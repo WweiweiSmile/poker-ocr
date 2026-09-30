@@ -1,0 +1,23 @@
+{
+  "image": "table1.jpg",
+  "frame_id": "table1.jpg",
+  "_comment": "长名字 + 带数字名字的回归基线。这张图曾经有四个名字读不出/读错，是三个 bug 一起造成的，见 README「名字为什么读不出来」。",
+  "_truth_note": "「菜菜子31」放大到 5 倍核对过：第三个字是「子」不是「菜」（前两个「菜」有艹字头，第三个没有）。OCR 是对的。",
+  "direction": "cw",
+  "table_size": 9,
+  "dealer_seat_id": "topR",
+  "dealer_method": "blob",
+  "seats_ring_from_hero": [
+    {"ring_index": 0, "seat_id": "hero",  "position": "UTG+1", "name": "svsvbmbm",   "stack": 103,   "unit": "BB", "status": "occupied", "is_dealer": false},
+    {"ring_index": 1, "seat_id": "lowL",  "position": "UTG+2", "name": "八六上青山", "stack": 91,    "unit": "BB", "status": "occupied", "is_dealer": false},
+    {"ring_index": 2, "seat_id": "midL",  "position": "LJ",    "name": "唐小鱼呀",   "stack": 308.5, "unit": "BB", "status": "occupied", "is_dealer": false},
+    {"ring_index": 3, "seat_id": "upL",   "position": "HJ",    "name": "夏至美食",   "stack": 469.5, "unit": "BB", "status": "occupied", "is_dealer": false},
+    {"ring_index": 4, "seat_id": "topL",  "position": "CO",    "name": "保险能不能", "stack": 508,   "unit": "BB", "status": "occupied", "is_dealer": false},
+    {"ring_index": 5, "seat_id": "topR",  "position": "BTN",   "name": "就要活的不", "stack": 202,   "unit": "BB", "status": "occupied", "is_dealer": true},
+    {"ring_index": 6, "seat_id": "upR",   "position": "SB",    "name": "菜菜子31",   "stack": 195.5, "unit": "BB", "status": "occupied", "is_dealer": false},
+    {"ring_index": 7, "seat_id": "midR",  "position": "BB",    "name": "Dragon333", "stack": 285.5, "unit": "BB", "status": "occupied", "is_dealer": false},
+    {"ring_index": 8, "seat_id": "lowR",  "position": "UTG",   "name": "谈轩66",     "stack": 776,   "unit": "BB", "status": "occupied", "is_dealer": false}
+  ],
+  "noise_texts": ["总底池"],
+  "gated_out_texts": ["X1", "翻牌", "转牌", "河牌", "ID:1790592417622584"]
+}

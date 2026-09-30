@@ -1,0 +1,529 @@
+{
+  "frame_id": "table1.jpg",
+  "size": [
+    1440,
+    3200
+  ],
+  "direction": "cw",
+  "direction_verified": true,
+  "table_size": 9,
+  "dealer": {
+    "seat_id": "topR",
+    "status": "found",
+    "method": "blob",
+    "confidence": 0.8776,
+    "candidates": [
+      {
+        "seat_id": "topR",
+        "confidence": 0.8776,
+        "center": [
+          1037.5,
+          714.5
+        ],
+        "reads_d": true,
+        "ocr_text": "D",
+        "seat_dist": 0.39
+      }
+    ]
+  },
+  "valid": true,
+  "violations": [],
+  "seats_ring_from_hero": [
+    {
+      "ring_index": 0,
+      "seat_id": "hero",
+      "position": "UTG+1",
+      "name": "svsvbmbm",
+      "name_score": 0.9816,
+      "name_review": false,
+      "stack": 103,
+      "unit": "BB",
+      "stack_score": 0.9979,
+      "status": "occupied",
+      "is_dealer": false,
+      "name_variants": [
+        {
+          "level": "L0 检测框",
+          "text": "svsvbmbm",
+          "score": 0.9816
+        },
+        {
+          "level": "L1 放大3x",
+          "text": "svsvbmbm",
+          "score": 0.8385
+        },
+        {
+          "level": "L2 放大3x灰度",
+          "text": "svsvbmbm",
+          "score": 0.8628
+        },
+        {
+          "level": "L3 放大5x二值",
+          "text": "svsvbmbm",
+          "score": 0.9177
+        }
+      ],
+      "evidence": {
+        "chip_read": true,
+        "name_read": true,
+        "avatar_std": 36.52,
+        "chip_std": 77.27
+      }
+    },
+    {
+      "ring_index": 1,
+      "seat_id": "lowL",
+      "position": "UTG+2",
+      "name": "八六上青山",
+      "name_score": 0.9994,
+      "name_review": false,
+      "stack": 91,
+      "unit": "BB",
+      "stack_score": 0.9958,
+      "status": "occupied",
+      "is_dealer": false,
+      "name_variants": [
+        {
+          "level": "L0 检测框",
+          "text": "八六上青山",
+          "score": 0.9989
+        },
+        {
+          "level": "L1 放大3x",
+          "text": "八六上青山",
+          "score": 0.9988
+        },
+        {
+          "level": "L2 放大3x灰度",
+          "text": "八六上青山",
+          "score": 0.9947
+        },
+        {
+          "level": "L3 放大5x二值",
+          "text": "八六上青山",
+          "score": 0.9994
+        }
+      ],
+      "evidence": {
+        "chip_read": true,
+        "name_read": true,
+        "avatar_std": 67.51,
+        "chip_std": 67.79
+      }
+    },
+    {
+      "ring_index": 2,
+      "seat_id": "midL",
+      "position": "LJ",
+      "name": "唐小鱼呀",
+      "name_score": 0.9982,
+      "name_review": false,
+      "stack": 308.5,
+      "unit": "BB",
+      "stack_score": 0.9949,
+      "status": "occupied",
+      "is_dealer": false,
+      "name_variants": [
+        {
+          "level": "L0 检测框",
+          "text": "唐小鱼呀",
+          "score": 0.9982
+        },
+        {
+          "level": "L1 放大3x",
+          "text": "唐小鱼呀",
+          "score": 0.9951
+        },
+        {
+          "level": "L2 放大3x灰度",
+          "text": "唐小鱼呀",
+          "score": 0.988
+        },
+        {
+          "level": "L3 放大5x二值",
+          "text": "唐小鱼呀",
+          "score": 0.9968
+        }
+      ],
+      "evidence": {
+        "chip_read": true,
+        "name_read": true,
+        "avatar_std": 45.08,
+        "chip_std": 68.91
+      }
+    },
+    {
+      "ring_index": 3,
+      "seat_id": "upL",
+      "position": "HJ",
+      "name": "夏至美食",
+      "name_score": 0.9992,
+      "name_review": false,
+      "stack": 469.5,
+      "unit": "BB",
+      "stack_score": 0.9981,
+      "status": "occupied",
+      "is_dealer": false,
+      "name_variants": [
+        {
+          "level": "L0 检测框",
+          "text": "夏至美食",
+          "score": 0.9926
+        },
+        {
+          "level": "L1 放大3x",
+          "text": "夏至美食",
+          "score": 0.98
+        },
+        {
+          "level": "L2 放大3x灰度",
+          "text": "夏至美食",
+          "score": 0.9757
+        },
+        {
+          "level": "L3 放大5x二值",
+          "text": "夏至美食",
+          "score": 0.9992
+        }
+      ],
+      "evidence": {
+        "chip_read": true,
+        "name_read": true,
+        "avatar_std": 53.92,
+        "chip_std": 65.42
+      }
+    },
+    {
+      "ring_index": 4,
+      "seat_id": "topL",
+      "position": "CO",
+      "name": "保险能不能",
+      "name_score": 0.9964,
+      "name_review": false,
+      "stack": 508,
+      "unit": "BB",
+      "stack_score": 0.9983,
+      "status": "occupied",
+      "is_dealer": false,
+      "name_variants": [
+        {
+          "level": "L0 检测框",
+          "text": "保险能不能",
+          "score": 0.9919
+        },
+        {
+          "level": "L1 放大3x",
+          "text": "保险能不能",
+          "score": 0.9964
+        },
+        {
+          "level": "L2 放大3x灰度",
+          "text": "保险能不能",
+          "score": 0.9939
+        },
+        {
+          "level": "L3 放大5x二值",
+          "text": "保险能不能",
+          "score": 0.943
+        }
+      ],
+      "evidence": {
+        "chip_read": true,
+        "name_read": true,
+        "avatar_std": 58.98,
+        "chip_std": 68.97
+      }
+    },
+    {
+      "ring_index": 5,
+      "seat_id": "topR",
+      "position": "BTN",
+      "name": "就要活的不",
+      "name_score": 0.999,
+      "name_review": false,
+      "stack": 202,
+      "unit": "BB",
+      "stack_score": 0.9978,
+      "status": "occupied",
+      "is_dealer": true,
+      "name_variants": [
+        {
+          "level": "L0 检测框",
+          "text": "就要活的不",
+          "score": 0.9978
+        },
+        {
+          "level": "L1 放大3x",
+          "text": "就要活的不",
+          "score": 0.9962
+        },
+        {
+          "level": "L2 放大3x灰度",
+          "text": "就要活的不",
+          "score": 0.9946
+        },
+        {
+          "level": "L3 放大5x二值",
+          "text": "就要活的不",
+          "score": 0.999
+        }
+      ],
+      "evidence": {
+        "chip_read": true,
+        "name_read": true,
+        "avatar_std": 63.16,
+        "chip_std": 72.8
+      }
+    },
+    {
+      "ring_index": 6,
+      "seat_id": "upR",
+      "position": "SB",
+      "name": "菜菜子31",
+      "name_score": 0.9976,
+      "name_review": false,
+      "stack": 195.5,
+      "unit": "BB",
+      "stack_score": 0.9976,
+      "status": "occupied",
+      "is_dealer": false,
+      "name_variants": [
+        {
+          "level": "L0 检测框",
+          "text": "菜菜子31",
+          "score": 0.9976
+        },
+        {
+          "level": "L1 放大3x",
+          "text": "菜菜子31",
+          "score": 0.9925
+        },
+        {
+          "level": "L2 放大3x灰度",
+          "text": "菜菜子31",
+          "score": 0.9867
+        },
+        {
+          "level": "L3 放大5x二值",
+          "text": "菜菜子31",
+          "score": 0.9959
+        }
+      ],
+      "evidence": {
+        "chip_read": true,
+        "name_read": true,
+        "avatar_std": 71.35,
+        "chip_std": 70.83
+      }
+    },
+    {
+      "ring_index": 7,
+      "seat_id": "midR",
+      "position": "BB",
+      "name": "Dragon333",
+      "name_score": 0.9997,
+      "name_review": false,
+      "stack": 285.5,
+      "unit": "BB",
+      "stack_score": 0.9977,
+      "status": "occupied",
+      "is_dealer": false,
+      "name_variants": [
+        {
+          "level": "L0 检测框",
+          "text": "Dragon333",
+          "score": 0.9982
+        },
+        {
+          "level": "L1 放大3x",
+          "text": "Dragon333",
+          "score": 0.9987
+        },
+        {
+          "level": "L2 放大3x灰度",
+          "text": "Dragon333",
+          "score": 0.9459
+        },
+        {
+          "level": "L3 放大5x二值",
+          "text": "Dragon333",
+          "score": 0.9997
+        }
+      ],
+      "evidence": {
+        "chip_read": true,
+        "name_read": true,
+        "avatar_std": 53.12,
+        "chip_std": 65.85
+      }
+    },
+    {
+      "ring_index": 8,
+      "seat_id": "lowR",
+      "position": "UTG",
+      "name": "谈轩66",
+      "name_score": 0.9986,
+      "name_review": false,
+      "stack": 776,
+      "unit": "BB",
+      "stack_score": 0.9968,
+      "status": "occupied",
+      "is_dealer": false,
+      "name_variants": [
+        {
+          "level": "L0 检测框",
+          "text": "谈轩66",
+          "score": 0.996
+        },
+        {
+          "level": "L1 放大3x",
+          "text": "谈轩66",
+          "score": 0.9906
+        },
+        {
+          "level": "L2 放大3x灰度",
+          "text": "谈轩66",
+          "score": 0.9819
+        },
+        {
+          "level": "L3 放大5x二值",
+          "text": "谈轩66",
+          "score": 0.9986
+        }
+      ],
+      "evidence": {
+        "chip_read": true,
+        "name_read": true,
+        "avatar_std": 57.67,
+        "chip_std": 70.67
+      }
+    }
+  ],
+  "debug": {
+    "noise_boxes": [
+      {
+        "text": "总底池",
+        "score": 0.9767,
+        "box": [
+          646.1,
+          885.5,
+          795.5,
+          943.5
+        ]
+      }
+    ],
+    "gated_out": [
+      {
+        "text": "16:32",
+        "score": 0.9607,
+        "box": [
+          88.4,
+          66.1,
+          229.8,
+          122.6
+        ]
+      },
+      {
+        "text": "5.12",
+        "score": 0.9976,
+        "box": [
+          827.7,
+          59.7,
+          890.4,
+          95.2
+        ]
+      },
+      {
+        "text": "0",
+        "score": 0.6861,
+        "box": [
+          896.8,
+          56.5,
+          1356.4,
+          125.8
+        ]
+      },
+      {
+        "text": "招乎",
+        "score": 0.8229,
+        "box": [
+          244.3,
+          74.2,
+          290.9,
+          112.9
+        ]
+      },
+      {
+        "text": "KB/S",
+        "score": 0.8827,
+        "box": [
+          826.1,
+          90.3,
+          896.8,
+          124.2
+        ]
+      },
+      {
+        "text": "X1",
+        "score": 0.9391,
+        "box": [
+          1231.1,
+          258.1,
+          1319.5,
+          314.5
+        ]
+      },
+      {
+        "text": "翻牌",
+        "score": 0.9981,
+        "box": [
+          78.8,
+          2843.5,
+          178.4,
+          2903.2
+        ]
+      },
+      {
+        "text": "转牌",
+        "score": 0.999,
+        "box": [
+          752.1,
+          2845.2,
+          850.2,
+          2900.0
+        ]
+      },
+      {
+        "text": "河牌",
+        "score": 0.9993,
+        "box": [
+          937.0,
+          2845.2,
+          1035.0,
+          2900.0
+        ]
+      },
+      {
+        "text": "6/10",
+        "score": 0.9983,
+        "box": [
+          647.7,
+          2990.3,
+          792.3,
+          3059.7
+        ]
+      },
+      {
+        "text": "ID:1790592417622584",
+        "score": 0.9893,
+        "box": [
+          991.6,
+          3088.7,
+          1387.0,
+          3125.8
+        ]
+      }
+    ],
+    "detected_boxes": 30
+  }
+}

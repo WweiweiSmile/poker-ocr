@@ -1,0 +1,15 @@
+# 识别核心（走 RapidOCR 路线）
+opencv-python>=4.8
+rapidocr-onnxruntime>=1.3
+
+# HTTP 接口
+fastapi>=0.115
+uvicorn[standard]>=0.30
+python-multipart>=0.0.9
+
+# 仅测试用（FastAPI TestClient 依赖 httpx，不起服务就能测接口）
+httpx>=0.27
+
+# 可选：如果 RapidOCR 读不准，再换 PaddleOCR 引擎（更重，精度通常更高）
+# paddlepaddle>=3.0.0
+# paddleocr>=3.7.0

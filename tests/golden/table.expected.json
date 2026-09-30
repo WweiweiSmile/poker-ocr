@@ -1,0 +1,23 @@
+{
+  "image": "table.jpg",
+  "frame_id": "table.jpg",
+  "_comment": "庄位自动检测的回归基线。庄位是白底 D 圆片自动检出的（method=blob），不是人工指定。",
+  "_evidence": "这帧是翻牌前：无敌猪肉佬 0.5BB(SB)、陈凤 1BB(BB)，0.5+1+4.5=6BB 正好等于总底池。盲注位置反过来证实了行动方向是屏幕顺时针。",
+  "direction": "cw",
+  "table_size": 9,
+  "dealer_seat_id": "hero",
+  "dealer_method": "blob",
+  "seats_ring_from_hero": [
+    {"ring_index": 0, "seat_id": "hero",  "position": "BTN",   "name": "svsvbmbm",   "stack": 460.5, "unit": "BB", "status": "occupied", "is_dealer": true},
+    {"ring_index": 1, "seat_id": "lowL",  "position": "SB",    "name": "无敌猪肉佬", "stack": 302,   "unit": "BB", "status": "occupied", "is_dealer": false},
+    {"ring_index": 2, "seat_id": "midL",  "position": "BB",    "name": "陈凤",       "stack": 891,   "unit": "BB", "status": "occupied", "is_dealer": false},
+    {"ring_index": 3, "seat_id": "upL",   "position": "UTG",   "name": "奥利奥H",    "stack": 141.5, "unit": "BB", "status": "occupied", "is_dealer": false},
+    {"ring_index": 4, "seat_id": "topL",  "position": "UTG+1", "name": "稚气未酒",   "stack": 113,   "unit": "BB", "status": "occupied", "is_dealer": false},
+    {"ring_index": 5, "seat_id": "topR",  "position": "UTG+2", "name": "夏至美食",   "stack": 63,    "unit": "BB", "status": "occupied", "is_dealer": false},
+    {"ring_index": 6, "seat_id": "upR",   "position": "LJ",    "name": "柚柚柚子呦", "stack": 331,   "unit": "BB", "status": "occupied", "is_dealer": false},
+    {"ring_index": 7, "seat_id": "midR",  "position": "HJ",    "name": "悍将v1",     "stack": 245,   "unit": "BB", "status": "occupied", "is_dealer": false},
+    {"ring_index": 8, "seat_id": "lowR",  "position": "CO",    "name": "到晚上就想", "stack": 163,   "unit": "BB", "status": "occupied", "is_dealer": false}
+  ],
+  "noise_texts": ["6BB", "4.5BB", "1BB", "0.5BB"],
+  "gated_out_texts": ["X1", "翻牌", "转牌", "ID:1790663760865986"]
+}
