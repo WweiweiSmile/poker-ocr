@@ -25,7 +25,7 @@ jobs:
           username: ${{ secrets.SERVER_USERNAME }}
           password: ${{ secrets.SERVER_PASSWORD }}
           port: 22
-          source: "poker_ocr/,api.py,scan.py,extract_table.py,rois.json,requirements.txt,config/"
+          source: "poker_ocr/,api.py,scan.py,extract_table.py,gunicorn.conf.py,rois.json,requirements.txt,config/"
           target: "/www/wwwroot/poker-ocr"
 
       - name: 部署
@@ -36,7 +36,4 @@ jobs:
           username: ${{ secrets.SERVER_USERNAME }}
           password: ${{ secrets.SERVER_PASSWORD }}
           port: 22
-          script: |
-            cd /www/wwwroot/poker-ocr
-            .venv/bin/pip install -r requirements.txt
-            systemctl restart poker-ocr
+          script:  python --version

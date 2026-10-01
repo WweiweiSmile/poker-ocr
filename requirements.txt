@@ -7,6 +7,12 @@ fastapi>=0.115
 uvicorn[standard]>=0.30
 python-multipart>=0.0.9
 
+# 生产进程管理（gunicorn 当 master，worker 由 uvicorn-worker 提供）
+# uvicorn-worker 是独立包：uvicorn 自带的 uvicorn.workers 已废弃
+# 启动见 gunicorn.conf.py：.venv/bin/gunicorn -c gunicorn.conf.py api:app
+gunicorn>=23.0
+uvicorn-worker>=0.4
+
 # 仅测试用（FastAPI TestClient 依赖 httpx，不起服务就能测接口）
 httpx>=0.27
 
