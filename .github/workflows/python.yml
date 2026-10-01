@@ -36,4 +36,54 @@ jobs:
           username: ${{ secrets.SERVER_USERNAME }}
           password: ${{ secrets.SERVER_PASSWORD }}
           port: 22
-          script:  python --version
+          script: |
+            set -e
+            cd /www/wwwroot/poker-ocr
+
+            # ── 1. 解释器：服务实际用的就是项目内的 venv，写死 ───────
+            PY=/www/wwwroot/poker-ocr/.venv/bin/python
+            if [ ! -x "$PY" ]; then
+              echo "❌ 解释器不存在：$PY"
+              echo "   venv 被删了或挪了位置，确认后再跑"
+              exit 1
+            fi
+            "$PY" -V
+
+            # 服务名不好写死（各版本宝塔生成的 unit 命名不一样），从 systemd 里找
+            SVC=$(systemctl list-units --type=service --plain --no-legend \
+                  | awk '{print $1}' | grep -i 'poker' | head -n1 || true)
+            if [ -z "$SVC" ]; then
+              echo "❌ 没找到名字含 poker 的服务，用下面这条看看叫什么："
+              systemctl list-units --type=service --plain --no-legend | grep -i python
+              exit 1
+            fi
+            echo "服务    : $SVC"
+
+            # ── 2. 依赖：requirements.txt 没变就跳过安装 ─────────────
+            STAMP=.requirements.sha256
+            NEW=$(sha256sum requirements.txt | awk '{print $1}')
+
+            # 哈希一致还不够：venv 若被重建过，stamp 还在但包没了，
+            # 所以额外确认环境里确实有依赖（fastapi 是最轻的探针之一）
+            if "$PY" -c "import fastapi" >/dev/null 2>&1; then
+              DEPS_OK=1
+            else
+              DEPS_OK=0
+            fi
+
+            if [ "$NEW" = "$(cat "$STAMP" 2>/dev/null || true)" ] && [ "$DEPS_OK" = 1 ]; then
+              echo "✅ requirements.txt 未变化，跳过依赖安装"
+            else
+              echo "⬆️  依赖有变化或环境缺包，开始安装"
+              if ! "$PY" -m pip --version >/dev/null 2>&1; then
+                "$PY" -m ensurepip --upgrade >/dev/null 2>&1 || true
+              fi
+              "$PY" -m pip install -r requirements.txt
+              echo "$NEW" > "$STAMP"   # 装成功才落盘，失败了下一次还会重试
+            fi
+
+            # ── 3. 重启并确认真的起来了 ─────────────────────────────
+            systemctl restart "$SVC"
+            sleep 3
+            systemctl is-active "$SVC"
+            echo "✅ 已重启 $SVC"

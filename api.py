@@ -13,6 +13,8 @@
   - 推理串行化（一把锁）。onnxruntime 的 session 不保证线程安全，
     并发跑同一份模型可能互相踩内存。
   - 接口本身是同步函数，FastAPI 会把它丢进线程池，不阻塞事件循环。
+  - 开了 CORS。浏览器跨域调时先发 OPTIONS 预检，没有中间件的话会被
+    路由判成方法不对而返回 405，见下面 add_middleware 处的注释。
 """
 
 from __future__ import annotations
@@ -25,6 +27,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from poker_ocr.dealer import build_detector
@@ -84,6 +87,19 @@ app = FastAPI(
     version="1.0",
     description="上传一张 9 人德州扑克桌截图，返回桌号与每个座位的名称/位置/筹码。",
     lifespan=lifespan,
+)
+
+# 跨域。前端页面跟 API 不同源时，浏览器在真正发 POST 之前会先发一个
+# OPTIONS 预检请求；没有这个中间件，OPTIONS 会被路由当成「方法不对」，
+# 直接 405，请求根本到不了业务函数。
+# 本服务无鉴权、不依赖 Cookie，所以放开到 *；要收紧就把 allow_origins
+# 换成前端的实际域名列表。注意 allow_credentials 不能和 * 同时用。
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["*"],
+    max_age=600,             # 预检结果缓存 10 分钟，别让每个请求都多一轮 OPTIONS
 )
 
 
