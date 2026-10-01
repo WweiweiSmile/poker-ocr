@@ -92,11 +92,20 @@ app = FastAPI(
 # 跨域。前端页面跟 API 不同源时，浏览器在真正发 POST 之前会先发一个
 # OPTIONS 预检请求；没有这个中间件，OPTIONS 会被路由当成「方法不对」，
 # 直接 405，请求根本到不了业务函数。
-# 本服务无鉴权、不依赖 Cookie，所以放开到 *；要收紧就把 allow_origins
-# 换成前端的实际域名列表。注意 allow_credentials 不能和 * 同时用。
+#
+# 这里**不能**写 allow_origins=["*"]：前端是带 withCredentials 调的，
+# 浏览器的规定是「凭证模式下 Allow-Origin 必须是具体域名」，回 * 会被
+# 直接拒掉（报 must not be the wildcard '*' when credentials mode is 'include'）。
+# 所以只能列白名单，前端加域名就往这里加一行。
+# 两个坑：① 结尾**不能带斜杠** —— 浏览器的 Origin 头永远不带，带上就永远
+#            匹配不上，预检照样失败；
+#         ② allow_credentials=True 和 "*" 互斥，这是浏览器的规定，不是 FastAPI 的。
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "http://call.qwnet.top",
+    ],
+    allow_credentials=True,
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
     max_age=600,             # 预检结果缓存 10 分钟，别让每个请求都多一轮 OPTIONS
