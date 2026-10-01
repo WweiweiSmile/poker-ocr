@@ -49,17 +49,38 @@ jobs:
             fi
             "$PY" -V
 
-            # 服务名不好写死（各版本宝塔生成的 unit 命名不一样），从 systemd 里找
-            SVC=$(systemctl list-units --type=service --plain --no-legend \
-                  | awk '{print $1}' | grep -i 'poker' | head -n1 || true)
-            if [ -z "$SVC" ]; then
-              echo "❌ 没找到名字含 poker 的服务，用下面这条看看叫什么："
-              systemctl list-units --type=service --plain --no-legend | grep -i python
-              exit 1
+            # ── 2. 找服务：先按端口反查，反查不到再按名字找 ──────────
+            # 按名字找不可靠：unit 叫什么全看宝塔怎么命名；而且服务处于
+            # failed 状态时 list-units 会在行首多打一个 ●，被 awk 当成
+            # 第一个字段，于是 grep 什么都匹配不到。
+            # 服务在跑的时候端口一定是通的，从端口反查最稳。
+            SVC=""
+            PID=$(ss -ltnp 'sport = :8000' 2>/dev/null \
+                  | sed -n 's/.*pid=\([0-9]*\).*/\1/p' | head -n1)
+            if [ -n "$PID" ]; then
+              echo "8000 端口进程 PID: $PID"
+              SVC=$(grep -oE '[^/]+\.service' "/proc/$PID/cgroup" 2>/dev/null | head -n1 || true)
             fi
-            echo "服务    : $SVC"
 
-            # ── 2. 依赖：requirements.txt 没变就跳过安装 ─────────────
+            if [ -z "$SVC" ]; then
+              # 服务没在跑（端口是空的）时兜底：按名字找，并剥掉行首的 ● 和空格
+              SVC=$(systemctl list-units --type=service --all --plain --no-legend --no-pager 2>/dev/null \
+                    | sed 's/^[^[:alnum:]]*//' | awk '{print $1}' \
+                    | grep -iE 'poker|ocr' | head -n1 || true)
+            fi
+
+            if [ -z "$SVC" ]; then
+              echo "⚠️  端口反查和按名字找都没拿到服务名，跳过重启（依赖照常处理）。现场信息："
+              echo "--- 含 python/gunicorn 的 service ---"
+              systemctl list-units --type=service --all --plain --no-legend --no-pager \
+                | grep -iE 'python|gunicorn' || echo "(无)"
+              echo "--- /etc/systemd/system 下的相关 unit 文件 ---"
+              ls /etc/systemd/system/ | grep -iE 'python|poker|ocr' || echo "(无)"
+              echo "两边都空说明宝塔没走 systemd，重启得在面板里点"
+            fi
+            echo "服务    : ${SVC:-（未找到，将跳过重启）}"
+
+            # ── 3. 依赖：requirements.txt 没变就跳过安装 ─────────────
             STAMP=.requirements.sha256
             NEW=$(sha256sum requirements.txt | awk '{print $1}')
 
@@ -82,8 +103,17 @@ jobs:
               echo "$NEW" > "$STAMP"   # 装成功才落盘，失败了下一次还会重试
             fi
 
-            # ── 3. 重启并确认真的起来了 ─────────────────────────────
-            systemctl restart "$SVC"
-            sleep 3
-            systemctl is-active "$SVC"
-            echo "✅ 已重启 $SVC"
+            # ── 4. 重启并确认真的起来了 ─────────────────────────────
+            # 没找到服务名就跳过这一步，但不让流水线红：依赖已经装好了，
+            # 剩下的重启动作去面板点一下即可
+            if [ -n "$SVC" ]; then
+              # 之前反复 boot 失败会把 unit 打成 failed 并触发 systemd 的启动
+              # 限流，这时 restart 会被直接拒掉，所以先清一次失败状态
+              systemctl reset-failed "$SVC" 2>/dev/null || true
+              systemctl restart "$SVC"
+              sleep 3
+              systemctl is-active "$SVC"
+              echo "✅ 已重启 $SVC"
+            else
+              echo "⚠️  跳过了重启：没找到服务名。依赖已处理完，去面板手动重启一次即可。"
+            fi
