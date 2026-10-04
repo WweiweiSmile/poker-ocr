@@ -50,6 +50,9 @@ class SeatState:
     is_dealer: bool | None = None
     position: str | None = None          # SB / BB / UTG / ... / BTN，由庄位推出
     evidence: dict = dc_field(default_factory=dict)
+    # 算不算这手牌的在场玩家：决定人数、位置，以及接口返不返回它。
+    # 判据是**筹码**，在 extract 里统一算好 —— api.py 只读不算，免得两处口径分家
+    in_hand: bool = False
 
     def to_debug(self) -> dict:
         return {
@@ -63,6 +66,7 @@ class SeatState:
             "unit": self.unit,
             "stack_score": round(self.stack_score, 4),
             "status": self.status,
+            "in_hand": self.in_hand,
             "is_dealer": self.is_dealer,
             **({"name_variants": self.name_variants} if self.name_variants else {}),
             **({"stack_corrected": True} if self.stack_corrected else {}),
@@ -246,8 +250,17 @@ def extract(img: np.ndarray, profile: Profile, engine: OcrEngine,
         state.is_dealer = (dealer.seat_id == seat.seat_id) if dealer.status == "found" else None
         seats.append(state)
 
-    # 位置要等占用判定跑完才知道人数 —— 空座位不发牌，不占位置
-    occupied_ring = [s.seat_id for s in seats if s.status != EMPTY]
+    # 谁算在场：**筹码读出来的座位**。没有筹码就是没有这个用户 —— 空座位、
+    # 「看着像有人但筹码读不出」都不进环、不占位置、不算人数，接口也不返回它们。
+    #
+    # hero 座位例外：那是配置里写死的「我」，只要不是判成空座位就得留下 ——
+    # 他的筹码没读到是"我"少填一个数，不该让客户端连"谁是我"都认不出来
+    for s in seats:
+        s.in_hand = s.status != EMPTY and (
+            s.stack is not None or s.seat_id == profile.hero_seat_id)
+
+    # 位置要等占用判定跑完才知道人数 —— 不在场的人不发牌、不占位置
+    occupied_ring = [s.seat_id for s in seats if s.in_hand]
     pos = assign_positions(occupied_ring, dealer.seat_id if dealer.status == "found" else None)
     if pos.ok:
         for s in seats:

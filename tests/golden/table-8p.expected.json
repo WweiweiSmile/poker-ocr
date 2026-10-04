@@ -1,0 +1,116 @@
+{
+  "image": "table-8p.jpg",
+  "frame_id": "table-8p.jpg",
+  "_comment": "空座位回归基线：截图右下角那个「+」是空座位（没筹码），按「没筹码就是没这个用户」处理 —— 人数 8、位置 SB…BTN，它不出现在座位环里。",
+  "_evidence": "庄位：D 圆片在我的头像左下角，自动检出（method=blob）。从庄位沿屏幕顺时针依次是 AKA炸弹人(0.5BB=SB)、百大连锁酒(1BB=BB)、欣宝1、颜值犯规者、紧紧呀、小蔡不吃菜、厕所管理员，再过去是「+」空座位，回到我。8 个人的筹码均与截图上的 BB 数一致（296.5/254.5/76.5/221.5/45/178/89.5/148.5）。",
+  "direction": "cw",
+  "table_size": 8,
+  "dealer_seat_id": "hero",
+  "dealer_method": "blob",
+  "seats_ring_from_hero": [
+    {
+      "ring_index": 0,
+      "seat_id": "hero",
+      "position": "BTN",
+      "name": "svsvbmbm",
+      "stack": 296.5,
+      "unit": "BB",
+      "status": "occupied",
+      "is_dealer": true
+    },
+    {
+      "ring_index": 1,
+      "seat_id": "lowL",
+      "position": "SB",
+      "name": "AKA炸弹人",
+      "stack": 254.5,
+      "unit": "BB",
+      "status": "occupied",
+      "is_dealer": false
+    },
+    {
+      "ring_index": 2,
+      "seat_id": "midL",
+      "position": "BB",
+      "name": "百大连锁酒",
+      "stack": 76.5,
+      "unit": "BB",
+      "status": "occupied",
+      "is_dealer": false
+    },
+    {
+      "ring_index": 3,
+      "seat_id": "upL",
+      "position": "UTG",
+      "name": "欣宝1",
+      "stack": 221.5,
+      "unit": "BB",
+      "status": "occupied",
+      "is_dealer": false
+    },
+    {
+      "ring_index": 4,
+      "seat_id": "topL",
+      "position": "UTG+1",
+      "name": "颜值犯规者",
+      "stack": 45,
+      "unit": "BB",
+      "status": "occupied",
+      "is_dealer": false
+    },
+    {
+      "ring_index": 5,
+      "seat_id": "topR",
+      "position": "LJ",
+      "name": "紧紧呀",
+      "stack": 178,
+      "unit": "BB",
+      "status": "occupied",
+      "is_dealer": false
+    },
+    {
+      "ring_index": 6,
+      "seat_id": "upR",
+      "position": "HJ",
+      "name": "小蔡不吃菜",
+      "stack": 89.5,
+      "unit": "BB",
+      "status": "occupied",
+      "is_dealer": false
+    },
+    {
+      "ring_index": 7,
+      "seat_id": "midR",
+      "position": "CO",
+      "name": "厕所管理员",
+      "stack": 148.5,
+      "unit": "BB",
+      "status": "occupied",
+      "is_dealer": false
+    },
+    {
+      "ring_index": 8,
+      "seat_id": "lowR",
+      "position": null,
+      "name": null,
+      "stack": null,
+      "unit": null,
+      "status": "uncertain",
+      "is_dealer": false
+    }
+  ],
+  "noise_texts": [
+    "总底池"
+  ],
+  "gated_out_texts": [
+    "17:33",
+    "20.4",
+    "KB/S",
+    "X1",
+    "翻牌",
+    "转牌",
+    "河牌",
+    "2/10",
+    "ID:1791005657204043"
+  ]
+}

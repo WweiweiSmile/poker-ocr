@@ -118,8 +118,8 @@ def to_table_out(result: FrameResult, profile: Profile) -> TableOut:
     """把管线结果收敛成对外的精简结构。"""
     seats: list[SeatOut] = []
     for s in result.seats:
-        if s.status == "empty":
-            continue          # 空座位不发牌、不占位置，不进数组（seats 长度 == table_size）
+        if not s.in_hand:
+            continue          # 不在场的不返回：空座位、以及筹码没读出来的座位
 
         seats.append(SeatOut(
             name=s.name,
@@ -134,20 +134,29 @@ def to_table_out(result: FrameResult, profile: Profile) -> TableOut:
             "not_found": "未检出庄位，位置推不出来",
             "ambiguous": "庄位有多个候选，无法确定",
         }.get(result.dealer.status, f"庄位状态异常：{result.dealer.status}"))
-    if any(s.position is None for s in result.seats if s.status != "empty"):
+    if any(s.position is None for s in result.seats if s.in_hand):
         warnings.append("有座位没拿到位置")
-    unread_name = [s.seat_id for s in result.seats if s.status != "empty" and not s.name]
+    unread_name = [s.seat_id for s in result.seats if s.in_hand and not s.name]
     if unread_name:
         warnings.append(f"这些座位没读出名字：{', '.join(unread_name)}")
-    unread_stack = [s.seat_id for s in result.seats if s.status != "empty" and s.stack is None]
-    if unread_stack:
-        warnings.append(f"这些座位没读出筹码：{', '.join(unread_stack)}")
-    review = [s.seat_id for s in result.seats if s.name_review]
+    review = [s.seat_id for s in result.seats if s.in_hand and s.name_review]
     if review:
         warnings.append(f"这些座位的名字置信度偏低，建议复核：{', '.join(review)}")
-    uncertain = [s.seat_id for s in result.seats if s.status == "uncertain"]
-    if uncertain:
-        warnings.append(f"这些座位有人但读不出内容：{', '.join(uncertain)}")
+    # 筹码读不出来的座位按空座位处理、不返回，所以这句必须说清"算了几个人"——
+    # 不然下游看到 seats 少了会以为漏识别（uncertain 的那些也在这里一起交代）
+    dropped = [s.seat_id for s in result.seats
+               if not s.in_hand and s.status != "empty" and s.seat_id != profile.hero_seat_id]
+    if dropped:
+        suspect = [s.seat_id for s in result.seats
+                   if s.seat_id in dropped and s.status == "uncertain"]
+        warnings.append(
+            f"这些座位没读出筹码，已按空座位处理（没计入人数）：{', '.join(dropped)}"
+            + (f"；其中 {', '.join(suspect)} 疑似有人但名字也读不出" if suspect else "")
+        )
+    # hero 例外：他算在场，但筹码得由用户补
+    hero = next((s for s in result.seats if s.seat_id == profile.hero_seat_id), None)
+    if hero is not None and hero.in_hand and hero.stack is None:
+        warnings.append("hero 座位没读出筹码：仍算在场，这个数请你手动补")
 
     return TableOut(
         table_size=result.table_size,
