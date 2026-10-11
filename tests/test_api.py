@@ -155,6 +155,41 @@ def test_manual_override(client: TestClient) -> None:
           f"庄位左侧应是 SB，实际 {by_pos.get('SB')}")
 
 
+def test_coach_advice(client: TestClient) -> None:
+    """翻后建议接口：不依赖 OCR 模型，纯规则。"""
+    body = {
+        "hero_cards": "KhQh", "board": "Ks7d2c", "street": "flop", "pot": 6,
+        "hero_position": "BTN", "opponents": 1,
+        "actions": [{"actor": "BB", "action": "check", "street": "flop"}],
+    }
+    r = client.post("/coach/advice", json=body)
+    check(r.status_code == 200, f"/coach/advice 应 200，实际 {r.status_code}: {r.text[:200]}")
+    d = r.json()
+    check(d["ok"] is True, f"应给出建议，实际 {d}")
+    check(d["action"] == "bet", f"顶对顶踢干燥面应下注，实际 {d['action']}")
+    check(d["sizing_bb"] == 4.0, f"6 池的 2/3 应 4.0，实际 {d['sizing_bb']}")
+    check(d["hand_label"] == "顶对Q踢", f"牌力应 顶对Q踢，实际 {d['hand_label']}")
+    check(d["texture"] == "干燥", f"质地应 干燥，实际 {d['texture']}")
+
+    # 转牌（4 张公共牌）也能答
+    r = client.post("/coach/advice", json={
+        **body, "board": "Ks7d2c9h", "street": "turn", "stack_bb": 30,
+        "actions": [{"actor": "BB", "action": "check", "street": "turn"}],
+    })
+    check(r.status_code == 200, f"转牌应 200，实际 {r.status_code}")
+    check(r.json()["ok"] is True and r.json()["action"] == "bet",
+          f"blank 转牌顶对应下注，实际 {r.json()}")
+
+    # 出界不报错，ok=false + 原因
+    r = client.post("/coach/advice", json={**body, "street": "turn"})   # 3 张牌当转牌
+    check(r.status_code == 200, f"出界应 200（不是 4xx），实际 {r.status_code}")
+    check(r.json()["ok"] is False, "公共牌张数不对应 ok=false")
+
+    # 缺 pot 是请求错误（字段必填）
+    r = client.post("/coach/advice", json={k: v for k, v in body.items() if k != "pot"})
+    check(r.status_code == 422, f"缺 pot 应 422，实际 {r.status_code}")
+
+
 def main() -> int:
     if not IMAGE.exists():
         print(f"注意：{IMAGE.name} 不在，正例会被跳过")
@@ -167,6 +202,7 @@ def main() -> int:
             test_empty_table,
             test_bad_inputs,
             test_manual_override,
+            test_coach_advice,
         ]
         for t in tests:
             before = len(FAILS)

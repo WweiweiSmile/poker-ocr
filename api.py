@@ -30,6 +30,7 @@ from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+from poker_ocr.coach import advise
 from poker_ocr.dealer import build_detector
 from poker_ocr.ocr import OcrEngine
 from poker_ocr.pipeline import FrameResult, extract
@@ -50,6 +51,45 @@ class SeatOut(BaseModel):
     stack: int | float | None = Field(
         None, description="筹码数量，纯数字。读不出时为 null。单位见 stack_unit")
     is_me: bool = Field(False, description="是不是我自己（界面上底部中间那个座位）")
+
+
+class ActionIn(BaseModel):
+    actor: str = Field(..., description="行动的人，位置名或昵称")
+    action: str = Field(..., description="check | bet | call | raise | fold | allin")
+    amount: float | None = Field(
+        None, description="bet/raise 用「加到总额」口径：bet 4 = 投到 4，"
+                          "raise 12 = 加到 12。这样「我下注 4 被加到 12」要额外跟的是 12−4")
+    street: str = Field(..., description="preflop | flop | turn | river")
+
+
+class CoachIn(BaseModel):
+    hero_cards: str = Field(..., description="我的手牌，如 KhQh")
+    board: str = Field(..., description="公共牌，如 Ks7d2c")
+    street: str = Field("flop", description="flop | turn | river")
+    pot: float = Field(..., gt=0, description="轮到我行动时桌面上的底池总额（BB）"
+                                              "（含我之前的下注与对手的加注）。赔率与尺度都用它")
+    actions: list[ActionIn] = Field(
+        default_factory=list, description="前面的行动，含翻前与本街，按发生顺序")
+    hero_position: str | None = Field(None, description="我的位置名，判断是否 PFR 用")
+    opponents: int | None = Field(None, description="对手数；不给就从 actions 推")
+    read: str = Field("未知", description="对手形象：松弱/紧弱/松凶/紧凶/未知")
+    stack_bb: float | None = Field(
+        None, description="有效筹码（BB）。转牌跟注的隐含赔率、套池比例的分母都用它")
+    hero_invested_bb: float | None = Field(
+        None, description="我已投入底池的总筹码（BB）。≥3/4×stack_bb 即「套池」，不允许弃牌")
+
+
+class CoachOut(BaseModel):
+    ok: bool = Field(..., description="false 表示落在覆盖范围外，没有给建议")
+    action: str | None = Field(None, description="fold | check | call | bet | raise")
+    sizing_bb: float | None = Field(None, description="下注/加注的目标量（BB）")
+    hand_label: str | None = Field(None, description="我的牌力，如「顶对顶踢」")
+    hand_tier: str | None = Field(None, description="规则表用的分档键")
+    texture: str | None = Field(None, description="牌面质地：干燥/花面/顺面/花顺面/公对面")
+    reason: str | None = Field(None, description="一句话理由，含尺度数字")
+    opponent_strength: dict | None = Field(
+        None, description="从对手动作读出的牌力 {value:0-100, label:弱/中/强/极强, reason}")
+    warnings: list[str] = Field(default_factory=list, description="数据不足等提示")
 
 
 class TableOut(BaseModel):
@@ -197,6 +237,28 @@ def resolve_profile(base: Profile, hero_seat: str | None) -> Profile:
 @app.get("/health", summary="就绪探针")
 def health() -> dict:
     return {"ready": STATE.ready}
+
+
+@app.post("/coach/advice", response_model=CoachOut, summary="翻后建议（规则引擎，不走模型）")
+def coach_advice(payload: CoachIn) -> CoachOut:
+    """确定性规则给出的建议，不加载任何模型 —— 所以**不受** STATE.ready 约束。
+
+    覆盖翻牌/转牌/河牌三条街。落在覆盖范围外（street 非法、公共牌张数不对、
+    缺 pot、牌不合法）时 ok=false，reason 说明原因。
+    """
+    decision = advise(
+        hero_cards=payload.hero_cards,
+        board=payload.board,
+        street=payload.street,
+        actions=[a.model_dump() for a in payload.actions],
+        pot=payload.pot,
+        hero_position=payload.hero_position,
+        opponents=payload.opponents,
+        read_name=payload.read,
+        stack_bb=payload.stack_bb,
+        hero_invested_bb=payload.hero_invested_bb,
+    )
+    return CoachOut(**decision.to_dict())
 
 
 @app.post("/ocr/table", response_model=TableOut, summary="识别牌桌")
