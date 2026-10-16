@@ -131,8 +131,25 @@ class BlobDealerDetector:
 
     # ── 几何 ──
 
+    def _area_range(self, profile: Profile, size: Size) -> tuple[float, float]:
+        """面积门按**整图面积**归一化后再用。
+
+        `area_min`/`area_max` 是在 `profile.reference_size` 上量出来的**绝对像素**。
+        换分辨率时圆片面积按 k² 缩水，绝对门槛就会**静默失守**：1440×3200 上真 D 是
+        area≈1894，到 1080×2400 只剩 1046，被 1200 的门槛挡掉 —— 表现出来是
+        `status=not_found`，看着像「这帧没渲染庄位」，其实是门槛写死了。
+
+        用**面积占比**而不是按宽度缩放：圆片是二维的，得用 k²；而且实测
+        1440×3200 的 1894/(1440×3200)=4.11e-4 与 1080×2400 的 1046/(1080×2400)=4.04e-4
+        只差 2% —— 说明这个口径本身跨分辨率就成立，不是巧合凑上的。
+        """
+        ref_w, ref_h = profile.reference_size
+        k2 = (size[0] * size[1]) / float(ref_w * ref_h)
+        return self.cfg["area_min"] * k2, self.cfg["area_max"] * k2
+
     def _find_blobs(self, img: np.ndarray, profile: Profile,
                     size: Size) -> list[tuple[tuple[float, float], float, tuple[int, int, int, int]]]:
+        area_min, area_max = self._area_range(profile, size)
         hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
         mask = ((hsv[:, :, 2] > self.cfg["v_min"]) &
                 (hsv[:, :, 1] < self.cfg["s_max"])).astype(np.uint8) * 255
@@ -142,7 +159,7 @@ class BlobDealerDetector:
         out = []
         for c in contours:
             area = cv2.contourArea(c)
-            if not (self.cfg["area_min"] <= area <= self.cfg["area_max"]):
+            if not (area_min <= area <= area_max):
                 continue
             perim = cv2.arcLength(c, True)
             if perim <= 0:

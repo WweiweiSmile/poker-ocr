@@ -23,6 +23,27 @@ Slot = tuple[float, float, float, float]   # 归一化 x1,y1,x2,y2
 Size = tuple[int, int]                      # 宽, 高
 
 
+def _opt_slot(raw) -> Slot | None:
+    """可选槽位：缺字段或不是 4 个数，一律当「本 profile 不支持」返回 None。
+
+    不抛异常是刻意的 —— 老配置没有 bet_slot/action_slot 属于正常情况，
+    不该让加载炸掉。但长度不对的（写错了）也不能被静默当成合法坐标 ——
+    这里一并返回 None，由调用方按「不支持」处理，而不是拿半个框去裁剪。
+    """
+    if not isinstance(raw, (list, tuple)) or len(raw) != 4:
+        return None
+    return (float(raw[0]), float(raw[1]), float(raw[2]), float(raw[3]))
+
+
+def _slot_ok(slot: Slot) -> bool:
+    """归一化矩形是否合法：0 ≤ x1 < x2 ≤ 1、0 ≤ y1 < y2 ≤ 1。
+
+    故意**允许**边界贴到 0 和 1（lowL 的名字槽就是从 0.0 起，是实测值不是笔误）。
+    """
+    x1, y1, x2, y2 = slot
+    return 0.0 <= x1 < x2 <= 1.0 and 0.0 <= y1 < y2 <= 1.0
+
+
 @dataclass(frozen=True)
 class Seat:
     seat_id: str
@@ -30,6 +51,11 @@ class Seat:
     name_slot: Slot
     chip_slot: Slot
     avatar_slot: Slot
+    # 下面两个是「本街下注」与「动作标签」的区域，新管线用。
+    # 老配置（table_default.json）没有，所以给默认 None —— 缺了就表示这个
+    # profile 不支持该字段，而不是「这块画面什么都没有」。
+    bet_slot: Slot | None = None
+    action_slot: Slot | None = None
 
 
 @dataclass
@@ -46,6 +72,9 @@ class Profile:
     dealer_cfg: dict
     seats: list[Seat]
     canvas: Slot | None = None
+    # 不属任何座位的全局区域：pot / board / hero_cards / hand_label / pot_before_street。
+    # 同样是「有才用」，键缺失即不支持。
+    global_slots: dict[str, Slot] = field(default_factory=dict)
 
     # ── 查询 ──────────────────────────────────────────────
 
@@ -156,6 +185,18 @@ class Profile:
         ring_idx = sorted(s.ring_index for s in self.seats)
         if ring_idx != list(range(9)):
             problems.append(f"ring_index 应该是 0-8 各一个，实际 {ring_idx}")
+
+        # 新槽位（可选）也要过一遍形状检查。`_opt_slot` 只挡住了「不是 4 个数」，
+        # 挡不住「写反了 / 超出 0-1」—— 那种框裁出来是空图，识别结果会静默变成
+        # 「这里什么都没有」，跟本次庄位门槛写死同一个病。
+        for s in self.seats:
+            for label, slot in (("bet_slot", s.bet_slot), ("action_slot", s.action_slot)):
+                if slot is not None and not _slot_ok(slot):
+                    problems.append(f"{s.seat_id}.{label} 不是合法的归一化矩形：{slot}")
+        for gname, gslot in self.global_slots.items():
+            if not _slot_ok(gslot):
+                problems.append(f"global_slots.{gname} 不是合法的归一化矩形：{gslot}")
+
         problems += self.check_ring_geometry()
 
         if problems:
@@ -179,6 +220,8 @@ class Profile:
                 name_slot=tuple(s["name_slot"]),      # type: ignore[arg-type]
                 chip_slot=tuple(s["chip_slot"]),      # type: ignore[arg-type]
                 avatar_slot=tuple(s["avatar_slot"]),  # type: ignore[arg-type]
+                bet_slot=_opt_slot(s.get("bet_slot")),
+                action_slot=_opt_slot(s.get("action_slot")),
             )
             for s in raw["seats"]
         ]
@@ -196,6 +239,11 @@ class Profile:
             dealer_cfg=dict(raw.get("dealer", {})),
             seats=seats,
             canvas=tuple(raw["canvas"]) if raw.get("canvas") else None,  # type: ignore[arg-type]
+            global_slots={
+                k: tuple(v)  # type: ignore[arg-type]
+                for k, v in (raw.get("global_slots") or {}).items()
+                if isinstance(v, list) and len(v) == 4
+            },
         )
         profile.validate()
         return profile
