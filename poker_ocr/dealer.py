@@ -164,7 +164,16 @@ class BlobDealerDetector:
             perim = cv2.arcLength(c, True)
             if perim <= 0:
                 continue
-            circularity = 4 * np.pi * area / (perim * perim)
+            # 先平滑轮廓再量圆度。**视频输入必须这么做**：H.264 会把白圆片的
+            # 边缘磨出锯齿，周长被抬高 → 圆度从 0.895 掉到 0.724–0.835，
+            # 被门槛 0.85 误杀（真机视频实测 171 帧里只有 1 帧过闸）。
+            # 2% 周长的多边形逼近把锯齿抹掉，同一条真 D 的圆度回到 0.890–0.949，
+            # 而其它小圆候选仍在 0.85 附近徘徊（实测 282 个里只有 18 个过，
+            # 且还要过「读出 D」那一关）。
+            smooth = cv2.approxPolyDP(c, 0.02 * perim, True)
+            sp = cv2.arcLength(smooth, True)
+            sa = cv2.contourArea(smooth)
+            circularity = 4 * np.pi * sa / (sp * sp) if sp > 0 else 0.0
             if circularity < self.cfg["circularity_min"]:
                 continue
             x, y, w, h = cv2.boundingRect(c)
