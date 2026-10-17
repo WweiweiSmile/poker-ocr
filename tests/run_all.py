@@ -3,10 +3,12 @@
 
     .venv/bin/python tests/run_all.py
 
-分四层，从不需要图到需要图：
+分层，从不需要图到需要图：
     test_positions  位置推导（纯逻辑，最快）
     test_coach      翻后建议引擎（纯逻辑，不需要图）
     test_dealer     庄位检测（合成图，不依赖照片）
+    test_roi_reader ROI 读取器（合成图 + 假 OCR 引擎，不依赖照片和模型）
+    test_roi_dedup  ROI 去重（合成图，不依赖照片和模型）
     test_extract    端到端提取（需要 table.jpg）
     test_api        HTTP 接口（需要 table.jpg + fastapi）
 """
@@ -19,8 +21,8 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 
-SUITES = ["test_positions.py", "test_coach.py", "test_dealer.py",
-          "test_extract.py", "test_api.py"]
+SUITES = ["test_positions.py", "test_coach.py", "test_dealer.py", "test_roi_reader.py",
+          "test_roi_dedup.py", "test_extract.py", "test_api.py"]
 
 
 def main() -> int:
