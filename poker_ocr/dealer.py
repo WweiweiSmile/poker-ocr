@@ -36,6 +36,13 @@ BLOB_DEFAULTS = {
     "max_seat_dist": 1.2,   # 到最近头像框的距离，按头像宽度归一化
 }
 
+# 小画面先放大再做 blob 检测。低分辨率直播（实测 344x764）里 D 圆片直径只有
+# ~11px，H.264 压缩后边缘全是锯齿，圆度/面积两条几何门会静默失守：
+# 同一批 10 帧在原始尺寸上 0 帧检出，放大到短边 600px 后 10/10 检出。
+# 面积门槛按整图面积归一化（见 _area_range），放大不会破坏它。
+MIN_DETECT_SIDE = 600
+MAX_PREP_SCALE = 3.0
+
 
 @dataclass
 class DealerCandidate:
@@ -188,7 +195,9 @@ class BlobDealerDetector:
     # ── 识别 ──
 
     def _reads_d(self, img: np.ndarray,
-                 bbox: tuple[int, int, int, int]) -> tuple[bool, str | None, float]:
+                 bbox: tuple[int, int, int, int],
+                 accepted: set[str] | None = None,
+                 ) -> tuple[bool, str | None, float]:
         """按**实际外接框**裁剪，只留一点边。
 
         别按 area_max 固定裁一大块 —— 实测那样四周全是毛毡，白色圆片缩成一个小点，
@@ -223,9 +232,12 @@ class BlobDealerDetector:
 
         if not best_text:
             return False, None, 0.0
-        # 圆片里就一个字母。去掉空白和分隔符后应当是 D（大小写都认）
-        norm = "".join(ch for ch in best_text if ch.isalnum())
-        return norm.upper() == "D", best_text, best_score
+        # 圆片里就一个字母。去掉空白和分隔符后应当是 D（大小写都认）。
+        # 全图路线会传入更宽的 accepted（0/O 等压缩后形近读法），
+        # ROI 路线保持默认只认 D。
+        accepted = accepted or {"D"}
+        norm = "".join(ch for ch in best_text if ch.isalnum()).upper()
+        return norm in accepted, best_text, best_score
 
     # ── 归座 ──
 
@@ -248,21 +260,40 @@ class BlobDealerDetector:
                 best_id, best_d = seat.seat_id, norm
         return best_id, best_d
 
+    # ── 预处理 ──
+
+    def _prepare(self, img: np.ndarray, size: Size) -> tuple[np.ndarray, Size, float]:
+        """短边太小就放大。返回 (工作图, 工作尺寸, 缩放倍数)。
+
+        只影响几何检测的像素分辨率；结果坐标最后会除回原尺寸，
+        所以调用方拿到的 center 仍然是原图坐标。
+        """
+        w, h = size
+        shortest = min(w, h)
+        if shortest <= 0:
+            return img, size, 1.0
+        scale = min(MAX_PREP_SCALE, MIN_DETECT_SIDE / shortest)
+        if scale <= 1.0:
+            return img, size, 1.0
+        work = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+        return work, (work.shape[1], work.shape[0]), scale
+
     # ── 主入口 ──
 
     def detect(self, img: np.ndarray, profile: Profile, size: Size) -> DealerResult:
-        blobs = self._find_blobs(img, profile, size)
+        work, work_size, scale = self._prepare(img, size)
+        blobs = self._find_blobs(work, profile, work_size)
 
         candidates: list[DealerCandidate] = []
         for center, circularity, bbox in blobs:
-            reads_d, text, ocr_score = self._reads_d(img, bbox)
-            seat_id, seat_dist = self._nearest_seat(profile, size, center)
+            reads_d, text, ocr_score = self._reads_d(work, bbox)
+            seat_id, seat_dist = self._nearest_seat(profile, work_size, center)
             far = seat_dist > self.cfg["max_seat_dist"]
             candidates.append(DealerCandidate(
                 seat_id=None if far else seat_id,
                 confidence=circularity * (ocr_score if reads_d else 0.5),
-                center=center,
-                center_norm=(center[0] / size[0], center[1] / size[1]),
+                center=(center[0] / scale, center[1] / scale),
+                center_norm=(center[0] / work_size[0], center[1] / work_size[1]),
                 reads_d=reads_d,
                 ocr_text=text,
                 seat_dist=seat_dist,

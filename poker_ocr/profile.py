@@ -56,6 +56,9 @@ class Seat:
     # profile 不支持该字段，而不是「这块画面什么都没有」。
     bet_slot: Slot | None = None
     action_slot: Slot | None = None
+    # 备选筹码槽：主槽读不到时再试这一块。hero 的筹码胶囊会随「有没有手牌」
+    # 上下移动（有牌时被牌推到最底部，没牌时贴在头像下面），见 WPK 配置。
+    chip_slot_alt: Slot | None = None
 
 
 @dataclass
@@ -75,6 +78,8 @@ class Profile:
     # 不属任何座位的全局区域：pot / board / hero_cards / hand_label / pot_before_street。
     # 同样是「有才用」，键缺失即不支持。
     global_slots: dict[str, Slot] = field(default_factory=dict)
+    # runtime profile：由全图识别现场生成，环序/几何不要求人工标定那套校验
+    runtime: bool = False
 
     # ── 查询 ──────────────────────────────────────────────
 
@@ -172,8 +177,8 @@ class Profile:
     def validate(self) -> None:
         problems = []
         ids = [s.seat_id for s in self.seats]
-        if len(ids) != 9:
-            problems.append(f"座位数应为 9，实际 {len(ids)}")
+        if not (2 <= len(ids) <= 9):
+            problems.append(f"座位数应在 2-9，实际 {len(ids)}")
         if len(set(ids)) != len(ids):
             problems.append(f"seat_id 有重复：{ids}")
         if sorted(ids) != sorted(self.ring_order):
@@ -183,21 +188,23 @@ class Profile:
         if self.action_direction not in ("cw", "ccw"):
             problems.append(f"action_direction 只能是 cw/ccw，收到 {self.action_direction}")
         ring_idx = sorted(s.ring_index for s in self.seats)
-        if ring_idx != list(range(9)):
-            problems.append(f"ring_index 应该是 0-8 各一个，实际 {ring_idx}")
+        if ring_idx != list(range(len(ids))):
+            problems.append(f"ring_index 应该是 0-{len(ids) - 1} 各一个，实际 {ring_idx}")
 
         # 新槽位（可选）也要过一遍形状检查。`_opt_slot` 只挡住了「不是 4 个数」，
         # 挡不住「写反了 / 超出 0-1」—— 那种框裁出来是空图，识别结果会静默变成
         # 「这里什么都没有」，跟本次庄位门槛写死同一个病。
         for s in self.seats:
-            for label, slot in (("bet_slot", s.bet_slot), ("action_slot", s.action_slot)):
+            for label, slot in (("bet_slot", s.bet_slot), ("action_slot", s.action_slot),
+                                ("chip_slot_alt", s.chip_slot_alt)):
                 if slot is not None and not _slot_ok(slot):
                     problems.append(f"{s.seat_id}.{label} 不是合法的归一化矩形：{slot}")
         for gname, gslot in self.global_slots.items():
             if not _slot_ok(gslot):
                 problems.append(f"global_slots.{gname} 不是合法的归一化矩形：{gslot}")
 
-        problems += self.check_ring_geometry()
+        if not self.runtime:
+            problems += self.check_ring_geometry()
 
         if problems:
             for p in problems:
@@ -222,6 +229,7 @@ class Profile:
                 avatar_slot=tuple(s["avatar_slot"]),  # type: ignore[arg-type]
                 bet_slot=_opt_slot(s.get("bet_slot")),
                 action_slot=_opt_slot(s.get("action_slot")),
+                chip_slot_alt=_opt_slot(s.get("chip_slot_alt")),
             )
             for s in raw["seats"]
         ]
@@ -244,6 +252,7 @@ class Profile:
                 for k, v in (raw.get("global_slots") or {}).items()
                 if isinstance(v, list) and len(v) == 4
             },
+            runtime=bool(raw.get("runtime", False)),
         )
         profile.validate()
         return profile

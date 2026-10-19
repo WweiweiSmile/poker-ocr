@@ -52,6 +52,33 @@ class Amount:
         return d
 
 
+# 宽松筹码解析：只给 live 的固定 ROI 用。全图路线也用同一套规则。
+# 只接受**以数字开头**的文本（前面最多是货币符号/图标），名字里的数字不会被当筹码。
+_LOOSE_NUM_RE = re.compile(r"^[^0-9A-Za-z\u4e00-\u9fff]*(\d[\d,]*(?:\.\d+)?)")
+
+
+def parse_chip_loose(text: str | None) -> float | None:
+    """`1,234`、`$1,234`、`243DB`、`478.5B8`、`460.538` 都取前导数字。
+
+    严格 `parse_amount` 要求 BB 单位；固定 ROI 的筹码槽上下文已经确定，
+    单位丢失/误读（BB→38/DB/B8）时用这个兜底。**只在明确知道是筹码槽时用**。
+    """
+    t = (text or "").strip()
+    if not t or "%" in t or "/" in t or ":" in t:
+        return None
+    m = _LOOSE_NUM_RE.match(t)
+    if not m:
+        return None
+    rest = t[m.end():].strip()
+    if len(rest) > 4:
+        return None
+    try:
+        value = float(m.group(1).replace(",", ""))
+    except ValueError:
+        return None
+    return value if value > 0 else None
+
+
 def parse_amount(text: str | None) -> Amount:
     """筹码 / 下注 / 底池的文本 → BB 数值。
 
@@ -89,8 +116,10 @@ _BLINDS_RE = re.compile(
     r"(?:[（(]\s*(\d{1,3}(?:\.\d+)?)\s*[）)])?"
 )
 
-# 合法盲注比：bb/sb 落在 [2, 10]。`1/20`（比率 20）和 `1/21` 都是 OCR 融合产物，
-# 真实牌桌的 1/2、2/5、5/10、10/20 都落在这个区间。
+# 合法盲注比：OCR 自动读数要求 bb/sb 落在 [2, 10]；真实牌桌的 1/2、2/5、5/10、
+# 10/20 都在这个区间。`1/21` 之类是融合产物 → 拒绝并继承上一帧。
+# 注意 1/20 这种真实高比例盲注也在区间外（2026-10-19 实测桌面），
+# 所以**人工显式指定**的 `--initial-blinds` 走 parse_blinds(max_ratio=50)。
 _MIN_BB_RATIO = 2.0
 _MAX_BB_RATIO = 10.0
 
@@ -106,11 +135,15 @@ class Blinds:
         return {"sb": self.sb, "bb": self.bb, "ante": self.ante, "raw": self.raw}
 
 
-def parse_blinds(text: str | None) -> Blinds | None:
+def parse_blinds(text: str | None,
+                 max_ratio: float = _MAX_BB_RATIO) -> Blinds | None:
     """`1/2(1)` → sb=0.5BB / bb=1BB / ante=0.5BB。
 
     **不猜缺斜杠的写法**（实测 OCR 会给出 `12（1）`）：`12` 既可能是 1/2 也可能
     真是 12，猜错会让整份数据的尺度错掉。解析不了 → None → 继承上一帧的盲注。
+
+    `max_ratio` 只应给**人工显式指定**的盲注放宽（如 `--initial-blinds 1/20`）：
+    OCR 自动读到的横幅仍用默认 10，避免把融合产物（`1/21）...`）解析成合法值。
     """
     t = (text or "").strip()
     m = _BLINDS_RE.match(t)
@@ -120,7 +153,7 @@ def parse_blinds(text: str | None) -> Blinds | None:
     if sb_chips <= 0 or bb_chips <= 0:
         return None
     ratio = bb_chips / sb_chips
-    if not (_MIN_BB_RATIO <= ratio <= _MAX_BB_RATIO):
+    if not (_MIN_BB_RATIO <= ratio <= max_ratio):
         return None
     ante_chips = float(m.group(3)) if m.group(3) else None
     # 这个 app 的盲注行是「筹码数」，1 BB = bb_chips 个筹码 → 全部折成 BB。

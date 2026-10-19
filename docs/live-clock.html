@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>OBS 延迟时钟</title>
+<style>
+  html, body {
+    margin: 0; height: 100%;
+    background: #000; color: #fff;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    display: grid; place-items: center;
+    overflow: hidden;
+  }
+  #clock {
+    font-size: 11vmin;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: 0.02em;
+    white-space: nowrap;
+  }
+</style>
+</head>
+<body>
+<div id="clock">--:--:--.---</div>
+<script>
+  const el = document.getElementById("clock");
+  const pad = (n, w = 2) => String(n).padStart(w, "0");
+  function tick() {
+    const d = new Date();
+    el.textContent =
+      `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}.` +
+      pad(d.getMilliseconds(), 3);
+    requestAnimationFrame(tick);
+  }
+  tick();
+</script>
+</body>
+</html>

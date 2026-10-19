@@ -1,0 +1,538 @@
+# 实时推流识别（OBS → MediaMTX → poker-ocr）
+
+把手机牌桌画面通过 OBS 推到本机 MediaMTX，按固定间隔采样、识别成结构化
+JSONL。本文是**当前方案的完整说明**：架构、功能、标定流程、启动命令、输出格式
+和排障。
+
+---
+
+## 1. 方案总览
+
+```
+手机 / 采集卡
+   │  AirPlay / scrcpy / 采集
+   ▼
+OBS（画布/输出保持手机比例，不拉伸）
+   │  SRT publish :8890/udp
+   ▼
+MediaMTX（SRT 接收 → RTSP 127.0.0.1:8554）
+   │  RTSP read（只保留最新帧）
+   ▼
+poker_ocr.live
+   ├─ 裁黑边（auto）
+   ├─ 宽高比对齐（AspectFit）
+   ├─ 固定 ROI：名字 / 筹码 / 下注 / 动作 / 庄位 / 底池 / 盲注
+   ├─ ROI 去重（没变的块不重复跑 rec）
+   ├─ 状态机（防抖、丢弃、跨帧继承）
+   └─ logs/live.states.jsonl
+```
+
+### 两条识别路线
+
+| 路线 | 参数 | 适用场景 | 速度 |
+|---|---|---|---|
+| **ROI（默认）** | `--recognizer roi` | 布局固定的 App（WPK 竖屏等） | ~0.5s/帧 |
+| **全图** | `--recognizer full` | 浏览器牌桌、布局不固定 | 0.5–1.5s/帧 |
+
+ROI 路线只裁固定槽位、只跑 rec，不跑全图检测，是实时链路的主力。
+全图路线做 det+rec 后按几何位置聚类座位，不依赖固定布局，作为兜底。
+
+### 关键设计
+
+- **只保留最新帧**：reader 线程持续 `read()`，邮箱里永远只有一帧；处理不过来
+  就覆盖旧帧，延迟不会越积越大。
+- **单 OCR 线程**：onnxruntime session 不保证线程安全，reader 只解码。
+- **严格质量闸**：一帧里任何一个字段无法精准识别，整帧丢弃（`discard`），
+  不把猜测写进输出。
+- **ROI 相对位置**：所有槽位都是 0–1 归一化坐标。画面宽高比和 profile 参考
+  不一致时，先按参考比例重采样（`AspectFit`），保证 x/y 共用一个像素缩放。
+- **ROI 级去重**：同一块 ROI 和上一帧逐 bit 相同 / MAD ≤ 0.2 时复用上一帧读数。
+- **断流重置**：重连后清空 ROI 缓存和状态机，下一帧重新当基线；累计计数保留。
+
+---
+
+## 2. 功能
+
+### 每帧识别出的状态
+
+- **座位**：9 人桌（ROI profile）或 2–9 人（全图路线）
+- **每个玩家**：名字、后手筹码（BB）、本街下注、动作
+  （`check/call/bet/raise/fold`）、是否弃牌、是否在池、是否全下
+- **位置**：BTN / SB / BB / UTG / …（由庄位和在场人数推导）
+- **庄位**：白底圆形「D」检测，归给最近头像
+- **全局**：盲注级别、底池、上一街底池、本街下注总额
+- **回合**：是否轮到 hero（读第一个下注预设钮的 BB 值行）
+- **桌型 / 在池人数**
+
+### 工程能力
+
+- 黑边自动裁剪；非等比画面按参考比例还原
+- 低分辨率自动放大后做庄位 blob 检测（短边 < 600px，最多 3x）
+- hero 筹码胶囊双槽位：有手牌时在最底部，无手牌时在头像下方（`chip_slot_alt`）
+- 手势/弹窗/动画帧自动丢弃，不污染状态
+- 同一状态连续 `--stable-frames` 帧才记录；名字连续 `--name-confirm` 帧才更换
+- 盲注读不到时继承上一帧（`blinds.source = "carried"`）
+- 断流自动重连，JSONL 用 `epoch` 区分会话
+
+### 工具链（抓帧 → 裁剪 → 验证 → 重新标注）
+
+| 工具 | 作用 |
+|---|---|
+| `tools/capture_stream.py` | 从 RTSP 按 0.5s 抓帧存图 |
+| `tools/crop_frames.py` | 批量裁黑边 + 按参考比例对齐 |
+| `tools/validate_roi.py` | 用现有 profile 跑 ROI，输出叠加图 + JSON 报告 |
+| `tools/refit_profile.py` | 用真实帧重新标注槽位，生成新 profile |
+| `tools/calibrate_live.py` | 从实时流跑一次全图识别，直接生成 runtime profile |
+| `tools/video_to_states.py` | 离线视频 → 状态 JSON（不经过 OBS/RTSP） |
+
+---
+
+## 3. 快速开始
+
+### 3.1 安装 MediaMTX
+
+```bash
+brew install mediamtx
+```
+
+OpenCV 的 wheel 已自带 FFmpeg，不需要额外安装。
+
+### 3.2 启动 MediaMTX
+
+先改 `config/mediamtx.yml` 里的 `srtPublishPassphrase`（10–79 位），
+或者启动时用环境变量覆盖：
+
+```bash
+cd ~/codes/poker-ocr
+mediamtx --validate-conf=config/mediamtx.yml
+mediamtx config/mediamtx.yml
+```
+
+正常日志：
+
+```
+[SRT] listener opened on :8890 (UDP)
+[RTSP] listener opened on 127.0.0.1:8554
+```
+
+确认端口：
+
+```bash
+lsof -nP -iUDP:8890
+lsof -nP -iTCP:8554
+```
+
+首次运行 macOS 会询问是否允许 MediaMTX 接受入站连接 —— 允许 UDP 8890。
+
+### 3.3 OBS 设置
+
+**Settings → Stream**
+
+- Service：`Custom`
+- Server：
+  ```
+  srt://<Mac 局域网 IP>:8890?streamid=publish:live&passphrase=<口令>&pbkeylen=16
+  ```
+- Stream Key：留空
+
+> `pbkeylen=16` 必须带。SRT 的 `latency` 单位是**微秒**，不写默认约 120ms。
+> 局域网可信时也可以清空 passphrase，去掉 URL 里的加密参数。
+
+**Settings → Output（Advanced）**
+
+- Encoder：`x264`（Apple Silicon 可用 Apple VT 低延迟预设）
+- Rate Control：`CBR`，Bitrate `4000 Kbps`
+- Keyframe Interval：`1s`
+- x264 Options：`tune=zerolatency bframes=0`
+- 音频：关闭
+
+**Settings → Video**
+
+- Base / Output Resolution：和手机画面同比例（推荐 `1080x2400`）
+- FPS：`15`
+- 缩放方式：**Fit / 适应屏幕，不要拉伸**
+
+**Settings → Advanced**
+
+- Color Format：`NV12`
+- Color Space：`Rec. 709`
+- Color Range：`Full`
+
+> 不要缩放、不要加黑边/填充。分辨率越低，筹码数字和庄位 D 越难读；
+> 建议 OBS 输出尽量接近 `1080x2400`。
+
+点击 **Start Streaming**，MediaMTX 日志出现：
+
+```
+[SRT] [conn ...] is publishing to path 'live'
+```
+
+### 3.4 启动识别
+
+```bash
+cd ~/codes/poker-ocr
+
+# 先跑 10 帧冒烟
+.venv/bin/python -m poker_ocr.live --max-frames 10
+
+# 正式运行（Ctrl-C 结束，自动写 session_end）
+.venv/bin/python -m poker_ocr.live \
+  --url rtsp://127.0.0.1:8554/live \
+  --profile config/table_wpk_1080x2400.json \
+  --every 0.5 \
+  --out logs/live.states.jsonl
+```
+
+启动顺序无所谓：worker 连不上会每 1s 重试。
+
+---
+
+## 4. 针对当前流的标定流程（推荐）
+
+同一台设备、同一套 OBS 参数下，建议先抓一批真实帧重新标定 ROI。
+这是目前效果最好的流程。
+
+### 4.1 抓帧（每 0.5s 一张）
+
+```bash
+# 抓 200 张（约 100 秒）
+.venv/bin/python tools/capture_stream.py \
+  --every 0.5 --max-frames 200 --out logs/live_frames
+```
+
+- 只拉流、不加载 OCR；持续 `grab()` 丢弃旧缓冲，到点再 `retrieve()`。
+- 文件名 = 墙钟时间 + 毫秒 + 序号，字典序即时间序。
+- 断流自动重连。
+
+### 4.2 裁黑边 + 对齐比例
+
+```bash
+.venv/bin/python tools/crop_frames.py logs/live_frames \
+  --out logs/live_frames_cropped
+```
+
+输出和实时 worker 看到的画面完全一致：`plan_crop(auto)` + `AspectFit`。
+
+### 4.3 用现有 profile 验证
+
+```bash
+.venv/bin/python tools/validate_roi.py logs/live_frames_cropped \
+  --profile config/table_wpk_1080x2400.json \
+  --initial-blinds 1/2 \
+  --out-dir logs/roi_validation
+```
+
+产物：
+
+- `<文件名>.roi.jpg`：3 倍放大，画上每块 ROI 和识别文本 —— **先看框有没有偏**
+- `report.json`：每帧的 `rect/text/score`、解析后的状态和 `errors`
+- stdout：字段读取率、丢弃原因汇总
+
+### 4.4 重新标注 ROI
+
+```bash
+.venv/bin/python tools/refit_profile.py logs/live_frames_cropped \
+  --profile config/table_wpk_1080x2400.json \
+  --out config/table_wpk_live.json --step 2
+```
+
+做法：
+
+1. 每帧跑全图 det+rec，拿到所有文本框；
+2. 按字段类型（名字 / 金额 / 盲注）匹配回原槽位；
+3. 多帧取坐标**中位数**，只修正槽位整体偏移，保留原搜索区尺寸；
+4. 命中不足 `--min-hits 5` 的槽位保持原值；
+5. 同步标定庄位 blob 的亮度门槛（`v_min=170 / s_max=60`）。
+
+产物：新 profile + `logs/refit_report.json`（每个槽位的命中数、旧值、新值）。
+
+### 4.5 用新 profile 运行
+
+```bash
+.venv/bin/python -m poker_ocr.live \
+  --profile config/table_wpk_live.json \
+  --initial-blinds 1/2 \
+  --out logs/live.states.jsonl
+```
+
+### 4.6 实测效果（2026-10-19，200 帧 / 982×2182）
+
+| 指标 | 旧 `table_wpk_1080x2400` | 新 `table_wpk_live` |
+|---|---|---|
+| 状态可用 | 70/200 | **126/200** |
+| 庄位检出 | 92/200 | **183/200** |
+| 名字读取 | 96.1% | 95.9% |
+| 筹码读取 | 97.2% | 97.3% |
+| 底池读取 | 95.0% | 95.0% |
+| 盲注读取 | 98.5% | 98.5% |
+
+剩余丢弃主要来自游戏自身的瞬时状态：玩家资料弹窗、摊牌亮手牌顶掉筹码、
+底池横幅只显示「总底池」标签、全下玩家筹码显示成裸 `0`。
+这些帧本来就无法精准识别，按规则整帧丢弃。
+
+---
+
+## 5. 启动命令汇总
+
+### 实时 ROI（推荐）
+
+```bash
+.venv/bin/python -m poker_ocr.live \
+  --url rtsp://127.0.0.1:8554/live \
+  --profile config/table_wpk_live.json \
+  --initial-blinds 1/2 \
+  --every 0.5 \
+  --out logs/live.states.jsonl
+```
+
+### 实时 ROI（使用通用 1080x2400 profile）
+
+```bash
+.venv/bin/python -m poker_ocr.live \
+  --profile config/table_wpk_1080x2400.json \
+  --out logs/live.states.jsonl
+```
+
+### 全图标定 → 运行时 ROI（浏览器 / 布局不固定）
+
+```bash
+# 1) 标定一次
+.venv/bin/python tools/calibrate_live.py \
+  --url rtsp://127.0.0.1:8554/live \
+  --frames 5 --crop auto \
+  --out config/runtime_browser.json
+
+# 2) 稳定运行
+.venv/bin/python -m poker_ocr.live \
+  --recognizer roi \
+  --profile config/runtime_browser.json \
+  --crop auto \
+  --initial-blinds 1/2 \
+  --lenient-chips \
+  --out logs/live.states.jsonl
+```
+
+### 全图路线（不依赖固定槽位）
+
+```bash
+.venv/bin/python -m poker_ocr.live \
+  --recognizer full \
+  --full-config config/full_browser.json \
+  --out logs/live.states.jsonl
+```
+
+### 离线视频
+
+```bash
+.venv/bin/python tools/video_to_states.py images/video/video1.mp4 \
+  --every 0.5 --out /tmp/video1.states.json
+```
+
+### 冒烟 / 调试
+
+```bash
+# 只处理 10 帧
+.venv/bin/python -m poker_ocr.live --max-frames 10
+
+# 保存每个采样帧
+.venv/bin/python -m poker_ocr.live --dump-frames /tmp/liveframes
+
+# 关掉 ROI 去重
+.venv/bin/python -m poker_ocr.live --no-dedup
+
+# 不读头像（省 9 块 ROI，失去弃牌检测）
+.venv/bin/python -m poker_ocr.live --no-fold
+```
+
+---
+
+## 6. 输出 JSONL
+
+每行一个完整 JSON，立即 flush。共 4 种记录：
+
+| `type` | 时机 |
+|---|---|
+| `session_start` | 启动时一条 |
+| `stream_info` | 分辨率 / 宽高比变化时一条 |
+| `state` | 产生新状态时（防抖后） |
+| `session_end` | 退出时一条（含汇总） |
+
+### 6.1 `session_start`
+
+```json
+{"type":"session_start","started_at":"2026-10-19T21:30:53.441+08:00",
+ "url":"rtsp://127.0.0.1:8554/live","profile":"table_wpk_live.json",
+ "recognizer":"roi","full_config":null,"every":0.5,"resolution":null}
+```
+
+### 6.2 `stream_info`
+
+```json
+{"type":"stream_info","ts":"...","recognizer":"roi",
+ "resolution":[982,2182],"aspect":0.450046,
+ "reference_aspect":0.450046,
+ "crop":{"mode":"auto","src":[982,2182],"out":[982,2182]},
+ "roi_fit":{"src":[982,2182],"out":[982,2182],"aspect":0.450046,
+            "reference":[982,2182],"reference_aspect":0.450046,
+            "deviation":0.0,"scale":[1.0,1.0]}}
+```
+
+- `resolution`：流原始分辨率
+- `aspect`：流的宽高比
+- `crop`：黑边裁剪结果
+- `roi_fit`：按 profile 参考比例重采样的结果；`scale` 是参考图 → 实际 ROI 的
+  x/y 缩放，正常应当相等。`scale < 0.5` 会额外告警分辨率不足。
+
+### 6.3 `state`
+
+```json
+{"type":"state","seq":412,"epoch":1,"ts":"2026-10-19T21:30:31.321+08:00",
+ "queue_ms":11.2,"proc_ms":561.4,
+ "index":1,"t":36.73,"frame":"live_e1_000667_0036.73s",
+ "table_seats":9,"players_in_hand":9,
+ "blinds":{"sb":0.5,"bb":1.0,"ante":0.5,"raw":"1/2（1）521222","source":"frame"},
+ "dealer":"midL","hero_seat_id":"hero","hero_turn":false,
+ "pot":45.0,"pot_before_street":45.0,"street_bet_total":0.0,
+ "players":[
+   {"seat_id":"hero","position":"CO","name":"gggamel","stack":87.0,
+    "bet":0.0,"action":null,"fold":false,"in_hand":true,
+    "all_in":false,"status":"playing"}
+ ]}
+```
+
+字段说明：
+
+| 字段 | 含义 |
+|---|---|
+| `seq` / `epoch` | 全局帧号 / 第几次连接 |
+| `ts` | 写入墙钟时间（ISO 8601，毫秒） |
+| `queue_ms` | 帧被读出 → 开始 OCR 的排队时间 |
+| `proc_ms` | 本帧 OCR + 状态机耗时 |
+| `index` / `t` | 第几条记录 / 会话内秒数 |
+| `frame` | 触发本记录的帧 ID |
+| `table_seats` | 桌型座位数 |
+| `players_in_hand` | 本手在池人数 |
+| `blinds` | `sb/bb/ante` 单位为 BB；`source=frame` 或 `carried` |
+| `dealer` | 庄位 `seat_id`；读不到时该帧会被丢弃 |
+| `hero_turn` | `true/false/null`（null = 有东西盖住，不硬判） |
+| `pot` | 底池（BB） |
+| `pot_before_street` | 本街开始前已收进底池的部分（BB） |
+| `street_bet_total` | `pot − pot_before_street` |
+| `players[].stack` | 后手筹码（BB），不是带入 |
+| `players[].bet` | 本街已下注（BB） |
+| `players[].action` | `check/call/bet/raise/fold` |
+| `players[].fold` | 弃牌检测，三态：`true/false/null` |
+| `players[].status` | `playing/folded/buying_in/sitting_out/away` |
+| `players[].notes` | 宽松解析等诊断信息（可选） |
+
+### 6.4 `session_end`
+
+```json
+{"type":"session_end","ended_at":"...","summary":{
+  "elapsed_seconds":53.8,"frames_read":1170,"processed_frames":63,
+  "avg_proc_ms":526.9,"eff_hz":1.17,"reconnects":6,
+  "sampled_frames":63,"accepted_frames":2,"discarded_frames":61,
+  "discarded_reasons":{"dealer":60,"bet":13,"pot":21,"stack":180},
+  "record_count":1,"roi_reuse":{...},"recognizer":"roi"}}
+```
+
+### 6.5 丢弃语义
+
+`state` 记录只在**所有字段都可精准识别**时产生。以下情况整帧丢弃：
+
+| `discarded_reasons` | 典型原因 |
+|---|---|
+| `dealer` | 庄位 D 被遮挡 / 太暗 / 不在画面 |
+| `stack:<seat>` | 摊牌手牌顶掉筹码胶囊、全下显示裸 `0`、弹窗遮挡 |
+| `bet:<seat>` | 下注 pill 读成非金额文本 |
+| `pot` / `blinds` | 底池横幅只显示标签、盲注行被融合读坏 |
+| `vanished:<seat>` | 整座空白超过 `--max-vanish` 帧 |
+
+消费端可以只读 `state` 记录；`discard` 不会写入输出。
+
+---
+
+## 7. 参数表
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `--url` | `rtsp://127.0.0.1:8554/live` | MediaMTX RTSP 地址 |
+| `--profile` | `config/table_wpk_1080x2400.json` | ROI 布局配置 |
+| `--recognizer` | `roi` | `roi`=固定槽位；`full`=全图 OCR + 座位聚类 |
+| `--full-config` | 无 | full 模式参数 JSON |
+| `--initial-blinds` | 无 | 首帧盲注，如 `1/2`、`1/20`；之后正常继承 |
+| `--lenient-chips` | 关 | 筹码单位读坏时取前导数字（固定筹码槽上下文） |
+| `--every` | `0.5` | 采样间隔（秒） |
+| `--out` | `logs/live.states.jsonl` | JSONL 输出（每次启动覆盖） |
+| `--stable-frames` | `2` | 新状态连续出现几帧才记录 |
+| `--max-vanish` | `3` | 整座空白连续几帧才认定离开 |
+| `--name-confirm` | `3` | 名字连续确认几帧才更换 |
+| `--dealer-carry` | `4` | full 模式 D 读不到时沿用上一庄位的最大帧数；`0` 关闭 |
+| `--max-frame-age` | `2.0` | 超过多少秒的帧直接跳过 |
+| `--crop` | `auto` | `auto`=裁非黑内容；`left`=按参考比例裁左侧；`none`=不裁 |
+| `--no-dedup` | 关 | 关掉 ROI 去重 |
+| `--no-fold` | 关 | 不读头像，省 9 块 ROI，失去弃牌检测 |
+| `--dump-frames` | 无 | 采样帧存 JPEG |
+| `--max-frames` | `0` | 最多处理多少帧（0 = 不限） |
+| `--quiet` | 关 | 只打状态行和最终汇总 |
+
+---
+
+## 8. 延迟与采样
+
+| 指标 | 预期 |
+|---|---|
+| OBS 画面 → 服务端拿到帧 | 0.3–0.8s |
+| 帧 → 写入 JSONL | p50 1.0–1.6s，p95 1.8–2.5s |
+| 桌面变化 → 写入 JSONL（含防抖） | p50 2–3s，p95 3.5–4.5s |
+
+单帧 OCR 约 **0.5–0.6s**，因此严格 2Hz 做不到。worker 采用最新帧优先，
+处理不过来就丢中间帧，有效约 **1.8Hz**，队列深度恒为 1。
+
+量延迟：
+
+```bash
+# 1) OBS 浏览器源加载 docs/live-clock.html，放在画面顶部
+# 2) 启动 worker 并保存采样帧
+.venv/bin/python -m poker_ocr.live --dump-frames /tmp/liveframes
+# 3) 对比记录 ts、dump 帧文件名墙钟和画面里的时钟
+```
+
+---
+
+## 9. 排障
+
+| 现象 | 先查 |
+|---|---|
+| `[重连] 打不开 rtsp://...` | MediaMTX 是否启动；OBS 是否推流；路径是否叫 `live` |
+| MediaMTX 有 publisher，worker 连不上 | RTSP 绑在 `127.0.0.1`，worker 必须在本机跑 |
+| SRT 推不上 | 口令不一致；UDP 8890 被防火墙挡；`streamid=publish:live` 拼错 |
+| 识别全错 / 大量丢弃 | 看 `stream_info.aspect` / `roi_fit.scale`；比例不对会自动换算，但 `scale < 0.5` 时分辨率已不够 |
+| 庄位一直 `not_found` | 跑 `tools/validate_roi.py` 看叠加图；低分辨率会自动放大，仍失败可重标定 dealer 门槛 |
+| 所有字段都空、ROI 复用率很高 | 画面根本不在槽位上；检查 `--crop`，或重新抓帧标定 |
+| hero 筹码读不到 | 有/无手牌时筹码胶囊位置会移动；确认 profile 里有 `chip_slot_alt` |
+| `proc_ms` 明显高于 600ms | CPU 争用；OBS 用 Apple VT 编码；试 `--no-fold` |
+| `queue_ms` 持续变大 | 不应发生；检查是否有别的东西在消费邮箱 |
+| 断流重连后第一条是重复基线 | 正常：重连会重置 ROI 缓存和状态机 |
+| 盲注读不出（如 1/20） | 用 `--initial-blinds 1/20` 人工指定；OCR 自动读数仍按 2–10 比例闸过滤融合文本 |
+
+---
+
+## 10. 已知限制
+
+- ROI profile（`table_wpk_1080x2400.json` / `table_wpk_live.json`）按 9 人桌标定；
+  `Profile.load` 要求座位数与 `ring_order` 一致。
+- 有效约 1.8Hz，不是严格 2Hz；忙时丢帧。
+- 断流重连会把下一帧当新基线；若断在牌局中段，可能把全下误判为离座。
+- 每次启动覆盖同一个 JSONL；只允许一个 worker 写同一个文件。
+- 严格质量闸意味着摊牌、弹窗、动画帧会被丢弃，输出比实际帧稀疏。
+- 不接后端/前端；当前只有文件和日志。
+
+## 11. 测试
+
+```bash
+.venv/bin/python tests/run_all.py
+```
+
+共 13 个套件，覆盖位置推导、庄位、ROI 读取/去重、解析、状态机、全图路线、
+runtime profile、实时邮箱/限速/JSONL 和 HTTP 接口。

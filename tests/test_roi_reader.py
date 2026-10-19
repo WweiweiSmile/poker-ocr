@@ -26,7 +26,8 @@ sys.path.insert(0, str(ROOT))
 
 from poker_ocr.profile import Profile  # noqa: E402
 from poker_ocr.roi_reader import (  # noqa: E402
-    GLOBAL_FIELDS, ROI_PAD, SEAT_FIELDS, RoiRead, measure_hero_turn, read_frame,
+    GLOBAL_FIELDS, ROI_PAD, SEAT_FIELDS, RoiRead, measure_hero_turn,
+    read_avatars, read_frame,
 )
 
 WPK = ROOT / "config" / "table_wpk_1080x2400.json"
@@ -110,6 +111,25 @@ def build_table(profile: Profile, size=SIZE) -> dict:
 
 # ─────────────────────────── 测试 ───────────────────────────
 
+def test_read_avatars_reads_all_nine_seats() -> None:
+    """头像区按 9 个目标框裁（pad=0），文本和分数原样透传。"""
+    profile = Profile.load(WPK)
+    img = make_marked()
+    table = {}
+    for seat in profile.seats:
+        rect = profile.slot_to_px(seat.avatar_slot, SIZE, pad=0.0)
+        table[rect] = [(f"{seat.seat_id}:avatar", 0.9)]
+    engine = StubEngine(table)
+
+    got = read_avatars(img, profile, engine, detect_fold=True)
+    check(len(got) == 9, f"应读 9 个头像，实际 {len(got)}")
+    for seat in profile.seats:
+        check(got.get(seat.seat_id) == (f"{seat.seat_id}:avatar", 0.9),
+              f"{seat.seat_id} 的头像读数不对：{got.get(seat.seat_id)}")
+    check(read_avatars(img, profile, engine, detect_fold=False) == {},
+          "detect_fold=False 时不该读头像")
+
+
 def test_only_rec_is_ever_called() -> None:
     """全图 det 一次都不许跑 —— read_boxes 抛异常，跑通即证明没调过。"""
     profile = Profile.load(WPK)
@@ -142,6 +162,32 @@ def test_each_roi_is_cropped_at_the_configured_slot() -> None:
         reported.add(tuple(turn_rect))
     check(set(engine.crops) == reported,
           f"引擎实际收到的裁剪和上报的不一致：{set(engine.crops) ^ reported}")
+
+
+def test_hero_chip_alt_slot_only_when_primary_is_empty() -> None:
+    """hero 没手牌时筹码胶囊贴在头像下方；主槽空才读备选槽。"""
+    profile = Profile.load(WPK)
+    hero = profile.seat("hero")
+    check(hero.chip_slot_alt is not None, "WPK 配置应给 hero 配 chip_slot_alt")
+    img = make_marked()
+    alt_rect = profile.slot_to_px(hero.chip_slot_alt, SIZE, pad=ROI_PAD)
+
+    # 主槽有读数 → 绝不碰备选槽（有手牌时筹码在最底部）
+    engine = StubEngine(build_table(profile))
+    read_frame(img, profile, engine, with_dealer=False)
+    check(alt_rect not in engine.crops,
+          "主 chip 槽读到文本时不该再读 chip_slot_alt")
+
+    # 主槽空、备选槽有读数 → 用备选槽
+    table = build_table(profile)
+    primary = profile.slot_to_px(hero.chip_slot, SIZE, pad=ROI_PAD)
+    table[primary] = []
+    table[alt_rect] = [("182.5BB", 0.9)]
+    frame = read_frame(img, profile, StubEngine(table), with_dealer=False)
+    read = frame.seat("hero").fields["chip"]
+    check(read.text == "182.5BB", f"应回退到备选槽，实际 {read.text!r}")
+    check("chip_slot_alt" in (read.note or ""),
+          f"回退时应留下 note，实际 {read.note!r}")
 
 
 def test_seat_order_starts_at_hero_and_text_is_passed_through() -> None:
@@ -268,8 +314,10 @@ def test_to_dict_and_strip() -> None:
 
 def main() -> int:
     tests = [
+        test_read_avatars_reads_all_nine_seats,
         test_only_rec_is_ever_called,
         test_each_roi_is_cropped_at_the_configured_slot,
+        test_hero_chip_alt_slot_only_when_primary_is_empty,
         test_seat_order_starts_at_hero_and_text_is_passed_through,
         test_hero_turn_by_button_text,
         test_hero_turn_unknown_without_the_slot,

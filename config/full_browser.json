@@ -1,0 +1,26 @@
+{
+  "region_y": [0.02, 0.995],
+  "region_x": [0.0, 1.0],
+  "table_center": null,
+  "pair_dy_min": 0.01,
+  "pair_dy_max": 0.24,
+  "pair_dx_max": 0.18,
+  "attach_dist": 0.14,
+  "center_radius": 0.18,
+  "ring_radius_tol": 0.25,
+  "min_orphan_value": 10.0,
+  "min_name_len": 2,
+  "min_name_score": 0.75,
+  "max_seats": 9,
+  "direction": "cw",
+  "dealer_ref_size": [1280, 720],
+  "dealer_blob": {
+    "v_min": 195,
+    "s_max": 45,
+    "area_min": 200,
+    "area_max": 3000,
+    "circularity_min": 0.80,
+    "aspect_tol": 0.35
+  },
+  "min_seats": 2
+}

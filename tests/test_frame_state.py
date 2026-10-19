@@ -128,6 +128,20 @@ def test_idle_zero_player_is_not_in_hand() -> None:
     check(s.player("lowR").name == "Dragon333", "人还坐在桌上，名字要留着")
 
 
+def test_lenient_chip_parse() -> None:
+    rows = {k: dict(v) for k, v in BASE.items()}
+    rows["lowL"]["chip"] = "460.538"       # BB 被读成 38
+    strict = build_state(make_frame(rows), PROFILE)
+    check(strict.player("lowL").stack is None, "严格模式应拒绝无单位筹码")
+    check(not strict.ok and any(e.startswith("stack:lowL") for e in strict.errors),
+          f"严格模式应报 stack:lowL：{strict.errors}")
+
+    loose = build_state(make_frame(rows), PROFILE, lenient_chips=True)
+    check(loose.player("lowL").stack == 460.538,
+          f"宽松模式应取前导数字，实际 {loose.player('lowL').stack}")
+    check(loose.ok, f"宽松模式这一帧应通过：{loose.errors}")
+
+
 def test_all_in_carried_after_bet_pill_disappears() -> None:
     """全下玩家在下注结算后变成「筹码 0、pill 收走」，不能当成离桌。"""
     rows = {k: dict(v) for k, v in BASE.items()}
@@ -254,6 +268,7 @@ def main() -> int:
         test_action_badge_keeps_sticky_name,
         test_idle_zero_player_is_not_in_hand,
         test_all_in_carried_after_bet_pill_disappears,
+        test_lenient_chip_parse,
         test_buying_in_by_avatar,
         test_name_tracker_used_when_given,
         test_missing_dealer,

@@ -34,6 +34,85 @@ curl -X POST http://localhost:8000/ocr/table -F "file=@table.jpg"
 }
 ```
 
+## 实时推流识别
+
+OBS 推 SRT → MediaMTX → 本机 RTSP；worker 按 0.5s 采样，用固定 ROI 识别
+座位、筹码、下注、动作、庄位、底池和盲注，输出一行一个状态的 JSONL。
+
+**完整方案、功能、OBS 参数、标定流程、输出字段与排障见
+[docs/live-stream.md](docs/live-stream.md)。**
+
+### 快速启动
+
+```bash
+mediamtx config/mediamtx.yml
+
+.venv/bin/python -m poker_ocr.live \
+  --url rtsp://127.0.0.1:8554/live \
+  --profile config/table_wpk_live.json \
+  --initial-blinds 1/2 \
+  --every 0.5 \
+  --out logs/live.states.jsonl
+```
+
+### 抓帧 → 裁剪 → 验证 → 重新标注
+
+同一台设备/OBS 布局下，建议先用真实帧重新标定一次：
+
+```bash
+# 1) 按 0.5s 抓 200 张
+.venv/bin/python tools/capture_stream.py \
+  --every 0.5 --max-frames 200 --out logs/live_frames
+
+# 2) 裁黑边 + 按 profile 参考比例对齐
+.venv/bin/python tools/crop_frames.py logs/live_frames \
+  --out logs/live_frames_cropped
+
+# 3) 用现有 profile 跑 ROI，输出叠加图和报告
+.venv/bin/python tools/validate_roi.py logs/live_frames_cropped \
+  --profile config/table_wpk_1080x2400.json \
+  --initial-blinds 1/2 \
+  --out-dir logs/roi_validation
+
+# 4) 重新标注 ROI，生成当前布局的 profile
+.venv/bin/python tools/refit_profile.py logs/live_frames_cropped \
+  --profile config/table_wpk_1080x2400.json \
+  --out config/table_wpk_live.json --step 2
+```
+
+### 输出
+
+每行一个 JSON：`session_start` / `stream_info` / `state` / `session_end`。
+`state` 里包含：
+
+- `players[]`：每座的 `position/name/stack/bet/action/fold/in_hand/all_in/status`
+- `dealer` / `hero_turn`
+- `pot` / `pot_before_street` / `street_bet_total`
+- `blinds`（`sb/bb/ante`，单位 BB，支持跨帧继承）
+
+一帧里任何一个字段无法精准识别就整帧丢弃（不写输出）。示例和字段语义见
+[docs/live-stream.md §6](docs/live-stream.md#6-输出-jsonl)。
+
+### 其他路线
+
+```bash
+# 浏览器 / 布局不固定：全图标定一次 → 运行时 ROI
+.venv/bin/python tools/calibrate_live.py --frames 5 --crop auto \
+  --out config/runtime_browser.json
+
+.venv/bin/python -m poker_ocr.live --recognizer roi \
+  --profile config/runtime_browser.json --crop auto \
+  --initial-blinds 1/2 --lenient-chips --out logs/live.states.jsonl
+
+# 直接走全图（慢，但不依赖固定槽位）
+.venv/bin/python -m poker_ocr.live --recognizer full \
+  --full-config config/full_browser.json --out logs/live.states.jsonl
+
+# 离线视频
+.venv/bin/python tools/video_to_states.py images/video/video1.mp4 \
+  --every 0.5 --out /tmp/video1.states.json
+```
+
 ## 命令行
 
 ```bash
@@ -145,6 +224,31 @@ OCR 没读错。
 | `dealer_seat` | form，可选 | 人工指定庄位座位 id。不指定就走自动检测 |
 | `hero_seat` | form，可选 | 人工指定哪个座位是我。不指定用配置默认（底部中间） |
 | `debug` | query，可选 | `?debug=1` 额外返回完整中间结果（各字段置信度、噪声框），排查用 |
+
+响应里还包含 `board`（公共牌）与 `hero_cards`（我的手牌），每张带
+`code` / `rank` / `suit` / `suit_name` / `confidence`，均按画面从左到右。
+读牌逻辑见 `poker_ocr/cards.py`（颜色 + 形状判花色，字形模板判点数）。
+
+### `POST /ocr/cards`
+
+只读牌，**不加载 OCR 模型**（纯 OpenCV），所以比 `/ocr/table` 快得多。
+
+| 参数 | 位置 | 说明 |
+|---|---|---|
+| `file` | form | 牌桌截图（PNG/JPEG），上限 20MB |
+| `debug` | query，可选 | `?debug=1` 返回逐张的像素框、花色/形状证据、点数模板分数 |
+
+```json
+{
+  "board": ["7d", "9c", "10c", "6h", "8c"],
+  "hero_cards": ["4c", "Ks"],
+  "warnings": []
+}
+```
+
+翻前 `board` 为空数组，**不是错误**。牌面是图形化的，OCR 读不出花色和 J/Q/K/A，
+所以这里完全不走 OCR：花色按「♠黑 / ♥红 / ♣绿 / ♦蓝」的颜色 + 轮廓形状判，
+点数按 `assets/card_rank_templates.png` 的字形模板做 NCC 匹配。
 
 ### `GET /health`
 
@@ -462,13 +566,19 @@ poker_ocr/
   dealer.py               # 庄位检测：手动 + 白底 D 圆片自动检测
   positions.py            # 庄位 → 位置名（SB/BB/UTG/…/BTN）
   pipeline.py             # 单帧 → FrameResult（含占用三态、位置）
+  cards.py                # 公共牌 / hero 手牌：颜色+形状判花色，字形模板判点数
+  assets/card_rank_templates.png  # 13 个点数的字形模板（工具生成，勿手改）
 tests/
   run_all.py              # 跑全部测试
   test_positions.py       # 位置推导单元测试
   test_dealer.py          # 庄位检测单元测试（合成图）
+  test_cards.py           # 公共牌 / hero 手牌回归（images/card 的 16 个标注样本）
   test_extract.py         # 端到端回归测试
   test_api.py             # HTTP 接口测试
   golden/*.expected.json
+tools/
+  build_card_templates.py # 从标注样本重建点数模板图集
+  card_probe.py           # 单图读牌 CLI
 scan.py                   # 旧的第 0 步验证脚本，已冻结
 ```
 

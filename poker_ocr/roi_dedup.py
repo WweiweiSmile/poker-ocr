@@ -320,7 +320,8 @@ class RoiStream:
                  seat_fields: tuple[str, ...] = SEAT_FIELDS,
                  global_fields: tuple[str, ...] = GLOBAL_FIELDS,
                  mode: str = "raw", upscale: float = 1.0,
-                 pad: float = ROI_PAD, with_dealer: bool = True) -> None:
+                 pad: float = ROI_PAD, with_dealer: bool = True,
+                 dedup: bool = True) -> None:
         self.profile = profile
         self.engine = engine
         self.dealer_detector = dealer_detector
@@ -330,7 +331,10 @@ class RoiStream:
         self.upscale = upscale
         self.pad = pad
         self.with_dealer = with_dealer
-        self.cache = RoiDedupCache(max_distance, mad_eps, tiles, hash_w, hash_h)
+        # dedup=False 时走 read_frame(cache=None) 的无去重路径。
+        # 调用方仍按原来的方式访问 self.cache，所以这里保留属性、值为 None。
+        self.cache = (RoiDedupCache(max_distance, mad_eps, tiles, hash_w, hash_h)
+                      if dedup else None)
         self.stats = StreamStats()
         self._signature: tuple | None = None
 
@@ -340,15 +344,17 @@ class RoiStream:
         **必须包含分辨率**：换了分辨率（比如模拟器改了缩放），槽位换算出来的
         裁剪区就不是原来那块了，可 hash 照样可能撞上 → 复用一份错位的读数。
         """
+        cache_sig = ((self.cache.max_distance, self.cache.mad_eps, self.cache.tiles,
+                      self.cache.hash_w, self.cache.hash_h)
+                     if self.cache is not None else None)
         return (str(self.profile.path), img.shape[0], img.shape[1], self.mode,
                 self.upscale, self.pad, self.seat_fields, self.global_fields,
-                self.cache.max_distance, self.cache.mad_eps, self.cache.tiles,
-                self.cache.hash_w, self.cache.hash_h)
+                cache_sig)
 
     def read(self, img: np.ndarray, frame_id: str = "frame") -> RoiFrame:
         sig = self._signature_of(img)
         if sig != self._signature:
-            if self._signature is not None:
+            if self._signature is not None and self.cache is not None:
                 # 不是第一帧：参数变了，旧记忆一律作废
                 self.cache.reset()
                 self.stats.resets += 1
@@ -368,4 +374,5 @@ class RoiStream:
 
     def reset(self) -> None:
         """开始新的一手/新的一张桌子时调它 —— 别让上一手的读数漏进来。"""
-        self.cache.reset()
+        if self.cache is not None:
+            self.cache.reset()

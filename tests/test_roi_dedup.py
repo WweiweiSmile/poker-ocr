@@ -237,6 +237,26 @@ def test_threshold_change_invalidates_the_cache() -> None:
     check(frame2.n_reused == 0, "作废后第一帧不该复用")
 
 
+def test_dedup_off_runs_rec_every_frame() -> None:
+    """dedup=False：缓存为 None，同一张图也每帧重跑 rec，结果仍然正确。"""
+    profile = Profile.load(WPK)
+    img = make_marked()
+    engine = StubEngine(build_table(profile))
+    stream = RoiStream(profile, engine, with_dealer=False, dedup=False)
+    check(stream.cache is None, "dedup=False 时 cache 应为 None")
+
+    first = stream.read(img, frame_id="f1")
+    calls_after_first = len(engine.crops)
+    second = stream.read(img, frame_id="f2")
+    check(len(engine.crops) == calls_after_first * 2,
+          f"关去重后第二帧应重跑全部 rec，实际从 {calls_after_first} "
+          f"变成 {len(engine.crops)}")
+    check(second.n_reused == 0,
+          f"关去重后不该有复用，实际 {second.n_reused}/{second.n_roi}")
+    check(first.text("name", "hero") == second.text("name", "hero") == "hero:name",
+          "两种路径读出的文本应一致")
+
+
 def main() -> int:
     tests = [
         test_one_changed_digit_in_long_text,
@@ -251,6 +271,7 @@ def main() -> int:
         test_mad_eps_defaults_to_0_2,
         test_resolution_change_invalidates_the_cache,
         test_threshold_change_invalidates_the_cache,
+        test_dedup_off_runs_rec_every_frame,
     ]
     for t in tests:
         before = len(FAILS)

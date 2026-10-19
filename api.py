@@ -5,7 +5,8 @@
 
 接口文档（自动生成，可直接给对接方看）：http://localhost:8000/docs
 
-    POST /ocr/table   上传一张牌桌截图，返回桌号 + 每个座位的位置/名称/筹码
+    POST /ocr/table   上传一张牌桌截图，返回桌号 + 每个座位的位置/名称/筹码 + 公共牌/手牌
+    POST /ocr/cards   只识别公共牌与 hero 手牌（纯 OpenCV，不加载 OCR 模型）
     GET  /health      就绪探针（模型加载完才算就绪）
 
 设计要点：
@@ -30,6 +31,7 @@ from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+from poker_ocr.cards import CardsResult, SUIT_NAMES, recognize_cards
 from poker_ocr.coach import advise
 from poker_ocr.dealer import build_detector
 from poker_ocr.ocr import OcrEngine
@@ -51,6 +53,14 @@ class SeatOut(BaseModel):
     stack: int | float | None = Field(
         None, description="筹码数量，纯数字。读不出时为 null。单位见 stack_unit")
     is_me: bool = Field(False, description="是不是我自己（界面上底部中间那个座位）")
+
+
+class CardOut(BaseModel):
+    code: str = Field(..., description="紧凑牌码：Ad / 10s / Kh")
+    rank: str = Field(..., description="点数：2-10 / J / Q / K / A")
+    suit: str = Field(..., description="花色：s / h / c / d")
+    suit_name: str = Field(..., description="spades / hearts / clubs / diamonds")
+    confidence: float = Field(..., description="综合置信度 0-1")
 
 
 class ActionIn(BaseModel):
@@ -97,8 +107,20 @@ class TableOut(BaseModel):
     stack_unit: str = Field("BB", description="stack 的单位。界面按 BB 显示，所以原样透出")
     seats: list[SeatOut] = Field(
         ..., description="从我（hero）开始，沿行动方向绕一圈。hero 恒在第一个")
+    board: list[CardOut] = Field(
+        default_factory=list, description="公共牌，从左到右。翻前为空数组")
+    hero_cards: list[CardOut] = Field(
+        default_factory=list, description="我的手牌，从左到右。没发牌或被遮挡时为空数组")
     warnings: list[str] = Field(
         default_factory=list, description="识别不完整的原因。空数组表示一切正常")
+    debug: dict | None = Field(None, description="debug=true 时的完整中间结果")
+
+
+class CardsOut(BaseModel):
+    board: list[str] = Field(..., description="公共牌，紧凑牌码，从左到右")
+    hero_cards: list[str] = Field(..., description="我的手牌，紧凑牌码，从左到右")
+    warnings: list[str] = Field(default_factory=list, description="识别异常说明")
+    debug: dict | None = Field(None, description="debug=true 时的逐张证据与像素框")
 
 
 # ─────────────────────────── 应用状态 ───────────────────────────
@@ -154,7 +176,18 @@ app.add_middleware(
 
 # ─────────────────────────── 转换 ───────────────────────────
 
-def to_table_out(result: FrameResult, profile: Profile) -> TableOut:
+def _card_out(card) -> CardOut:
+    return CardOut(
+        code=card.code,
+        rank=card.rank,
+        suit=card.suit,
+        suit_name=SUIT_NAMES[card.suit],
+        confidence=round(card.confidence, 4),
+    )
+
+
+def to_table_out(result: FrameResult, profile: Profile,
+                 cards: CardsResult | None = None) -> TableOut:
     """把管线结果收敛成对外的精简结构。"""
     seats: list[SeatOut] = []
     for s in result.seats:
@@ -198,10 +231,15 @@ def to_table_out(result: FrameResult, profile: Profile) -> TableOut:
     if hero is not None and hero.in_hand and hero.stack is None:
         warnings.append("hero 座位没读出筹码：仍算在场，这个数请你手动补")
 
+    if cards is not None:
+        warnings.extend(cards.warnings)
+
     return TableOut(
         table_size=result.table_size,
         stack_unit="BB",
         seats=seats,
+        board=[_card_out(c) for c in (cards.board.cards if cards else [])],
+        hero_cards=[_card_out(c) for c in (cards.hero_cards.cards if cards else [])],
         warnings=warnings,
     )
 
@@ -291,7 +329,36 @@ def ocr_table(
         result = extract(img, profile, STATE.engine, detector,
                          frame_id=file.filename or "upload")
 
-    payload = to_table_out(result, profile)
+    cards = recognize_cards(img, profile)
+    payload = to_table_out(result, profile, cards)
     if debug:
-        return {**payload.model_dump(), "debug": result.to_dict()}
+        payload.debug = {
+            "table": result.to_dict(),
+            "cards": cards.to_dict(include_details=True),
+        }
     return payload
+
+
+@app.post("/ocr/cards", response_model=CardsOut, summary="识别公共牌与我的手牌")
+def ocr_cards(
+    file: UploadFile = File(..., description="牌桌截图（PNG/JPEG）"),
+    debug: bool = Query(False, description="返回逐张证据与像素框"),
+):
+    """只读牌：公共牌（board）与 hero 手牌（hero_cards）。
+
+    纯 OpenCV 颜色/形状/模板识别，**不加载 OCR 模型**，所以比 /ocr/table 快得多。
+    翻前没有公共牌时 board 为空数组，不是错误。
+    """
+    if STATE.profile is None:
+        raise HTTPException(status_code=503, detail="服务尚未就绪")
+
+    img = decode_image(file.file.read())
+    result = recognize_cards(img, STATE.profile)
+    out = CardsOut(
+        board=result.board_codes,
+        hero_cards=result.hero_codes,
+        warnings=result.warnings,
+    )
+    if debug:
+        out.debug = result.to_dict(include_details=True)
+    return out

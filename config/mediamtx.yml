@@ -1,0 +1,45 @@
+# MediaMTX：OBS 推流接入 + 本机 RTSP 转出（M3.1）
+#
+#   mediamtx config/mediamtx.yml
+#
+# 只开两条路：
+#   · SRT :8890/udp  —— 给局域网里的 OBS 推流
+#   · RTSP 127.0.0.1:8554 —— 只给本机 poker_ocr.live 拉流
+# RTMP/HLS/WebRTC/MoQ/API 全部关掉，减少暴露面。
+#
+# OBS 的 Server 填（pbkeylen=16 必须带，否则口令不生效）：
+#   srt://<本机 LAN IP>:8890?streamid=publish:live&passphrase=change-me-please-1234&pbkeylen=16
+# SRT 的 latency 参数单位是微秒；不写就走默认约 120ms。
+#
+# 口令不要用仓库里的占位值。两种改法：
+#   1) 直接改下面的 srtPublishPassphrase（别提交真值）；
+#   2) 用环境变量覆盖：
+#      MTX_PATHS_LIVE_SRTPUBLISHPASSPHRASE='...' mediamtx config/mediamtx.yml
+#
+# 改完先校验：
+#   mediamtx --validate-conf=config/mediamtx.yml
+
+logLevel: info
+logDestinations: [stdout]
+
+srt: yes
+srtAddress: :8890
+
+rtsp: yes
+rtspAddress: 127.0.0.1:8554
+# 本机回环走 TCP 最省心；UDP 还要额外开 RTP 端口。
+rtspTransports: [tcp]
+
+rtmp: no
+hls: no
+webrtc: no
+moq: no
+api: no
+metrics: no
+pprof: no
+
+paths:
+  live:
+    source: publisher
+    # 10–79 位，OBS 的 Server URL 里要带同一个值。
+    srtPublishPassphrase: "change-me-please-1234"

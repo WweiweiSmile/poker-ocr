@@ -25,7 +25,7 @@ from dataclasses import dataclass, field as dc_field
 
 from .parse import (
     Amount, Blinds, NameTracker, is_fold_badge, parse_action, parse_amount,
-    parse_blinds, sticky_name,
+    parse_blinds, parse_chip_loose, sticky_name,
 )
 from .positions import assign_positions
 from .profile import Profile
@@ -118,7 +118,8 @@ def build_state(frame: RoiFrame, profile: Profile,
                 prev_blinds: Blinds | None = None,
                 avatar_reads: dict[str, tuple[str, float]] | None = None,
                 name_tracker: "NameTracker | None" = None,
-                prev_all_in: set[str] | None = None) -> FrameState:
+                prev_all_in: set[str] | None = None,
+                lenient_chips: bool = False) -> FrameState:
     """一帧 RoiFrame → FrameState（含解析错误清单）。
 
     `prev_names` 是**上一份被接受的状态**里的名字（名称粘性用）；
@@ -176,7 +177,19 @@ def build_state(frame: RoiFrame, profile: Profile,
                     prev_name if action else sticky_name(prev_name, name_raw or None))
 
         chip: Amount = parse_amount(chip_raw)
+        chip_loose = False
+        if lenient_chips and not chip.ok:
+            loose = parse_chip_loose(chip_raw)
+            if loose is not None:
+                chip = Amount(chip_raw, loose, "?", error=None)
+                chip_loose = True
         bet_a: Amount = parse_amount(bet_raw)
+        bet_loose = False
+        if lenient_chips and bet_raw.strip() and not bet_a.ok:
+            loose = parse_chip_loose(bet_raw)
+            if loose is not None:
+                bet_a = Amount(bet_raw, loose, "?", error=None)
+                bet_loose = True
         # 空 bet 文本 = 这款 app 没渲染 pill = 本街 0；读到乱码才是「未知」
         bet = 0.0 if not bet_raw.strip() else (bet_a.value if bet_a.ok else None)
         stack = chip.value if chip.ok else None
@@ -205,9 +218,13 @@ def build_state(frame: RoiFrame, profile: Profile,
                   "folded" if fold else "playing")
 
         notes: list[str] = []
-        if chip_raw.strip() and not chip.ok:
+        if chip_loose:
+            notes.append(f"chip: 宽松解析 {chip_raw!r} → {chip.value}")
+        elif chip_raw.strip() and not chip.ok:
             notes.append(f"chip: {chip.error}")
-        if bet_raw.strip() and not bet_a.ok:
+        if bet_loose:
+            notes.append(f"bet: 宽松解析 {bet_raw!r} → {bet_a.value}")
+        elif bet_raw.strip() and not bet_a.ok:
             notes.append(f"bet: {bet_a.error}")
 
         players.append(PlayerState(

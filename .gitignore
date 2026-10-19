@@ -1,0 +1,19 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.DS_Store
+.idea/
+
+# 实时识别的运行产物
+logs/
+images/
+*.states.jsonl
+shots/
+frames/
+
+# MediaMTX 自动生成的证书（不要提交私钥）
+auto.crt
+auto.key
+server.crt
+server.key

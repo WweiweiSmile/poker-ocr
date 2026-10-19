@@ -29,7 +29,6 @@ import argparse
 import json
 import sys
 import time
-from collections import Counter, defaultdict
 from pathlib import Path
 
 import cv2
@@ -38,31 +37,12 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from poker_ocr.dealer import build_detector          # noqa: E402
-from poker_ocr.frame_state import (                  # noqa: E402
-    FrameState, NameTracker, build_state, signature,
-)
-from poker_ocr.ocr import OcrEngine                  # noqa: E402
-from poker_ocr.profile import Profile                # noqa: E402
-from poker_ocr.roi_dedup import RoiStream            # noqa: E402
-from poker_ocr.roi_reader import read_slot           # noqa: E402
+from poker_ocr.live import AspectFit      # noqa: E402
+from poker_ocr.ocr import OcrEngine       # noqa: E402
+from poker_ocr.profile import Profile     # noqa: E402
+from poker_ocr.state_stream import StateStream  # noqa: E402
 
 DEFAULT_PROFILE = PROJECT_ROOT / "config" / "table_wpk_1080x2400.json"
-
-
-def read_avatars(img, profile: Profile, engine: OcrEngine, stream: RoiStream,
-                 detect_fold: bool) -> dict[str, tuple[str, float]]:
-    """每座的头像区读一遍，用于弃牌 / 正在带入检测（best-effort）。"""
-    if not detect_fold:
-        return {}
-    out: dict[str, tuple[str, float]] = {}
-    size = (img.shape[1], img.shape[0])
-    for seat in profile.seats:
-        read = read_slot(img, profile, engine, seat.avatar_slot, "avatar", size,
-                         pad=0.0, cache=stream.cache,
-                         cache_key=f"{seat.seat_id}.@avatar")
-        out[seat.seat_id] = (read.text, read.score)
-    return out
 
 
 def main() -> int:
@@ -87,8 +67,14 @@ def main() -> int:
     out_path = args.out or args.video.with_suffix(".states.json")
     profile = Profile.load(args.profile)
     engine = OcrEngine()
-    detector = build_detector(profile, None, engine)
-    stream = RoiStream(profile, engine, detector, with_dealer=True)
+    state_stream = StateStream(
+        profile, engine,
+        detect_fold=not args.no_fold,
+        dedup=not args.no_dedup,
+        stable_frames=args.stable_frames,
+        max_vanish=args.max_vanish,
+        name_confirm=args.name_confirm,
+    )
 
     cap = cv2.VideoCapture(str(args.video))
     if not cap.isOpened():
@@ -100,22 +86,16 @@ def main() -> int:
     if fps <= 0:
         sys.exit("读不到帧率")
     step = max(1, round(fps * args.every))
+    fit = AspectFit.for_size((w, h), profile)
     print(f"{args.video.name}: {w}x{h} {fps:.2f}fps {total} 帧 ≈ {total / fps:.1f}s；"
           f"每 {step} 帧取 1（{step / fps:.2f}s）")
+    if fit.resized:
+        print(f"比例：{w}x{h}（{fit.aspect:.4f}）→ {fit.out_size[0]}x{fit.out_size[1]}"
+              f"（参考 {fit.reference_aspect:.4f}），x/y 缩放 "
+              f"{fit.scale[0]:.4f}/{fit.scale[1]:.4f}")
 
-    discarded: Counter = Counter()
-    vanish: dict[str, int] = defaultdict(int)
     states: list[dict] = []
-    prev: FrameState | None = None       # 上一份被接受的状态（vanish / 盲注继承用）
-    # 全下状态要跨「下注 pill 被收走」保持：同一手内只增不减，庄位轮转（新手）时清空。
-    # 不能每帧重算 —— 某一帧把全下玩家读成「筹码 0、无下注」就会把他误判成离桌。
-    prev_all_in: set[str] = set()
-    prev_dealer: str | None = None
-    names = NameTracker(confirm=args.name_confirm)   # 跨帧的名字稳定器
-    last_sig: tuple | None = None
-    cand_sig: tuple | None = None
-    cand_n = 0
-    sampled = accepted = idx = 0
+    idx = 0
     t0 = time.perf_counter()
 
     while True:
@@ -125,112 +105,65 @@ def main() -> int:
         if idx % step:
             idx += 1
             continue
-        sampled += 1
-        t = idx / fps
-        if args.max_frames and sampled > args.max_frames:
+        if args.max_frames and state_stream.sampled >= args.max_frames:
             break
+        t = idx / fps
+        img = fit.apply(img)
 
-        frame = stream.read(img, frame_id=f"f{idx:05d}_{t:06.2f}s")
-        avatars = read_avatars(img, profile, engine, stream, not args.no_fold)
+        outcome = state_stream.ingest(
+            img, frame_id=f"f{idx:05d}_{t:06.2f}s", t=t)
+        state = outcome.state
 
-        # 庄位轮转 = 新的一手：上一手的全下状态不能带进来
-        dealer_now = (frame.dealer.seat_id
-                      if frame.dealer and frame.dealer.status == "found" else None)
-        if dealer_now and prev_dealer and dealer_now != prev_dealer:
-            prev_all_in = set()
-
-        state = build_state(frame, profile,
-                            prev_blinds=prev.blinds if prev else None,
-                            avatar_reads=avatars,
-                            name_tracker=names,
-                            prev_all_in=prev_all_in)
-        if dealer_now:
-            prev_dealer = dealer_now
-        prev_all_in |= {p.seat_id for p in state.players if p.in_hand and p.all_in}
-
-        # ── 座位整座消失：先当遮挡，连续 max_vanish 帧才认定人走了 ──
-        if prev is not None:
-            for p_prev in prev.players:
-                if not p_prev.in_hand:
-                    continue
-                p_now = next(p for p in state.players if p.seat_id == p_prev.seat_id)
-                if p_now.in_hand:
-                    vanish[p_prev.seat_id] = 0
-                else:
-                    vanish[p_prev.seat_id] += 1
-                    if vanish[p_prev.seat_id] <= args.max_vanish:
-                        state.errors.append(f"vanished:{p_prev.seat_id}")
-
-        if not state.ok:
-            for e in state.errors:
-                discarded[e.split(":", 1)[0]] += 1
+        if outcome.kind == "discard":
             if not args.quiet:
-                n_reused = frame.n_reused
-                print(f"  [{t:7.2f}s] 丢弃 {','.join(state.errors)}"
-                      f"  (复用 {n_reused}/{frame.n_roi})")
-            idx += 1
-            continue
-
-        accepted += 1
-        sig = signature(state)
-        record = None
-        if last_sig is None:
-            record = state                    # 首帧：直接当基线
-        elif sig == cand_sig:
-            cand_n += 1
-            if cand_n >= args.stable_frames and sig != last_sig:
-                record = state
-        else:
-            cand_sig, cand_n = sig, 1
-
-        if record is not None:
-            payload = record.to_debug()
-            payload.pop("frame_id", None)
-            payload = {"index": len(states) + 1, "t": round(t, 2),
-                       "frame": state.frame_id, **payload}
-            states.append(payload)
-            last_sig = sig
+                print(f"  [{t:7.2f}s] 丢弃 {','.join(outcome.errors)}"
+                      f"  (复用 {outcome.reused}/{outcome.n_roi})")
+        elif outcome.record is not None:
+            states.append(outcome.record)
             if not args.quiet:
                 players = " ".join(
                     f"{p.seat_id}:{p.name or '-'}={p.stack}"
                     f"{'/' + str(p.bet) if p.bet else ''}"
                     f"{'(' + p.action + ')' if p.action else ''}"
-                    for p in record.players if p.in_hand)
-                print(f"  [{t:7.2f}s] ✅ 记录 #{len(states)}  pot={record.pot} "
-                      f"pbs={record.pot_before_street} 轮到我={record.hero_turn}  "
-                      f"{players}")
+                    for p in state.players if p.in_hand)
+                print(f"  [{t:7.2f}s] ✅ 记录 #{outcome.record['index']}  "
+                      f"pot={state.pot} pbs={state.pot_before_street} "
+                      f"轮到我={state.hero_turn}  {players}")
         elif not args.quiet:
-            print(f"  [{t:7.2f}s] 无变化 (复用 {frame.n_reused}/{frame.n_roi})")
+            print(f"  [{t:7.2f}s] 无变化 (复用 {outcome.reused}/{outcome.n_roi})")
 
-        prev = state
         idx += 1
 
     cap.release()
     elapsed = time.perf_counter() - t0
+    summary = state_stream.summary()
 
     payload = {
         "video": args.video.name,
         "interval_s": args.every,
         "profile": profile.path.name,
         "table_seats": len(profile.seats),
-        "sampled_frames": sampled,
-        "accepted_frames": accepted,
-        "discarded_frames": sampled - accepted,
-        "discarded_reasons": dict(discarded),
-        "record_count": len(states),
+        "sampled_frames": summary["sampled_frames"],
+        "accepted_frames": summary["accepted_frames"],
+        "discarded_frames": summary["discarded_frames"],
+        "discarded_reasons": summary["discarded_reasons"],
+        "record_count": summary["record_count"],
         "processing_seconds": round(elapsed, 1),
-        "roi_reuse": stream.cache.to_debug(),
+        "roi_reuse": summary["roi_reuse"],
         "states": states,
     }
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2),
                         encoding="utf-8")
 
-    print(f"\n抽样 {sampled} 帧，接受 {accepted}，丢弃 {sampled - accepted}，"
-          f"记录 {len(states)} 条；耗时 {elapsed:.0f}s")
-    if discarded:
-        print("丢弃原因：" + "  ".join(f"{k}={v}" for k, v in discarded.most_common()))
-    print("ROI 去重：" + str(stream.cache.to_debug()))
+    print(f"\n抽样 {summary['sampled_frames']} 帧，接受 {summary['accepted_frames']}，"
+          f"丢弃 {summary['discarded_frames']}，记录 {summary['record_count']} 条；"
+          f"耗时 {elapsed:.0f}s")
+    if summary["discarded_reasons"]:
+        print("丢弃原因：" + "  ".join(
+            f"{k}={v}" for k, v in
+            sorted(summary["discarded_reasons"].items(), key=lambda kv: -kv[1])))
+    print("ROI 去重：" + str(summary["roi_reuse"]))
     print(f"→ {out_path}")
     return 0
 

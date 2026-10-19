@@ -336,6 +336,27 @@ def measure_hero_turn(img: np.ndarray, profile: Profile, engine: OcrEngine,
 
 # ─────────────────────────── 主流程 ───────────────────────────
 
+def read_avatars(img: np.ndarray, profile: Profile, engine: OcrEngine,
+                 cache: RoiCache | None = None,
+                 detect_fold: bool = True) -> dict[str, tuple[str, float]]:
+    """每座的头像区读一遍，用于弃牌 / 正在带入检测（best-effort）。
+
+    头像不是文字，rec 只会吐碎片；这里只把原文和分数原样交出去，
+    「是不是弃牌」由 `frame_state.is_fold_badge` 判。
+    pad=0：头像槽本来就是照片的紧框，不需要再留白。
+    """
+    if not detect_fold:
+        return {}
+    out: dict[str, tuple[str, float]] = {}
+    size = (img.shape[1], img.shape[0])
+    for seat in profile.seats:
+        read = read_slot(img, profile, engine, seat.avatar_slot, "avatar", size,
+                         pad=0.0, cache=cache,
+                         cache_key=f"{seat.seat_id}.@avatar")
+        out[seat.seat_id] = (read.text, read.score)
+    return out
+
+
 def read_frame(img: np.ndarray, profile: Profile, engine: OcrEngine,
                frame_id: str = "frame",
                seat_fields: tuple[str, ...] = SEAT_FIELDS,
@@ -364,9 +385,23 @@ def read_frame(img: np.ndarray, profile: Profile, engine: OcrEngine,
             if slot is None:
                 fields[key] = RoiRead(key, (0, 0, 0, 0), note=why)
                 continue
-            fields[key] = read_slot(img, profile, engine, slot, key, size,
-                                    mode=mode, upscale=upscale, pad=pad,
-                                    cache=cache, cache_key=f"{seat.seat_id}.{key}")
+            read = read_slot(img, profile, engine, slot, key, size,
+                             mode=mode, upscale=upscale, pad=pad,
+                             cache=cache, cache_key=f"{seat.seat_id}.{key}")
+            # 主槽读不到时再试备选槽。只判「空」不判内容：有牌时 hero 的
+            # 筹码在 alt 位置以外，主槽读到东西就绝不去碰备选块。
+            if (key == "chip" and not read.text
+                    and seat.chip_slot_alt is not None):
+                alt = read_slot(img, profile, engine, seat.chip_slot_alt, key,
+                                size, mode=mode, upscale=upscale, pad=pad,
+                                cache=cache,
+                                cache_key=f"{seat.seat_id}.chip_alt")
+                if alt.text:
+                    alt.note = "；".join(
+                        n for n in (alt.note, "主 chip 槽为空，改用 chip_slot_alt")
+                        if n)
+                    read = alt
+            fields[key] = read
         seats.append(SeatRoi(seat.seat_id, ring_index, fields))
 
     globals_: dict[str, RoiRead] = {}

@@ -11,6 +11,11 @@
     test_roi_dedup  ROI 去重（合成图，不依赖照片和模型）
     test_parse      字段解析（真实 OCR 原文变体）
     test_frame_state 桌面状态 + 变化指纹（手工拼 RoiFrame）
+    test_state_stream 防抖/丢弃/消失确认/断流重置（桩 RoiStream）
+    test_live       实时邮箱/限速/重连/JSONL（不连 RTSP）
+    test_full_table 全图 OCR/座位聚类/D 庄位/位置（需要 table-8p.jpg）
+    test_runtime_profile 全图标定 → runtime profile → ROI 回读（需要 table-8p.jpg）
+    test_cards      公共牌 / hero 手牌识别（需要 images/card 标注样本）
     test_extract    端到端提取（需要 table.jpg）
     test_api        HTTP 接口（需要 table.jpg + fastapi）
 """
@@ -25,6 +30,8 @@ HERE = Path(__file__).resolve().parent
 
 SUITES = ["test_positions.py", "test_coach.py", "test_dealer.py", "test_roi_reader.py",
           "test_roi_dedup.py", "test_parse.py", "test_frame_state.py",
+          "test_state_stream.py", "test_live.py", "test_full_table.py",
+          "test_runtime_profile.py", "test_cards.py",
           "test_extract.py", "test_api.py"]
 
 

@@ -18,7 +18,7 @@ sys.path.insert(0, str(ROOT))
 
 from poker_ocr.parse import (  # noqa: E402
     NameTracker, is_fold_badge, names_similar, parse_action, parse_amount,
-    parse_blinds, sticky_name,
+    parse_blinds, parse_chip_loose, sticky_name,
 )
 
 FAILS: list[str] = []
@@ -68,6 +68,20 @@ def test_amount_zero_glyphs() -> None:
               f"{text!r} 应解析成「无单位 0」，实际 {a.to_debug()}")
 
 
+def test_parse_chip_loose() -> None:
+    cases = {
+        "1,234": 1234.0, "$1,234": 1234.0, "243DB": 243.0,
+        "478.5B8": 478.5, "460.538": 460.538, "93.500": 93.5, "18B": 18.0,
+    }
+    for text, want in cases.items():
+        got = parse_chip_loose(text)
+        check(got == want, f"宽松解析 {text!r} 应为 {want}，实际 {got}")
+    for text in ("星际小杨66", "1/2", "21:36", "200代入拉新300手100",
+                 "%", "弃牌", ""):
+        got = parse_chip_loose(text)
+        check(got is None, f"{text!r} 不该被宽松解析成筹码，实际 {got}")
+
+
 def test_amount_empty_is_not_zero() -> None:
     """空文本 ≠ 0：空表示这块没渲染（比如没有下注 pill），由调用方决定。"""
     a = parse_amount("")
@@ -99,6 +113,17 @@ def test_blinds_rejects_fused_room_number() -> None:
                  "1/20）52122200:38:04", "12（1）521222", "Allin金场梦高中", ""):
         b = parse_blinds(text)
         check(b is None, f"{text!r} 不该被解析成盲注，实际 {b}")
+
+
+def test_blinds_explicit_override_allows_high_ratio() -> None:
+    """人工指定的盲注允许 1/20 这类高比例（2026-10-19 实测桌面）；
+    OCR 自动读数仍用默认上限，不能把融合产物放进来。"""
+    b = parse_blinds("1/20", max_ratio=50.0)
+    check(b is not None and (b.sb, b.bb) == (0.05, 1.0),
+          f"显式指定 1/20 应得 sb=0.05 / bb=1，实际 {b}")
+    check(parse_blinds("1/20") is None, "OCR 默认路径仍应拒绝 1/20")
+    check(parse_blinds("1/21", max_ratio=50.0) is not None,
+          "显式允许到 50 时 1/21 可解析（最终以用户显式输入为准）")
 
 
 def test_blinds_rejects_bad_ratio() -> None:
@@ -167,9 +192,11 @@ def main() -> int:
         test_amount_accepts_real_shapes,
         test_amount_rejects_noise_without_unit,
         test_amount_zero_glyphs,
+        test_parse_chip_loose,
         test_amount_empty_is_not_zero,
         test_blinds_variants,
         test_blinds_rejects_fused_room_number,
+        test_blinds_explicit_override_allows_high_ratio,
         test_blinds_rejects_bad_ratio,
         test_actions,
         test_fold_badge_is_best_effort,
