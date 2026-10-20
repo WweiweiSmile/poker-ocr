@@ -75,6 +75,17 @@ def _log(msg: str) -> None:
     print(msg, flush=True)
 
 
+# 终端没法用 ANSI 改字号，「加大」靠加粗 + 高亮底色 + 上下留白来拉开层次。
+# 只在真终端里上色：重定向到文件 / NO_COLOR 时保持纯文本，方便 grep。
+_ANSI_RESET = "\033[0m"
+_ANSI_ADVICE_BAR = "\033[1;30;103m"   # 粗体黑字 + 亮黄底
+_ANSI_ADVICE_TEXT = "\033[1m"         # 粗体
+
+
+def _use_ansi() -> bool:
+    return sys.stdout.isatty() and not os.environ.get("NO_COLOR")
+
+
 def _iso_now() -> str:
     return datetime.now().astimezone().isoformat(timespec="milliseconds")
 
@@ -645,8 +656,20 @@ class LiveProcessor:
         option = advice.option
         amount = f" {option.amount}BB" if option.amount is not None else ""
         tail = f"（{advice.error}）" if advice.error else ""
-        self.log(f"  [建议] {advice.street} ⇒ {option.label}{amount}"
-                 f"｜{advice.reason}{tail}")
+        if not _use_ansi():
+            self.log(f"  [建议] {advice.street} ⇒ {option.label}{amount}"
+                     f"｜{advice.reason}{tail}")
+            return
+        # 模型结果只出现一次，别被滚动的识别日志淹没：
+        # 留白 → 高亮横幅（街 + 动作 + 金额）→ 粗体理由 → 留白。
+        bar = "═" * 60
+        headline = f" ▶ 建议  {advice.street} ⇒ {option.label}{amount} "
+        self.log("")
+        self.log(f"{_ANSI_ADVICE_BAR}{bar}{_ANSI_RESET}")
+        self.log(f"{_ANSI_ADVICE_BAR}{headline}{_ANSI_RESET}")
+        self.log(f"{_ANSI_ADVICE_BAR}{bar}{_ANSI_RESET}")
+        self.log(f"{_ANSI_ADVICE_TEXT} 理由：{advice.reason}{tail}{_ANSI_RESET}")
+        self.log("")
 
     def _read_cards(self, img: np.ndarray) -> CardsResult | None:
         """每帧读一次公共牌 / hero 手牌。
