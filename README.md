@@ -85,6 +85,18 @@ cp .env.example .env      # 然后编辑 .env，填入 AI_SERVER_API_KEY
 可以显式指定（指定了却读不到会直接启动失败）。**环境变量优先**：已经 export
 的同名变量不会被 `.env` 覆盖。`.env` 已被 `.gitignore` 忽略，模板是 `.env.example`。
 
+**模型协议由模型名决定**：
+
+| `AI_SERVER_MODEL` | 协议 | `AI_SERVER_BASE_URL` |
+|---|---|---|
+| `typesafe/jev-1.14`、`jev-*`（名字里带 jev） | JEV decisions：`state` + 带类型的 `questions` → `answers` | **完整**地址，如 `https://openrouter.ai/api/alpha/decisions` |
+| 其他（`deepseek-flash` 等） | OpenAI 兼容 `/chat/completions` | 基址，如 `https://api.deepseek.com` |
+
+JEV 模式下候选动作会被转成一道 `choice` 题（criteria 的 key 就是选项 id），
+返回值仍是 `{option, reason}`，所以下游与 DeepSeek 完全一致；`confidence`
+（选择概率）只写日志，不进 JSONL。`AI_SERVER_REFERER` / `AI_SERVER_TITLE`
+是 OpenRouter 的可选排名头。
+
 - **需要 profile 里有 `hero_turn_probe` 槽位**（`table_wpk_1080x2400.json` 有，
   `table_wpk_live.json` 没有）。缺了它判不出「轮到我」，worker 会拒绝启动并说明原因。
 - 只支持 `--recognizer roi`：全图路线读不到每座的本街下注，算不出跟注额。

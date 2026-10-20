@@ -8,6 +8,7 @@
     test_env        .env 解析与加载（纯逻辑）
     test_coach      翻后建议引擎（纯逻辑，不需要图）
     test_advice     实时 AI 建议：行动线/技能路由/选项/模型协议（纯逻辑）
+    test_ai_advice_replay 复盘手牌 → 决策点快照的重建（纯逻辑，不连库不调模型）
     test_dealer     庄位检测（合成图，不依赖照片）
     test_roi_reader ROI 读取器（合成图 + 假 OCR 引擎，不依赖照片和模型）
     test_roi_dedup  ROI 去重（合成图，不依赖照片和模型）
@@ -31,7 +32,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 
 SUITES = ["test_positions.py", "test_env.py", "test_coach.py", "test_advice.py",
-          "test_dealer.py", "test_roi_reader.py",
+          "test_ai_advice_replay.py", "test_dealer.py", "test_roi_reader.py",
           "test_roi_dedup.py", "test_parse.py", "test_frame_state.py",
           "test_state_stream.py", "test_live.py", "test_full_table.py",
           "test_runtime_profile.py", "test_cards.py",

@@ -488,11 +488,11 @@ class LiveHandTracker:
 
         warnings: list[str] = []
         if hand.start_stack is None:
-            warnings.append("没读到 hero 的开局筹码，套池比例算不出")
+            warnings.append("hero opening stack unread, pot-commitment ratio unknown")
         if not hand.hero_cards:
-            warnings.append("没读到 hero 手牌")
+            warnings.append("hero hole cards unread")
         if hand.street != PREFLOP and len(hand.board) < 3:
-            warnings.append("公共牌不完整")
+            warnings.append("board incomplete")
 
         # 同一条街、同样的行动序列与下注额 = 同一个决策点
         key = (hand.hand_id, hand.street, len(hand.actions),

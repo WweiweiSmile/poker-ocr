@@ -96,6 +96,13 @@ ROI 路线只裁固定槽位、只跑 rec，不跑全图检测，是实时链路
   写在项目根目录的 `.env`（模板 `.env.example`）或直接设为环境变量，环境变量优先。
   `.env` 找不到时退到启动 CWD；`ENV_FILE` 可显式指定路径（读不到直接启动失败）。
   启动日志会打印命中的 `.env` 路径与凭据来源，但**不打印 Key**。
+- **协议按模型名选**：名字里带 `jev`（`jev-1.14` / `typesafe/jev-1.14`）走
+  OpenRouter 的 decisions 接口 —— `POST AI_SERVER_BASE_URL`，请求体是
+  `{"model", "state", "questions"}`，候选动作变成一道 `choice` 题
+  （criteria 的 key 是选项 id），从 `answers.option` 取选择与概率。
+  其他模型走 OpenAI 兼容的 `{BASE_URL}/chat/completions`。
+  两套协议对下游输出相同的 `{option, reason}`。
+  `AI_SERVER_REFERER` / `AI_SERVER_TITLE` 是 OpenRouter 的可选排名头。
 
 ### 工具链（抓帧 → 裁剪 → 验证 → 重新标注）
 

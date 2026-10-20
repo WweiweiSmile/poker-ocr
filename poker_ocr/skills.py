@@ -1,8 +1,9 @@
 """教练技能库：按**当前行动街**挑技能，供实时 AI 决策使用。
 
-正文来自 `poker_ocr/skills_md/*.md`，与 call-back 的
-`services/skills/*.md` **逐字一致**（body 是单一事实源，两边同步）；路由元数据
-（触发器 / 优先级）按 live 的口径在 Python 侧重写，而不是照搬 Go 的 ReviewHand 模型。
+正文来自 `poker_ocr/skills_md_en/*.md` —— 这是 `skills_md/*.md` 的**英文翻译**
+（`skills_md/` 保留中文，逐字同步 call-back 的 `services/skills/*.md`；JEV 等模型
+读中文较差，所以给模型的提示词用英文副本）。路由元数据（触发器 / 优先级）按 live
+的口径在 Python 侧重写，而不是照搬 Go 的 ReviewHand 模型。
 
 与 call-back 的差异（刻意的）：
 
@@ -42,7 +43,7 @@ POT_MULTI = "multi"
 # 将来触发器写宽了把提示词撑爆
 MAX_EXPANDED = 6
 
-SKILLS_DIR = Path(__file__).resolve().parent / "skills_md"
+SKILLS_DIR = Path(__file__).resolve().parent / "skills_md_en"
 
 
 @dataclass(frozen=True)
@@ -116,72 +117,90 @@ class SkillContext:
 # 正文文件与 trigger 的对应关系。Priority 与 call-back 保持一致：展开顺序、
 # 抢名额时的先后都看它。
 _DEFS: tuple[tuple[str, str, str, str, int, SkillTrigger, str], ...] = (
-    ("core-stance", "底层立场与决策流程", "每一手牌",
-     "先问能不能下注或加注，再问要不要过牌或弃牌；说不出理由的下注与过牌都是漏损",
+    ("core-stance", "Core Stance & Decision Flow", "Every hand",
+     "Ask first whether you can bet or raise, then whether to check or fold; "
+     "a bet or check you cannot justify is a leak",
      100, SkillTrigger(always=True), "core-stance.md"),
-    ("odds-table", "赔率与概率速查", "任何要算赔率、outs 或成牌概率的地方",
-     "1/3 池需 20% 胜率、1/2 池 25%、1 倍池 33%、2 倍池 40%；转牌面对 1/2 池以上的下注，"
-     "9 张 outs 及以下的听牌跟注都是错的",
+    ("odds-table", "Odds & Probability Quick Reference",
+     "Whenever you need pot odds, outs, or draw-equity numbers",
+     "1/3 pot needs 20% equity, 1/2 pot 25%, full pot 33%, 2× pot 40%; on the turn, "
+     "calling with 9 outs or fewer facing a 1/2-pot-or-bigger bet is a mistake",
      95, SkillTrigger(always=True), "odds-table.md"),
-    ("opponent-read", "对手读牌", "这手牌至少记录了一个对手的名字或位置",
-     "五格形象各有对策；样本不足 3 次归「未知」按标准线打，不做剥削性偏离",
+    ("opponent-read", "Opponent Reading",
+     "At least one opponent's name or position is recorded this hand",
+     "Each of the five player types has a counter-strategy; below 3 samples classify as "
+     "'unknown' and play the standard line — no exploitative deviation",
      88, SkillTrigger(min_villains=1), "opponent-read.md"),
-    # ---- 河牌 ----
-    ("river-value", "河牌价值下注", "河牌你持强牌，考虑收价值",
-     "用钟形曲线定尺度，让价值下注看起来不像价值下注；过牌-加注使用率低于 1/10",
+    # ---- river ----
+    ("river-value", "River Value Betting", "On the river with a strong hand, considering value",
+     "Size with a bell curve so value bets don't look like value bets; "
+     "check-raise on the river less than 1 in 10 times",
      82,
      SkillTrigger(streets=(RIVER,), tiers=("强成牌",), exclude_plays_board=True),
      "river-value.md"),
-    ("river-medium", "河牌中等牌力", "河牌你持中等牌力（含被牌面削弱过的强牌）",
-     "无位置持中等牌下注是最糟的错误之一，该过牌引诱诈唬；对手在无关牌面下注，倾向认定是诈唬",
+    ("river-medium", "River Medium-Strength Hands",
+     "On the river with medium strength (including strong hands weakened by the board)",
+     "Betting a medium hand out of position on the river is one of the worst errors — "
+     "check to induce; if the opponent bets a blank board, lean toward reading it as a bluff",
      81,
      SkillTrigger(streets=(RIVER,),
                   tiers=("超对", "顶对强踢", "顶对弱踢", "中底对")),
      "river-medium.md"),
-    # ---- 转牌 / 翻牌 ----
-    ("postflop-turn", "转牌决策", "这手牌打到了转牌",
-     "转牌不是耍花招的时候，有最好的牌就下注；吓人牌出现时把开火权让给对手、过牌-跟注控池",
+    # ---- turn / flop ----
+    ("postflop-turn", "Turn Decisions", "The hand reached the turn",
+     "The turn is no place for fancy play — bet when you have the best hand; "
+     "when a scare card hits, yield the betting lead and check-call to control the pot",
      78, SkillTrigger(streets=(TURN,)), "postflop-turn.md"),
-    ("postflop-made-hand", "成牌打法", "翻后你持两对或更强的成牌",
-     "两对只有 17% 会再变大、顶底两对最脆弱；三条要让对手犯最大的错；"
-     "顺子与同花按牌面结构定尺度",
+    ("postflop-made-hand", "Playing Made Hands", "Postflop with two pair or better",
+     "Two pair only improves 17% of the time and top-and-bottom two pair is the most fragile; "
+     "with a set, make the opponent make the biggest mistake; size straights and flushes "
+     "by board structure",
      76,
      SkillTrigger(streets=POSTFLOP_STREETS, min_category=2,  # TWO_PAIR
                   exclude_plays_board=True),
      "postflop-made-hand.md"),
-    ("postflop-draw", "听牌与半诈唬", "你在听花或听顺",
-     "优质抽牌对单一对手可以当强牌打，主动下注有两条赢路；转牌跟注只看隐含赔率",
+    ("postflop-draw", "Draws & Semi-Bluffs", "You are on a flush or straight draw",
+     "A premium draw can be played as a strong hand heads-up — betting gives you two ways "
+     "to win; on the turn, call only on implied odds",
      74, SkillTrigger(streets=POSTFLOP_STREETS, require_draw=True),
      "postflop-draw.md"),
-    ("postflop-cbet", "持续下注", "你是翻前最后的加注者，翻牌轮到你时还没有人下注",
-     "按单挑情形取频率（位置好的对手跟注 65%、位置差的对手过牌 85%）；"
-     "尺度用四因素法；对子面先下注",
+    ("postflop-cbet", "Continuation Betting",
+     "You were the last preflop raiser and it's checked to you on the flop",
+     "Take frequency by heads-up scenario (65% vs a call in position, 85% when "
+     "out-of-position opponents check); use the four-factor sizing method; "
+     "bet first on paired boards",
      72, SkillTrigger(streets=(FLOP,), cbet_spot=True), "postflop-cbet.md"),
-    ("postflop-multiway", "多人池铁律", "翻后还有三个以上的人",
-     "人越多越不诈唬；认为牌最大就几乎肯定下注、几乎从不慢打",
+    ("postflop-multiway", "Multiway Pot Rules", "Three or more players remain postflop",
+     "The more players, the less you bluff; if you believe you have the best hand, "
+     "almost always bet and almost never slow-play",
      70,
      SkillTrigger(streets=POSTFLOP_STREETS, pot_types=(POT_MULTI,)),
      "postflop-multiway.md"),
-    # ---- 翻前 ----
-    ("preflop-3bet-pot", "翻前 3bet 底池", "翻前你行动时已经出现过再加注",
-     "再加注尺度按位置定；翻前投入超过一半筹码即 100% 套池，此时诈唬毫无意义",
+    # ---- preflop ----
+    ("preflop-3bet-pot", "Preflop 3-Bet Pots",
+     "There has already been a re-raise before your preflop action",
+     "Re-raise size depends on position; committing more than half your stack preflop "
+     "makes you 100% pot-committed, so bluffing is pointless",
      66, SkillTrigger(streets=(PREFLOP,),
                       preflop_shapes=(SHAPE_THREE_BET,)),
      "preflop-3bet-pot.md"),
-    ("preflop-open", "翻前开池", "翻前你行动时还没有人加注",
-     "前位 2.5-3 倍、后位 3.5-4 倍，不按牌力调尺度；第一个入池总是加注，"
-     "平跟只允许三种情形",
+    ("preflop-open", "Preflop Open-Raising", "No one has raised before your preflop action",
+     "2.5-3× early, 3.5-4× late, never size by hand strength; always raise as the first to "
+     "enter — limping is allowed only in three situations",
      62, SkillTrigger(streets=(PREFLOP,),
                       preflop_shapes=(SHAPE_UNOPENED,)),
      "preflop-open.md"),
-    ("preflop-vs-open", "翻前面对开池", "翻前你行动时前面已有一次加注",
-     "位置好倾向跟注设陷阱、盲注位倾向再加注；KK/QQ 几乎总是再加注",
+    ("preflop-vs-open", "Preflop vs an Open", "There has been one raise before your preflop action",
+     "In position lean toward calling to trap; in the blinds lean toward re-raising; "
+     "almost always re-raise KK/QQ",
      60, SkillTrigger(streets=(PREFLOP,),
                       preflop_shapes=(SHAPE_SINGLE_RAISE,)),
      "preflop-vs-open.md"),
-    ("mindset", "心态与资金", "玩家自己的想法里出现情绪、上头、下风或资金相关的字眼",
-     "Bad beat 是营业成本；只有「当时是领先下注」才值得复盘情绪；"
-     "2000 手以内的波动不构成改策略的依据",
+    ("mindset", "Mindset & Bankroll",
+     "The player's own notes mention tilt, emotions, downswing, or bankroll",
+     "A bad beat is a cost of doing business; only review emotions when you were ahead "
+     "when the money went in; variance over fewer than 2000 hands is no basis for "
+     "changing strategy",
      86,
      SkillTrigger(keywords=("上头", "情绪", "下风", "tilt", "追损", "破产", "心态")),
      "mindset.md"),
@@ -335,10 +354,11 @@ def render_catalog(all_: list[Skill], selected: list[Skill]) -> str:
     width = max((len(s.code) for s in all_), default=0)
 
     lines = [
-        "## 教练技能目录",
-        "本次建议的依据来自 Phil Gordon《德州扑克小绿皮书》（仅现金局部分）。",
-        "★ = 本次已展开全文，正文在下面；未展开的只有一句结论，"
-        "不要凭一句话结论编细则。",
+        "## Coach Skill Catalog",
+        "The advice this session is based on Phil Gordon's \"Little Green Book\" "
+        "(cash-game sections only).",
+        "★ = full text expanded below; unexpanded entries show only a one-line conclusion — "
+        "do not invent details from a one-line summary.",
         "",
     ]
     for skill in all_:
@@ -346,7 +366,7 @@ def render_catalog(all_: list[Skill], selected: list[Skill]) -> str:
         if skill.code in expanded:
             lines.append(f"★ {skill.code}{pad} — {skill.title}")
         else:
-            lines.append(f"  {skill.code}{pad} — {skill.when}｜结论：{skill.summary}")
+            lines.append(f"  {skill.code}{pad} — {skill.when} | conclusion: {skill.summary}")
     return "\n".join(lines) + "\n"
 
 

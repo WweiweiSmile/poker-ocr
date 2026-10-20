@@ -97,6 +97,9 @@ def rank_char(idx: int) -> str:
 # ─────────────────────────── 成手牌评估（移植自 call-front/tools/open-size-ev/evaluator.ts） ───────────────────────────
 
 CATEGORY_NAMES = ["高牌", "一对", "两对", "三条", "顺子", "同花", "葫芦", "四条", "同花顺"]
+# 英文牌型名：只用于给 AI 模型的提示词（advice.py），/coach/advice 仍用中文。
+CATEGORY_NAMES_EN = ["High card", "One pair", "Two pair", "Trips", "Straight",
+                     "Flush", "Full house", "Quads", "Straight flush"]
 
 HIGH_CARD, ONE_PAIR, TWO_PAIR, TRIPS, STRAIGHT, FLUSH, FULL_HOUSE, QUADS, STRAIGHT_FLUSH = range(9)
 
@@ -305,6 +308,7 @@ class Read:
     nut_draw: bool                         # 听牌命中后是不是坚果（严格口径，见 _nut_draw）
     combo: bool = False                    # 成牌 + ≥8 outs 的强听（"有牌又有听"，盲点①）
     plays_board: bool = False              # 最好的 5 张全靠公共牌（盲点②）
+    label_en: str = ""                     # 英文标签，只给 AI 提示词用（advice.py）
 
     def to_dict(self) -> dict:
         return {"tier": self.tier, "label": self.label,
@@ -413,36 +417,42 @@ def read_hand(hole: list[tuple[int, str]], board: list[tuple[int, str]]) -> Read
 
     paired_tiers = (OVERPAIR, TPTK, TP_WEAK, MID_BOTTOM)
 
-    def mk(tier: str, label: str) -> Read:
+    def mk(tier: str, label: str, label_en: str) -> Read:
         ceil = board_ceiling(board)
         return Read(tier, label, cat, outs, equity, cat < ceil, ceil,
                     _nut_draw(hole, board),
                     combo=(outs >= 8 and tier in paired_tiers),   # 有牌又有听
-                    plays_board=(tier == BOARD_PLAY))
+                    plays_board=(tier == BOARD_PLAY),
+                    label_en=label_en)
 
     # ── 打牌面：最好的 5 张全靠公共牌（人人都有），只有更好的牌会跟 ──
     if cat >= ONE_PAIR and _plays_board(hole, board):
         if outs >= 8:                     # 打牌面 + 强听 → 价值在听牌上，不是那手"人人都有"
-            return mk(STRONG_DRAW, f"打牌面+强听({outs} outs)")
+            return mk(STRONG_DRAW, f"打牌面+强听({outs} outs)",
+                      f"Board play + strong draw ({outs} outs)")
         if outs >= 4:
-            return mk(WEAK_DRAW, f"打牌面+弱听({outs} outs)")
-        return mk(BOARD_PLAY, f"{CATEGORY_NAMES[cat]}(打牌面)")
+            return mk(WEAK_DRAW, f"打牌面+弱听({outs} outs)",
+                      f"Board play + weak draw ({outs} outs)")
+        return mk(BOARD_PLAY, f"{CATEGORY_NAMES[cat]}(打牌面)",
+                  f"{CATEGORY_NAMES_EN[cat]} (board play)")
 
     # ── 两对及以上：强成牌 ──
     if cat >= TWO_PAIR:
         if cat == TRIPS:
             is_set = pocket and hole_ranks[0] in board_ranks
-            return mk(STRONG_MADE, "三条(set)" if is_set else "明三条(trips)")
-        return mk(STRONG_MADE, CATEGORY_NAMES[cat])
+            return mk(STRONG_MADE, "三条(set)" if is_set else "明三条(trips)",
+                      "Set" if is_set else "Trips")
+        return mk(STRONG_MADE, CATEGORY_NAMES[cat], CATEGORY_NAMES_EN[cat])
 
     # ── 一对 ──
     if cat == ONE_PAIR:
         if pocket and hole_ranks[0] > board_top:
-            return mk(OVERPAIR, "超对")
+            return mk(OVERPAIR, "超对", "Overpair")
         if pocket:
             tier = MID_BOTTOM
-            label = "中对(口袋)" if hole_ranks[0] > board_ranks[-1] else "底对(口袋)"
-            return mk(tier, label)
+            if hole_ranks[0] > board_ranks[-1]:
+                return mk(tier, "中对(口袋)", "Middle pair (pocket)")
+            return mk(tier, "底对(口袋)", "Bottom pair (pocket)")
 
         matched = [r for r in hole_ranks if r in board_ranks]
         if matched:
@@ -450,25 +460,27 @@ def read_hand(hole: list[tuple[int, str]], board: list[tuple[int, str]]) -> Read
             kicker = hole_ranks[0] if hole_ranks[1] == pair_rank else hole_ranks[1]
             if pair_rank == board_top:
                 if kicker >= KICKER_STRONG_MIN:
-                    return mk(TPTK, f"顶对{rank_char(kicker)}踢")
-                return mk(TP_WEAK, f"顶对{rank_char(kicker)}踢")
+                    return mk(TPTK, f"顶对{rank_char(kicker)}踢",
+                              f"Top pair {rank_char(kicker)} kicker")
+                return mk(TP_WEAK, f"顶对{rank_char(kicker)}踢",
+                          f"Top pair {rank_char(kicker)} kicker")
             if len(board_ranks) > 1 and pair_rank == board_ranks[1]:
-                return mk(MID_BOTTOM, "中对")
-            return mk(MID_BOTTOM, "底对")
+                return mk(MID_BOTTOM, "中对", "Middle pair")
+            return mk(MID_BOTTOM, "底对", "Bottom pair")
 
         # 没配上牌面的一对 = 牌面公对（借牌面）
         if board_paired:
-            return mk(MID_BOTTOM, "公对(借牌面)")
+            return mk(MID_BOTTOM, "公对(借牌面)", "Board pair (playing the board)")
 
     # ── 高牌：看听牌与高张 ──
     if outs >= 8:
-        return mk(STRONG_DRAW, f"强听({outs} outs)")
+        return mk(STRONG_DRAW, f"强听({outs} outs)", f"Strong draw ({outs} outs)")
     if outs >= 4:
-        return mk(WEAK_DRAW, f"弱听({outs} outs)")
+        return mk(WEAK_DRAW, f"弱听({outs} outs)", f"Weak draw ({outs} outs)")
     overcards = all(r > board_top for r in hole_ranks)
     if overcards:
-        return mk(AIR, "两张高牌")
-    return mk(AIR, "高牌/空气")
+        return mk(AIR, "两张高牌", "Two overcards")
+    return mk(AIR, "高牌/空气", "High card / air")
 
 
 # ─────────────────────────── 行动线 ───────────────────────────
@@ -570,12 +582,15 @@ class OpponentRead:
     value: int
     label: str          # 弱 / 中 / 强 / 极强
     reason: str
+    label_en: str = ""  # 英文标签，只给 AI 提示词用（advice.py）
+    reason_en: str = ""
 
     def to_dict(self) -> dict:
         return {"value": self.value, "label": self.label, "reason": self.reason}
 
 
 _OPP_LABELS = ((75, "极强"), (55, "强"), (35, "中"), (0, "弱"))
+_OPP_LABELS_EN = ((75, "Very strong"), (55, "Strong"), (35, "Medium"), (0, "Weak"))
 _OPP_BASE = {"check": 8, "call": 20, "bet": 30, "raise": 55, "allin": 88}
 
 
@@ -611,6 +626,7 @@ def opponent_strength(actions: list[dict], street: str, hero_position: str | Non
 
     best = _OPP_BASE["check"]
     why = "对手尚无动作"
+    why_en = "No opponent action yet"
     for a in opp:
         if a.get("street") != street:
             continue
@@ -622,15 +638,18 @@ def opponent_strength(actions: list[dict], street: str, hero_position: str | Non
         if s > best:
             best = s
             why = f"对手 {act}" + (f" {amt}" if amt else "")
+            why_en = f"Opponent {act}" + (f" {amt}" if amt else "")
 
     fired = {a.get("street") for a in opp if a.get("action") in AGGRESSIVE}
     if len(fired) >= 2:
         best += 10 * (len(fired) - 1)
         why += f"（{len(fired)} 条街开火）"
+        why_en += f" (fired {len(fired)} streets)"
 
     value = max(0, min(100, best))
     label = next(lbl for th, lbl in _OPP_LABELS if value >= th)
-    return OpponentRead(value, label, why)
+    label_en = next(lbl for th, lbl in _OPP_LABELS_EN if value >= th)
+    return OpponentRead(value, label, why, label_en=label_en, reason_en=why_en)
 
 
 # ─────────────────────────── 尺度 ───────────────────────────

@@ -9,16 +9,22 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+from unittest.mock import patch  # noqa: E402
+
+import poker_ocr.advice as advice_mod  # noqa: E402
 from poker_ocr import skills  # noqa: E402
 from poker_ocr.advice import (  # noqa: E402
     AISettings, AIError, AdviceRunner, OPTION_ORDER, advise,
-    build_messages, build_options, build_situation, parse_json_content,
+    build_messages, build_options, build_situation, complete_jev, complete_json,
+    is_jev_model, jev_decisions, jev_headers, jev_payload, parse_json_content,
+    render_hand_facts, value_directive,
 )
 from poker_ocr.frame_state import FrameState, PlayerState  # noqa: E402
 from poker_ocr.hand_track import LiveHandTracker, street_of_board  # noqa: E402
@@ -260,7 +266,7 @@ def test_skill_library_loads_all_files() -> None:
     check(len(all_) == 14, f"应有 14 篇技能，实际 {len(all_)}")
     check(all(s.body.strip() for s in all_), "每篇都应有正文")
     core = next(s for s in all_ if s.code == "core-stance")
-    check("底层立场" in core.body, "core-stance 正文不对")
+    check("Core Stance" in core.body, "core-stance 正文不对")
 
 
 def test_skill_text_matches_call_back_copy() -> None:
@@ -340,7 +346,7 @@ def test_catalog_marks_expanded() -> None:
     catalog = skills.render_catalog(all_, selected)
     for s in selected:
         check(f"★ {s.code}" in catalog, f"已展开的技能应标 ★：{s.code}")
-    check("教练技能目录" in catalog, "目录应有标题")
+    check("Coach Skill Catalog" in catalog, "目录应有标题")
 
 
 # ─────────────────────────── 选项 ───────────────────────────
@@ -376,6 +382,133 @@ def test_options_checked_to_hero() -> None:
     check(by["raise-1/2"].amount == 3.0, f"1/2 池应 3.0，实际 {by['raise-1/2'].amount}")
     check(by["raise-1"].amount == 6.0, f"1 倍池应 6.0，实际 {by['raise-1'].amount}")
     check(by["raise-1.2"].amount == 7.2, f"1.2 倍池应 7.2，实际 {by['raise-1.2'].amount}")
+
+
+def test_options_no_bet_are_labelled_bets() -> None:
+    """没人下注时是下注不是加注：标签和 kind 都要说 Bet。"""
+    by = {o.id: o for o in build_options(make_point())}
+    check(by["raise-1/2"].label == "Bet 1/2 pot",
+          f"无人下注应标 Bet：{by['raise-1/2'].label}")
+    check(by["raise-1/2"].kind == "bet",
+          f"无人下注 kind 应为 bet：{by['raise-1/2'].kind}")
+    facing = {o.id: o for o in build_options(
+        make_point(to_call=4.0, pot=10.0, hero_stack=90.0))}
+    check(facing["raise-1/2"].label == "Raise to 1/2 pot"
+          and facing["raise-1/2"].kind == "raise",
+          f"面对下注仍应是 Raise：{facing['raise-1/2']}")
+
+
+def test_value_directive_covers_strong_hands() -> None:
+    """强牌默认拿价值；弱牌/翻前不该有指令。"""
+    # 口袋 K 在 K 高翻牌 = 暗三（强成牌），无人下注
+    set_sit = build_situation(make_point(hero_cards=("Kd", "Kc")))
+    d = value_directive(set_sit)
+    check(d is not None and "BET for value" in d,
+          f"暗三无人下注应默认下注：{d}")
+    # 同一手牌面对下注 → 默认加注
+    facing = build_situation(make_point(hero_cards=("Kd", "Kc"),
+                                        to_call=4.0, pot=10.0))
+    d = value_directive(facing)
+    check(d is not None and "RAISE for value" in d,
+          f"暗三面对下注应默认加注：{d}")
+    # 顶对强踢（AhKd 在 K 高翻牌）无人下注 → 下注
+    tptk = build_situation(make_point())
+    check((value_directive(tptk) or "").startswith("VALUE DEFAULT"),
+          f"顶对强踢应默认下注：{value_directive(tptk)}")
+    # 顶对弱踢面对下注 → 跟注为主，不该默认弃牌
+    tp_weak = build_situation(make_point(hero_cards=("Kh", "9d"),
+                                         to_call=4.0, pot=10.0))
+    check("SHOWDOWN DEFAULT" in (value_directive(tp_weak) or ""),
+          f"顶对弱踢应给跟注指令：{value_directive(tp_weak)}")
+    # 强听无人下注 → 半诈唬
+    draw = build_situation(make_point(hero_cards=("Ah", "Qh"),
+                                      board=("9h", "6h", "5s")))
+    check("SEMI-BLUFF" in (value_directive(draw) or ""),
+          f"强听应默认下注：{value_directive(draw)}")
+    # 空气 → 没有价值指令
+    air = build_situation(make_point(hero_cards=("3c", "4c")))
+    check(value_directive(air) is None, f"空气不该有价值指令：{value_directive(air)}")
+
+
+def test_one_pair_does_not_stack_off_against_a_raise() -> None:
+    """单对子面对加注/全下默认弃牌；面对普通下注才是跟注。"""
+    from poker_ocr.hand_track import ActionRecord, StreetRecord
+
+    raise_street = StreetRecord("flop", 6.0, (
+        ActionRecord("flop", "a", "老王", "BB", "raise", 20.0, False, False),))
+    tptk = build_situation(make_point(
+        to_call=14.0, pot=30.0,
+        streets=(StreetRecord("preflop", 0.0, ()), raise_street)))
+    d = value_directive(tptk)
+    check("ONE PAIR vs AGGRESSION" in (d or "") and "FOLD" in (d or ""),
+          f"顶对面对加注应默认弃牌：{d}")
+
+    tp_weak = build_situation(make_point(
+        hero_cards=("Kh", "9d"), to_call=14.0, pot=30.0,
+        streets=(StreetRecord("preflop", 0.0, ()), raise_street)))
+    d = value_directive(tp_weak)
+    check("FOLD" in (d or ""), f"顶对弱踢面对加注应弃牌：{d}")
+
+    # 同一手牌面对普通下注（没有 raise 动作）→ 允许跟注
+    bet_street = StreetRecord("flop", 6.0, (
+        ActionRecord("flop", "a", "老王", "BB", "bet", 14.0, False, False),))
+    tptk_bet = build_situation(make_point(
+        to_call=14.0, pot=30.0,
+        streets=(StreetRecord("preflop", 0.0, ()), bet_street)))
+    d = value_directive(tptk_bet)
+    check("VALUE/DEFEND" in (d or ""), f"顶对面对普通下注应允许跟注：{d}")
+
+
+def test_straight_is_not_nuts_on_a_flush_board() -> None:
+    """三张同花面：顺子不是坚果，不能被价值指令推着加注。
+
+    990026 河牌 Jc8dKdQcAd：牌面三张方片（8d Kd Ad），对手拿两张方片就是同花。
+    这里正确动作是跟注/弃牌，不是 all-in。
+    """
+    straight = build_situation(make_point(
+        street="river", board=("Jc", "8d", "Kd", "Qc", "Ad"),
+        hero_cards=("As", "Th"), to_call=144.5, pot=358.0))
+    d = value_directive(straight)
+    check("VALUE CAUTION" in (d or "") and "NOT the nuts" in (d or ""),
+          f"三张同花面的顺子应提示不是坚果：{d}")
+    check("Do NOT raise" in (d or ""), f"不该鼓励加注：{d}")
+
+    # 同一张牌面，河牌成葫芦 → 不怕同花，仍然是价值下注
+    full_house = build_situation(make_point(
+        street="river", board=("2c", "4c", "2d", "5s", "6c"),
+        hero_cards=("2h", "5h"), to_call=0.0, pot=84.0))
+    d = value_directive(full_house)
+    check("VALUE DEFAULT" in (d or "") and "CAUTION" not in (d or ""),
+          f"葫芦在花面仍是价值牌：{d}")
+
+    # 牌面对子时，顺子也要提示葫芦可能
+    paired = build_situation(make_point(
+        street="river", board=("Jc", "Jd", "9d", "Qc", "Ad"),
+        hero_cards=("As", "Th"), to_call=0.0, pot=50.0))
+    check("VALUE CAUTION" in (value_directive(paired) or ""),
+          f"对子面的顺子应提示葫芦可能：{value_directive(paired)}")
+
+    # 对子面的两对面对正常大小下注：可以跟，不要因为「不是坚果」就弃
+    two_pair = build_situation(make_point(
+        street="turn", board=("Ks", "5s", "2h", "2c"),
+        hero_cards=("5d", "Jc"), to_call=44.0, pot=132.5))
+    d = value_directive(two_pair)
+    check("Call a normal-sized bet" in (d or "") and "Do NOT raise" in (d or ""),
+          f"对子面两对应允许跟正常下注：{d}")
+
+
+def test_prompt_renders_value_directive_and_draw_equity() -> None:
+    draw = build_situation(make_point(hero_cards=("Ah", "Qh"),
+                                      board=("9h", "6h", "5s")))
+    user = render_hand_facts(draw)
+    check("Value directive:" in user and "SEMI-BLUFF" in user,
+          f"提示词应带价值指令：{user}")
+    check("Estimated draw equity" in user, f"听牌应给四二法则胜率：{user}")
+
+    set_sit = build_situation(make_point(hero_cards=("Kd", "Kc")))
+    user = render_hand_facts(set_sit)
+    check("Estimated draw equity" not in user,
+          "成牌不该渲染四二法则胜率（outs 数的是改良张数，不是胜率）")
 
 
 def test_options_preflop_uses_bb_sizing() -> None:
@@ -431,7 +564,7 @@ def test_options_bump_to_min_raise_when_fraction_too_small() -> None:
     by = {o.id: o for o in opts}
     check(by["raise-1/3"].amount == 40.0,
           f"应抬到最小加注 40，实际 {by['raise-1/3'].amount}")
-    check("最小加注额" in by["raise-1/3"].note,
+    check("minimum raise" in by["raise-1/3"].note,
           f"抬额应注明：{by['raise-1/3']}")
 
 
@@ -441,7 +574,7 @@ def test_options_capped_by_stack() -> None:
     by = {o.id: o for o in opts}
     check(by["raise-1"].amount == 20.0,
           f"后手 20BB 时 1 倍池应封顶到 20，实际 {by['raise-1'].amount}")
-    check("全下" in by["raise-1"].note, "封顶的档位应注明等同全下")
+    check("all-in" in by["raise-1"].note, "封顶的档位应注明等同全下")
 
 
 # ─────────────────────────── 提示词 ───────────────────────────
@@ -459,18 +592,40 @@ def test_prompt_contains_full_action_line_and_options() -> None:
     sit = build_situation(point)
     system, user = build_messages(sit)
 
-    check("## 教练技能目录" in system, "system 应含技能目录")
-    check("## 底层立场与决策流程" in system, "system 应含常驻技能正文")
+    check("## Coach Skill Catalog" in system, "system 应含技能目录")
+    check("## Core Stance & Decision Flow" in system, "system 应含常驻技能正文")
     check("按当前" not in system, "不应出现占位文案")
 
-    check("CO 加注到 3.0BB" in user, f"对手加注应写进行动线：\n{user}")
-    check("Hero 跟注 3.0BB" in user, "hero 跟注应写进行动线")
-    check("CO 下注 4.0BB" in user, "对手翻牌下注应写进行动线")
-    check("本街需再跟: 4.0BB" in user, f"需跟额不对：\n{user}")
-    check("我的牌力: 顶对" in user or "顶对" in user, f"应有牌力标签：\n{user}")
+    check("CO raises to 3.0BB" in user, f"对手加注应写进行动线：\n{user}")
+    check("Hero calls 3.0BB" in user, "hero 跟注应写进行动线")
+    check("CO bets 4.0BB" in user, "对手翻牌下注应写进行动线")
+    check("To call: 4.0BB" in user, f"需跟额不对：\n{user}")
+    check("My hand strength: Top pair" in user, f"应有牌力标签：\n{user}")
     for oid in ("fold", "call", "raise-1/3", "raise-1/2", "raise-2/3",
                 "raise-1", "raise-1.2"):
         check(oid in user, f"选项 {oid} 应出现在提示词里")
+
+
+def test_prompt_is_english_only() -> None:
+    """JEV 等模型对中文的识别较差：喂给模型的提示词不能有中文文案。
+
+    例外只有 OCR 读到的玩家真实名字（那是数据，不是提示词文案）。
+    """
+    import re
+    cjk = re.compile(r"[一-鿿]")
+    data_names = set("老王小李")          # make_point 里的对手名
+    cases = {
+        "flop facing bet": make_point(to_call=4.0, pot=10.0, hero_stack=90.0),
+        "flop checked": make_point(),
+        "preflop": make_point(street="preflop", board=(), to_call=3.0, pot=4.5,
+                              cbet_spot=False),
+    }
+    for name, point in cases.items():
+        system, user = build_messages(build_situation(point))
+        for part, label in ((system, "system"), (user, "user")):
+            leftover = set(cjk.findall(part)) - data_names
+            check(not leftover,
+                  f"{name} 的 {label} 里还有中文：{''.join(sorted(leftover))}")
 
 
 def test_prompt_preflop_has_no_strength_facts() -> None:
@@ -479,8 +634,8 @@ def test_prompt_preflop_has_no_strength_facts() -> None:
                        preflop_shapes=("single-raise",))
     sit = build_situation(point)
     system, user = build_messages(sit)
-    check("翻前局面: 前面已有一次加注" in user, f"翻前局面没写：\n{user}")
-    check("我的牌力" not in user, "翻前不该给成牌分档")
+    check("Preflop shape: one raise already" in user, f"翻前局面没写：\n{user}")
+    check("My hand strength" not in user, "翻前不该给成牌分档")
     check("preflop-vs-open" in system, f"翻前技能应被展开：\n{system[:500]}")
 
 
@@ -493,7 +648,7 @@ def test_advise_uses_model_choice() -> None:
     sit = build_situation(make_point(to_call=4.0, pot=10.0, hero_stack=90.0))
     seen: dict = {}
 
-    def fake(settings, system, user, timeout=20.0):
+    def fake(settings, system, user, timeout=20.0, options=None):
         seen["system"] = system
         return {"option": "raise-2/3", "reason": "顶对在干燥面按 §4 下 2/3 池"}
 
@@ -501,7 +656,7 @@ def test_advise_uses_model_choice() -> None:
     check(advice.source == "model", f"应来自模型，实际 {advice.source}")
     check(advice.option.id == "raise-2/3", f"选项不对：{advice.option.id}")
     check(advice.option.amount is not None, "金额应由程序算好")
-    check("教练技能目录" in seen["system"], "调模型时应带上技能层")
+    check("Coach Skill Catalog" in seen["system"], "调模型时应带上技能层")
     check(advice.to_dict()["street"] == "flop", "落库结构不对")
 
 
@@ -521,6 +676,141 @@ def test_advise_fallback_without_settings() -> None:
           f"没配置时应给过牌：{advice.option}")
 
 
+# ─────────────────────────── JEV 协议 ───────────────────────────
+
+JEV = AISettings(api_key="or-key",
+                 base_url="https://openrouter.ai/api/alpha/decisions",
+                 model="typesafe/jev-1.14",
+                 referer="https://example.com", title="poker-ocr")
+
+
+def test_is_jev_model() -> None:
+    cases = {
+        "jev-1.14": True,
+        "typesafe/jev-1.14": True,       # OpenRouter 的 vendor/model 写法
+        "JEV-2": True,
+        "deepseek-flash": False,
+        "my-jev-model": False,           # 只认路径分段，不认子串
+        "": False,
+    }
+    for model, want in cases.items():
+        check(is_jev_model(model) == want,
+              f"{model!r} 应 {'是' if want else '不是'} JEV，实际 {is_jev_model(model)}")
+
+
+def test_jev_payload_and_headers() -> None:
+    state = ["系统提示", {"type": "image_url",
+                          "image_url": {"url": "data:image/png;base64,AAA"}}]
+    questions = {"matches_listing": {"type": "noul",
+                                     "instructions": "?"}}
+    payload = jev_payload(JEV, state, questions)
+    check(payload["model"] == "typesafe/jev-1.14", f"model 不对：{payload}")
+    check(payload["state"] == state, f"state 应原样传递：{payload}")
+    check(payload["questions"] == questions, f"questions 应原样传递：{payload}")
+
+    headers = jev_headers(JEV)
+    check(headers["Authorization"] == "Bearer or-key", f"鉴权头不对：{headers}")
+    check(headers["Content-Type"] == "application/json", f"内容头不对：{headers}")
+    check(headers["HTTP-Referer"] == "https://example.com", f"Referer 不对：{headers}")
+    check(headers["X-OpenRouter-Title"] == "poker-ocr", f"Title 不对：{headers}")
+
+    # 没配可选头时不应发空字段
+    bare = jev_headers(AISettings("k", "https://x/decisions", "jev-1"))
+    check("HTTP-Referer" not in bare and "X-OpenRouter-Title" not in bare,
+          f"可选头不该为空值发送：{bare}")
+
+
+def test_jev_decisions_posts_sample_schema() -> None:
+    seen: dict = {}
+
+    def fake_post(url, payload, headers, timeout):
+        seen.update(url=url, payload=payload, headers=headers, timeout=timeout)
+        return json.dumps({"answers": {"matches_listing": {"noul": 0.91}}}).encode()
+
+    answers = jev_decisions(
+        JEV, ["Listing: vintage red bicycle"],
+        {"matches_listing": {"type": "noul", "instructions": "?",
+                             "criteria": {"true": "shown", "false": "not shown"}}},
+        request=fake_post)
+    check(answers["matches_listing"]["noul"] == 0.91, f"answers 解析不对：{answers}")
+    check(seen["url"] == JEV.base_url, f"JEV 应直接 POST 配置的 URL：{seen}")
+    check(seen["payload"]["model"] == JEV.model, f"model 没带上：{seen}")
+    check(seen["payload"]["questions"]["matches_listing"]["type"] == "noul",
+          f"questions 没带上：{seen}")
+    check(seen["headers"]["Authorization"] == "Bearer or-key", f"鉴权头没带上：{seen}")
+
+
+def test_complete_jev_builds_choice_question_and_reason() -> None:
+    options = [
+        {"id": "fold", "label": "Fold", "kind": "fold"},
+        {"id": "raise-1/2", "label": "Raise to 1/2 pot", "kind": "raise",
+         "amount_bb": 10.25},
+    ]
+    seen: dict = {}
+
+    def fake_post(url, payload, headers, timeout):
+        seen.update(payload)
+        return json.dumps({"answers": {"option": {
+            "choice": "raise-1/2",
+            "probabilities": {"raise-1/2": 0.72, "fold": 0.28},
+        }}}).encode()
+
+    got = complete_jev(JEV, "系统", "用户", options=options, request=fake_post)
+    check(got["option"] == "raise-1/2", f"choice 解析不对：{got}")
+    check(got["confidence"] == 0.72, f"概率没转成 confidence：{got}")
+    check("72%" in got["reason"], f"reason 应带概率：{got}")
+    check(got["reason"].startswith("JEV chose"), f"reason 结构不对：{got}")
+
+    question = seen["questions"]["option"]
+    check(question["type"] == "choice", f"应是 choice 题：{question}")
+    check(set(question["criteria"]) == {"fold", "raise-1/2"},
+          f"criteria 的 key 必须是选项 id：{question}")
+    check("10.25BB" in question["criteria"]["raise-1/2"],
+          f"criteria 应带金额：{question}")
+    check(seen["state"] == ["系统", "用户"], f"system/user 应进 state：{seen}")
+
+
+def test_complete_jev_rejects_unknown_choice() -> None:
+    def fake_post(url, payload, headers, timeout):
+        return json.dumps({"answers": {"option": {"choice": "all-in"}}}).encode()
+
+    try:
+        complete_jev(JEV, "s", "u", options=[{"id": "fold", "label": "弃牌"}],
+                     request=fake_post)
+    except AIError as exc:
+        check("选项" in str(exc), f"报错应说明不在选项里：{exc}")
+    else:
+        FAILS.append("JEV 返回不在选项里的 choice 应抛 AIError")
+
+
+def test_complete_json_dispatches_by_model_name() -> None:
+    options = [{"id": "fold", "label": "弃牌", "kind": "fold"}]
+    from unittest.mock import MagicMock
+    jev = MagicMock(return_value={"option": "fold", "reason": "jev"})
+    with patch.object(advice_mod, "complete_jev", jev):
+        got = complete_json(JEV, "s", "u", options=options)
+    check(got["option"] == "fold", f"JEV 模型应走 complete_jev：{got}")
+    check(jev.called, "complete_jev 没被调用")
+
+    with patch.object(advice_mod, "complete_jev") as jev:
+        try:
+            # 非 JEV 模型走 chat/completions；没网会报错，但绝不该进 complete_jev
+            complete_json(AISettings("k", "http://127.0.0.1:1", "deepseek-chat"),
+                          "s", "u", options=options, request=lambda *a: b"{}")
+        except Exception:                # noqa: BLE001 — 这里只关心分发路径
+            pass
+    check(not jev.called, "非 JEV 模型不该走 JEV 分支")
+
+
+def test_ai_settings_reads_referer_and_title() -> None:
+    env = {"AI_SERVER_API_KEY": "k", "AI_SERVER_BASE_URL": "https://x/decisions",
+           "AI_SERVER_MODEL": "typesafe/jev-1.14",
+           "AI_SERVER_REFERER": "https://site", "AI_SERVER_TITLE": "t"}
+    settings = AISettings.from_env(env)
+    check(settings.referer == "https://site" and settings.title == "t",
+          f"可选头没读进来：{settings}")
+
+
 def test_parse_json_content_tolerates_fence() -> None:
     got = parse_json_content('```json\n{"option": "call", "reason": "x"}\n```')
     check(got["option"] == "call", f"应剥掉 markdown 围栏：{got}")
@@ -538,7 +828,7 @@ def test_advice_runner_does_not_block() -> None:
 
     sit = build_situation(make_point(to_call=0.0))
 
-    def slow(settings, system, user, timeout=20.0):
+    def slow(settings, system, user, timeout=20.0, options=None):
         time.sleep(0.2)
         return {"option": "raise-1/2", "reason": "x"}
 
@@ -578,6 +868,11 @@ def main() -> int:
         test_plays_board_excludes_made_hand_skills,
         test_catalog_marks_expanded,
         test_options_checked_to_hero,
+        test_options_no_bet_are_labelled_bets,
+        test_value_directive_covers_strong_hands,
+        test_one_pair_does_not_stack_off_against_a_raise,
+        test_straight_is_not_nuts_on_a_flush_board,
+        test_prompt_renders_value_directive_and_draw_equity,
         test_options_preflop_uses_bb_sizing,
         test_options_facing_bet_uses_pot_after_call,
         test_options_bump_to_min_raise_when_fraction_too_small,
@@ -587,6 +882,13 @@ def main() -> int:
         test_advise_uses_model_choice,
         test_advise_rejects_unknown_option,
         test_advise_fallback_without_settings,
+        test_is_jev_model,
+        test_jev_payload_and_headers,
+        test_jev_decisions_posts_sample_schema,
+        test_complete_jev_builds_choice_question_and_reason,
+        test_complete_jev_rejects_unknown_choice,
+        test_complete_json_dispatches_by_model_name,
+        test_ai_settings_reads_referer_and_title,
         test_parse_json_content_tolerates_fence,
         test_advice_runner_does_not_block,
     ]
