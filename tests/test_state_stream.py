@@ -102,6 +102,17 @@ def test_change_needs_two_stable_frames() -> None:
         check(second.record["pot"] == 40.0, "记录的应是新底池")
 
 
+def test_single_stable_frame_records_immediately() -> None:
+    """stable_frames=1：变化第一帧就记录，不再等第二帧。"""
+    with stub_env():
+        s = new_stream(stable_frames=1)
+        feed(s, make_frame())
+        changed = make_frame(pot="40BB")
+        out = feed(s, changed, t=0.5)
+        check(out.kind == "record", f"1 帧确认应立即记录，实际 {out.kind}")
+        check(out.record["pot"] == 40.0, "记录的应是新底池")
+
+
 def test_discard_does_not_advance_prev() -> None:
     with stub_env():
         s = new_stream()
@@ -175,6 +186,7 @@ def main() -> int:
         test_first_frame_is_baseline,
         test_same_signature_is_not_recorded_again,
         test_change_needs_two_stable_frames,
+        test_single_stable_frame_records_immediately,
         test_discard_does_not_advance_prev,
         test_vanished_seat_needs_max_vanish_frames,
         test_initial_blinds_carried_when_banner_unreadable,

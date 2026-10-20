@@ -36,8 +36,9 @@ curl -X POST http://localhost:8000/ocr/table -F "file=@table.jpg"
 
 ## 实时推流识别
 
-OBS 推 SRT → MediaMTX → 本机 RTSP；worker 按 0.5s 采样，用固定 ROI 识别
-座位、筹码、下注、动作、庄位、底池和盲注，输出一行一个状态的 JSONL。
+OBS 推 SRT → MediaMTX → 本机 RTSP；worker **不节流**：处理完当前帧立刻取
+邮箱里的最新帧，中间帧直接丢弃；用固定 ROI 识别座位、筹码、下注、动作、庄位、
+底池和盲注，输出一行一个状态的 JSONL。
 
 **完整方案、功能、OBS 参数、标定流程、输出字段与排障见
 [docs/live-stream.md](docs/live-stream.md)。**
@@ -51,13 +52,12 @@ mediamtx config/mediamtx.yml
   --url rtsp://127.0.0.1:8554/live \
   --profile config/table_wpk_live.json \
   --initial-blinds 1/2 \
-  --every 0.5 \
   --out logs/live.states.jsonl
 ```
 
-### AI 实时建议（可选）
+### AI 实时建议（默认开启）
 
-`--ai-advice` 打开后，worker 会在**轮到我**时把这一手的完整行动线交给模型，
+worker 在**轮到我**时把这一手的完整行动线交给模型（`--no-ai-advice` 可关闭），
 按**当前行动街**加载教练技能（方法论文本与 call-back 的 `services/skills/` 一致），
 让它从固定选项里选一个：
 
@@ -97,8 +97,9 @@ JEV 模式下候选动作会被转成一道 `choice` 题（criteria 的 key 就�
 （选择概率）只写日志，不进 JSONL。`AI_SERVER_REFERER` / `AI_SERVER_TITLE`
 是 OpenRouter 的可选排名头。
 
-- **需要 profile 里有 `hero_turn_probe` 槽位**（`table_wpk_1080x2400.json` 有，
-  `table_wpk_live.json` 没有）。缺了它判不出「轮到我」，worker 会拒绝启动并说明原因。
+- **「轮到我」默认看 hero 头像槽的蓝色「下注/加注」按钮**（`images/roi/hero_bet.jpg`
+  实测蓝色占比 0.85–0.86，非回合帧 0.000–0.003），所以 `table_wpk_live.json`
+  没有 `hero_turn_probe` 也能用；老 UI 会回退到预设钮文本判据。
 - 只支持 `--recognizer roi`：全图路线读不到每座的本街下注，算不出跟注额。
 - 换手时另外写一条 `hand` 记录，含这一手完整的逐街行动线（对手 + 自己），
   可以直接拿去复盘或对照。

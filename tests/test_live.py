@@ -38,6 +38,22 @@ FAILS: list[str] = []
 IMG = np.zeros((4, 4, 3), np.uint8)
 
 
+def test_defaults_are_no_throttle_and_instant_turn() -> None:
+    """用户口径：不节流、不做 2 帧确认、轮到我第一帧就调用模型。"""
+    ap = live.build_parser()
+    args = ap.parse_args([])
+    check(args.every == 0.0, f"默认应不节流，实际 --every={args.every}")
+    check(args.stable_frames == 1,
+          f"默认应取消 2 帧稳定确认，实际 {args.stable_frames}")
+    check(args.ai_confirm == 1,
+          f"默认应第一帧就认定轮到我，实际 {args.ai_confirm}")
+    check(args.ai_advice is True, "AI 建议默认应开启")
+
+    args = ap.parse_args(["--no-ai-advice", "--every", "0.5"])
+    check(args.ai_advice is False, "--no-ai-advice 应能关闭")
+    check(args.every == 0.5, "--every 仍应能显式降频")
+
+
 def check(cond: bool, msg: str) -> None:
     if not cond:
         FAILS.append(msg)
@@ -434,8 +450,35 @@ def test_ai_advice_waits_for_hero_cards() -> None:
     check(runner.count == 1, f"读到手牌后应补投一次，实际 {runner.count}")
 
 
+def test_processor_pauses_while_advice_is_generating() -> None:
+    """模型返回前 waiting_for_advice=True，主循环据此跳过识别。"""
+    class BusyRunner:
+        busy = True
+
+        def poll(self):
+            return []
+
+        def submit(self, sit) -> bool:      # pragma: no cover — 不应被调用
+            raise AssertionError("等待期间不该投新决策点")
+
+    proc = LiveProcessor(StubStateStream(), StubWriter(), quiet=True,
+                         advice_runner=BusyRunner())
+    check(proc.waiting_for_advice, "生成建议期间应暂停识别")
+
+    class IdleRunner(BusyRunner):
+        busy = False
+
+    proc = LiveProcessor(StubStateStream(), StubWriter(), quiet=True,
+                         advice_runner=IdleRunner())
+    check(not proc.waiting_for_advice, "结果返回后应恢复识别")
+
+    proc = LiveProcessor(StubStateStream(), StubWriter(), quiet=True)
+    check(not proc.waiting_for_advice, "没开 AI 建议时不应暂停")
+
+
 def main() -> int:
     tests = [
+        test_defaults_are_no_throttle_and_instant_turn,
         test_mailbox_keeps_only_latest,
         test_wait_newer_wakes_up,
         test_slow_consumer_drops_frames_but_ends_at_latest,
@@ -457,6 +500,7 @@ def main() -> int:
         test_jsonl_is_one_complete_object_per_line,
         test_ai_advice_submits_on_hero_turn_once,
         test_ai_advice_waits_for_hero_cards,
+        test_processor_pauses_while_advice_is_generating,
     ]
     for t in tests:
         before = len(FAILS)

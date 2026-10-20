@@ -33,6 +33,7 @@ import time
 from dataclasses import dataclass, field as dc_field, replace as dc_replace
 from typing import Protocol, runtime_checkable
 
+import cv2
 import numpy as np
 
 from .dealer import DealerDetector, DealerResult
@@ -60,6 +61,20 @@ ROI_PAD = 0.05
 _HERO_TURN_RE = re.compile(r"\d+(?:\.\d+)?\s*BB")
 # 分数闸读不到时的兜底。实测正例 0.89–0.99、表情面板的伪装 0.21–0.30。
 _HERO_TURN_MIN_SCORE_DEFAULT = 0.5
+
+# ── 蓝色「下注/加注」按钮 ──
+#
+# 轮 hero 行动时，hero 的头像槽会被一个蓝色圆钮覆盖（`images/roi/hero_bet.jpg`
+# 实测：按钮 bbox 与 hero.avatar_slot 几乎完全重合）。判据是**头像槽里的蓝色
+# 像素占比**：真机 5 张回合帧（hero_bet / 130 / 131 / 132 / 135）为 0.85–0.86，
+# 6 张非回合帧（126–129 / 133 / 134）为 0.000–0.003，间隔极大。
+#
+# 为什么不用 OCR 文字做硬门槛：真图上「下注」会被 rec 读成「下生」（0.72），
+# 而「加注」能读对（0.96）—— 文字只做灰区的二次确认，颜色才是主判据。
+_HERO_BET_BLUE_MIN = 0.35
+_HERO_BET_BLUE_DEFINITIVE = 0.55
+_HERO_BET_TEXT_MIN_SCORE = 0.4
+_HERO_BET_CHARS = ("下", "注", "加", "跟")
 
 
 @dataclass
@@ -286,40 +301,120 @@ def _seat_slot(seat, key: str) -> tuple[Slot | None, str]:
     return slot, ""
 
 
+def hero_turn_method(profile: Profile) -> str:
+    """本 profile 用哪种「轮到我」判据。
+
+    显式配置优先；没配时按能力推断：有旧探针就用旧文本判据，没有就用
+    蓝色下注按钮（refit 生成的 profile 通常两者都没有显式配置）。
+    """
+    method = str(profile.thresholds.get("hero_turn_method") or "").strip()
+    if method:
+        return method
+    return "preset_text" if "hero_turn_probe" in profile.global_slots \
+        else "blue_button"
+
+
+def _blue_fraction(roi: np.ndarray) -> float:
+    """ROI 里蓝色像素的占比（0–1）。按钮蓝的 HSV 实测落在 95–125 / S≥120 / V≥120。"""
+    if roi.size == 0:
+        return 0.0
+    hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+    mask = cv2.inRange(hsv, (95, 120, 120), (125, 255, 255))
+    return float(mask.mean()) / 255.0
+
+
+def measure_hero_bet_button(img: np.ndarray, profile: Profile,
+                            engine: OcrEngine, size: Size | None = None,
+                            cache: RoiCache | None = None) -> tuple[bool | None, dict]:
+    """hero 头像槽是不是被蓝色「下注/加注」按钮覆盖 → 轮到 hero 了吗。三态。
+
+    这是 `images/roi/hero_bet.jpg` 那条链路的主判据：轮到我时，头像位置
+    （hero.avatar_slot）会变成一个蓝色圆钮，蓝色占比从 ~0.00 跳到 ~0.85。
+    颜色阈值只在**这个槽位内部**使用，不会像以前的「浅灰圆片占比」那样被
+    表情面板/其它浅色 UI 骗到 —— 非回合帧实测 0.000–0.003。
+
+    三态：
+      · 蓝占比 ≥ definitive（默认 0.55）→ True，不再依赖 OCR
+        （OCR 会把「下注」读成「下生」，文字不是可靠门槛）
+      · 蓝占比 < min（默认 0.35）→ False（头像还是头像，不是我）
+      · 灰区 → 读一次文字，命中「下/注/加/跟」才 True，否则 None
+    """
+    size = size or (img.shape[1], img.shape[0])
+    hero = next((s for s in profile.seats if s.seat_id == profile.hero_seat_id), None)
+    if hero is None:
+        return None, {"error": "profile 里没有 hero 座位，判不了蓝色下注按钮"}
+
+    rect, roi = crop_slot(img, profile, hero.avatar_slot, size, pad=0.0)
+    blue = _blue_fraction(roi)
+    evidence = {
+        "method": "blue_button",
+        "rect": list(rect),
+        "blue": round(blue, 4),
+    }
+    min_blue = float(profile.thresholds.get("hero_bet_blue_min",
+                                            _HERO_BET_BLUE_MIN))
+    definitive = float(profile.thresholds.get("hero_bet_blue_definitive",
+                                              _HERO_BET_BLUE_DEFINITIVE))
+    if blue < min_blue:
+        return False, evidence
+    if blue >= definitive:
+        return True, evidence
+
+    read = read_slot(img, profile, engine, hero.avatar_slot, "hero_bet",
+                     size, pad=0.0, cache=cache, cache_key="@hero_bet")
+    evidence.update({"text": read.text, "score": round(read.score, 4),
+                     "ms": round(read.ms, 2)})
+    min_score = float(profile.thresholds.get("hero_bet_text_min_score",
+                                             _HERO_BET_TEXT_MIN_SCORE))
+    if (read.text and read.score >= min_score
+            and any(ch in read.text for ch in _HERO_BET_CHARS)):
+        return True, evidence
+    return None, {**evidence,
+                  "why": "蓝色占比在灰区，但没读到「下注/加注」文字"}
+
+
 def measure_hero_turn(img: np.ndarray, profile: Profile, engine: OcrEngine,
                       size: Size | None = None,
                       cache: RoiCache | None = None) -> tuple[bool | None, dict]:
-    """读 `hero_turn_probe`（第一个预设钮的 BB 值行）→ 轮到 hero 了吗。三态。
+    """轮到 hero 了吗。三态。
 
-    为什么是这一小块：整块 presets 是 5 个钮 × 3 行，纯 rec 读不了；单个钮的
-    **BB 值行**是干净的单行文本，而且在 1080x2400 和 864x1920 两种分辨率上都成立。
+    **优先走蓝色下注按钮**（`hero_turn_method = "blue_button"`）：
+    `measure_hero_bet_button` 直接判头像槽的蓝色占比，拿到 True/False 就返回。
+    灰区或该方法不适用时，回退到旧的 `hero_turn_probe`（第一个预设钮的 BB 值行）
+    文本判据 —— 老配置（table_default 等）没有蓝色按钮，仍然能工作。
 
-    **为什么不再用「浅灰圆片占比」**（这是真机视频推翻的）：色彩/亮度门槛跨设备
-    不成立 —— 同一段视频里，表情面板用 0.042 骗过了 0.03，而这台设备上的真按钮
-    只有 0.0266 反而漏掉。文本不随亮度变，所以改用文本。
-
-    三态是刻意的：
-      · 读到「数字+BB」且分数够 → True（预设按钮在，轮到他）
-      · 空 → False（那块什么都没有 = 没轮到）
-      · 非空但不是 BB 形 / 分数太低 → None（有东西，但不是预设，不硬判）
-    最后那条是为了「有东西盖住了这块」的情况 —— 把遮挡读成「没轮到」会安静地
-    漏掉一整条行动线，所以宁可不知道。
+    旧判据为什么不删：它是 1080x2400 那套 UI 的实测结论（见配置的
+    `_hero_turn_comment`），而且蓝色按钮在别的皮肤/分辨率上未必存在。
     """
+    size = size or (img.shape[1], img.shape[0])
+    method = hero_turn_method(profile)
+    bet_turn: bool | None = None
+    bet_ev: dict = {}
+    if method == "blue_button":
+        bet_turn, bet_ev = measure_hero_bet_button(img, profile, engine, size, cache)
+        if bet_turn is not None:
+            return bet_turn, bet_ev
+
     slot = profile.global_slots.get("hero_turn_probe")
     if slot is None:
+        if method == "blue_button":
+            # 蓝色按钮在灰区、又没有旧探针可回退 → 不知道，别硬判
+            return None, bet_ev or {"error": "profile 里没有 hero_turn_probe 槽位"}
         return None, {"error": "profile 里没有 hero_turn_probe 槽位，判不了回合"}
 
-    size = size or (img.shape[1], img.shape[0])
     read = read_slot(img, profile, engine, slot, "hero_turn_probe", size, pad=0.0,
                      cache=cache, cache_key="@hero_turn")
     min_score = float(profile.thresholds.get("hero_turn_min_score",
                                              _HERO_TURN_MIN_SCORE_DEFAULT))
     evidence = {
+        "method": "preset_text",
         "text": read.text,
         "score": round(read.score, 4),
         "rect": list(read.rect),
         "ms": round(read.ms, 2),
     }
+    if bet_ev:
+        evidence["blue_button"] = bet_ev
     if read.reused:
         evidence["reused"] = True
     if read.text:

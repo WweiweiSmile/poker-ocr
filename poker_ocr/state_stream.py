@@ -157,12 +157,15 @@ class StateStream:
         record: dict | None = None
         if self.last_sig is None:
             record = self._payload(state, t, self.records + 1)   # 首帧：基线
-        elif sig == self.cand_sig:
-            self.cand_n += 1
+        else:
+            if sig == self.cand_sig:
+                self.cand_n += 1
+            else:
+                self.cand_sig, self.cand_n = sig, 1
+            # stable_frames=1 时第一次出现就记录（不再等第二帧）。
+            # 旧写法把记录判断放在「重复出现」分支里，1 帧确认也要等两帧。
             if self.cand_n >= self.stable_frames and sig != self.last_sig:
                 record = self._payload(state, t, self.records + 1)
-        else:
-            self.cand_sig, self.cand_n = sig, 1
 
         self.prev = state
         if record is not None:

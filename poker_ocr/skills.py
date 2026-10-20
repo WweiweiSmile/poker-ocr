@@ -1,8 +1,9 @@
 """教练技能库：按**当前行动街**挑技能，供实时 AI 决策使用。
 
-正文来自 `poker_ocr/skills_md_en/*.md` —— 这是 `skills_md/*.md` 的**英文翻译**
+正文来自 `poker_ocr/skills_md_en/*.md` —— 大部分是 `skills_md/*.md` 的**英文翻译**
 （`skills_md/` 保留中文，逐字同步 call-back 的 `services/skills/*.md`；JEV 等模型
-读中文较差，所以给模型的提示词用英文副本）。路由元数据（触发器 / 优先级）按 live
+读中文较差，所以给模型的提示词用英文副本）。live 专属的新增篇（如
+`preflop-limp.md`）没有中文对应的副本。路由元数据（触发器 / 优先级）按 live
 的口径在 Python 侧重写，而不是照搬 Go 的 ReviewHand 模型。
 
 与 call-back 的差异（刻意的）：
@@ -30,8 +31,11 @@ TURN = "turn"
 RIVER = "river"
 POSTFLOP_STREETS = (FLOP, TURN, RIVER)
 
-# 翻前局面形态，判据是「hero 行动前有几次加注」，与 call-back 一致
+# 翻前局面形态，判据是「hero 行动前有几次加注」，与 call-back 一致。
+# 没人加注时再分两种：没人入池（unopened）和已经有人溜入（limped）——
+# 「第一个入池必须加注」只适用于前者，溜入池里平跟是正常线路。
 SHAPE_UNOPENED = "unopened"
+SHAPE_LIMPED = "limped"
 SHAPE_SINGLE_RAISE = "single-raise"
 SHAPE_THREE_BET = "three-bet"
 
@@ -190,6 +194,13 @@ _DEFS: tuple[tuple[str, str, str, str, int, SkillTrigger, str], ...] = (
      62, SkillTrigger(streets=(PREFLOP,),
                       preflop_shapes=(SHAPE_UNOPENED,)),
      "preflop-open.md"),
+    ("preflop-limp", "Preflop Limped Pots & Set Mining",
+     "Players have limped and no one has raised before your preflop action",
+     "Over-limp pocket pairs when the call is small and the effective stack is at least "
+     "15× the call; a set flops 11.8% and the dead money pays for the misses",
+     61, SkillTrigger(streets=(PREFLOP,),
+                      preflop_shapes=(SHAPE_LIMPED,)),
+     "preflop-limp.md"),
     ("preflop-vs-open", "Preflop vs an Open", "There has been one raise before your preflop action",
      "In position lean toward calling to trap; in the blinds lean toward re-raising; "
      "almost always re-raise KK/QQ",

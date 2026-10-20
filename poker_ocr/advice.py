@@ -159,10 +159,14 @@ def build_preflop_options(snap: HandSnapshot) -> list[Option]:
                 amount, note))
         return options
 
-    # 没人加注：平跟（limp）/ 补齐盲注 / 大盲过牌，然后按位置倍数开池
+    # 没人加注：平跟（limp）/ 补齐盲注 / 大盲过牌，然后按位置倍数开池。
+    # 平跟标签必须区分「小盲补齐」和「非盲位的 over-limp」：写成 complete
+    # 会让模型以为这是小盲的补盲动作，看不到溜入池里抽 set 的线路
     hero_pos = snap.hero_position or ""
     if to_call > 0:
-        options.append(Option("call", "Call (complete)", "call", _round_bb(to_call)))
+        label = ("Complete the blind" if hero_pos == "SB"
+                 else f"Call {to_call:g}BB (over-limp)")
+        options.append(Option("call", label, "call", _round_bb(to_call)))
     elif hero_pos == "BB":
         options.append(Option("call", "Check", "check", None,
                               "Big blind sees the flop free"))
@@ -492,6 +496,12 @@ def _position_en(pos: str | None) -> str:
     return pos or "unknown"
 
 
+def _is_pocket_pair(cards: tuple[str, ...] | list[str]) -> bool:
+    """两张底牌同点数。翻前抽 set 的隐含赔率只对口袋对有意义。"""
+    return (len(cards) == 2 and all(len(c) >= 2 for c in cards)
+            and cards[0][0] == cards[1][0])
+
+
 def render_hand_facts(sit: Situation) -> str:
     """把当前局面写成紧凑的手牌历史式文本 —— 模型对这套写法先验最强。"""
     snap = sit.snap
@@ -549,11 +559,21 @@ def render_hand_facts(sit: Situation) -> str:
     lines.append("")
     lines.append("## Computed facts (trust these, don't recompute)")
     if sit.street == PREFLOP:
-        shape = {"unopened": "no one has raised", "single-raise": "one raise already",
+        shape = {"unopened": "no one has entered the pot",
+                 "limped": "limpers are in, no raise",
+                 "single-raise": "one raise already",
                  "three-bet": "a re-raise already"}
         shapes = ", ".join(shape.get(s, s) for s in snap.preflop_shapes) or "unknown"
         lines.append(f"Preflop shape: {shapes}｜Hero is preflop raiser: "
                      f"{'yes' if snap.hero_is_pfr else 'no'}")
+        # 抽 set 的隐含赔率：翻前不渲染成牌胜率，但小对子需要这组数字才能
+        # 判断「跟 1BB 看翻牌」划不划算。阈值（15-20×）来自 preflop-limp.md
+        if (to_call > 0 and effective is not None
+                and _is_pocket_pair(snap.hero_cards)):
+            lines.append(
+                f"Implied odds (pocket pair): effective stack / call = "
+                f"{effective / to_call:.0f}:1; flopping a set is 11.8% (1 in 8.5), "
+                f"so 15:1 or better makes set-mining profitable (10:1 with antes).")
     else:
         tier_en = _TIER_EN.get(sit.hand_tier, sit.hand_tier or "unknown")
         lines.append(f"My hand strength: {sit.hand_label_en or 'unreadable'}"
@@ -1067,6 +1087,8 @@ class AdviceRunner:
         self._queue: queue.Queue = queue.Queue(maxsize=1)
         self._done: queue.Queue = queue.Queue()
         self._stop = threading.Event()
+        # 模型调用进行中。主循环据此暂停识别 —— 等待期间画面只会越来越旧
+        self._busy = threading.Event()
         self._dropped = 0
         self._thread = threading.Thread(target=self._loop, name="advice",
                                         daemon=True)
@@ -1114,12 +1136,16 @@ class AdviceRunner:
                 continue
             if sit is None:
                 return
+            self._busy.set()
             try:
-                advice = advise(sit, self.settings, self.timeout, self._complete)
-            except Exception as exc:      # noqa: BLE001 — 后台线程不能死
-                self._log(f"[建议] 生成失败：{type(exc).__name__}: {exc}")
-                continue
-            self._done.put(advice)
+                try:
+                    advice = advise(sit, self.settings, self.timeout, self._complete)
+                except Exception as exc:  # noqa: BLE001 — 后台线程不能死
+                    self._log(f"[建议] 生成失败：{type(exc).__name__}: {exc}")
+                    continue
+                self._done.put(advice)
+            finally:
+                self._busy.clear()
 
     def close(self) -> None:
         self._stop.set()
@@ -1128,6 +1154,11 @@ class AdviceRunner:
         except Exception:                 # noqa: BLE001 — 队列满就直接退出
             pass
         self._thread.join(timeout=2.0)
+
+    @property
+    def busy(self) -> bool:
+        """模型调用进行中（从开始调用到结果放进 `_done`）。"""
+        return self._busy.is_set()
 
     @property
     def dropped(self) -> int:

@@ -30,6 +30,8 @@
     "_comment": "桌面区。y<0.11 是手机状态栏，y>0.855 是播放器 UI（10/20、ID、翻牌/转牌）"
   },
   "thresholds": {
+    "hero_turn_method": "preset_text",
+    "_hero_turn_method_comment": "老布局没有蓝色下注按钮；显式声明走 hero_turn_probe 文本判据，避免被误判成 blue_button。",
     "chip_min_score": 0.7,
     "name_min_score": 0.7,
     "slot_margin": 0.18,

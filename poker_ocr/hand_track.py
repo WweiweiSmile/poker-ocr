@@ -531,6 +531,10 @@ class LiveHandTracker:
         不需要在 hero 自己的行动处截断。hero 开池后被 3bet 时，两次加注都在
         记录里，形态会正确落到 three-bet。
 
+        没人加注时还要区分「没人入池」和「已经有人溜入」：前者才是
+        preflop-open 的「第一个入池必须加注」；溜入池里平跟（over-limp）是
+        正常线路，尤其是小对子抽 set。
+
         一次翻前行动都没记到（中途接管链路）时用盲注水位兜底：有人投到 1BB
         以上说明已经有人加注。宁可把一个 3bet 局面判成 single-raise，
         也不要因为「没记录」把有人加注的局面判成无人加注。
@@ -546,7 +550,9 @@ class LiveHandTracker:
                 raises = 1
 
         if raises == 0:
-            return ("unopened",)
+            limped = any(a.street == PREFLOP and a.action == "call"
+                         and not a.is_hero for a in hand.actions)
+            return ("limped",) if limped else ("unopened",)
         if raises == 1:
             return ("single-raise",)
         return ("three-bet",)

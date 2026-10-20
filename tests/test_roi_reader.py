@@ -26,11 +26,12 @@ sys.path.insert(0, str(ROOT))
 
 from poker_ocr.profile import Profile  # noqa: E402
 from poker_ocr.roi_reader import (  # noqa: E402
-    GLOBAL_FIELDS, ROI_PAD, SEAT_FIELDS, RoiRead, measure_hero_turn,
-    read_avatars, read_frame,
+    GLOBAL_FIELDS, ROI_PAD, SEAT_FIELDS, RoiRead, measure_hero_bet_button,
+    measure_hero_turn, read_avatars, read_frame,
 )
 
 WPK = ROOT / "config" / "table_wpk_1080x2400.json"
+WPK_LIVE = ROOT / "config" / "table_wpk_live.json"
 LEGACY = ROOT / "config" / "table_default.json"
 
 FAILS: list[str] = []
@@ -157,9 +158,12 @@ def test_each_roi_is_cropped_at_the_configured_slot() -> None:
     # 假引擎记录的裁剪框就是它实际收到的图 —— 和上报的 rect 必须一致
     reported = {r.rect for s in frame.seats for r in s.fields.values()}
     reported |= {r.rect for r in frame.globals.values()}
-    turn_rect = frame.hero_turn_evidence.get("rect")
-    if turn_rect:
-        reported.add(tuple(turn_rect))
+    # hero_turn 的证据里只有**真跑过 rec** 的块才在 engine.crops 里
+    # （纯颜色判据的 blue_button 证据只有 rect，没有 text，不能算）
+    for ev in (frame.hero_turn_evidence,
+               frame.hero_turn_evidence.get("blue_button") or {}):
+        if isinstance(ev, dict) and "text" in ev and ev.get("rect"):
+            reported.add(tuple(ev["rect"]))
     check(set(engine.crops) == reported,
           f"引擎实际收到的裁剪和上报的不一致：{set(engine.crops) ^ reported}")
 
@@ -227,6 +231,8 @@ def test_hero_turn_by_button_text() -> None:
     有内容但不是 BB 形（表情面板 / 遮挡）= None，不硬判。
     """
     profile = Profile.load(WPK)
+    # 这个用例测的是旧文本判据；强制走 preset_text，蓝色按钮单独测
+    profile.thresholds["hero_turn_method"] = "preset_text"
     img = make_marked()
 
     turn, ev = measure_hero_turn(img, profile, turn_engine(profile, "15BB", 0.97))
@@ -245,6 +251,68 @@ def test_hero_turn_by_button_text() -> None:
     # 形状对但分数太低（设备变暗/糊）→ 也不硬判
     turn, ev = measure_hero_turn(img, profile, turn_engine(profile, "15BB", 0.3))
     check(turn is None, f"分数低于门槛应判 None，实际 {turn}（{ev}）")
+
+
+class FixedEngine(StubEngine):
+    """不管裁到哪儿都返回固定文本（蓝色灰区测试用，颜色图无法编码坐标）。"""
+
+    def __init__(self, text: str, score: float):
+        super().__init__({})
+        self.text, self.score = text, score
+
+    def read_text(self, roi: np.ndarray) -> list[tuple[str, float]]:
+        self.crops.append((0, 0, 0, 0))
+        return [(self.text, self.score)] if self.text else []
+
+
+def _blue_avatar_image(profile: Profile, fraction: float = 1.0,
+                       size=SIZE) -> tuple[np.ndarray, tuple[int, int, int, int]]:
+    """黑底图，把 hero 头像槽的左侧 fraction 填成按钮蓝（BGR）。"""
+    img = np.zeros((size[1], size[0], 3), dtype=np.uint8)
+    rect = profile.slot_to_px(profile.seat(profile.hero_seat_id).avatar_slot,
+                              size, pad=0.0)
+    x1, y1, x2, y2 = rect
+    cut = x1 + int((x2 - x1) * fraction)
+    img[y1:y2, x1:cut] = (255, 128, 0)          # HSV ≈ 105/255/255
+    return img, rect
+
+
+def test_hero_turn_by_blue_bet_button() -> None:
+    """蓝头像槽 = 轮到我：颜色直接判，灰区才用「下注/加注」文字确认。"""
+    profile = Profile.load(WPK)
+    check(profile.thresholds.get("hero_turn_method") == "blue_button",
+          "WPK profile 应使用 blue_button 判据")
+
+    img, rect = _blue_avatar_image(profile, 1.0)
+    turn, ev = measure_hero_turn(img, profile, StubEngine({}))
+    check(turn is True, f"全蓝头像槽应判轮到我：{turn} {ev}")
+    check(ev.get("method") == "blue_button", f"应标记 blue_button：{ev}")
+    check(ev.get("blue", 0) > 0.9, f"蓝色占比应接近 1：{ev}")
+
+    # 灰区：蓝色占比 ~0.45，靠 OCR 文字「下注」确认
+    gray, _ = _blue_avatar_image(profile, 0.45)
+    turn, ev = measure_hero_bet_button(gray, profile, FixedEngine("下注", 0.9))
+    check(turn is True, f"灰区 + 「下注」应判 True：{turn} {ev}")
+    turn, ev = measure_hero_bet_button(gray, profile, FixedEngine("", 0.0))
+    check(turn is None, f"灰区且没文字应判 None：{turn} {ev}")
+
+    # 非回合：头像槽不是蓝色
+    turn, ev = measure_hero_turn(np.zeros((SIZE[1], SIZE[0], 3), np.uint8),
+                                 profile, StubEngine({}))
+    check(turn is False, f"非蓝头像槽应判 False：{turn} {ev}")
+
+
+def test_hero_turn_blue_button_without_legacy_probe() -> None:
+    """table_wpk_live 没有 hero_turn_probe，蓝色按钮仍能判。"""
+    profile = Profile.load(WPK_LIVE)
+    check("hero_turn_probe" not in profile.global_slots,
+          "live profile 不应有 hero_turn_probe（本用例的前提）")
+    img, _ = _blue_avatar_image(profile, 1.0)
+    turn, ev = measure_hero_turn(img, profile, StubEngine({}))
+    check(turn is True, f"live profile 蓝头像应判 True：{turn} {ev}")
+    turn, ev = measure_hero_turn(np.zeros((SIZE[1], SIZE[0], 3), np.uint8),
+                                 profile, StubEngine({}))
+    check(turn is False, f"live profile 非蓝头像应判 False：{turn} {ev}")
 
 
 def test_hero_turn_unknown_without_the_slot() -> None:
@@ -298,6 +366,8 @@ def test_crops_never_leave_the_image() -> None:
 def test_to_dict_and_strip() -> None:
     """调试输出：带 debug 时给 rect/ms，strip 掉之后只剩 text/score。"""
     profile = Profile.load(WPK)
+    # 这个用例用旧探针造 hero_turn=True；蓝色按钮判据单独测
+    profile.thresholds["hero_turn_method"] = "preset_text"
     engine = StubEngine(build_table(profile))
     frame = read_frame(make_marked(), profile, engine, with_dealer=False)
 
@@ -320,6 +390,8 @@ def main() -> int:
         test_hero_chip_alt_slot_only_when_primary_is_empty,
         test_seat_order_starts_at_hero_and_text_is_passed_through,
         test_hero_turn_by_button_text,
+        test_hero_turn_by_blue_bet_button,
+        test_hero_turn_blue_button_without_legacy_probe,
         test_hero_turn_unknown_without_the_slot,
         test_score_is_the_worst_box_and_text_is_concatenated,
         test_legacy_profile_degrades_with_a_note_not_a_crash,

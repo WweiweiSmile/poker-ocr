@@ -12,8 +12,8 @@
     处理不过来就覆盖旧帧，绝不让延迟越积越大。
   · **单 OCR 线程**。onnxruntime 的 session 不保证线程安全，reader 只做解码，
     `StateStream.ingest()` 永远只在主循环里调用。
-  · **0.5s 是目标节奏，不是硬承诺**。单帧实测约 0.56s，忙时自然丢帧，
-    有效频率约 1.8Hz。
+  · **默认不节流**。处理完当前帧立刻回到邮箱取最新帧，中间帧直接丢弃；
+    `--every > 0` 才按固定间隔降频（调试/降压用）。
   · **断流自动重连**。重连后清空 ROI 缓存和状态机，下一帧重新当基线；
     累计计数保留，JSONL 里用 `epoch` 区分。
   · **输出 JSONL**：一行一个完整 JSON。`session_start` / `stream_info` /
@@ -54,13 +54,16 @@ from .hand_track import LiveHandTracker
 from .ocr import OcrEngine
 from .parse import parse_blinds
 from .profile import Profile
+from .roi_reader import hero_turn_method
 from .state_stream import StateStream
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_PROFILE = PROJECT_ROOT / "config" / "table_wpk_1080x2400.json"
 DEFAULT_URL = "rtsp://127.0.0.1:8554/live"
 DEFAULT_OUT = Path("logs/live.states.jsonl")
-DEFAULT_EVERY = 0.5
+# 默认不节流：处理完当前帧立刻取邮箱里的最新帧，中间帧直接丢弃。
+# `--every` 仍保留给调试/降压用（>0 时按该间隔采样）。
+DEFAULT_EVERY = 0.0
 
 # 让 OpenCV 的 FFmpeg 后端用 TCP、少缓冲。必须在第一次 VideoCapture 之前设置。
 FFMPEG_OPTIONS = ("rtsp_transport;tcp|fflags;nobuffer|flags;low_delay|max_delay;0")
@@ -456,7 +459,7 @@ class LiveProcessor:
                  engine: OcrEngine | None = None,
                  full_config: FullTableConfig | None = None,
                  profile: Profile | None = None,
-                 stable_frames: int = 2,
+                 stable_frames: int = 1,
                  dealer_carry: int = 4,
                  every: float = DEFAULT_EVERY, max_frame_age: float = 2.0,
                  dump_dir: Path | None = None, quiet: bool = False,
@@ -571,12 +574,9 @@ class LiveProcessor:
                     t, body,
                     f"  pot={state.pot} pbs={state.pot_before_street} "
                     f"轮到我={state.hero_turn}"))
-        elif outcome.kind == "discard":
-            if not self.quiet:
-                self.log(f"  [{t:7.2f}s] 丢弃 {','.join(outcome.errors)}"
-                         f"  (复用 {outcome.reused}/{outcome.n_roi})")
-        elif not self.quiet:
-            self.log(f"  [{t:7.2f}s] 无变化 (复用 {outcome.reused}/{outcome.n_roi})")
+        # 丢弃 / 无变化的帧不会进 JSONL，属于「没被使用」的图片：不逐帧打印，
+        # 只保留记录状态的行（丢弃原因在退出汇总里仍会打印）。
+        # 注意 `_track_hand` 仍要跑：行动线/建议吃的是被接受的状态，不只是记录。
 
         # AI 建议：吃**每一帧被接受的状态**（不只被记录的）。签名里没有 action /
         # hero_turn，只吃 record 会漏掉大部分行动线。
@@ -613,6 +613,11 @@ class LiveProcessor:
             elif not self.quiet:
                 self.log(f"  [建议] 轮到我：{point.street} 需跟 {point.to_call}BB"
                          f"（未开启 AI 建议）")
+
+    @property
+    def waiting_for_advice(self) -> bool:
+        """AI 建议正在生成：主循环应暂停识别，等结果回来再处理新帧。"""
+        return self.advice_runner is not None and self.advice_runner.busy
 
     def drain_advice(self, final: bool = False) -> None:
         """把已完成的手牌/建议写进 JSONL 并打印。
@@ -698,12 +703,7 @@ class LiveProcessor:
                     t, body,
                     f"  桌型={result.table_size} "
                     f"庄位={result.dealer_seat_id}{carried}"))
-        elif outcome.kind == "discard":
-            if not self.quiet:
-                self.log(f"  [{t:7.2f}s] 丢弃 座位={result.table_size} "
-                         f"庄位={result.dealer_status}")
-        elif not self.quiet:
-            self.log(f"  [{t:7.2f}s] 无变化 ({result.table_size} 座)")
+        # 与 roi 路线一致：丢弃 / 无变化的帧不进 JSONL，不逐帧打印日志
 
         return outcome.kind
 
@@ -746,11 +746,12 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--full-config", type=Path, default=None,
                     help="full 模式的参数 JSON（FullTableConfig 字段）")
     ap.add_argument("--every", type=float, default=DEFAULT_EVERY,
-                    help="采样间隔秒（默认 0.5）")
+                    help="采样间隔秒（默认 0 = 不节流：处理完当前帧立即取最新帧，"
+                         "中间帧丢弃）")
     ap.add_argument("--out", type=Path, default=DEFAULT_OUT,
                     help=f"JSONL 输出（默认 {DEFAULT_OUT}）")
-    ap.add_argument("--stable-frames", type=int, default=2,
-                    help="新状态连续出现几帧才记录（默认 2）")
+    ap.add_argument("--stable-frames", type=int, default=1,
+                    help="新状态连续出现几帧才记录（默认 1 = 不做多帧确认）")
     ap.add_argument("--max-vanish", type=int, default=3,
                     help="在场玩家整座空白连续几帧才认定离开（默认 3）")
     ap.add_argument("--name-confirm", type=int, default=3,
@@ -768,21 +769,23 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--no-fold", action="store_true", help="不读头像（省 9 块 ROI）")
     ap.add_argument("--dump-frames", type=Path, default=None,
                     help="把每个采样帧存成 JPEG，文件名带墙钟时间（量延迟用）")
-    ap.add_argument("--ai-advice", action="store_true",
+    ap.add_argument("--ai-advice", action=argparse.BooleanOptionalAction,
+                    default=True,
                     help="轮到我时按当前街加载技能并调用 AI 给一个选项"
-                         "（需要 AI_SERVER_API_KEY / AI_SERVER_BASE_URL / "
-                         "AI_SERVER_MODEL；仅 roi 模式）")
+                         "（默认开启；用 --no-ai-advice 关闭。需要 AI_SERVER_API_KEY / "
+                         "AI_SERVER_BASE_URL / AI_SERVER_MODEL；仅 roi 模式）")
     ap.add_argument("--ai-timeout", type=float, default=20.0,
                     help="单次 AI 建议的超时秒数（默认 20）")
-    ap.add_argument("--ai-confirm", type=int, default=2,
-                    help="轮到我需要连续几帧确认（默认 2；真机按钮会闪断）")
+    ap.add_argument("--ai-confirm", type=int, default=1,
+                    help="轮到我需要连续几帧确认（默认 1 = 第一帧就触发，"
+                         "配合蓝色下注按钮；按钮会闪断的旧 UI 可调回 2）")
     ap.add_argument("--quiet", action="store_true", help="只打状态行和最终汇总")
     return ap
 
 
 def _validate_args(ap: argparse.ArgumentParser, args) -> None:
-    if args.every <= 0:
-        ap.error("--every 必须大于 0")
+    if args.every < 0:
+        ap.error("--every 不能为负数（0 = 不节流）")
     if args.max_frame_age <= 0:
         ap.error("--max-frame-age 必须大于 0")
     if args.stable_frames < 1:
@@ -886,13 +889,19 @@ def main(argv: list[str] | None = None) -> int:
         if settings is None:
             ap.error("--ai-advice 需要 AI_SERVER_API_KEY、AI_SERVER_BASE_URL、"
                      "AI_SERVER_MODEL（写在项目根目录的 .env 里，或直接设为环境变量）")
-        if "hero_turn_probe" not in profile.global_slots:
+        turn_method = hero_turn_method(profile)
+        if turn_method == "blue_button":
+            hero_seat = next(
+                (s for s in profile.seats if s.seat_id == profile.hero_seat_id), None)
+            if hero_seat is None:
+                ap.error("当前 profile 没有 hero 座位，判不出蓝色下注按钮，"
+                         "AI 建议永远不会触发")
+        elif "hero_turn_probe" not in profile.global_slots:
             # 静默不触发是最难查的故障：直接拒绝启动，让人现在就去补槽位
             ap.error(
                 "当前 profile 没有 hero_turn_probe 槽位，判不出「轮到我」，"
-                "AI 建议永远不会触发。table_wpk_live.json 由 refit 生成时没有保留"
-                "该槽位；请补上（可参考 table_wpk_1080x2400.json 的坐标并在真机帧上"
-                "验证），或改用带该槽位的 profile")
+                "AI 建议永远不会触发。请把 thresholds.hero_turn_method 设为 "
+                "blue_button（用 hero 头像槽判蓝色下注按钮），或补上 hero_turn_probe")
         advice_runner = AdviceRunner(settings, timeout=args.ai_timeout, log=_log)
         hand_tracker = LiveHandTracker(confirm_frames=args.ai_confirm)
         _log(f"[建议] 已启用 AI 建议：{settings.model}"
@@ -924,7 +933,9 @@ def main(argv: list[str] | None = None) -> int:
         hand_tracker=hand_tracker, advice_runner=advice_runner)
 
     _log(f"[启动] 拉流 {args.url}")
-    _log(f"[启动] 输出 {args.out}；间隔 {args.every}s；Ctrl-C 结束")
+    cadence = (f"间隔 {args.every}s" if args.every > 0
+               else "无节流（处理完当前帧立即取最新帧）")
+    _log(f"[启动] 输出 {args.out}；{cadence}；Ctrl-C 结束")
     reader.start()
 
     last_seq = -1
@@ -937,7 +948,9 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         while not stop.is_set():
-            packet = mailbox.wait_newer(last_seq, timeout=0.5)
+            # 事件驱动：有新帧会立刻唤醒；timeout 只是「没帧时多久回来查一次」，
+            # 不是采样间隔。默认不节流后把它调小，避免把空闲等待误当成延迟。
+            packet = mailbox.wait_newer(last_seq, timeout=0.2)
             now = time.monotonic()
 
             if packet is None:
@@ -951,6 +964,13 @@ def main(argv: list[str] | None = None) -> int:
                 if now - last_status >= 10.0:
                     _log_status(processor, reader, started_mono)
                     last_status = now
+                continue
+
+            # 模型生成建议期间不识别新帧：等待时画面只会越来越旧，继续 OCR
+            # 既浪费 CPU，也会让下一步决策基于过时画面。这里只把帧标记为已
+            # 消费，结果回来后直接处理邮箱里最新的一帧。
+            if processor.waiting_for_advice:
+                last_seq = packet.seq
                 continue
 
             shape = packet.image.shape[:2]          # (h, w)
@@ -1004,15 +1024,17 @@ def main(argv: list[str] | None = None) -> int:
                 packet = FramePacket(packet.seq, packet.epoch,
                                      packet.grab_mono, img)
 
-            delay = throttle_delay(last_start, now, args.every)
-            if delay > 0:
-                if stop.wait(delay):
-                    break
-                newer = mailbox.latest()
-                if newer is not None and newer.seq > packet.seq:
-                    packet = newer
-
-            last_start = time.monotonic()
+            # 默认不节流：处理完这一帧就回到 wait_newer，邮箱里永远只有最新一帧，
+            # 中间帧已经被 reader 覆盖丢弃。--every > 0 时才保留旧的可选降频。
+            if args.every > 0:
+                delay = throttle_delay(last_start, now, args.every)
+                if delay > 0:
+                    if stop.wait(delay):
+                        break
+                    newer = mailbox.latest()
+                    if newer is not None and newer.seq > packet.seq:
+                        packet = newer
+                last_start = time.monotonic()
             result = processor.handle(packet)
             last_seq = packet.seq
 

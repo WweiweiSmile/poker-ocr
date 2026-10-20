@@ -46,6 +46,11 @@
     "_assign_comment": "沿用 table_default 的实测口径：命中 max=0.051、被拒的下注筹码最近 2.85。收紧到 0.5 留 10 倍余量。**注意本版本的『下注 pill』(1BB/4.5BB/11BB) 正是靠这条被拒的** —— 它们不该被当成筹码。",
     "avatar_var_min": 18.0,
     "chip_pill_contrast_min": 25.0,
+    "hero_turn_method": "blue_button",
+    "hero_bet_blue_min": 0.35,
+    "hero_bet_blue_definitive": 0.55,
+    "hero_bet_text_min_score": 0.4,
+    "_hero_turn_method_comment": "轮到我时 hero 头像槽被蓝色「下注/加注」圆钮覆盖（images/roi/hero_bet.jpg：按钮 bbox 与 hero.avatar_slot 几乎重合）。实测蓝色占比：回合帧 hero_bet/130/131/132/135 = 0.85–0.86；非回合帧 126–129/133/134 = 0.000–0.003。因此以颜色为主判据（≥0.55 直接 True，<0.35 直接 False），灰区才用 OCR 文字「下注/加注」二次确认——真图里「下注」会被读成「下生」(0.72)，文字不能当硬门槛。本 profile 没有 hero_turn_probe，蓝色按钮是唯一判据。",
     "hero_turn_min_score": 0.5,
     "_hero_turn_comment": "判「轮到 hero」：读 `hero_turn_probe`（第一个预设钮的 BB 值行），文本要匹配「数字+BB」且 score ≥ 本值才算轮到我。实测：11 张静图 130/131/132/135 读出 15BB/15BB/2.5BB/3.5BB（0.97–0.99），其余 7 张为空；864x1920 视频里预设帧读 2.5BB/15BB（0.99），表情面板帧读 'Q?'/'J?'（0.21/0.30，正则和分数双重挡掉），非回合帧为空。**旧的浅灰圆片占比判据已废弃**：在那段视频上 2 次误报（表情面板）+ 11 次漏报（这台设备按钮更暗，占比 0.0266 < 0.03）—— 色彩门槛跨设备不成立，文本才成立。",
     "_occupancy_comment": "阈值沿用 table_default（估计值，手上没有空座位样张）。本版本『弃牌』是盖在头像上的深色块，会压低头像区 std —— 若线上出现空座位被误判，先怀疑这里。"

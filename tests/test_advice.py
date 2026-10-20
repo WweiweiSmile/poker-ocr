@@ -248,6 +248,19 @@ def test_snapshot_to_call_and_preflop_shape() -> None:
     check(not point.hero_is_pfr, "hero 没加注不应是 PFR")
 
 
+def test_snapshot_marks_limped_pot() -> None:
+    """有人溜入、没人加注应判 limped —— 否则会命中「第一个入池必须加注」。"""
+    tr = LiveHandTracker(confirm_frames=1)
+    players = (player("hero", position="UTG+1", stack=100.0),
+               player("a", position="UTG", bet=1.0, action="call", name="老王"),
+               player("b", position="BB", bet=1.0, name="小李"))
+    feed(tr, state(*players, pot=2.5, pbs=0.0), ["4s", "4h"], [])
+    point = feed(tr, state(*players, pot=2.5, pbs=0.0, hero_turn=True),
+                 ["4s", "4h"], [])
+    check(point is not None and point.preflop_shapes == ("limped",),
+          f"一次溜入应判 limped，实际 {getattr(point, 'preflop_shapes', None)}")
+
+
 # ─────────────────────────── 技能路由 ───────────────────────────
 
 def context(**kw) -> skills.SkillContext:
@@ -263,7 +276,7 @@ def codes(selected) -> list[str]:
 
 def test_skill_library_loads_all_files() -> None:
     all_ = skills.all_skills()
-    check(len(all_) == 14, f"应有 14 篇技能，实际 {len(all_)}")
+    check(len(all_) == 15, f"应有 15 篇技能，实际 {len(all_)}")
     check(all(s.body.strip() for s in all_), "每篇都应有正文")
     core = next(s for s in all_ if s.code == "core-stance")
     check("Core Stance" in core.body, "core-stance 正文不对")
@@ -315,6 +328,11 @@ def test_skill_selection_preflop_shapes() -> None:
     three = codes(skills.select_skills(context(
         street="preflop", preflop_shapes=("three-bet",))))
     check("preflop-3bet-pot" in three, f"3bet 底池应展开：{three}")
+
+    limped = codes(skills.select_skills(context(
+        street="preflop", preflop_shapes=("limped",))))
+    check("preflop-limp" in limped and "preflop-open" not in limped,
+          f"溜入池应展开抽 set 技能，而不是「第一个入池」：{limped}")
 
 
 def test_skill_selection_draw_and_multiway_and_cbet() -> None:
@@ -511,6 +529,27 @@ def test_prompt_renders_value_directive_and_draw_equity() -> None:
           "成牌不该渲染四二法则胜率（outs 数的是改良张数，不是胜率）")
 
 
+def test_prompt_renders_implied_odds_for_pocket_pair() -> None:
+    """翻前口袋对应给出「有效筹码 / 跟注额」，模型才能判断抽 set 划不划算。"""
+    from poker_ocr.hand_track import OpponentSnapshot
+
+    def preflop(cards):
+        return build_situation(make_point(
+            street="preflop", board=(), to_call=1.0, pot=7.0,
+            hero_position="UTG+1", hero_cards=cards, hero_bet=0.0,
+            hero_stack=101.5,
+            opponents=(OpponentSnapshot("a", "老王", "BB", 56.0, 0.0, False),),
+            preflop_shapes=("limped",), cbet_spot=False))
+
+    user = render_hand_facts(preflop(("4s", "4h")))
+    check("Implied odds" in user and "56:1" in user,
+          f"口袋对翻前应渲染隐含赔率：{user}")
+    check("limpers are in, no raise" in user, f"limped 形态文案不对：{user}")
+
+    check("Implied odds" not in render_hand_facts(preflop(("Ah", "Kd"))),
+          "非口袋对不该渲染抽 set 隐含赔率")
+
+
 def test_options_preflop_uses_bb_sizing() -> None:
     """翻前不能给「底池的 1/3」这种尺度：底池只有盲注，而且技能明确要求用 bb。"""
     unopened = make_point(street="preflop", board=(), to_call=0.0, pot=1.5,
@@ -539,7 +578,17 @@ def test_options_preflop_uses_bb_sizing() -> None:
     by = {o.id: o for o in build_options(sb)}
     check("raise-3x" not in by and "open-3" in by,
           f"小盲补齐不该当成面对加注：{list(by)}")
-    check(by["call"].amount == 0.5, f"补齐额应是 0.5BB：{by['call']}")
+    check(by["call"].amount == 0.5 and "Complete" in by["call"].label,
+          f"小盲补齐的标签应是 Complete：{by['call']}")
+
+    # 非盲位面对溜入是 over-limp，不能写成补盲（complete）
+    limp = make_point(street="preflop", board=(), to_call=1.0, pot=7.0,
+                      hero_position="UTG+1", hero_cards=("4s", "4h"),
+                      hero_bet=0.0, hero_stack=101.5,
+                      preflop_shapes=("limped",), cbet_spot=False)
+    by = {o.id: o for o in build_options(limp)}
+    check(by["call"].amount == 1.0 and "over-limp" in by["call"].label,
+          f"非盲位平跟应标 over-limp：{by['call']}")
 
 
 def test_options_facing_bet_uses_pot_after_call() -> None:
@@ -848,6 +897,34 @@ def test_advice_runner_does_not_block() -> None:
           f"后台结果应能取回：{got}")
 
 
+def test_advice_runner_reports_busy_while_waiting() -> None:
+    """生成建议期间 busy=True，主循环据此暂停识别帧。"""
+    import threading
+    import time
+
+    sit = build_situation(make_point(to_call=0.0))
+    started = threading.Event()
+    release = threading.Event()
+
+    def blocking(settings, system, user, timeout=20.0, options=None):
+        started.set()
+        release.wait(2.0)
+        return {"option": "call", "reason": "x"}
+
+    runner = AdviceRunner(SETTINGS, complete=blocking)
+    check(not runner.busy, "初始不应 busy")
+    runner.submit(sit)
+    check(started.wait(2.0), "模型调用应开始")
+    check(runner.busy, "等待模型返回期间应 busy")
+    release.set()
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline and runner.busy:
+        time.sleep(0.01)
+    check(not runner.busy, "结果返回后应清除 busy")
+    check(len(runner.poll()) == 1, "结果应可取回")
+    runner.close()
+
+
 # ─────────────────────────── 主流程 ───────────────────────────
 
 def main() -> int:
@@ -860,6 +937,7 @@ def main() -> int:
         test_tracker_board_drop_needs_two_frames,
         test_tracker_decision_point_confirmed_and_deduped,
         test_snapshot_to_call_and_preflop_shape,
+        test_snapshot_marks_limped_pot,
         test_skill_library_loads_all_files,
         test_skill_text_matches_call_back_copy,
         test_skill_selection_is_street_scoped,
@@ -873,6 +951,7 @@ def main() -> int:
         test_one_pair_does_not_stack_off_against_a_raise,
         test_straight_is_not_nuts_on_a_flush_board,
         test_prompt_renders_value_directive_and_draw_equity,
+        test_prompt_renders_implied_odds_for_pocket_pair,
         test_options_preflop_uses_bb_sizing,
         test_options_facing_bet_uses_pot_after_call,
         test_options_bump_to_min_raise_when_fraction_too_small,
@@ -891,6 +970,7 @@ def main() -> int:
         test_ai_settings_reads_referer_and_title,
         test_parse_json_content_tolerates_fence,
         test_advice_runner_does_not_block,
+        test_advice_runner_reports_busy_while_waiting,
     ]
     for t in tests:
         before = len(FAILS)
