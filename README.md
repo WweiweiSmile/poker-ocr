@@ -55,6 +55,44 @@ mediamtx config/mediamtx.yml
   --out logs/live.states.jsonl
 ```
 
+### AI 实时建议（可选）
+
+`--ai-advice` 打开后，worker 会在**轮到我**时把这一手的完整行动线交给模型，
+按**当前行动街**加载教练技能（方法论文本与 call-back 的 `services/skills/` 一致），
+让它从固定选项里选一个：
+
+```
+翻后：弃牌 / 跟注（没人下注时是过牌）/ 加注到底池 1/3 / 1/2 / 2/3 / 1 倍 / 1.2 倍
+翻前：弃牌 / 平跟（或过牌）/ 开池到 2.5-4BB（按位置档）/ 面对加注时 3× 或 4× 上家加注
+```
+
+翻前不用底池倍数：底池只有盲注那么大，而且 `preflop-open.md` 明确要求尺度用
+bb 说。金额由程序按现场底池/加注算好（含最小加注额与后手封顶），模型只返回
+选项 id，所以它不可能给出做不出来的尺度。模型调用在后台线程跑，**不阻塞采样**；
+结果写进 JSONL 的 `advice` 记录并在终端打印一行。
+
+```bash
+cp .env.example .env      # 然后编辑 .env，填入 AI_SERVER_API_KEY
+
+.venv/bin/python -m poker_ocr.live \
+  --url rtsp://127.0.0.1:8554/live \
+  --profile config/table_wpk_1080x2400.json \
+  --initial-blinds 1/2 --ai-advice \
+  --out logs/live.states.jsonl
+```
+
+`.env` 默认从**项目根目录**读，找不到再退到启动时的 CWD；`ENV_FILE=/path/to/.env`
+可以显式指定（指定了却读不到会直接启动失败）。**环境变量优先**：已经 export
+的同名变量不会被 `.env` 覆盖。`.env` 已被 `.gitignore` 忽略，模板是 `.env.example`。
+
+- **需要 profile 里有 `hero_turn_probe` 槽位**（`table_wpk_1080x2400.json` 有，
+  `table_wpk_live.json` 没有）。缺了它判不出「轮到我」，worker 会拒绝启动并说明原因。
+- 只支持 `--recognizer roi`：全图路线读不到每座的本街下注，算不出跟注额。
+- 换手时另外写一条 `hand` 记录，含这一手完整的逐街行动线（对手 + 自己），
+  可以直接拿去复盘或对照。
+- 模型超时/报错/返回了不在选项里的答案时，记录标 `source=fallback`：
+  面对下注→弃牌，否则→过牌（最保守），并保留 `error` 原因，绝不猜。
+
 ### 抓帧 → 裁剪 → 验证 → 重新标注
 
 同一台设备/OBS 布局下，建议先用真实帧重新标定一次：

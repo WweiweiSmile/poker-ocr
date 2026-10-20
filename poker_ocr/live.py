@@ -45,9 +45,12 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from .advice import AISettings, AdviceRunner, build_situation
 from .cards import CardsResult, recognize_cards
+from .env import EnvFileError, load_env
 from .full_table import (DealerTracker, FullOutcome, FullStateRecorder,
                          FullTableConfig, load_full_config, observe_full)
+from .hand_track import LiveHandTracker
 from .ocr import OcrEngine
 from .parse import parse_blinds
 from .profile import Profile
@@ -457,6 +460,8 @@ class LiveProcessor:
                  dealer_carry: int = 4,
                  every: float = DEFAULT_EVERY, max_frame_age: float = 2.0,
                  dump_dir: Path | None = None, quiet: bool = False,
+                 hand_tracker: LiveHandTracker | None = None,
+                 advice_runner: AdviceRunner | None = None,
                  clock=time.monotonic, log=_log) -> None:
         if recognizer not in ("roi", "full"):
             raise ValueError(f"未知 recognizer：{recognizer}")
@@ -480,6 +485,11 @@ class LiveProcessor:
         self.max_frame_age = max_frame_age
         self.dump_dir = dump_dir
         self.quiet = quiet
+        # AI 建议只在 roi 路线可用：全图路线读不到每座的「本街下注」，
+        # 也没有 hero_turn，算不出跟注额与选项金额
+        self.hand_tracker = hand_tracker
+        self.advice_runner = advice_runner
+        self.advice_count = 0
         self.clock = clock
         self.log = log
 
@@ -507,6 +517,8 @@ class LiveProcessor:
                     self.full_recorder.reset()
                 if self.dealer_tracker is not None:
                     self.dealer_tracker.reset()
+                if self.hand_tracker is not None:
+                    self.hand_tracker.reset()
             self.last_epoch = packet.epoch
 
         age = now - packet.grab_mono
@@ -566,7 +578,70 @@ class LiveProcessor:
         elif not self.quiet:
             self.log(f"  [{t:7.2f}s] 无变化 (复用 {outcome.reused}/{outcome.n_roi})")
 
+        # AI 建议：吃**每一帧被接受的状态**（不只被记录的）。签名里没有 action /
+        # hero_turn，只吃 record 会漏掉大部分行动线。
+        self._track_hand(outcome, cards)
         return outcome.kind
+
+    def _track_hand(self, outcome, cards: CardsResult | None) -> None:
+        """累积行动线；轮到我时把决策点投给后台建议线程。
+
+        先取结果再投新决策点：上一回合的答案先落库，再排新的。
+        """
+        self.drain_advice()
+
+        if self.hand_tracker is None or outcome.state is None or not outcome.state.ok:
+            return
+        hero_codes = cards.hero_codes if cards is not None else []
+        board = cards.board_codes if cards is not None else []
+        point = self.hand_tracker.observe(outcome.state, hero_codes, board)
+        if point is not None:
+            self.advice_count += 1
+            if self.advice_runner is not None:
+                # 一个坏快照不能把整条拉流链路带下去
+                try:
+                    situation = build_situation(point)
+                except Exception as exc:      # noqa: BLE001
+                    self.log(f"  [建议] 局面构建失败：{type(exc).__name__}: {exc}")
+                    return
+                self.advice_runner.submit(situation)
+                if not self.quiet:
+                    self.log(f"  [建议] 轮到我：{point.street} 手牌 "
+                             f"{''.join(point.hero_cards) or '?'} "
+                             f"牌面 {''.join(point.board) or '-'} "
+                             f"需跟 {point.to_call}BB（生成中…）")
+            elif not self.quiet:
+                self.log(f"  [建议] 轮到我：{point.street} 需跟 {point.to_call}BB"
+                         f"（未开启 AI 建议）")
+
+    def drain_advice(self, final: bool = False) -> None:
+        """把已完成的手牌/建议写进 JSONL 并打印。
+
+        `final=True` 在退出时调用：最后一手牌等不到「换手」，也要落库。
+        """
+        if self.hand_tracker is not None:
+            finished = self.hand_tracker.take_finished()
+            if finished is not None:
+                self.writer.write({"type": "hand", "ts": _iso_now(), **finished})
+            if final:
+                current = self.hand_tracker.take_current()
+                if current is not None:
+                    self.writer.write({"type": "hand", "ts": _iso_now(),
+                                       "partial": True, **current})
+
+        if self.advice_runner is None:
+            return
+        for advice in self.advice_runner.poll():
+            self.writer.write({"type": "advice", "ts": _iso_now(),
+                               **advice.to_dict()})
+            self._log_advice(advice)
+
+    def _log_advice(self, advice) -> None:
+        option = advice.option
+        amount = f" {option.amount}BB" if option.amount is not None else ""
+        tail = f"（{advice.error}）" if advice.error else ""
+        self.log(f"  [建议] {advice.street} ⇒ {option.label}{amount}"
+                 f"｜{advice.reason}{tail}")
 
     def _read_cards(self, img: np.ndarray) -> CardsResult | None:
         """每帧读一次公共牌 / hero 手牌。
@@ -693,6 +768,14 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--no-fold", action="store_true", help="不读头像（省 9 块 ROI）")
     ap.add_argument("--dump-frames", type=Path, default=None,
                     help="把每个采样帧存成 JPEG，文件名带墙钟时间（量延迟用）")
+    ap.add_argument("--ai-advice", action="store_true",
+                    help="轮到我时按当前街加载技能并调用 AI 给一个选项"
+                         "（需要 AI_SERVER_API_KEY / AI_SERVER_BASE_URL / "
+                         "AI_SERVER_MODEL；仅 roi 模式）")
+    ap.add_argument("--ai-timeout", type=float, default=20.0,
+                    help="单次 AI 建议的超时秒数（默认 20）")
+    ap.add_argument("--ai-confirm", type=int, default=2,
+                    help="轮到我需要连续几帧确认（默认 2；真机按钮会闪断）")
     ap.add_argument("--quiet", action="store_true", help="只打状态行和最终汇总")
     return ap
 
@@ -712,6 +795,12 @@ def _validate_args(ap: argparse.ArgumentParser, args) -> None:
         ap.error("--dealer-carry 不能为负")
     if args.max_frames < 0:
         ap.error("--max-frames 不能为负")
+    if args.ai_advice and args.recognizer != "roi":
+        ap.error("--ai-advice 只支持 --recognizer roi：全图路线读不到每座本街下注和轮到我")
+    if args.ai_timeout <= 0:
+        ap.error("--ai-timeout 必须大于 0")
+    if args.ai_confirm < 1:
+        ap.error("--ai-confirm 至少为 1")
 
 
 def _install_signals(stop: threading.Event) -> None:
@@ -729,6 +818,19 @@ def main(argv: list[str] | None = None) -> int:
     ap = build_parser()
     args = ap.parse_args(argv)
     _validate_args(ap, args)
+
+    # `.env` 在任何配置读取之前加载：已存在的环境变量优先，文件只补齐。
+    # 找不到文件不报错（全靠环境变量是合法部署方式），但 --ai-advice 下会告警 ——
+    # 「.env 明明放了却没生效」是这类配置最难查的故障
+    try:
+        env_load = load_env()
+    except EnvFileError as exc:
+        ap.error(str(exc))
+    if env_load.found:
+        overridden = (f"，其中 {len(env_load.kept)} 项环境变量已存在、未覆盖"
+                      if env_load.kept else "")
+        _log(f"[启动] 已加载 .env：{env_load.path}（{len(env_load.applied)} 项{overridden}）")
+
     if args.crop is None:
         args.crop = "auto"
     initial_blinds = None
@@ -772,6 +874,31 @@ def main(argv: list[str] | None = None) -> int:
             lenient_chips=args.lenient_chips,
         )
 
+    advice_runner = None
+    hand_tracker = None
+    if args.ai_advice:
+        if not env_load.found:
+            _log("[建议] 没找到 .env（找过 "
+                 + "、".join(str(p) for p in env_load.tried)
+                 + "），改用环境变量")
+        source = "dotenv" if "AI_SERVER_API_KEY" in env_load.applied else "env"
+        settings = AISettings.from_env(source=source)
+        if settings is None:
+            ap.error("--ai-advice 需要 AI_SERVER_API_KEY、AI_SERVER_BASE_URL、"
+                     "AI_SERVER_MODEL（写在项目根目录的 .env 里，或直接设为环境变量）")
+        if "hero_turn_probe" not in profile.global_slots:
+            # 静默不触发是最难查的故障：直接拒绝启动，让人现在就去补槽位
+            ap.error(
+                "当前 profile 没有 hero_turn_probe 槽位，判不出「轮到我」，"
+                "AI 建议永远不会触发。table_wpk_live.json 由 refit 生成时没有保留"
+                "该槽位；请补上（可参考 table_wpk_1080x2400.json 的坐标并在真机帧上"
+                "验证），或改用带该槽位的 profile")
+        advice_runner = AdviceRunner(settings, timeout=args.ai_timeout, log=_log)
+        hand_tracker = LiveHandTracker(confirm_frames=args.ai_confirm)
+        _log(f"[建议] 已启用 AI 建议：{settings.model}"
+             f"（凭据来源 {settings.source}，超时 {args.ai_timeout}s，"
+             f"连续 {args.ai_confirm} 帧确认）")
+
     writer = JsonlWriter(args.out)
     writer.write({
         "type": "session_start",
@@ -781,6 +908,7 @@ def main(argv: list[str] | None = None) -> int:
         "recognizer": args.recognizer,
         "full_config": str(args.full_config) if args.full_config else None,
         "every": args.every,
+        "ai_advice": bool(args.ai_advice),
         "resolution": None,
     })
 
@@ -792,7 +920,8 @@ def main(argv: list[str] | None = None) -> int:
         profile=profile,
         stable_frames=args.stable_frames, dealer_carry=args.dealer_carry,
         every=args.every, max_frame_age=args.max_frame_age,
-        dump_dir=args.dump_frames, quiet=args.quiet)
+        dump_dir=args.dump_frames, quiet=args.quiet,
+        hand_tracker=hand_tracker, advice_runner=advice_runner)
 
     _log(f"[启动] 拉流 {args.url}")
     _log(f"[启动] 输出 {args.out}；间隔 {args.every}s；Ctrl-C 结束")
@@ -897,6 +1026,11 @@ def main(argv: list[str] | None = None) -> int:
         mailbox.close()
         reader.join(timeout=2.0)
 
+        # 关掉建议线程前先把已完成的结果落库；正在跑的那一次不再等
+        if advice_runner is not None:
+            advice_runner.close()
+            processor.drain_advice(final=True)
+
         elapsed = time.monotonic() - started_mono
         summary = {
             "elapsed_seconds": round(elapsed, 1),
@@ -905,6 +1039,7 @@ def main(argv: list[str] | None = None) -> int:
             "avg_proc_ms": round(processor.avg_proc_ms, 1),
             "eff_hz": round(processor.processed / elapsed, 2) if elapsed else 0,
             "reconnects": reader.reconnects,
+            "advice_count": processor.advice_count,
             **processor.summary(),
         }
         writer.write({"type": "session_end", "ended_at": _iso_now(),

@@ -74,6 +74,29 @@ ROI 路线只裁固定槽位、只跑 rec，不跑全图检测，是实时链路
 - 盲注读不到时继承上一帧（`blinds.source = "carried"`）
 - 断流自动重连，JSONL 用 `epoch` 区分会话
 
+### AI 实时建议（`--ai-advice`，可选）
+
+- **触发**：`hero_turn` 连续 `--ai-confirm` 帧为真（默认 2，真机预设按钮会在
+  一个回合内闪断），且这个决策点的指纹（行动条数 / 底池 / 最高下注）没建议过。
+  多人池里 hero 过牌、对手下注、又轮回 hero 时会给第二次建议。
+- **行动线**：吃**每一帧被接受的状态**（不只 JSONL 里被记录的）。动作徽章与
+  轮到我都被排除在变化指纹之外，只吃 `state` 记录会漏掉大量过牌/跟注。
+  每座每街按「徽章 + 本街下注额」落一条，重复帧合并。
+- **技能**：只加载**当前行动街**的技能（与 call-back 的
+  `services/skills/*.md` 正文逐字一致），常驻 `core-stance` + `odds-table`，
+  再按翻前形态 / 牌力分档 / 听牌 / 多人池 / cbet 点路由专项技能。
+- **选项**：翻后是弃牌、跟注（没人下注时是过牌）、加注到底池 1/3、1/2、2/3、1、
+  1.2 倍；翻前换成 bb 口径 —— 平跟/过牌 + 开池到 2.5~4BB（按位置档、前注×2、
+  每个溜入者 +1BB），面对加注时是 3×/4× 上家加注。
+  金额由程序算好（翻后口径为「当前最高下注 + f ×（底池 + 需跟额）」），低于最小
+  加注额会抬到合法值，超过后手会封顶为全下；模型只返回选项 id。
+- **执行**：模型调用在后台线程，单次超时 `--ai-timeout`；主循环不等待，
+  采样频率不受影响。失败时回退到最保守动作并记录原因。
+- **凭据**：读 `AI_SERVER_API_KEY / AI_SERVER_BASE_URL / AI_SERVER_MODEL`。
+  写在项目根目录的 `.env`（模板 `.env.example`）或直接设为环境变量，环境变量优先。
+  `.env` 找不到时退到启动 CWD；`ENV_FILE` 可显式指定路径（读不到直接启动失败）。
+  启动日志会打印命中的 `.env` 路径与凭据来源，但**不打印 Key**。
+
 ### 工具链（抓帧 → 裁剪 → 验证 → 重新标注）
 
 | 工具 | 作用 |
@@ -348,13 +371,15 @@ cd ~/codes/poker-ocr
 
 ## 6. 输出 JSONL
 
-每行一个完整 JSON，立即 flush。共 4 种记录：
+每行一个完整 JSON，立即 flush。共 6 种记录：
 
 | `type` | 时机 |
 |---|---|
 | `session_start` | 启动时一条 |
 | `stream_info` | 分辨率 / 宽高比变化时一条 |
 | `state` | 产生新状态时（防抖后） |
+| `hand` | 换手时一条：上一手完整的逐街行动线（仅 `--ai-advice`） |
+| `advice` | AI 建议完成时一条（仅 `--ai-advice`） |
 | `session_end` | 退出时一条（含汇总） |
 
 ### 6.1 `session_start`
@@ -436,7 +461,51 @@ cd ~/codes/poker-ocr
   "record_count":1,"roi_reuse":{...},"recognizer":"roi"}}
 ```
 
-### 6.5 丢弃语义
+### 6.5 `advice`
+
+```json
+{"type":"advice","ts":"...","hand_id":"h7","street":"flop",
+ "hero_cards":["Ah","Kd"],"board":["Ks","7d","2c"],
+ "pot":19.5,"to_call":8.0,
+ "option":{"id":"raise-1/2","label":"加注到底池 1/2","kind":"raise",
+           "amount_bb":25.75},
+ "reason":"顶对顶踢被加注，牌面干燥，按成牌打法加注求价值",
+ "source":"model","model":"deepseek-chat",
+ "skill_codes":["core-stance","odds-table","opponent-read","postflop-made-hand"],
+ "duration_ms":1840}
+```
+
+| 字段 | 含义 |
+|---|---|
+| `hand_id` | 第几手（换手时 +1） |
+| `option.id` | 模型选的选项。翻后：`fold` / `call` / `raise-1/3` / `raise-1/2` / `raise-2/3` / `raise-1` / `raise-1.2`（没人下注时 `call` 表示**过牌**）；翻前：`fold` / `call` / `open-2.5`…`open-4` / `raise-3x` / `raise-4x` |
+| `option.amount_bb` | 加注后的**本街总额**；跟注为需跟额 |
+| `source` | `model` = 模型选的；`fallback` = 超时/报错/非法选项，按最保守动作 |
+| `skill_codes` | 本次按当前街展开的技能 |
+| `error` | 仅 `fallback` 时出现，说明原因 |
+| `duration_ms` | 模型调用耗时（后台，不影响采样） |
+
+### 6.6 `hand`
+
+换手时写一条，内容是**上一手完整的逐街行动线**（对手与自己都记），可直接用于复盘。
+退出时若最后一手还没换手，也会写一条并标 `"partial":true`。
+
+```json
+{"type":"hand","ts":"...","hand_id":"h6",
+ "hero_cards":["Ah","Kd"],"hero_position":"BTN","table_size":6,
+ "blinds":{"sb":0.5,"bb":1.0,"ante":null,"raw":"1/2"},
+ "board":["Ks","7d","2c"],"pot":19.5,
+ "streets":[
+   {"street":"preflop","pot_start":0.0,"actions":[
+     {"seat_id":"a","name":"老王","position":"CO","action":"raise",
+      "amount":3.0,"all_in":false,"is_hero":false},
+     {"seat_id":"hero","name":"me","position":"BTN","action":"call",
+      "amount":3.0,"all_in":false,"is_hero":true}]},
+   {"street":"flop","pot_start":6.0,"actions":[...]}
+ ]}
+```
+
+### 6.7 丢弃语义
 
 `state` 记录只在**所有字段都可精准识别**时产生。以下情况整帧丢弃：
 
@@ -474,6 +543,9 @@ cd ~/codes/poker-ocr
 | `--no-fold` | 关 | 不读头像，省 9 块 ROI，失去弃牌检测 |
 | `--dump-frames` | 无 | 采样帧存 JPEG |
 | `--max-frames` | `0` | 最多处理多少帧（0 = 不限） |
+| `--ai-advice` | 关 | 轮到我时加载当前街技能并调用 AI 选一个选项（仅 roi 模式） |
+| `--ai-timeout` | `20` | 单次 AI 建议超时（秒）；后台线程，不阻塞采样 |
+| `--ai-confirm` | `2` | `hero_turn` 连续几帧才认定轮到我 |
 | `--quiet` | 关 | 只打状态行和最终汇总 |
 
 ---
@@ -527,6 +599,18 @@ cd ~/codes/poker-ocr
 - 每次启动覆盖同一个 JSONL；只允许一个 worker 写同一个文件。
 - 严格质量闸意味着摊牌、弹窗、动画帧会被丢弃，输出比实际帧稀疏。
 - 不接后端/前端；当前只有文件和日志。
+- **AI 建议只在 roi 路线可用**：全图路线没有每座的本街下注，也没有 `hero_turn`，
+  算不出跟注额和选项金额。
+- **AI 建议依赖 profile 的 `hero_turn_probe` 槽位**。`table_wpk_live.json`
+  由 refit 生成时没有这个槽位（它只在 `table_wpk_1080x2400.json` 里），
+  用该 profile 开 `--ai-advice` 会**拒绝启动**并提示补槽位 —— 静默永不触发
+  是这里最难查的故障。
+- 同一次采样里如果读到了两个人的动作，**先后顺序无法还原**，按座位环序记录；
+  牌桌上的实际顺序可能不同。单次采样 0.5s，实际很少发生。
+- 中途接管链路时（worker 在牌局中间启动），启动前的行动线缺失；翻前形态会用
+  「最高下注 > 大盲」兜底判成至少一次加注，但更细的形态（3bet/4bet）判不出来。
+- 模型延迟通常在数秒级，建议返回时 hero 可能已经行动；`advice` 记录照常落库，
+  但实时提示价值随延迟下降。需要更快时换更快的模型/网关。
 
 ## 11. 测试
 
@@ -534,5 +618,6 @@ cd ~/codes/poker-ocr
 .venv/bin/python tests/run_all.py
 ```
 
-共 13 个套件，覆盖位置推导、庄位、ROI 读取/去重、解析、状态机、全图路线、
-runtime profile、实时邮箱/限速/JSONL 和 HTTP 接口。
+共 16 个套件，覆盖位置推导、`.env` 加载、翻后规则、实时建议链路、庄位、
+ROI 读取/去重、解析、状态机、全图路线、runtime profile、实时邮箱/限速/JSONL
+和 HTTP 接口。

@@ -5,6 +5,11 @@ __pycache__/
 .DS_Store
 .idea/
 
+# 本地配置（含模型 Key）。.env.example 是可提交的模板
+.env
+.env.*
+!.env.example
+
 # 实时识别的运行产物
 logs/
 images/

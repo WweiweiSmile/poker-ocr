@@ -30,6 +30,8 @@ from poker_ocr.live import (  # noqa: E402
     AspectFit, FramePacket, JsonlWriter, LatestFrame, LiveProcessor, plan_crop,
     throttle_delay,
 )
+from poker_ocr.frame_state import FrameState, PlayerState  # noqa: E402
+from poker_ocr.hand_track import LiveHandTracker  # noqa: E402
 from poker_ocr.state_stream import FrameOutcome  # noqa: E402
 
 FAILS: list[str] = []
@@ -334,6 +336,104 @@ def test_jsonl_is_one_complete_object_per_line() -> None:
         check(parsed[1]["pot"] == 40.0, "第二行应完整")
 
 
+def test_ai_advice_submits_on_hero_turn_once() -> None:
+    """轮到我时投一次决策点；同一个回合的后续帧不重复投。"""
+    class TurnStream(StubStateStream):
+        def ingest(self, img, frame_id: str, t: float, *,
+                   extra_signature: tuple | None = None) -> FrameOutcome:
+            self.extra_signatures.append(extra_signature)
+            st = FrameState(
+                frame_id=frame_id, table_seats=3, players_in_hand=3,
+                players=[
+                    PlayerState("hero", name="me", position="BTN", stack=100.0,
+                                bet=0.0, in_hand=True),
+                    PlayerState("a", name="A", position="SB", stack=99.5,
+                                bet=1.0, action="call", in_hand=True),
+                    PlayerState("b", name="B", position="BB", stack=99.0,
+                                bet=1.0, in_hand=True),
+                ],
+                blinds=live.parse_blinds("1/2"), dealer="hero",
+                hero_seat_id="hero", hero_turn=True, pot=2.5,
+                pot_before_street=0.0)
+            return FrameOutcome("no_change", st, [], None, 0, 0)
+
+    class FakeRunner:
+        def __init__(self) -> None:
+            self.situations: list[dict] = []
+
+        def submit(self, sit) -> bool:
+            self.situations.append({"street": sit.street,
+                                    "options": [o.id for o in sit.options]})
+            return True
+
+        def poll(self):
+            return []
+
+    runner = FakeRunner()
+    tracker = LiveHandTracker(confirm_frames=1)
+    fake_cards = SimpleNamespace(hero_codes=["Ah", "Kd"], board_codes=[],
+                                 warnings=[])
+    with patch.object(live, "recognize_cards", lambda img, profile: fake_cards):
+        proc = LiveProcessor(TurnStream(), StubWriter(), quiet=True,
+                             profile=SimpleNamespace(), hand_tracker=tracker,
+                             advice_runner=runner)
+        proc.handle(packet(1))
+        proc.handle(packet(2))
+    check(len(runner.situations) == 1,
+          f"轮到我应投一次建议，实际 {runner.situations}")
+    check("open-3.5" in runner.situations[0]["options"],
+          f"翻前选项应是 bb 口径的开池：{runner.situations[0]}")
+    with patch.object(live, "recognize_cards", lambda img, profile: fake_cards):
+        proc.handle(packet(2))
+    check(len(runner.situations) == 1,
+          f"同一个决策点不应重复投：{runner.situations}")
+
+
+def test_ai_advice_waits_for_hero_cards() -> None:
+    """读不到手牌时不给建议（宁可晚一帧，也不给一个不知道手牌的答案）。"""
+    class TurnStream(StubStateStream):
+        def ingest(self, img, frame_id: str, t: float, *,
+                   extra_signature: tuple | None = None) -> FrameOutcome:
+            st = FrameState(
+                frame_id=frame_id, table_seats=2, players_in_hand=2,
+                players=[
+                    PlayerState("hero", name="me", position="BTN", stack=100.0,
+                                bet=0.0, in_hand=True),
+                    PlayerState("a", name="A", position="BB", stack=99.0,
+                                bet=1.0, in_hand=True),
+                ],
+                blinds=live.parse_blinds("1/2"), dealer="hero",
+                hero_seat_id="hero", hero_turn=True, pot=1.5,
+                pot_before_street=0.0)
+            return FrameOutcome("no_change", st, [], None, 0, 0)
+
+    class FakeRunner:
+        def __init__(self) -> None:
+            self.count = 0
+
+        def submit(self, sit) -> bool:
+            self.count += 1
+            return True
+
+        def poll(self):
+            return []
+
+    runner = FakeRunner()
+    tracker = LiveHandTracker(confirm_frames=1)
+    empty = SimpleNamespace(hero_codes=[], board_codes=[], warnings=[])
+    with patch.object(live, "recognize_cards", lambda img, profile: empty):
+        proc = LiveProcessor(TurnStream(), StubWriter(), quiet=True,
+                             profile=SimpleNamespace(), hand_tracker=tracker,
+                             advice_runner=runner)
+        proc.handle(packet(1))
+    check(runner.count == 0, "没读到手牌不该投建议")
+
+    cards = SimpleNamespace(hero_codes=["Ah", "Kd"], board_codes=[], warnings=[])
+    with patch.object(live, "recognize_cards", lambda img, profile: cards):
+        proc.handle(packet(2))
+    check(runner.count == 1, f"读到手牌后应补投一次，实际 {runner.count}")
+
+
 def main() -> int:
     tests = [
         test_mailbox_keeps_only_latest,
@@ -355,6 +455,8 @@ def main() -> int:
         test_full_recognizer_writes_state,
         test_state_payload_orders_hero_board_opponents,
         test_jsonl_is_one_complete_object_per_line,
+        test_ai_advice_submits_on_hero_turn_once,
+        test_ai_advice_waits_for_hero_cards,
     ]
     for t in tests:
         before = len(FAILS)
