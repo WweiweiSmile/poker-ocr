@@ -487,7 +487,11 @@ def _fmt_actions(actions: list[ActionRecord], hero_name: str = "Hero") -> str:
     parts = []
     for a in actions:
         who = hero_name if a.is_hero else (a.position or a.name or a.seat_id)
-        extra = " (all-in)" if a.all_in else ""
+        # inferred = 视频流漏抓、按街末底池对账补出来的动作。模型要能看到这个
+        # 标记，才知道这条行动是程序补的、金额是「本街加到总额」而不是差值
+        tags = [name for name, on in (("all-in", a.all_in),
+                                      ("inferred", a.inferred)) if on]
+        extra = f" ({', '.join(tags)})" if tags else ""
         parts.append(f"{who} {_action_en(a)}{extra}")
     return " → ".join(parts)
 
@@ -550,6 +554,10 @@ def render_hand_facts(sit: Situation) -> str:
 
     lines.append("")
     lines.append("## Action line")
+    if any(a.inferred for rec in snap.streets for a in rec.actions):
+        lines.append('Actions tagged "inferred" were reconstructed from the pot '
+                     'ledger after the video missed that frame; treat them as real '
+                     'actions (amounts are "total invested on the street").')
     for rec in snap.streets:
         pot_start = f" (pot before street {rec.pot_start}BB)" \
             if rec.pot_start is not None else ""

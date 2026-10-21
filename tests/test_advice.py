@@ -175,6 +175,79 @@ def test_tracker_ignores_stale_badge_after_others_acted() -> None:
           f"第一次加注不该被覆盖或重复：{acts}")
 
 
+def _flop_scene(turn_pbs: float):
+    """复现「最后位置秒跟、视频流漏抓」：SB 在翻牌下注 22，hero(CO) 与
+    BTN 跟注后直接进入转牌（下注 pill 已被底池收走）。返回喂完转牌的 tracker。"""
+    tr = LiveHandTracker(confirm_frames=1)
+    feed(tr, state(
+        player("a", position="SB", bet=0.5, name="老王"),
+        player("b", position="BB", bet=1.0, name="小李"),
+        player("hero", position="CO", stack=100.0),
+        player("c", position="BTN", name="阿强"),
+        pot=1.5, pbs=0.0, dealer="c"), ["Ah", "Qd"], [])
+
+    # 翻牌还没人下注：pot_before_street = 翻前结算后的 1.5
+    feed(tr, state(
+        player("a", position="SB", name="老王"),
+        player("b", position="BB", fold=True, status="folded", name="小李"),
+        player("hero", position="CO", stack=100.0),
+        player("c", position="BTN", name="阿强"),
+        pot=1.5, pbs=1.5, dealer="c"), ["Ah", "Qd"], ["Ks", "7d", "2c"])
+
+    # SB 下注 22（这一帧抓到了）
+    feed(tr, state(
+        player("a", position="SB", bet=22.0, action="bet", name="老王"),
+        player("b", position="BB", fold=True, status="folded", name="小李"),
+        player("hero", position="CO", stack=100.0),
+        player("c", position="BTN", name="阿强"),
+        pot=23.5, pbs=1.5, dealer="c"), ["Ah", "Qd"], ["Ks", "7d", "2c"])
+
+    # 转牌：底池 1.5+66，大家的本街下注已清零 —— 中间两帧跟注没抓到
+    feed(tr, state(
+        player("a", position="SB", name="老王"),
+        player("b", position="BB", fold=True, status="folded", name="小李"),
+        player("hero", position="CO", stack=100.0),
+        player("c", position="BTN", name="阿强"),
+        pot=turn_pbs, pbs=turn_pbs, dealer="c"),
+        ["Ah", "Qd"], ["Ks", "7d", "2c", "Th"])
+    return tr
+
+
+def test_tracker_backfills_missed_calls_at_street_end() -> None:
+    """街末用底池对账补上漏抓的跟注：SB bet 22，hero 和 BTN 的跟注没抓到，
+    转牌底池 +66 说明三人都投了 22 —— 补 hero/BTN 各一条跟注 22。"""
+    tr = _flop_scene(turn_pbs=67.5)
+    acts = [(a.seat_id, a.action, a.amount, a.inferred)
+            for a in tr.hand.street_actions("flop")]
+    check(acts == [("a", "bet", 22.0, False),
+                   ("hero", "call", 22.0, True),
+                   ("c", "call", 22.0, True)],
+          f"漏抓的跟注应按行动顺序补在 SB 下注之后：{acts}")
+
+    # 弃牌的 BB 不该被补跟注
+    check(all(a.seat_id != "b" for a in tr.hand.street_actions("flop")),
+          "弃牌的人不应补记跟注")
+
+    # 补完就收账：翻牌的 pot_start 仍是 1.5，转牌没有凭空多出行动
+    check(tr.hand.pot_start.get("flop") == 1.5,
+          f"翻牌起始底池应保持 1.5，实际 {tr.hand.pot_start.get('flop')}")
+    check(tr.hand.street_actions("turn") == [], "转牌不该有行动")
+
+    rec = tr._hand_dict(tr.hand)
+    flop = next(s for s in rec["streets"] if s["street"] == "flop")
+    check("inferred" not in flop["actions"][0], "正常记录不应带 inferred")
+    check(flop["actions"][1].get("inferred") is True, "补记的跟注应标 inferred")
+
+
+def test_tracker_does_not_guess_when_pot_does_not_match() -> None:
+    """底池差额对不上（中间可能有加注/读错）时宁可留空，不乱补。"""
+    tr = _flop_scene(turn_pbs=89.5)   # 1.5 + 88：不是 3×22
+    acts = [(a.seat_id, a.action, a.amount)
+            for a in tr.hand.street_actions("flop")]
+    check(acts == [("a", "bet", 22.0)],
+          f"对不上账时只应保留已抓到的 SB 下注：{acts}")
+
+
 def test_tracker_new_hand_on_dealer_change() -> None:
     tr = LiveHandTracker(confirm_frames=1)
     feed(tr, state(player("hero", position="BTN"),
@@ -628,6 +701,35 @@ def test_options_capped_by_stack() -> None:
 
 # ─────────────────────────── 提示词 ───────────────────────────
 
+def test_prompt_marks_inferred_actions() -> None:
+    """街末补出来的行动要连 inferred 标记一起给模型，并解释这个标记的含义。"""
+    from poker_ocr.hand_track import ActionRecord, StreetRecord
+    flop = StreetRecord("flop", 6.0, (
+        ActionRecord("flop", "a", "老王", "SB", "bet", 22.0),
+        ActionRecord("flop", "hero", None, "CO", "call", 22.0,
+                     is_hero=True, inferred=True),
+        ActionRecord("flop", "c", "阿强", "BTN", "call", 22.0, inferred=True)))
+    user = render_hand_facts(build_situation(make_point(
+        to_call=0.0, pot=72.0,
+        streets=(StreetRecord("preflop", 0.0, ()), flop))))
+    check("Hero calls 22.0BB (inferred)" in user,
+          f"补记的跟注应带 inferred 标记：\n{user}")
+    check("BTN calls 22.0BB (inferred)" in user,
+          f"补记的 BTN 跟注应带 inferred 标记：\n{user}")
+    check("SB bets 22.0BB" in user and "SB bets 22.0BB (inferred)" not in user,
+          f"直接抓到的下注不该被标成 inferred：\n{user}")
+    check('Actions tagged "inferred"' in user,
+          f"应解释 inferred 的含义：\n{user}")
+
+    # 没有补记时不要多出这段说明，避免提示词膨胀
+    plain = render_hand_facts(build_situation(make_point(
+        streets=(StreetRecord("preflop", 0.0, ()),
+                 StreetRecord("flop", 6.0, (
+                     ActionRecord("flop", "a", "老王", "SB", "bet", 22.0),))))))
+    check('Actions tagged "inferred"' not in plain,
+          f"没有补记时不该出现 inferred 说明：\n{plain}")
+
+
 def test_prompt_contains_full_action_line_and_options() -> None:
     from poker_ocr.hand_track import ActionRecord, StreetRecord
     acts = (ActionRecord("preflop", "a", "老王", "CO", "raise", 3.0),
@@ -933,6 +1035,8 @@ def main() -> int:
         test_tracker_collects_actions_and_dedupes_frames,
         test_tracker_infers_actions_when_badges_are_missed,
         test_tracker_ignores_stale_badge_after_others_acted,
+        test_tracker_backfills_missed_calls_at_street_end,
+        test_tracker_does_not_guess_when_pot_does_not_match,
         test_tracker_new_hand_on_dealer_change,
         test_tracker_board_drop_needs_two_frames,
         test_tracker_decision_point_confirmed_and_deduped,
@@ -956,6 +1060,7 @@ def main() -> int:
         test_options_facing_bet_uses_pot_after_call,
         test_options_bump_to_min_raise_when_fraction_too_small,
         test_options_capped_by_stack,
+        test_prompt_marks_inferred_actions,
         test_prompt_contains_full_action_line_and_options,
         test_prompt_preflop_has_no_strength_facts,
         test_advise_uses_model_choice,

@@ -17,6 +17,10 @@
     跟注/过牌的金额是下注 pill 的原值；读不到就不写金额，不猜。
   · **徽章漏读时从下注额反推**：下注额升到当前水位以上就是加注（新街第一次
     是下注），追平就是跟注。盲注是基线，不会被记成「跟注」。
+  · **街末用底池对账补漏**：下一街的 `pot_before_street` 就是这一街结算后的底池，
+    减去这一街起始底池即「这一街所有人投进去的总和」。它比行动线记录的总额多、
+    而差额恰好等于「还在池里的人补齐到当前下注额」时，说明中间有跟注没抓到
+    （典型：最后位置预设跟注，下注那一帧被视频流跳过）。对得上才补，对不上不猜。
   · **换手判据**：庄位变了 / 公共牌掉回 0 或 3 张 / hero 手牌变成另一组 / 人数骤变。
     1/2 张牌是发牌动画，5→4 更像读错一张，都不算换手。
   · **轮到我用「连续帧确认 + 决策点指纹」去重**，不用单帧上升沿。真机上预设按钮
@@ -41,6 +45,9 @@ RIVER = "river"
 # 公共牌张数 → 街。0 张是翻前，1/2 张是发牌动画，5 张之后是河牌
 STREET_BY_BOARD = {0: PREFLOP, 3: FLOP, 4: TURN, 5: RIVER}
 
+# 街的先后顺序。只允许「往后」推进时对账；单帧 5→3 的误读不能倒着补
+STREET_SEQ = {PREFLOP: 0, FLOP: 1, TURN: 2, RIVER: 3}
+
 # 徽章原文（parse.ACTION_WORDS 已经翻成英文）→ 我们的行动类型，一一对应
 ACTION_TYPES = ("check", "call", "bet", "raise", "fold")
 
@@ -48,6 +55,13 @@ AGGRESSIVE = ("bet", "raise")
 
 # 换手时「人数骤变」的阈值：一桌人同时换掉一大半，只可能是换了手/换了桌
 TABLE_SIZE_JUMP = 2
+
+# 翻前/翻后共用的行动顺序（各人数下的位置表都是它的子序列）。
+# 街末补漏时用它给同一批跟注排序，避免按物理座位顺序把 CO 排到 BTN 后面。
+ACTION_ORDER = ("SB", "BB", "UTG", "UTG+1", "UTG+2", "LJ", "HJ", "CO", "BTN")
+
+# 街末对账的金额容差：底池/下注都是 0.01BB 精度的文本
+RECONCILE_TOLERANCE = 0.02
 
 
 def street_of_board(board_len: int) -> str | None:
@@ -71,6 +85,8 @@ class ActionRecord:
     amount: float | None = None
     all_in: bool = False
     is_hero: bool = False
+    # 视频流漏抓、由街末底池对账补出来的记录。落库时单独标出来，复盘时可区分
+    inferred: bool = False
 
     def label(self) -> str:
         if self.action == "check":
@@ -252,6 +268,8 @@ class LiveHandTracker:
         # 街推进：公共牌只增不减；1/2 张是动画，不推进。
         # 4 张的读数不能覆盖已经读到的 5 张 —— 那是读错一张，不是新街
         if street is not None and street != hand.street and board_len >= 3:
+            # 旧街已经结算：先用它的最终底池补上中间漏抓的跟注，再换街
+            self._reconcile_street(hand, street, state)
             hand.street = street
             hand.pot_start.setdefault(street, state.pot_before_street)
             # **不能在这里按桌上的下注额重置基线**：那一刻的下注往往就是本街
@@ -425,6 +443,80 @@ class LiveHandTracker:
                 level = bet
 
         hand.level[hand.street] = level
+
+    # ─────────────────────────── 街末对账 ───────────────────────────
+
+    def _reconcile_street(self, hand: _LiveHand, new_street: str,
+                          state: FrameState) -> None:
+        """换街时用底池账单补齐上一街漏抓的跟注。
+
+        下一街的 `pot_before_street` = 上一街结算后的底池，所以
+
+            上一街实际投入 = pbs(下一街) − pot_start(上一街)
+
+        行动线里能算出来的投入是每座「盲注基线 / 已记录动作金额」之和
+        （金额都是「本街加到总额」，同一座取最大值）。两者相减就是没抓到的钱。
+
+        只在差额**正好**等于「还在池里的人补齐到当前下注额」时补记录：
+        典型场景是最后位置预设了跟注，视频流没抓到他下注的那一帧，下一条
+        记录已经是下一街（下注 pill 已被收走）。对不上就说明中间可能还有
+        加注/弃牌/读错，宁可留空也不猜。
+        """
+        street = hand.street
+        # 只接受往后推进。公共牌 5→3 的单帧误读会走到这里，不能倒着补
+        if STREET_SEQ.get(new_street, -1) <= STREET_SEQ.get(street, -1):
+            return
+        start = hand.pot_start.get(street)
+        end = state.pot_before_street
+        if start is None or end is None:
+            return
+        actual = round(end - start, 2)
+        level = hand.level.get(street, 0.0)
+        if actual <= 1e-9 or level <= 1e-9:
+            return
+
+        # 已经记进账的投入：盲注基线 + 每条动作的「本街加到总额」
+        known: dict[str, float] = {}
+        for (s, seat), amount in hand.baseline.items():
+            if s == street:
+                known[seat] = max(known.get(seat, 0.0), amount or 0.0)
+        for a in hand.street_actions(street):
+            known[a.seat_id] = max(known.get(a.seat_id, 0.0), a.amount or 0.0)
+        missing = round(actual - sum(known.values()), 2)
+        if missing <= 1e-9:
+            return
+
+        # 还在池里的人，理论上街末都应该补齐到当前水位。弃牌/离桌的人不用补；
+        # 全下的人可能只跟到更少的钱，不当作漏抓（否则金额会猜错）
+        owed: list[tuple[int, PlayerState, float]] = []
+        for p in state.players:
+            if not p.in_hand or p.fold is True or p.status == "folded" or p.all_in:
+                continue
+            delta = round(level - known.get(p.seat_id, 0.0), 2)
+            if delta > 1e-9:
+                owed.append((self._action_rank(p), p, delta))
+        if not owed:
+            return
+        if abs(sum(d for _, _, d in owed) - missing) > RECONCILE_TOLERANCE:
+            return
+
+        owed.sort(key=lambda item: item[0])
+        for _, p, _ in owed:
+            hand.actions.append(ActionRecord(
+                street=street, seat_id=p.seat_id, name=p.name,
+                position=p.position, action="call", amount=level,
+                all_in=p.all_in, is_hero=p.seat_id == state.hero_seat_id,
+                inferred=True))
+            hand.last_index[(street, p.seat_id)] = len(hand.actions) - 1
+            hand.baseline[(street, p.seat_id)] = level
+
+    @staticmethod
+    def _action_rank(p: PlayerState) -> int:
+        """按行动顺序给补记的跟注排序；位置读不到时保持 state.players 顺序。"""
+        try:
+            return ACTION_ORDER.index(p.position)
+        except ValueError:
+            return len(ACTION_ORDER)
 
     # ─────────────────────────── 决策点 ───────────────────────────
 
@@ -604,7 +696,9 @@ class LiveHandTracker:
                         {"seat_id": a.seat_id, "name": a.name,
                          "position": a.position, "action": a.action,
                          "amount": a.amount, "all_in": a.all_in,
-                         "is_hero": a.is_hero}
+                         "is_hero": a.is_hero,
+                         # 只在补出来时写这个键：正常手牌的落库内容保持原样
+                         **({"inferred": True} if a.inferred else {})}
                         for a in rec.actions
                     ],
                 }

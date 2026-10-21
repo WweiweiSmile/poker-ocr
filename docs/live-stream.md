@@ -85,6 +85,10 @@ ROI 路线只裁固定槽位、只跑 rec，不跑全图检测，是实时链路
 - **行动线**：吃**每一帧被接受的状态**（不只 JSONL 里被记录的）。动作徽章与
   轮到我都被排除在变化指纹之外，只吃 `state` 记录会漏掉大量过牌/跟注。
   每座每街按「徽章 + 本街下注额」落一条，重复帧合并。
+- **街末补漏**：换街时用底池账单对账 —— `pbs(下一街) − pot_start(上一街)` 是
+  这一街所有人实际投进去的钱；如果它比行动线记录的总额多，且差额正好等于
+  「还在池里的人补齐到当前下注额」，就补记这些跟注（落库时带 `inferred: true`）。
+  专门覆盖最后位置预设跟注、视频流没抓到下注帧就换街的情况；对不上账不猜。
 - **技能**：只加载**当前行动街**的技能（与 call-back 的
   `services/skills/*.md` 正文逐字一致），常驻 `core-stance` + `odds-table`，
   再按翻前形态 / 牌力分档 / 听牌 / 多人池 / cbet 点路由专项技能。
@@ -513,9 +517,15 @@ cd ~/codes/poker-ocr
       "amount":3.0,"all_in":false,"is_hero":false},
      {"seat_id":"hero","name":"me","position":"BTN","action":"call",
       "amount":3.0,"all_in":false,"is_hero":true}]},
-   {"street":"flop","pot_start":6.0,"actions":[...]}
+   {"street":"flop","pot_start":6.0,"actions":[
+     {"seat_id":"a","name":"老王","position":"SB","action":"bet",
+      "amount":22.0,"all_in":false,"is_hero":false},
+     {"seat_id":"hero","name":"me","position":"CO","action":"call",
+      "amount":22.0,"all_in":false,"is_hero":true,"inferred":true}]}
  ]}
 ```
+
+`inferred: true` 只在**街末底池对账补出来**的记录上出现（正常抓到的记录没有这个键）。
 
 ### 6.7 丢弃语义
 
