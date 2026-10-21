@@ -28,9 +28,9 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .dealer import build_detector
+from .dealer import DealerResult, build_detector
 from .frame_state import FrameState, NameTracker, build_state, signature
-from .parse import Blinds
+from .parse import Blinds, parse_action, parse_blinds
 from .ocr import OcrEngine
 from .profile import Profile
 from .roi_dedup import RoiStream
@@ -41,6 +41,14 @@ from .roi_reader import read_avatars
 # intra-op 线程、RTSP 解码线程抢核，反而变慢。小机器按一半核数封顶。
 # `--roi-threads 1` 可整体回退到串行。
 DEFAULT_ROI_THREADS = max(1, min(4, (os.cpu_count() or 2) // 2))
+
+# ── 一手牌内的慢变量（语义缓存）──
+# 名字和盲注横幅在一手牌里不会变，但横幅里的房间号/倒计时每秒都在动，
+# 按像素去重每帧都会 miss。这里把它们「钉住」：读到一次可信值后不再 OCR，
+# 换手时整批解钉。庄位同理 —— 一手牌里只在换手时挪一次。
+DEALER_RECHECK_SECONDS = 2.0     # 定期复核庄位，兜住漏掉的换手信号
+DEALER_CONFIRM_FRAMES = 2        # 换手后多detect几帧，等轮转动画落位
+NAME_PIN_MIN_SCORE = 0.8         # 低于这个分数不钉，等下帧重读到可信名字
 
 
 @dataclass(frozen=True)
@@ -99,6 +107,15 @@ class StateStream:
         self.prev_dealer: str | None = None
         self.vanish: dict[str, int] = defaultdict(int)
 
+        # 一手牌内的慢变量缓存：庄位结果 + 上一帧的牌面/手牌指纹（判断换手）
+        self._dealer_result: DealerResult | None = None
+        self._dealer_seat: str | None = None
+        self._dealer_checked_at: float | None = None
+        self._dealer_confirm_left = 0
+        self._board_len: int | None = None
+        self._board_drop = 0
+        self._hero_cards: tuple[str, ...] = ()
+
         self.last_sig: tuple | None = None
         self.cand_sig: tuple | None = None
         self.cand_n = 0
@@ -118,11 +135,55 @@ class StateStream:
         `extra_signature` 把 OCR 之外的状态并进变化指纹。实时链路用它把
         「公共牌 / hero 手牌」纳入触发条件 —— 否则翻牌只让牌面变、底池没变时，
         这一帧会被判成 no_change，JSONL 里就看不到新公共牌。
-        离线工具不传，行为与以前完全一致。
+
+        **它也定义了一手牌的范围**：拿到它时，同一手内把名字/盲注/庄位
+        钉住复用，牌面掉回 0 或 hero 换牌时整批解钉重读。离线工具不传，
+        行为与以前完全一致（纯像素去重 + 每帧庄位检测）。
         """
         self.sampled += 1
 
-        frame = self.stream.read(img, frame_id=frame_id)
+        # 换手信号先于读帧：名字/盲注要在这一帧就解钉并重新识别。
+        # 只有 live 会传 extra_signature（手牌/公共牌）；离线工具没有可靠的
+        # 换手边界，慢变量维持原来的「按像素变化重读」，避免跨手复用旧值。
+        sticky = extra_signature is not None
+        new_hand = self._hand_changed(extra_signature)
+        if new_hand:
+            self._restart_sticky()
+
+        # 庄位一手牌里只挪一次：没换手时直接复用上一帧结果，省掉整帧 blob 扫描。
+        # 每 DEALER_RECHECK_SECONDS 兜底复核一次，防止换手信号漏掉。
+        detect_dealer = (not sticky) or (
+            self._dealer_result is None
+            or new_hand
+            or self._dealer_confirm_left > 0
+            or self._dealer_checked_at is None
+            or t - self._dealer_checked_at >= DEALER_RECHECK_SECONDS
+        )
+        frame = self.stream.read(img, frame_id=frame_id,
+                                 detect_dealer=detect_dealer)
+        # 先钉这一帧读到的名字/盲注；如果下面查出庄位轮转（换手），
+        # _restart_sticky() 会立刻把它们解钉，下一帧重新识别。
+        if sticky:
+            self._pin_slow_fields(frame)
+        if detect_dealer:
+            self._dealer_checked_at = t
+            self._dealer_confirm_left = max(0, self._dealer_confirm_left - 1)
+            detected = frame.dealer
+            if detected is not None and detected.status == "found":
+                if (self._dealer_seat is not None
+                        and detected.seat_id != self._dealer_seat):
+                    # 庄位换了但牌面/手牌都没给出换手信号：按换手处理
+                    new_hand = True
+                    self._restart_sticky()
+                self._dealer_seat = detected.seat_id
+                self._dealer_result = detected
+        elif self._dealer_result is not None:
+            frame.dealer = self._dealer_result
+            frame.ms_dealer = 0.0
+        if new_hand:
+            # 轮转动画可能还没落位，换手后再多读两帧
+            self._dealer_confirm_left = DEALER_CONFIRM_FRAMES
+
         avatars = read_avatars(img, self.profile, self.engine,
                                self.stream.cache, self.detect_fold,
                                executor=self._roi_pool)
@@ -195,6 +256,66 @@ class StateStream:
 
     # ─────────────────────────── 辅助 ───────────────────────────
 
+    def _hand_changed(self, extra_signature: tuple | None) -> bool:
+        """用 hero 手牌 / 公共牌判断是不是换了一手。
+
+        live 每帧把 `(hero_cards, board_codes)` 作为 `extra_signature` 传进来；
+        离线工具不传，这时不做换手推断（行为与以前一致，慢变量按需重读）。
+        board 从 >0 掉回 0、或 hero 的两张牌换了一组，都是新一手。
+        """
+        if extra_signature is None or len(extra_signature) != 2:
+            return False
+        hero = tuple(extra_signature[0] or ())
+        board = tuple(extra_signature[1] or ())
+        new_hand = False
+        if self._board_len is not None:
+            # 单帧读空很常见（遮挡/动画），牌面掉回 0 必须连续 2 帧才算换手，
+            # 与 LiveHandTracker._is_new_hand 的确认口径一致
+            if len(board) == 0:
+                if self._board_len > 0 or self._board_drop > 0:
+                    self._board_drop += 1
+            else:
+                self._board_drop = 0
+            if self._board_drop >= 2:
+                new_hand = True
+                self._board_drop = 0
+            if (len(hero) == 2 and len(self._hero_cards) == 2
+                    and hero != self._hero_cards):
+                new_hand = True
+        self._board_len = len(board)
+        self._hero_cards = hero
+        return new_hand
+
+    def _restart_sticky(self) -> None:
+        """换手：名字/盲注解钉，庄位结果作废（下一帧重新检测）。"""
+        cache = self.stream.cache
+        if cache is not None:
+            cache.unpin_all()
+        self._dealer_result = None
+
+    def _pin_slow_fields(self, frame) -> None:
+        """把这一帧读到的可信名字 / 盲注钉住，之后同手内不再 OCR。
+
+        名字槽在部分布局里会被动作徽章盖住；看起来像动作的读数不钉，
+        免得把「弃牌/跟注」冻成名字。分数太低的也留到下帧重读。
+        """
+        cache = self.stream.cache
+        if cache is None:
+            return
+        for seat_roi in frame.seats:
+            key = f"{seat_roi.seat_id}.name"
+            if cache.is_pinned(key):
+                continue
+            read = seat_roi.fields.get("name")
+            if (read is not None and read.text
+                    and read.score >= NAME_PIN_MIN_SCORE
+                    and parse_action(read.text) is None):
+                cache.pin(key)
+        if not cache.is_pinned("@blinds"):
+            read = frame.globals.get("blinds")
+            if read is not None and parse_blinds(read.text) is not None:
+                cache.pin("@blinds")
+
     @staticmethod
     def _payload(state: FrameState, t: float, index: int) -> dict:
         payload = state.to_debug()
@@ -212,6 +333,13 @@ class StateStream:
         self.last_sig = None
         self.cand_sig = None
         self.cand_n = 0
+        self._dealer_result = None
+        self._dealer_seat = None
+        self._dealer_checked_at = None
+        self._dealer_confirm_left = 0
+        self._board_len = None
+        self._board_drop = 0
+        self._hero_cards = ()
         self.stream.reset()
 
     def close(self) -> None:

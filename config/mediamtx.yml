@@ -22,6 +22,11 @@
 logLevel: info
 logDestinations: [stdout]
 
+# 每个读者最多排队多少包（必须是 2 的幂）。默认 512 在读者偶尔卡顿时
+# 会攒下一两秒的旧数据，恢复后先播旧帧；本机 RTSP 读者跟得上，压到 128
+# 既够吸收短暂抖动（约 0.3–0.4s），又把「卡一下 → 追旧帧」的上限砍掉一半多。
+writeQueueSize: 128
+
 srt: yes
 srtAddress: :8890
 

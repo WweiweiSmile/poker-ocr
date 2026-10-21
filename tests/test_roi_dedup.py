@@ -29,8 +29,10 @@ sys.path.insert(0, str(ROOT / "tests"))
 
 from poker_ocr.profile import Profile  # noqa: E402
 from poker_ocr.roi_dedup import (  # noqa: E402
-    RoiStream, dhash, dhash_tiles, hash_distance, hamming, pixel_mad,
+    RoiDedupCache, RoiStream, dhash, dhash_tiles, hash_distance, hamming,
+    pixel_mad,
 )
+from poker_ocr.roi_reader import RoiRead  # noqa: E402
 from test_roi_reader import (  # noqa: E402
     DISC, FELT, SIZE, StubEngine, build_table, make_marked,
 )
@@ -189,6 +191,34 @@ def test_reused_read_is_a_copy() -> None:
           "第二帧的复用把第一帧那份读数也改了 —— 说明没复制（dc_replace 漏了）")
 
 
+def test_pinned_key_ignores_pixel_changes_until_unpinned() -> None:
+    """钉住的名字/盲注：画面变了也复用，换手 unpin_all 后重新按像素判断。"""
+    cache = RoiDedupCache()
+    # 用横/竖渐变做两张真正不同的图：纯色图 dhash 都是 0，测不出变化
+    x = np.tile(np.arange(40, dtype=np.uint8) * 5, (40, 1))
+    roi = np.dstack([x] * 3)
+    y = np.tile((np.arange(40, dtype=np.uint8) * 5)[:, None], (1, 40))
+    changed = np.dstack([y] * 3)
+    read = RoiRead("name", (0, 0, 40, 40), [("Alice", 0.95)])
+    cache.check("hero.name", roi)
+    cache.store("hero.name", read)
+    check(cache.pin("hero.name"), "有读数时应能钉住")
+    check(cache.is_pinned("hero.name"), "钉住状态不对")
+
+    hit, _ = cache.check("hero.name", changed)
+    check(hit is not None and hit.text == "Alice",
+          f"钉住后画面怎么变都应复用，实际 {hit}")
+    check(cache.hits_pinned == 1, f"钉住命中应单独计数，实际 {cache.hits_pinned}")
+
+    cache.unpin_all()
+    hit, _ = cache.check("hero.name", changed)
+    check(hit is None, "解钉后画面变了应重读（返回 None）")
+
+    # 钉住但没有读数（缓存被清过）不能命中
+    cache2 = RoiDedupCache()
+    check(not cache2.pin("nobody"), "没有读数时 pin 应返回 False")
+
+
 def test_mad_eps_defaults_to_0_2() -> None:
     """默认开 0.2：真机视频上精确 hash 只有 0.5% 命中，不开等于没去重。
     传 0.0 可以退回纯 dhash；统计里要能区分两条命中路径。"""
@@ -268,6 +298,7 @@ def main() -> int:
         test_unchanged_frame_runs_no_rec_at_all,
         test_changed_roi_reruns_and_neighbours_reuse,
         test_reused_read_is_a_copy,
+        test_pinned_key_ignores_pixel_changes_until_unpinned,
         test_mad_eps_defaults_to_0_2,
         test_resolution_change_invalidates_the_cache,
         test_threshold_change_invalidates_the_cache,

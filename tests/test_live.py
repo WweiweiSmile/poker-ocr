@@ -27,8 +27,8 @@ from poker_ocr.full_table import (  # noqa: E402
     FullTableConfig, FullTableResult, SeatObservation,
 )
 from poker_ocr.live import (  # noqa: E402
-    AspectFit, FramePacket, JsonlWriter, LatestFrame, LiveProcessor, plan_crop,
-    throttle_delay,
+    AspectFit, FramePacket, JsonlWriter, LatestFrame, LiveProcessor, SettleGate,
+    plan_crop, throttle_delay,
 )
 from poker_ocr.frame_state import FrameState, PlayerState  # noqa: E402
 from poker_ocr.hand_track import LiveHandTracker  # noqa: E402
@@ -48,10 +48,16 @@ def test_defaults_are_no_throttle_and_instant_turn() -> None:
     check(args.ai_confirm == 1,
           f"默认应第一帧就认定轮到我，实际 {args.ai_confirm}")
     check(args.ai_advice is True, "AI 建议默认应开启")
+    check(args.settle == live.DEFAULT_SETTLE,
+          f"动作合并默认应开启（{live.DEFAULT_SETTLE}s），实际 {args.settle}")
+    check(args.settle_max == live.DEFAULT_SETTLE_MAX,
+          f"动作合并上限默认 {live.DEFAULT_SETTLE_MAX}s，实际 {args.settle_max}")
 
-    args = ap.parse_args(["--no-ai-advice", "--every", "0.5"])
+    args = ap.parse_args(["--no-ai-advice", "--every", "0.5",
+                          "--settle", "0"])
     check(args.ai_advice is False, "--no-ai-advice 应能关闭")
     check(args.every == 0.5, "--every 仍应能显式降频")
+    check(args.settle == 0.0, "--settle 0 应能关掉动作合并")
 
 
 def check(cond: bool, msg: str) -> None:
@@ -150,6 +156,96 @@ def test_throttle_delay() -> None:
           "已经超过间隔就不该再等")
     check(throttle_delay(0.0, 0.0, 0.5) == 0.5,
           "首帧按 last_start=0 计算时等满一个间隔（主循环会先处理首帧）")
+
+
+class _GateSeat:
+    """一份最小的槽位布局（100x100 测试图上的动作区）。"""
+    name_slot = (0.10, 0.10, 0.30, 0.15)
+    chip_slot = (0.10, 0.20, 0.30, 0.25)
+    chip_slot_alt = None
+    bet_slot = (0.10, 0.30, 0.30, 0.35)
+    avatar_slot = (0.10, 0.40, 0.30, 0.60)
+
+
+class _GateProfile:
+    seats = [_GateSeat()]
+    global_slots = {
+        "pot": (0.50, 0.10, 0.70, 0.15),
+        # 盲注横幅里的倒计时每秒都在跳：它必须被排除在静止判据之外
+        "blinds": (0.50, 0.20, 0.70, 0.25),
+    }
+
+    @staticmethod
+    def slot_to_px(slot, size):
+        w, h = size
+        return (int(slot[0] * w), int(slot[1] * h),
+                int(slot[2] * w), int(slot[3] * h))
+
+
+def _gate_image(patch=None) -> np.ndarray:
+    img = np.zeros((100, 100, 3), np.uint8)
+    if patch is not None:
+        (x1, y1, x2, y2), value = patch
+        img[y1:y2, x1:x2] = value
+    return img
+
+
+def test_settle_gate_coalesces_action_burst() -> None:
+    """一阵连续变化期间一帧都不放行；静止 settle 秒后只放行最新帧。"""
+    gate = SettleGate(_GateProfile(), settle=0.2, max_wait=0.5)
+    base = _gate_image()
+    check(gate.should_process(base, 0.0), "首帧应立即放行")
+    check(gate.should_process(base, 0.05), "画面没变时应立即放行")
+
+    # 名字槽（x 10–30, y 10–15）连续出现三个动作
+    check(not gate.should_process(
+        _gate_image(((10, 10, 30, 15), 80)), 0.10), "动作刚开始时不该放行")
+    check(not gate.should_process(
+        _gate_image(((10, 10, 30, 15), 160)), 0.20), "动作还在继续时不该放行")
+    check(not gate.should_process(
+        _gate_image(((10, 10, 30, 15), 160)), 0.35),
+        "距离最后一次变化不足 settle 时不该放行")
+    check(gate.should_process(
+        _gate_image(((10, 10, 30, 15), 160)), 0.45), "静止满 settle 后应放行")
+    check(gate.should_process(
+        _gate_image(((10, 10, 30, 15), 160)), 0.50), "落定后应回到逐帧放行")
+    check(gate.blocks == 3, f"三次变化应合并掉 3 帧，实际 {gate.blocks}")
+
+
+def test_settle_gate_max_wait_limits_starvation() -> None:
+    """动作一直不停（每次都比 settle 短）时，max_wait 到点也要放行一帧。"""
+    gate = SettleGate(_GateProfile(), settle=0.3, max_wait=0.5)
+    check(gate.should_process(_gate_image(), 0.0), "首帧应立即放行")
+    times = [0.1, 0.2, 0.3, 0.4, 0.5]
+    for i, t in enumerate(times, start=1):
+        # 每次都变，永远达不到「静止 0.3s」
+        img = _gate_image(((10, 10, 30, 15), min(255, i * 40)))
+        allowed = gate.should_process(img, t)
+        if t < 0.6:
+            check(not allowed, f"{t}s 时 burst 才 {t - 0.1:.1f}s，不该放行")
+    # burst_start=0.1，max_wait=0.5 → 0.6s 到点
+    check(gate.should_process(
+        _gate_image(((10, 10, 30, 15), 255)), 0.6),
+        "等满 max_wait 后必须放行，不能无限等")
+
+
+def test_settle_gate_ignores_blind_clock_and_avatar_ring() -> None:
+    """盲注倒计时和头像边缘的计时环一直在动，不能拖住识别。"""
+    gate = SettleGate(_GateProfile(), settle=0.2)
+    img = _gate_image()
+    check(gate.should_process(img, 0.0), "首帧应立即放行")
+
+    for i in range(1, 6):
+        img = img.copy()
+        img[20:25, 50:70] = i * 40            # 盲注横幅倒计时
+        img[40:60, 10:13] = i * 40            # 头像左边缘（计时环）
+        check(gate.should_process(img, i * 0.1),
+              f"第 {i} 帧只有倒计时/计时环在动，应继续放行")
+
+    # 头像中心（弃牌蒙层）是真实动作，必须拦住
+    img = img.copy()
+    img[45:55, 18:25] = 200
+    check(not gate.should_process(img, 0.65), "头像中心变化应触发合并")
 
 
 def test_epoch_change_resets_state_machine() -> None:
@@ -603,6 +699,103 @@ def test_processor_pauses_while_advice_is_generating() -> None:
     check(not proc.waiting_for_advice, "没开 AI 建议时不应暂停")
 
 
+def test_rotate_frame_clockwise() -> None:
+    """--rotate 90 是顺时针；0 度原样返回，非法角度报错。"""
+    img = np.zeros((2, 4, 3), np.uint8)
+    img[0, 0] = (1, 2, 3)
+    rotated = live.rotate_frame(img, 90)
+    check(rotated.shape == (4, 2, 3), f"90° 后尺寸应 4x2，实际 {rotated.shape}")
+    check(tuple(rotated[0, 1]) == (1, 2, 3),
+          f"左上角应顺时针转到右上角，实际 {rotated[0, 1]}")
+    check(live.rotate_frame(img, 180).shape == (2, 4, 3), "180° 尺寸应不变")
+    check(live.rotate_frame(img, 270).shape == (4, 2, 3), "270° 后尺寸应 4x2")
+    check(live.rotate_frame(img, 0) is img, "0° 应原样返回")
+    try:
+        live.rotate_frame(img, 45)
+    except ValueError:
+        pass
+    else:
+        FAILS.append("45° 应报错")
+
+
+def test_open_capture_supports_virtual_camera_index() -> None:
+    """cam:N 走 AVFoundation 直接打开摄像头（OBS 虚拟摄像头超低延迟接法）。"""
+    class FakeCap:
+        def __init__(self, src, backend=None) -> None:
+            self.src = src
+            self.backend = backend
+            self.opened = (src == 1 and backend == live.cv2.CAP_AVFOUNDATION)
+            self.released = False
+
+        def isOpened(self) -> bool:
+            return self.opened
+
+        def release(self) -> None:
+            self.released = True
+
+        def set(self, *_args) -> bool:
+            return True
+
+    calls: list[tuple] = []
+
+    def factory(src, backend=None):
+        calls.append((src, backend))
+        return FakeCap(src, backend)
+
+    with patch.object(live.cv2, "VideoCapture", side_effect=factory):
+        cap = live._open_capture("cam:1")
+    check(cap is not None and not cap.released, "cam:1 应能用 AVFoundation 打开")
+    check(calls[:1] == [(1, live.cv2.CAP_AVFOUNDATION)],
+          f"cam:1 应先试 AVFoundation：{calls}")
+
+    calls.clear()
+    with patch.object(live.cv2, "VideoCapture", side_effect=factory):
+        check(live._open_capture("cam:9") is None, "不存在的索引应返回 None")
+        check(live._open_capture("cam:abc") is None, "非法索引应返回 None")
+    check(calls == [(9, live.cv2.CAP_AVFOUNDATION), (9, None)],
+          f"cam:9 应依次试 AVFoundation 和默认后端：{calls}")
+
+
+def test_advice_wait_logs_heartbeat_each_second() -> None:
+    """等待模型时每秒一行心跳；同一秒不重复，结束后重置。"""
+    class SlowRunner:
+        busy = True
+
+        def __init__(self) -> None:
+            self.busy_seconds = 0.0
+
+        def poll(self):
+            return []
+
+        def submit(self, sit) -> bool:      # pragma: no cover
+            return True
+
+    runner = SlowRunner()
+    logs: list[str] = []
+    proc = LiveProcessor(StubStateStream(), StubWriter(),
+                         advice_runner=runner, log=logs.append)
+
+    proc.log_advice_wait()
+    check(logs == [], f"不足 1 秒不该打心跳：{logs}")
+    runner.busy_seconds = 1.2
+    proc.log_advice_wait()
+    check(logs == ["  [建议] 生成中… 1s"], f"1 秒应打一行心跳：{logs}")
+    proc.log_advice_wait()
+    check(len(logs) == 1, f"同一秒不该重复：{logs}")
+    runner.busy_seconds = 2.9
+    proc.log_advice_wait()
+    check(logs[-1].endswith("2s"), f"2 秒应再打一行：{logs}")
+
+    # 模型返回后下一轮从 1s 重新开始
+    runner.busy = False
+    proc.log_advice_wait()
+    check(proc._wait_beat_second == 0, "结束后心跳计数应重置")
+    runner.busy = True
+    runner.busy_seconds = 1.5
+    proc.log_advice_wait()
+    check(logs[-1].endswith("1s"), f"新一次建议应重新从 1s 报：{logs}")
+
+
 def main() -> int:
     tests = [
         test_defaults_are_no_throttle_and_instant_turn,
@@ -610,6 +803,9 @@ def main() -> int:
         test_wait_newer_wakes_up,
         test_slow_consumer_drops_frames_but_ends_at_latest,
         test_throttle_delay,
+        test_settle_gate_coalesces_action_burst,
+        test_settle_gate_max_wait_limits_starvation,
+        test_settle_gate_ignores_blind_clock_and_avatar_ring,
         test_epoch_change_resets_state_machine,
         test_stale_frame_is_skipped,
         test_crop_left_uses_training_aspect_and_left_anchor,
@@ -630,6 +826,9 @@ def main() -> int:
         test_hand_memory_keeps_action_line_and_advices,
         test_hand_memory_flushes_on_switch_frame,
         test_processor_pauses_while_advice_is_generating,
+        test_advice_wait_logs_heartbeat_each_second,
+        test_rotate_frame_clockwise,
+        test_open_capture_supports_virtual_camera_index,
     ]
     for t in tests:
         before = len(FAILS)

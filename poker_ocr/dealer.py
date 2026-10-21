@@ -36,6 +36,10 @@ BLOB_DEFAULTS = {
     "max_seat_dist": 1.2,   # 到最近头像框的距离，按头像宽度归一化
 }
 
+# 第一档 OCR 以这个分数以上认出「D」就直接收工，不再跑后两档重试。
+# 真机实测三档都在 0.9 以上，留一点余量给压缩噪声。
+CONFIDENT_READ = 0.9
+
 # 小画面先放大再做 blob 检测。低分辨率直播（实测 344x764）里 D 圆片直径只有
 # ~11px，H.264 压缩后边缘全是锯齿，圆度/面积两条几何门会静默失守：
 # 同一批 10 帧在原始尺寸上 0 帧检出，放大到短边 600px 后 10/10 检出。
@@ -135,6 +139,12 @@ class BlobDealerDetector:
     def __init__(self, cfg: dict | None = None, engine=None) -> None:
         self.cfg = {**BLOB_DEFAULTS, **(cfg or {})}
         self.engine = engine
+        # 庄位按钮一手牌里只挪一次：同一块 D 圆片的识别结果可以跨帧复用。
+        # 实测 `_reads_d` 占了单帧总耗时的 60%+（每帧 3 次 rec），而它读的
+        # 就是同一个白底「D」。按 (工作图尺寸, bbox) 做键、按裁剪图做签名，
+        # 位置或字形一变就自然失效。
+        self._reads_cache: dict[tuple[int, int, int, int, int, int],
+                                tuple[bytes, tuple[bool, str | None, float]]] = {}
 
     # ── 几何 ──
 
@@ -215,8 +225,19 @@ class BlobDealerDetector:
         if roi.size == 0:
             return False, None, 0.0
 
+        # 同一个位置、同一块画面 → 上一帧已经认过的结果直接复用
+        key = (img.shape[0], img.shape[1], x, y, w, h)
+        sig = self._roi_signature(roi)
+        cached = self._reads_cache.get(key)
+        if cached is not None and cached[0] == sig:
+            return cached[1]
+
         from .ocr import preprocess_variant
 
+        # 圆片里就一个字母。去掉空白和分隔符后应当是 D（大小写都认）。
+        # 全图路线会传入更宽的 accepted（0/O 等压缩后形近读法），
+        # ROI 路线保持默认只认 D。
+        accepted = accepted or {"D"}
         best_text, best_score = None, 0.0
         for upscale, mode in ((1.0, "raw"), (3.0, "raw"), (3.0, "gray")):
             try:
@@ -227,17 +248,34 @@ class BlobDealerDetector:
                 continue
             text = "".join(t for t, _ in hits).strip()
             score = min(s for _, s in hits)
+            norm = "".join(ch for ch in text if ch.isalnum()).upper()
+            # 第一档（原尺寸 raw）就已经以高置信度认对时，不必再跑另外两档。
+            # 实测真机三档分数 0.96/0.95/0.93，后两档只会重复读同一个 D。
+            if norm in accepted and score >= CONFIDENT_READ:
+                result = (True, text, score)
+                self._remember(key, sig, result)
+                return result
             if score > best_score:
                 best_text, best_score = text, score
 
-        if not best_text:
-            return False, None, 0.0
-        # 圆片里就一个字母。去掉空白和分隔符后应当是 D（大小写都认）。
-        # 全图路线会传入更宽的 accepted（0/O 等压缩后形近读法），
-        # ROI 路线保持默认只认 D。
-        accepted = accepted or {"D"}
-        norm = "".join(ch for ch in best_text if ch.isalnum()).upper()
-        return norm in accepted, best_text, best_score
+        norm = ("".join(ch for ch in best_text if ch.isalnum()).upper()
+                if best_text else "")
+        result = (norm in accepted, best_text, best_score)
+        self._remember(key, sig, result)
+        return result
+
+    @staticmethod
+    def _roi_signature(roi: np.ndarray) -> bytes:
+        """裁剪图的粗指纹。只用来判断「还是不是同一块 D」，轻微压缩噪声不该
+        造成重读，所以缩到 16×16；真换了位置/字形时字节必然不同。"""
+        return cv2.resize(roi, (16, 16), interpolation=cv2.INTER_AREA).tobytes()
+
+    def _remember(self, key: tuple, sig: bytes,
+                  result: tuple[bool, str | None, float]) -> None:
+        if len(self._reads_cache) >= 64:
+            # 只在换桌/换分辨率时可能积累到这么大，整份丢掉最简单
+            self._reads_cache.clear()
+        self._reads_cache[key] = (sig, result)
 
     # ── 归座 ──
 

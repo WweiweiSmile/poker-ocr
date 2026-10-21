@@ -43,7 +43,7 @@ class StubRoiStream:
         self.frames = []
         self.resets = 0
 
-    def read(self, img, frame_id: str = "frame"):
+    def read(self, img, frame_id: str = "frame", *, detect_dealer: bool = True):
         if not self.frames:
             raise AssertionError("StubRoiStream 没有待处理的帧")
         return dc_replace(self.frames.pop(0), frame_id=frame_id)
@@ -181,6 +181,74 @@ def test_dealer_rotation_clears_all_in_carry() -> None:
               f"庄位轮转应清空全下继承，实际 {s.prev_all_in}")
 
 
+class FakeCache:
+    """只实现钉住相关的方法；StateStream 的慢变量缓存只用到这几个。"""
+
+    def __init__(self) -> None:
+        self.pinned: set[str] = set()
+
+    def is_pinned(self, key: str) -> bool:
+        return key in self.pinned
+
+    def pin(self, key: str) -> bool:
+        self.pinned.add(key)
+        return True
+
+    def unpin_all(self) -> None:
+        self.pinned.clear()
+
+
+def test_hand_boundaries_from_cards_and_board() -> None:
+    """live 的 extra_signature：牌面掉回 0 / hero 换两张牌 = 新一手。"""
+    with stub_env():
+        s = new_stream()
+        check(not s._hand_changed((("Ah", "Kd"), ("Ks", "7d", "2c"))),
+              "首帧不该判成换手")
+        check(not s._hand_changed((("Ah", "Kd"), ())),
+              "牌面刚读空的第一帧先不判换手（可能是遮挡）")
+        check(s._hand_changed((("Ah", "Kd"), ())),
+              "连续两帧空牌面才判换手")
+        check(not s._hand_changed((("Ah", "Kd"), ())), "空牌面重复不是换手")
+        check(s._hand_changed((("Qs", "Jd"), ())), "hero 换了两张牌应判换手")
+        check(not s._hand_changed(None), "没有 live 信号时不做换手推断")
+
+
+def test_slow_fields_pinned_until_hand_switch() -> None:
+    """名字/盲注读到可信值就钉住；动作徽章不钉；换手整批解钉。"""
+    from poker_ocr.roi_reader import RoiFrame, RoiRead, SeatRoi
+
+    with stub_env():
+        s = new_stream()
+        s.stream.cache = FakeCache()
+        frame = RoiFrame(
+            frame_id="f", size=(100, 100), hero_seat_id="hero",
+            seats=[SeatRoi("hero", 0,
+                           {"name": RoiRead("name", (0, 0, 1, 1),
+                                            [("Alice", 0.95)])})],
+            globals={"blinds": RoiRead("blinds", (0, 0, 1, 1),
+                                       [("1/2(）30301600:24:28", 0.9)])})
+        s._pin_slow_fields(frame)
+        check("hero.name" in s.stream.cache.pinned,
+              f"可信名字应钉住：{s.stream.cache.pinned}")
+        check("@blinds" in s.stream.cache.pinned,
+              f"可解析的盲注应钉住：{s.stream.cache.pinned}")
+
+        # 动作徽章盖住名字槽时不能当名字钉住；盲注读坏也不钉
+        s.stream.cache.unpin_all()
+        frame.seats[0].fields["name"] = RoiRead(
+            "name", (0, 0, 1, 1), [("弃牌", 0.95)])
+        frame.globals["blinds"] = RoiRead("blinds", (0, 0, 1, 1), [])
+        s._pin_slow_fields(frame)
+        check("hero.name" not in s.stream.cache.pinned,
+              f"动作徽章不该钉成名字：{s.stream.cache.pinned}")
+        check("@blinds" not in s.stream.cache.pinned,
+              f"读不出盲注不该钉：{s.stream.cache.pinned}")
+
+        s.stream.cache.pinned.add("hero.name")
+        s._restart_sticky()
+        check(not s.stream.cache.pinned, "换手应解钉全部慢变量")
+
+
 def main() -> int:
     tests = [
         test_first_frame_is_baseline,
@@ -192,6 +260,8 @@ def main() -> int:
         test_initial_blinds_carried_when_banner_unreadable,
         test_reset_makes_next_frame_a_new_baseline,
         test_dealer_rotation_clears_all_in_carry,
+        test_hand_boundaries_from_cards_and_board,
+        test_slow_fields_pinned_until_hand_switch,
     ]
     for t in tests:
         before = len(FAILS)

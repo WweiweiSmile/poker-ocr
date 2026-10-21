@@ -995,6 +995,57 @@ def test_complete_json_dispatches_by_model_name() -> None:
     check(not jev.called, "非 JEV 模型不该走 JEV 分支")
 
 
+def test_post_json_reuses_connection() -> None:
+    """连续两次建议复用同一条连接 —— 握手实测能占到一次建议的一半时间。"""
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+        connections = 0
+        payloads: list[dict] = []
+
+        def setup(self) -> None:
+            type(self).connections += 1
+            super().setup()
+
+        def do_POST(self) -> None:
+            n = int(self.headers.get("Content-Length", 0))
+            type(self).payloads.append(json.loads(self.rfile.read(n)))
+            body = b'{"ok": true}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args) -> None:
+            pass
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{srv.server_port}/v1"
+    headers = {"Content-Type": "application/json"}
+    try:
+        # 测试环境可能配了代理；这里强制走 keep-alive 分支
+        with patch.object(advice_mod, "_proxy_configured", lambda: False):
+            first = advice_mod._post_json(url, {"i": 1}, headers, 5.0)
+            second = advice_mod._post_json(url, {"i": 2}, headers, 5.0)
+        check(json.loads(first) == {"ok": True}, f"响应体不对：{first!r}")
+        check(json.loads(second) == {"ok": True}, f"响应体不对：{second!r}")
+        check(Handler.connections == 1,
+              f"两次请求应复用一条连接，实际新建 {Handler.connections} 条")
+        check(Handler.payloads == [{"i": 1}, {"i": 2}],
+              f"请求体应按顺序送达：{Handler.payloads}")
+    finally:
+        srv.shutdown()
+        srv.server_close()
+        with advice_mod._conn_lock:
+            for conn in advice_mod._conns.values():
+                conn.close()
+            advice_mod._conns.clear()
+
+
 def test_ai_settings_reads_referer_and_title() -> None:
     env = {"AI_SERVER_API_KEY": "k", "AI_SERVER_BASE_URL": "https://x/decisions",
            "AI_SERVER_MODEL": "typesafe/jev-1.14",
@@ -1057,14 +1108,17 @@ def test_advice_runner_reports_busy_while_waiting() -> None:
 
     runner = AdviceRunner(SETTINGS, complete=blocking)
     check(not runner.busy, "初始不应 busy")
+    check(runner.busy_seconds == 0.0, "空闲时 busy_seconds 应为 0")
     runner.submit(sit)
     check(started.wait(2.0), "模型调用应开始")
     check(runner.busy, "等待模型返回期间应 busy")
+    check(runner.busy_seconds > 0.0, "等待期间应能报出已等待秒数")
     release.set()
     deadline = time.monotonic() + 2.0
     while time.monotonic() < deadline and runner.busy:
         time.sleep(0.01)
     check(not runner.busy, "结果返回后应清除 busy")
+    check(runner.busy_seconds == 0.0, "结果返回后 busy_seconds 应归零")
     check(len(runner.poll()) == 1, "结果应可取回")
     runner.close()
 
@@ -1116,6 +1170,7 @@ def main() -> int:
         test_complete_jev_builds_choice_question_and_reason,
         test_complete_jev_rejects_unknown_choice,
         test_complete_json_dispatches_by_model_name,
+        test_post_json_reuses_connection,
         test_ai_settings_reads_referer_and_title,
         test_parse_json_content_tolerates_fence,
         test_advice_runner_does_not_block,

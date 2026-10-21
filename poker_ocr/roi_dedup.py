@@ -194,9 +194,15 @@ class RoiDedupCache:
         self._hash: dict[str, tuple[int, ...]] = {}
         self._read: dict[str, RoiRead] = {}
         self._gray: dict[str, np.ndarray] = {}       # 只在 mad_eps > 0 时填
+        # 语义上「一手牌内不会变」的块（名字、盲注横幅）。钉住后不跑 hash /
+        # rec，直接复用上一次读数；换手时由调用方 unpin_all()。盲注横幅里的
+        # 房间号和倒计时每秒都在动，按像素判据每帧都会 miss —— 但它解析出来
+        # 的盲注在这一手内是常量。
+        self._pinned: set[str] = set()
         self.hits = 0
         self.hits_dhash = 0
         self.hits_mad = 0
+        self.hits_pinned = 0
         self.misses = 0
         self.max_hit_distance: int | None = None     # 命中里距离最大的那次（看门槛余量）
         self.max_hit_mad: float | None = None
@@ -205,6 +211,15 @@ class RoiDedupCache:
 
     def check(self, key: str, roi: np.ndarray) -> tuple[RoiRead | None, float]:
         """算分块 hash 并与上一帧比。命中返回上次的读数（调用方复制再标 reused）。"""
+        if key in self._pinned:
+            cached = self._read.get(key)
+            if cached is not None:
+                self.hits += 1
+                self.hits_pinned += 1
+                return cached, 0.0
+            # 钉住却没有读数：缓存被清过，先解钉再走正常路径
+            self._pinned.discard(key)
+
         t0 = perf_counter()
         h = dhash_tiles(roi, self.tiles, self.hash_w, self.hash_h)
         prev = self._hash.get(key)
@@ -246,6 +261,29 @@ class RoiDedupCache:
     def store(self, key: str, read: RoiRead) -> None:
         self._read[key] = read
 
+    # —— 语义钉住（一手牌内的慢变量）——
+
+    def pin(self, key: str) -> bool:
+        """钉住一块：有读数就之后每帧直接复用，不再 hash / rec。
+
+        只给「一手牌内不会变」的字段用（名字、盲注）。换手时调用方必须
+        `unpin_all()`，否则下一手的新名字/新盲注永远读不到。
+        """
+        if key not in self._read:
+            return False
+        self._pinned.add(key)
+        return True
+
+    def unpin_all(self) -> None:
+        self._pinned.clear()
+
+    def is_pinned(self, key: str) -> bool:
+        return key in self._pinned
+
+    @property
+    def pinned(self) -> frozenset[str]:
+        return frozenset(self._pinned)
+
     # —— 维护 ——
 
     def reset(self) -> None:
@@ -253,9 +291,11 @@ class RoiDedupCache:
         self._hash.clear()
         self._read.clear()
         self._gray.clear()
+        self._pinned.clear()
 
     def reset_stats(self) -> None:
-        self.hits = self.hits_dhash = self.hits_mad = self.misses = 0
+        self.hits = self.hits_dhash = self.hits_mad = self.hits_pinned = 0
+        self.misses = 0
         self.max_hit_distance = None
         self.max_hit_mad = None
 
@@ -270,6 +310,8 @@ class RoiDedupCache:
             "misses": self.misses,
             "hit_rate": round(self.hit_rate, 4),
             "by_dhash": self.hits_dhash,
+            "by_pinned": self.hits_pinned,
+            "pinned_keys": len(self._pinned),
             "max_distance": self.max_distance,
             "tiles": self.tiles,
         }
@@ -355,7 +397,13 @@ class RoiStream:
                 self.upscale, self.pad, self.seat_fields, self.global_fields,
                 cache_sig)
 
-    def read(self, img: np.ndarray, frame_id: str = "frame") -> RoiFrame:
+    def read(self, img: np.ndarray, frame_id: str = "frame", *,
+             detect_dealer: bool = True) -> RoiFrame:
+        """读一帧。`detect_dealer=False` 时不跑庄位检测（调用方自己复用上一帧结果）。
+
+        庄位一手牌里不会变，但 blob 扫描每帧要 20–40ms；StateStream 在
+        同一手的后续帧把它关掉，换手/定期复核时再打开。
+        """
         sig = self._signature_of(img)
         if sig != self._signature:
             if self._signature is not None and self.cache is not None:
@@ -369,8 +417,8 @@ class RoiStream:
                            global_fields=self.global_fields,
                            mode=self.mode, upscale=self.upscale, pad=self.pad,
                            dealer_detector=self.dealer_detector,
-                           with_dealer=self.with_dealer, cache=self.cache,
-                           executor=self.executor)
+                           with_dealer=self.with_dealer and detect_dealer,
+                           cache=self.cache, executor=self.executor)
 
         self.stats.frames += 1
         self.stats.roi_total += frame.n_roi

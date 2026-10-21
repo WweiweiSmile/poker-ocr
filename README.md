@@ -55,6 +55,11 @@ mediamtx config/mediamtx.yml
   --out logs/live.states.jsonl
 ```
 
+OBS 和 worker 在**同一台 Mac** 时，可以点 OBS 的 **Start Virtual Camera**，
+然后 `--url cam:0` 直接读虚拟摄像头（索引用 `tools/list_cameras.py` 查），
+整段跳过 编码 → SRT → MediaMTX → RTSP → 解码，延迟最低。详见
+[docs/live-stream.md §3.4](docs/live-stream.md#34-降低-obs--python-的传输延迟)。
+
 ### AI 实时建议（默认开启）
 
 worker 在**轮到我**时把这一手的完整行动线交给模型（`--no-ai-advice` 可关闭），
@@ -69,7 +74,8 @@ worker 在**轮到我**时把这一手的完整行动线交给模型（`--no-ai-
 翻前不用底池倍数：底池只有盲注那么大，而且 `preflop-open.md` 明确要求尺度用
 bb 说。金额由程序按现场底池/加注算好（含最小加注额与后手封顶），模型只返回
 选项 id，所以它不可能给出做不出来的尺度。模型调用在后台线程跑，**不阻塞采样**；
-结果写进 JSONL 的 `advice` 记录并在终端打印一行。
+结果写进 JSONL 的 `advice` 记录并高亮打印（含本次耗时）。等模型期间识别会暂停，
+终端每秒打一行 `[建议] 生成中… Ns` 心跳，日志不会静默几秒后突然成团出现。
 
 ```bash
 cp .env.example .env      # 然后编辑 .env，填入 AI_SERVER_API_KEY

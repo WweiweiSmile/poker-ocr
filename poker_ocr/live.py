@@ -10,6 +10,10 @@
 
   · **只保留最新帧**。reader 线程按源帧率连续 read，邮箱里永远只有一帧；
     处理不过来就覆盖旧帧，绝不让延迟越积越大。
+  · **连续动作合并**。连续弃牌/下注时，中间帧的徽章还在动画里，读数既不可信
+    也会写成一串「弃牌 1 个 → 2 个 → 3 个」的半成品记录。动作区静止
+    `--settle` 秒后才识别，交出去的是这阵动作落定后的最新一帧；动作一直不停
+    时由 `--settle-max` 兜底。盲注倒计时/头像计时环不参与「静止」判据。
   · **单处理线程**。reader 只做解码，`StateStream.ingest()` 永远只在主循环里
     调用；一帧内的多块 ROI rec 由线程池并行（`--roi-threads`，默认 4，1=串行）。
     共享同一个 OcrEngine/ONNX session，实测并发结果与串行逐字一致。
@@ -55,6 +59,7 @@ from .hand_track import LiveHandTracker
 from .ocr import OcrEngine
 from .parse import parse_blinds
 from .profile import Profile
+from .roi_dedup import pixel_mad
 from .roi_reader import hero_turn_method
 from .state_stream import DEFAULT_ROI_THREADS, StateStream
 
@@ -305,6 +310,142 @@ def plan_crop(size: tuple[int, int], profile: Profile,
     return CropPlan(mode, (w, h), None, (w, h), warning)
 
 
+# ─────────────────────────── 动作区静止闸 ───────────────────────────
+#
+# 连续弃牌 / 连续下注时，画面会在一两秒里一帧一变。逐帧 OCR 只会得到一串
+# 中间状态（弃牌 1 个 → 2 个 → 3 个），每个都被当成一条新记录；而这些帧里的
+# 徽章还在动画中，本来就是最不可信的读数。用户要的是**这阵动作落定后的最新
+# 一帧**。
+#
+# 做法：在 OCR 之前只看**动作相关区域**的像素变化。还在变 → 丢掉当前帧继续
+# 等；静止 `settle` 秒 → 才把邮箱里的最新帧交给识别。动作一直不停时由
+# `max_wait` 兜底，保证不会无限等下去。
+#
+# 哪些区域**不能**算进来：
+#   · 盲注横幅（`blinds`）里有房间号和每秒跳动的倒计时；
+#   · 头像只有**中心**参与：回合计时环画在头像边缘，整块拿来比永远不会静止；
+#   · hero 操作区 / 预设按钮：蓝色按钮会呼吸式高亮，而且轮到我时本来就要
+#     尽快出建议，不能被动画拖到 max_wait。
+DEFAULT_SETTLE = 0.25
+DEFAULT_SETTLE_MAX = 1.5
+SETTLE_MAD = 2.0                  # 文字/数字区：下采样到 32x32 后的平均绝对差门槛
+# 头像中心单独用更高的门槛：照片本身的压缩噪声比文字区大一个量级（实测
+# 24fps 视频 p90 就有 2.4），而弃牌蒙层/蓝色下注钮会把平均值推到 30 以上 ——
+# 门槛取 10 既不会把噪声当动作，也不会漏掉整块变暗/变蓝这种真变化。
+SETTLE_AVATAR_MAD = 10.0
+SETTLE_AVATAR_INSET = 0.2         # 头像只取中心 60%，躲开边缘的计时环
+_SETTLE_GLOBALS = ("pot", "pot_before_street", "board", "hero_cards", "hand_label")
+_SETTLE_SIZE = (32, 32)
+
+
+def _shrink(rect: tuple[int, int, int, int],
+            frac: float) -> tuple[int, int, int, int]:
+    """按比例向内收一圈。frac=0.2 → 保留中心 60%。"""
+    x1, y1, x2, y2 = rect
+    dx, dy = int((x2 - x1) * frac), int((y2 - y1) * frac)
+    return x1 + dx, y1 + dy, x2 - dx, y2 - dy
+
+
+def build_settle_regions(profile: Profile, size: tuple[int, int], *,
+                         mad: float = SETTLE_MAD,
+                         avatar_mad: float = SETTLE_AVATAR_MAD,
+                         avatar_inset: float = SETTLE_AVATAR_INSET
+                         ) -> tuple[tuple[tuple[int, int, int, int], float], ...]:
+    """一帧里参与「还在动吗」判定的区域，以及各自的 MAD 门槛。"""
+    regions: list[tuple[tuple[int, int, int, int], float]] = []
+    for seat in profile.seats:
+        for slot in (seat.name_slot, seat.chip_slot, seat.chip_slot_alt,
+                     seat.bet_slot):
+            if slot is not None:
+                regions.append((profile.slot_to_px(slot, size), mad))
+        regions.append((_shrink(profile.slot_to_px(seat.avatar_slot, size),
+                                avatar_inset), avatar_mad))
+    for key in _SETTLE_GLOBALS:
+        slot = profile.global_slots.get(key)
+        if slot is not None:
+            regions.append((profile.slot_to_px(slot, size), mad))
+    return tuple((r, th) for r, th in regions if r[2] > r[0] and r[3] > r[1])
+
+
+class SettleGate:
+    """动作区静止闸：一阵连续动作只放行落定后的最后一帧。
+
+        gate = SettleGate(profile, settle=0.25, max_wait=1.5)
+        if gate.should_process(img, time.monotonic()):
+            process(img)
+
+    时间参数由调用方传入（不自己读钟），单测可以直接喂合成时间轴。
+    画面尺寸变了会重建区域 —— 和 ROI 缓存一样，换分辨率不能沿用旧坐标。
+    """
+
+    def __init__(self, profile: Profile, *, settle: float = DEFAULT_SETTLE,
+                 max_wait: float = DEFAULT_SETTLE_MAX,
+                 mad: float = SETTLE_MAD,
+                 avatar_mad: float = SETTLE_AVATAR_MAD,
+                 avatar_inset: float = SETTLE_AVATAR_INSET) -> None:
+        if settle < 0:
+            raise ValueError("settle 不能为负")
+        if max_wait < settle:
+            raise ValueError("max_wait 不能小于 settle")
+        self.profile = profile
+        self.settle = float(settle)
+        self.max_wait = float(max_wait)
+        self.mad = float(mad)
+        self.avatar_mad = float(avatar_mad)
+        self.avatar_inset = float(avatar_inset)
+        self._size: tuple[int, int] | None = None
+        self._regions: tuple[tuple[tuple[int, int, int, int], float], ...] = ()
+        self._prev: tuple[tuple[np.ndarray, float], ...] | None = None
+        # 没有「上次变化」时视为已经静止：第一帧立即放行，不白等一个窗口
+        self._last_change = float("-inf")
+        self._burst_start: float | None = None
+        self.blocks = 0               # 合并掉的帧数（统计/调试）
+
+    def _signature(self, img: np.ndarray) -> tuple[tuple[np.ndarray, float], ...]:
+        size = (img.shape[1], img.shape[0])
+        if size != self._size:
+            self._size = size
+            self._regions = build_settle_regions(
+                self.profile, size, mad=self.mad, avatar_mad=self.avatar_mad,
+                avatar_inset=self.avatar_inset)
+            self._prev = None
+            self._last_change = float("-inf")
+            self._burst_start = None
+        out = []
+        for (x1, y1, x2, y2), mad in self._regions:
+            roi = img[y1:y2, x1:x2]
+            if roi.size == 0:
+                continue
+            gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+            out.append((cv2.resize(gray, _SETTLE_SIZE,
+                                   interpolation=cv2.INTER_AREA), mad))
+        return tuple(out)
+
+    def _changed(self, prev: tuple[tuple[np.ndarray, float], ...],
+                 cur: tuple[tuple[np.ndarray, float], ...]) -> bool:
+        if len(prev) != len(cur):
+            return True
+        return any(pixel_mad(a, b) > mad
+                   for (a, _), (b, mad) in zip(prev, cur))
+
+    def should_process(self, img: np.ndarray, now: float) -> bool:
+        """`now` 是单调时钟。返回 True = 画面已落定，可以交给 OCR。"""
+        sig = self._signature(img)
+        if self._prev is not None and self._changed(self._prev, sig):
+            self._last_change = now
+            if self._burst_start is None:
+                self._burst_start = now
+        self._prev = sig
+
+        if (now - self._last_change >= self.settle
+                or (self._burst_start is not None
+                    and now - self._burst_start >= self.max_wait)):
+            self._burst_start = None
+            return True
+        self.blocks += 1
+        return False
+
+
 class JsonlWriter:
     """一行一个 JSON；每条立即 flush。默认覆盖写。"""
 
@@ -421,7 +562,7 @@ class RtspReader(threading.Thread):
             w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
             h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
             fps = cap.get(cv2.CAP_PROP_FPS) or 0.0
-            self.log(f"[连接] RTSP 已连接 epoch={self.epoch}：{w}x{h} @ {fps:.1f}fps")
+            self.log(f"[连接] 视频源已连接 epoch={self.epoch}：{w}x{h} @ {fps:.1f}fps")
 
             try:
                 while not self.stop_event.is_set():
@@ -443,8 +584,52 @@ class RtspReader(threading.Thread):
                 self.stop_event.wait(self.reconnect_delay)
 
 
+def rotate_frame(img: np.ndarray, degrees: int) -> np.ndarray:
+    """按 0/90/180/270 度旋转。**90 = 顺时针**（与 cv2.ROTATE_90_CLOCKWISE 一致）。
+
+    OBS 虚拟摄像头在 macOS 上固定输出 1920x1080；竖屏画布塞进去只剩 ~486x1080，
+    筹码数字太小。把 OBS 画布改成 1920x1080、手机源旋转 90° 铺满宽度，就能保留
+    ~864x1920（参考尺寸的 ~88%），再用这里的 `--rotate` 把画面转回来。
+    """
+    table = {0: None, 90: cv2.ROTATE_90_CLOCKWISE, 180: cv2.ROTATE_180,
+             270: cv2.ROTATE_90_COUNTERCLOCKWISE}
+    if degrees not in table:
+        raise ValueError(f"rotate 只支持 0/90/180/270，实际 {degrees}")
+    code = table[degrees]
+    return img if code is None else cv2.rotate(img, code)
+
+
 def _open_capture(url: str):
-    """打开 RTSP。优先显式 FFmpeg 后端；失败再让 OpenCV 自选。"""
+    """打开视频源。
+
+    两种写法：
+
+      · `rtsp://...` —— 走 FFmpeg 解 RTSP（OBS → SRT → MediaMTX 路线）。
+      · `cam:0` / `cam:1` —— 直接打开本机摄像头。OBS 在**同一台机器**上时，
+        用 OBS 虚拟摄像头（Start Virtual Camera）把画面直接喂给 Python，
+        可以整段跳过 编码 → SRT → MediaMTX → RTSP → 解码（约 0.3–0.8s）。
+        索引用 `tools/list_cameras.py` 查。
+
+    `cam:` 优先 AVFoundation（macOS 虚拟摄像头只在这个后端暴露）；失败再让
+    OpenCV 自选后端。
+    """
+    if url.startswith(("cam:", "camera:")):
+        _, _, raw = url.partition(":")
+        try:
+            index = int(raw)
+        except ValueError:
+            return None
+        cap = cv2.VideoCapture(index, cv2.CAP_AVFOUNDATION)
+        if not cap.isOpened():
+            cap.release()
+            cap = cv2.VideoCapture(index)
+        if not cap.isOpened():
+            cap.release()
+            return None
+        # 摄像头后端大多忽略这个设置；读循环本身也只保留最新帧
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        return cap
+
     cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
     if not cap.isOpened():
         cap.release()
@@ -519,6 +704,8 @@ class LiveProcessor:
         self.last_proc_ms = 0.0
         self._stale_logged = 0.0
         self._cards_error_logged = False
+        # 上一次「生成中…」心跳报到第几秒（只在等待建议时使用）
+        self._wait_beat_second = 0
 
         if dump_dir is not None:
             dump_dir.mkdir(parents=True, exist_ok=True)
@@ -638,6 +825,23 @@ class LiveProcessor:
         """AI 建议正在生成：主循环应暂停识别，等结果回来再处理新帧。"""
         return self.advice_runner is not None and self.advice_runner.busy
 
+    def log_advice_wait(self) -> None:
+        """等模型时每秒打一行「生成中…」。
+
+        等待期间主循环暂停 OCR，控制台本来会完全静默，模型返回后建议和恢复
+        后的识别日志一起涌出来，看起来像「一堆一堆」。心跳把这段静默填成线性
+        的时间线，也让人一眼看出慢在模型而不是识别。
+        """
+        runner = self.advice_runner
+        if self.quiet or runner is None or not runner.busy:
+            self._wait_beat_second = 0
+            return
+        second = int(runner.busy_seconds)
+        if second < 1 or second == self._wait_beat_second:
+            return
+        self._wait_beat_second = second
+        self.log(f"  [建议] 生成中… {second}s")
+
     def drain_advice(self, final: bool = False) -> None:
         """把已完成的手牌/建议写进 JSONL 并打印。
 
@@ -679,14 +883,16 @@ class LiveProcessor:
         option = advice.option
         amount = f" {option.amount}BB" if option.amount is not None else ""
         tail = f"（{advice.error}）" if advice.error else ""
+        elapsed = f"耗时 {advice.duration_ms / 1000:.1f}s"
         if not _use_ansi():
             self.log(f"  [建议] {advice.street} ⇒ {option.label}{amount}"
-                     f"｜{advice.reason}{tail}")
+                     f"｜{elapsed}｜{advice.reason}{tail}")
             return
         # 模型结果只出现一次，别被滚动的识别日志淹没：
-        # 留白 → 高亮横幅（街 + 动作 + 金额）→ 粗体理由 → 留白。
+        # 留白 → 高亮横幅（街 + 动作 + 金额 + 耗时）→ 粗体理由 → 留白。
         bar = "═" * 60
-        headline = f" ▶ 建议  {advice.street} ⇒ {option.label}{amount} "
+        headline = (f" ▶ 建议  {advice.street} ⇒ {option.label}{amount}"
+                    f"  ·  {elapsed} ")
         self.log("")
         self.log(f"{_ANSI_ADVICE_BAR}{bar}{_ANSI_RESET}")
         self.log(f"{_ANSI_ADVICE_BAR}{headline}{_ANSI_RESET}")
@@ -781,7 +987,13 @@ def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
         description="实时拉 RTSP 流，按间隔识别牌桌状态并写 JSONL")
     ap.add_argument("--url", default=DEFAULT_URL,
-                    help=f"RTSP 地址（默认 {DEFAULT_URL}）")
+                    help=f"视频源（默认 {DEFAULT_URL}）。本机 OBS 虚拟摄像头可写 "
+                         "cam:0 / cam:1（用 tools/list_cameras.py 查索引），"
+                         "跳过 SRT/MediaMTX，延迟最低")
+    ap.add_argument("--rotate", type=int, choices=(0, 90, 180, 270), default=0,
+                    help="把视频源顺时针旋转多少度再识别（默认 0）。OBS 虚拟摄像头"
+                         "固定 1920x1080，把 OBS 画布改成横屏、手机源转 90° 后，"
+                         "这里用 --rotate 90 转回竖屏，能保住更高分辨率")
     ap.add_argument("--profile", type=Path, default=DEFAULT_PROFILE)
     ap.add_argument("--initial-blinds", default=None,
                     help="盲注横幅读不到时的首帧盲注，如 1/2（之后走正常继承）")
@@ -794,6 +1006,12 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--every", type=float, default=DEFAULT_EVERY,
                     help="采样间隔秒（默认 0 = 不节流：处理完当前帧立即取最新帧，"
                          "中间帧丢弃）")
+    ap.add_argument("--settle", type=float, default=DEFAULT_SETTLE,
+                    help="连续动作合并：动作区静止多少秒后才识别，只保留落定后的"
+                         f"最新一帧（默认 {DEFAULT_SETTLE}；0 = 关闭，逐帧识别）")
+    ap.add_argument("--settle-max", type=float, default=DEFAULT_SETTLE_MAX,
+                    help="连续动作合并的最长等待秒数：动作一直不停时最多攒这么久"
+                         f"就先识别一帧（默认 {DEFAULT_SETTLE_MAX}）")
     ap.add_argument("--out", type=Path, default=DEFAULT_OUT,
                     help=f"JSONL 输出（默认 {DEFAULT_OUT}）")
     ap.add_argument("--stable-frames", type=int, default=1,
@@ -836,6 +1054,10 @@ def build_parser() -> argparse.ArgumentParser:
 def _validate_args(ap: argparse.ArgumentParser, args) -> None:
     if args.every < 0:
         ap.error("--every 不能为负数（0 = 不节流）")
+    if args.settle < 0:
+        ap.error("--settle 不能为负数（0 = 关闭动作合并）")
+    if args.settle_max < args.settle:
+        ap.error("--settle-max 不能小于 --settle")
     if args.max_frame_age <= 0:
         ap.error("--max-frame-age 必须大于 0")
     if args.stable_frames < 1:
@@ -987,9 +1209,17 @@ def main(argv: list[str] | None = None) -> int:
         dump_dir=args.dump_frames, quiet=args.quiet,
         hand_tracker=hand_tracker, advice_runner=advice_runner)
 
+    # 动作区静止闸只用于 roi 路线：它的区域来自固定槽位；full 路线没有布局。
+    settle_gate = (SettleGate(profile, settle=args.settle,
+                              max_wait=args.settle_max)
+                   if args.settle > 0 and args.recognizer == "roi" else None)
+
     _log(f"[启动] 拉流 {args.url}")
     cadence = (f"间隔 {args.every}s" if args.every > 0
                else "无节流（处理完当前帧立即取最新帧）")
+    if settle_gate is not None:
+        cadence += (f"；动作区静止 {args.settle}s 后识别"
+                    f"（上限 {args.settle_max}s）")
     _log(f"[启动] 输出 {args.out}；{cadence}；Ctrl-C 结束")
     reader.start()
 
@@ -1007,6 +1237,7 @@ def main(argv: list[str] | None = None) -> int:
             # 不是采样间隔。默认不节流后把它调小，避免把空闲等待误当成延迟。
             packet = mailbox.wait_newer(last_seq, timeout=0.2)
             now = time.monotonic()
+            processor.log_advice_wait()
 
             if packet is None:
                 # 流断了 / 还没连上：定期提醒，不要每 0.5s 刷屏
@@ -1027,6 +1258,12 @@ def main(argv: list[str] | None = None) -> int:
             if processor.waiting_for_advice:
                 last_seq = packet.seq
                 continue
+
+            if args.rotate:
+                # 先转正再裁剪/缩放：OBS 虚拟摄像头输出横屏，牌桌是竖屏
+                packet = FramePacket(
+                    packet.seq, packet.epoch, packet.grab_mono,
+                    rotate_frame(packet.image, args.rotate))
 
             shape = packet.image.shape[:2]          # (h, w)
             if shape != last_shape:
@@ -1088,8 +1325,22 @@ def main(argv: list[str] | None = None) -> int:
                         break
                     newer = mailbox.latest()
                     if newer is not None and newer.seq > packet.seq:
-                        packet = newer
+                        # 新帧同样要过裁剪/比例归一化，否则 ROI 坐标会错位
+                        newer_img = plan.apply(newer.image)
+                        if fit is not None:
+                            newer_img = fit.apply(newer_img)
+                        packet = FramePacket(newer.seq, newer.epoch,
+                                             newer.grab_mono, newer_img)
                 last_start = time.monotonic()
+
+            # 动作区还在变（连续弃牌 / 下注动画）就先不识别：丢掉这一帧，
+            # 等它落定后直接处理邮箱里的最新帧。这样一串动作只留最后一帧。
+            if (settle_gate is not None
+                    and not settle_gate.should_process(packet.image,
+                                                       time.monotonic())):
+                last_seq = packet.seq
+                continue
+
             result = processor.handle(packet)
             last_seq = packet.seq
 
@@ -1117,6 +1368,8 @@ def main(argv: list[str] | None = None) -> int:
             "eff_hz": round(processor.processed / elapsed, 2) if elapsed else 0,
             "reconnects": reader.reconnects,
             "advice_count": processor.advice_count,
+            **({"settle_blocks": settle_gate.blocks}
+               if settle_gate is not None else {}),
             **processor.summary(),
         }
         writer.write({"type": "session_end", "ended_at": _iso_now(),

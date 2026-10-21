@@ -125,6 +125,68 @@ def test_disc_far_from_every_seat_is_rejected() -> None:
           f"离所有座位都远的圆片应当 not_found，实际 {r.status}/{r.seat_id}")
 
 
+def test_reads_d_stops_after_confident_first_variant() -> None:
+    """第一档就高置信度认出 D 时不该再跑后两档 —— 每帧省 ~2/3 的 dealer OCR。"""
+    class CountingEngine:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def read_text(self, _img):
+            self.calls += 1
+            return [("D", 0.96)]
+
+    profile = Profile.load()
+    engine = CountingEngine()
+    det = BlobDealerDetector(profile.dealer_cfg.get("blob"), engine=engine)
+    img = np.full((120, 120, 3), 240, np.uint8)
+    got = det._reads_d(img, (40, 40, 40, 40))
+    check(got[0] and got[1] == "D", f"应认出 D，实际 {got}")
+    check(engine.calls == 1, f"第一档可信就该收工，实际跑了 {engine.calls} 档")
+
+
+def test_reads_d_reuses_cache_until_pixels_change() -> None:
+    """同一位置的同一块画面跨帧复用；按钮挪走/被盖住（像素变了）才重读。"""
+    class CountingEngine:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def read_text(self, _img):
+            self.calls += 1
+            return [("D", 0.96)]
+
+    profile = Profile.load()
+    engine = CountingEngine()
+    det = BlobDealerDetector(profile.dealer_cfg.get("blob"), engine=engine)
+    img = np.full((120, 120, 3), 240, np.uint8)
+    det._reads_d(img, (40, 40, 40, 40))
+    det._reads_d(img.copy(), (40, 40, 40, 40))
+    check(engine.calls == 1, f"画面没变应命中缓存，实际重读 {engine.calls} 次")
+
+    changed = img.copy()
+    changed[40:80, 40:80] = 20
+    det._reads_d(changed, (40, 40, 40, 40))
+    check(engine.calls == 2, f"画面变了应重读，实际只读了 {engine.calls} 次")
+
+
+def test_reads_d_tries_all_variants_when_unconfident() -> None:
+    """第一档读得不像 D 时，仍要跑满三档再下结论。"""
+    class GarbageEngine:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def read_text(self, _img):
+            self.calls += 1
+            return [("X", 0.5)]
+
+    profile = Profile.load()
+    engine = GarbageEngine()
+    det = BlobDealerDetector(profile.dealer_cfg.get("blob"), engine=engine)
+    img = np.full((120, 120, 3), 240, np.uint8)
+    got = det._reads_d(img, (40, 40, 40, 40))
+    check(not got[0], f"读不出 D 应判 False，实际 {got}")
+    check(engine.calls == 3, f"不可信时三档都要跑，实际 {engine.calls} 档")
+
+
 def main() -> int:
     tests = [
         test_blank_felt_finds_nothing,
@@ -133,6 +195,9 @@ def main() -> int:
         test_correct_size_is_found_and_goes_to_nearest_seat,
         test_two_discs_is_ambiguous_not_a_guess,
         test_disc_far_from_every_seat_is_rejected,
+        test_reads_d_stops_after_confident_first_variant,
+        test_reads_d_reuses_cache_until_pixels_change,
+        test_reads_d_tries_all_variants_when_unconfident,
     ]
     for t in tests:
         before = len(FAILS)

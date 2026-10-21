@@ -14,14 +14,21 @@ ReviewHand；输出也不是长篇点评，而是从固定选项里**选一个**
 调用协议：OpenAI 兼容的 /chat/completions（与 call-back 的 AIClient 同口径），
 凭据来自环境变量 AI_SERVER_API_KEY / AI_SERVER_BASE_URL / AI_SERVER_MODEL。
 **非流式**：一次建议的正文只有几十个 token，流式只会增加复杂度；超时用
-`socket` 级的总时长控制（默认 20 秒，实时链路等不起更久）。
+`socket` 级的总时长控制（默认 20 秒，实时链路等不起更久）。**连接复用**：
+同一 host 的 HTTP/1.1 长连接会被缓存，省掉每次建议都要付的 TLS 握手
+（国内到 OpenRouter 实测 0.4–1.4s，常常比模型本身还慢）。
 """
 
 from __future__ import annotations
 
+import http.client
+import io
 import json
 import os
+import threading
+import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections import Counter
 from dataclasses import dataclass, field
@@ -769,15 +776,70 @@ def is_jev_model(model: str) -> bool:
     return any(part.startswith("jev") for part in name.split("/") if part)
 
 
+# 一次建议的模型本身只要几百毫秒，但国内到 OpenRouter 的 TLS 握手实测
+# 0.4–1.4s —— urllib 每次 urlopen 都新建连接，等于每给一次建议就多付一次
+# 握手钱。这里按 host 缓存一条 HTTP/1.1 长连接。只在没配代理时用：
+# http.client 不会读 HTTPS_PROXY，配了代理就退回 urllib（保持原有行为）。
+_conn_lock = threading.Lock()
+_conns: dict[tuple[str, str, int], http.client.HTTPConnection] = {}
+_PROXY_ENV = ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy",
+              "ALL_PROXY", "all_proxy")
+
+
+def _proxy_configured() -> bool:
+    return any(os.environ.get(k) for k in _PROXY_ENV)
+
+
+def _post_keepalive(url: str, data: bytes, headers: dict,
+                    timeout: float) -> bytes:
+    parts = urllib.parse.urlsplit(url)
+    https = parts.scheme == "https"
+    key = (parts.scheme, parts.hostname or "",
+           parts.port or (443 if https else 80))
+    conn_cls = http.client.HTTPSConnection if https else http.client.HTTPConnection
+    path = urllib.parse.urlunsplit(("", "", parts.path or "/", parts.query, ""))
+    with _conn_lock:
+        conn = _conns.get(key)
+        if conn is None:
+            conn = conn_cls(key[1], key[2], timeout=timeout)
+            _conns[key] = conn
+        elif conn.sock is not None:
+            conn.sock.settimeout(timeout)
+        try:
+            conn.request("POST", path, body=data, headers=headers)
+            resp = conn.getresponse()
+            body = resp.read()
+        except BaseException:
+            # 连接坏了不能留在缓存里，下一次还得付握手钱
+            conn.close()
+            _conns.pop(key, None)
+            raise
+        if resp.will_close:
+            conn.close()
+            _conns.pop(key, None)
+    if resp.status >= 400:
+        # 与 urllib 的口径一致：HTTP 错误带着 code 原样抛出，调用方决定
+        # 401/403 脱敏、400 退回非 JSON 模式重试
+        raise urllib.error.HTTPError(url, resp.status, resp.reason,
+                                     resp.headers, io.BytesIO(body))
+    return body
+
+
 def _post_json(url: str, payload: dict, headers: dict, timeout: float) -> bytes:
     """POST 一段 JSON 并返回原始响应体。
 
     `HTTPError` 原样抛出，由调用方决定怎么脱敏（401/403 不回显 body）；
     网络层错误统一转 AIError。
     """
-    req = urllib.request.Request(
-        url, data=json.dumps(payload).encode("utf-8"),
-        headers=headers, method="POST")
+    data = json.dumps(payload).encode("utf-8")
+    if not _proxy_configured():
+        try:
+            return _post_keepalive(url, data, headers, timeout)
+        except (http.client.HTTPException, ConnectionError):
+            # 长连接被服务端按空闲超时关掉是最常见的情况：丢掉它，走 urllib
+            # 新建连接重试一次。模型请求是幂等的选择题，重试不会产生副作用。
+            pass
+    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return resp.read()
@@ -1036,8 +1098,6 @@ class Advice:
 def advise(sit: Situation, settings: AISettings | None,
            timeout: float = 20.0, complete=None) -> Advice:
     """出一次建议。`complete` 可注入（单测用），默认走 complete_json。"""
-    import time
-
     started = time.monotonic()
     by_id = {o.id: o for o in sit.options}
     selected = skills.select_skills(_skill_context(sit))
@@ -1099,6 +1159,7 @@ class AdviceRunner:
         self._stop = threading.Event()
         # 模型调用进行中。主循环据此暂停识别 —— 等待期间画面只会越来越旧
         self._busy = threading.Event()
+        self._busy_since: float | None = None
         self._dropped = 0
         self._thread = threading.Thread(target=self._loop, name="advice",
                                         daemon=True)
@@ -1146,6 +1207,7 @@ class AdviceRunner:
                 continue
             if sit is None:
                 return
+            self._busy_since = time.monotonic()
             self._busy.set()
             try:
                 try:
@@ -1155,6 +1217,7 @@ class AdviceRunner:
                     continue
                 self._done.put(advice)
             finally:
+                self._busy_since = None
                 self._busy.clear()
 
     def close(self) -> None:
@@ -1169,6 +1232,16 @@ class AdviceRunner:
     def busy(self) -> bool:
         """模型调用进行中（从开始调用到结果放进 `_done`）。"""
         return self._busy.is_set()
+
+    @property
+    def busy_seconds(self) -> float:
+        """这一次模型调用已经跑了多少秒；不在调用中时为 0。
+
+        主循环用它打「生成中…」心跳：等模型时 OCR 是暂停的，没有这行日志，
+        控制台会先静默几秒、再把建议和恢复后的识别日志一次性吐出来。
+        """
+        since = self._busy_since
+        return max(time.monotonic() - since, 0.0) if since is not None else 0.0
 
     @property
     def dropped(self) -> int:
