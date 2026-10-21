@@ -534,6 +534,20 @@ def _state_body(record: dict, cards: CardsResult | None, recognizer: str) -> dic
     if cards is not None and cards.warnings:
         body["cards_warnings"] = cards.warnings
     body["opponents"] = opponents    # 其他对手永远最后
+    shows = getattr(cards, "shows", {}) if cards is not None else {}
+    if shows:
+        # 亮牌座位尽量补上名字/位置；full 路线的 seats 不一定有 seat_id，
+        # 补不到就只写 seat_id 和牌。
+        by_id = {p.get("seat_id"): p for p in opponents}
+        body["shows"] = [
+            {
+                "seat_id": seat_id,
+                "name": (by_id.get(seat_id) or {}).get("name"),
+                "position": (by_id.get(seat_id) or {}).get("position"),
+                "cards": read.codes,
+            }
+            for seat_id, read in shows.items()
+        ]
     return body
 
 
@@ -833,10 +847,19 @@ class LiveProcessor:
         """
         self.drain_advice()
 
-        if self.hand_tracker is None or outcome.state is None or not outcome.state.ok:
+        if self.hand_tracker is None:
             return
         hero_codes = cards.hero_codes if cards is not None else []
         board = cards.board_codes if cards is not None else []
+        shows = getattr(cards, "show_codes", {}) if cards is not None else {}
+        # 亮牌不依赖 state.ok：摊牌帧常因筹码/底池被牌顶掉而整帧丢弃，
+        # 但对手亮出的牌本身仍然可读。先挂到当前手牌，再做状态检查。
+        # cards 为 None 表示这一帧读牌失败，不能据此清空「亮牌已消失」状态。
+        if cards is not None:
+            self.hand_tracker.record_shows(shows)
+
+        if outcome.state is None or not outcome.state.ok:
+            return
         point = self.hand_tracker.observe(outcome.state, hero_codes, board)
         # 换手是在 observe 内部判定的：紧接着再 drain 一次，把上一手的
         # 手牌记忆（行动线 + 建议）在换手这一帧就落库，不必等下一帧。
@@ -982,10 +1005,14 @@ class LiveProcessor:
 
     @staticmethod
     def _cards_signature(cards: CardsResult | None) -> tuple | None:
-        """牌面指纹：公共牌或 hero 手牌变化时触发一条新记录。"""
+        """牌面指纹：公共牌 / hero 手牌 / 对手亮牌变化时触发一条新记录。"""
         if cards is None:
             return None
-        return (tuple(cards.hero_codes), tuple(cards.board_codes))
+        base = (tuple(cards.hero_codes), tuple(cards.board_codes))
+        shows = tuple(sorted((seat_id, tuple(read.codes))
+                             for seat_id, read in getattr(cards, "shows", {}).items()))
+        # 没有亮牌时保持旧指纹形状，避免所有帧的签名都多一个空维度
+        return (*base, shows) if shows else base
 
     def _handle_full(self, packet: FramePacket, t: float, frame_id: str,
                      age: float, t0: float,

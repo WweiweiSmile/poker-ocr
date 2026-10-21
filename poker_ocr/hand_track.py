@@ -190,6 +190,8 @@ class _LiveHand:
     # (street, seat_id) → 该座在这条街的「已知下注额」。盲注不是行动，所以基线
     # 必须按座位记，不能拿 0 当基线
     baseline: dict[tuple[str, str], float] = field(default_factory=dict)
+    # 摊牌/主动秀牌时读到的对手手牌：seat_id → {seat_id, name, position, cards}
+    shows: dict[str, dict] = field(default_factory=dict)
 
     def street_actions(self, street: str) -> list[ActionRecord]:
         return [a for a in self.actions if a.street == street]
@@ -228,6 +230,12 @@ class LiveHandTracker:
         self._drop_frames = 0
         # 上一手结束时的工作副本。调用方 start_hand 时取走，落成一条 hand 记录
         self.last_finished: _LiveHand | None = None
+        # 最近一次有效状态里各座的名字/位置。亮牌帧经常因为筹码被顶掉而整帧
+        # 丢弃，但亮牌本身不依赖状态；用这份缓存给 show 记录补名字/位置。
+        self._seat_meta: dict[str, tuple[str | None, str | None]] = {}
+        # seat_id → 首次看到这组亮牌时的手牌 id。亮牌会在屏幕上停留好几秒，
+        # 跨过换手；没有这份映射会把上一手的亮牌也写进下一手。
+        self._active_shows: dict[str, str] = {}
 
     # ─────────────────────────── 主流程 ───────────────────────────
 
@@ -237,9 +245,15 @@ class LiveHandTracker:
         """喂一帧被接受的状态；返回决策点快照或 None。
 
         调用方只应喂 `state.ok` 的帧 —— 带 errors 的帧里任何字段都可能是猜的。
+        对手亮牌走独立的 `record_shows()`：亮牌帧常常因为筹码/底池被顶掉而
+        `not ok`，不能等这里。
         """
         if not state.ok:
             return None
+
+        for p in state.players:
+            if p.seat_id != state.hero_seat_id:
+                self._seat_meta[p.seat_id] = (p.name, p.position)
 
         cards = tuple(hero_cards)
         board = tuple(board)
@@ -291,6 +305,45 @@ class LiveHandTracker:
 
         return self._maybe_decision(state, hand)
 
+    def record_shows(self, shows: dict[str, list[str]] | None) -> None:
+        """把本帧读到的亮牌挂到当前（或刚结束的）这手牌上。
+
+        亮牌帧常常因为筹码/底池被牌顶掉而 `state.ok=False`，所以这个入口
+        不要求有效状态。名字/位置用最近一次有效状态的缓存；同一手牌里重复
+        读到同一座位时以后读到的为准。
+        """
+        shows = shows or {}
+        # 本帧不再出现的亮牌：结束这次「亮牌事件」，下一手同样的牌可以重新记。
+        for seat_id in list(self._active_shows):
+            if seat_id not in shows:
+                del self._active_shows[seat_id]
+        if not shows:
+            return
+        target = self.hand
+        # 当前手牌还是换手后的空壳（没有 hero 手牌/公共牌）时，亮牌更可能
+        # 属于刚结束的上一手。
+        if (target is None or (not target.hero_cards and not target.board)) \
+                and self.last_finished is not None:
+            target = self.last_finished
+        if target is None:
+            return
+        for seat_id, codes in shows.items():
+            codes = tuple(codes)
+            if len(codes) != 2:
+                continue
+            # 同一组亮牌从上一手一直停留到这一手时，不要再写进新手牌。
+            first_hand = self._active_shows.get(seat_id)
+            if first_hand is not None and first_hand != target.hand_id:
+                continue
+            self._active_shows[seat_id] = target.hand_id
+            name, position = self._seat_meta.get(seat_id, (None, None))
+            target.shows[seat_id] = {
+                "seat_id": seat_id,
+                "name": name,
+                "position": position,
+                "cards": list(codes),
+            }
+
     def reset(self) -> None:
         """断流重连：桌面状态全部作废，但已给出的建议不重发。"""
         self.hand = None
@@ -298,6 +351,8 @@ class LiveHandTracker:
         self._prev_hero_cards = ()
         self._prev_in_hand = 0
         self._drop_frames = 0
+        self._seat_meta.clear()
+        self._active_shows.clear()
 
     # ─────────────────────────── 换手 ───────────────────────────
 
@@ -806,7 +861,7 @@ class LiveHandTracker:
 
     @staticmethod
     def _hand_dict(hand: _LiveHand) -> dict:
-        return {
+        out = {
             "hand_id": hand.hand_id,
             "hero_cards": list(hand.hero_cards),
             "hero_position": hand.hero_position,
@@ -831,6 +886,11 @@ class LiveHandTracker:
                 for rec in hand.snapshot()
             ],
         }
+        # 摊牌/主动秀牌读到的对手手牌。没有亮牌时连键都不出现。
+        if hand.shows:
+            out["shows"] = [hand.shows[seat_id]
+                            for seat_id in sorted(hand.shows)]
+        return out
 
     def copy_hand(self) -> _LiveHand | None:
         """测试/调试用：拿一份独立的工作副本。"""

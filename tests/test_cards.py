@@ -41,6 +41,7 @@ def check(cond: bool, msg: str) -> None:
 CARD_DIR = ROOT / "images" / "card"
 PROFILE_PATH = ROOT / "config" / "table_wpk_1080x2400.json"
 DEFAULT_PROFILE_PATH = ROOT / "config" / "table_default.json"
+SHOW_PROFILE_PATH = ROOT / "config" / "table_wpk_live.json"
 
 # key -> (公共牌, hero 手牌)，均按画面从左到右。
 # key 取文件名里的序号；redA.jpg 单独命名。
@@ -75,6 +76,9 @@ def _unique_files() -> dict[str, Path]:
     seen: dict[str, str] = {}
     out: dict[str, Path] = {}
     for path in sorted(CARD_DIR.glob("*.jpg")):
+        # show_card.jpg 是摊牌亮牌样张，不是「公共牌 + hero」标注样本
+        if not (path.stem.startswith("微信图片") or path.stem.startswith("redA")):
+            continue
         key = _key(path)
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
         if digest in seen:
@@ -151,6 +155,40 @@ def test_preflop_has_no_false_positive() -> None:
               f"{key} 翻前不应识别出公共牌，得到 {result.board_codes}")
 
 
+def test_shown_cards_from_show_card_sample() -> None:
+    """摊牌亮牌样张：midL 的 A♣Q♥ 紧贴在一起，要切开并归到该座。"""
+    profile = Profile.load(SHOW_PROFILE_PATH)
+    img = cv2.imread(str(CARD_DIR / "show_card.jpg"))
+    check(img is not None, "读不了 show_card.jpg")
+    if img is None:
+        return
+    result = recognize_cards(img, profile)
+    check(result.show_codes == {"midL": ["Ac", "Qh"]},
+          f"亮牌识别：得到 {result.show_codes}，期望 midL Ac Qh")
+    check(result.hero_codes == ["Js", "Qs"],
+          f"同一张图的 hero 手牌应为 JsQs，实际 {result.hero_codes}")
+
+
+def test_three_eight_use_hole_topology() -> None:
+    """3/8 的 NCC 分数可能只差 0.01；用闭合孔数量兜底（3=0，8=2）。"""
+    profile = Profile.load(PROFILE_PATH)
+    three = recognize_cards_of_file(_unique_files()["redA"], profile)
+    card3 = next((c for c in three.board.cards if c.code == "3s"), None)
+    check(card3 is not None, "redA 样本里应有 3s")
+    if card3 is not None:
+        check(card3.evidence.get("glyph_holes") == 0,
+              f"3 应有 0 个闭合孔：{card3.evidence}")
+        check(card3.evidence.get("topology_resolved") is True,
+              f"3 vs 8 应由拓扑判出：{card3.evidence}")
+
+    eight = recognize_cards_of_file(_unique_files()["140"], profile)
+    card8 = next((c for c in eight.hero_cards.cards if c.code == "8s"), None)
+    check(card8 is not None, "140 样本的 hero 应有 8s")
+    if card8 is not None:
+        check(card8.evidence.get("glyph_holes") == 2,
+              f"8 应有 2 个闭合孔：{card8.evidence}")
+
+
 def test_all_ranks_have_templates() -> None:
     from poker_ocr.cards import _load_templates
     templates = _load_templates()
@@ -161,6 +199,8 @@ def test_all_ranks_have_templates() -> None:
 def main() -> int:
     tests = [
         test_all_ranks_have_templates,
+        test_shown_cards_from_show_card_sample,
+        test_three_eight_use_hole_topology,
         test_all_labeled_samples,
         test_color_and_shape_agree,
         test_default_profile_falls_back_to_wpk_slots,

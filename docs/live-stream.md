@@ -84,6 +84,10 @@ ROI 路线只裁固定槽位、只跑 rec，不跑全图检测，是实时链路
 - **全局**：盲注级别、底池、上一街底池、本街下注总额
 - **回合**：是否轮到 hero（读第一个下注预设钮的 BB 值行）
 - **桌型 / 在池人数**
+- **摊牌亮牌**：对手主动秀牌/摊牌时，从该座 `action_slot` 读两张手牌，
+  写入 `state.shows` 和 `hand.shows`；亮牌帧即使整帧被质量闸丢弃也能记录
+- **3/8 防误判**：3 和 8 的字形 NCC 经常只差约 0.01；用闭合孔数量兜底
+  （3 = 0 孔，8 = 2 孔），识别证据里记录 `glyph_holes/topology_rank`
 
 ### 工程能力
 
@@ -591,6 +595,7 @@ cd ~/codes/poker-ocr
 | `players[].fold` | 弃牌检测，三态：`true/false/null` |
 | `players[].status` | `playing/folded/buying_in/sitting_out/away` |
 | `players[].notes` | 宽松解析等诊断信息（可选） |
+| `shows` | 摊牌/主动秀牌时该座亮出的两张牌（可选；`seat_id/name/position/cards`） |
 
 ### 6.4 `session_end`
 
@@ -650,6 +655,9 @@ cd ~/codes/poker-ocr
      {"seat_id":"hero","name":"me","position":"CO","action":"call",
       "amount":22.0,"all_in":false,"is_hero":true,"inferred":true}]}
  ],
+ "shows":[
+   {"seat_id":"midL","name":"许文文啊","position":"CO","cards":["Ac","Qh"]}
+ ],
  "advices":[
    {"hand_id":"h6","street":"flop","hero_cards":["Ah","Kd"],
     "board":["Ks","7d","2c"],"pot":19.5,"to_call":22.0,
@@ -660,6 +668,9 @@ cd ~/codes/poker-ocr
 ```
 
 `inferred: true` 只在**街末底池对账补出来**的记录上出现（正常抓到的记录没有这个键）。
+`shows` 只在摊牌或对手主动秀牌时出现，来源是各座 `action_slot` 的亮牌识别
+（样张 `images/card/show_card.jpg`）。亮牌帧即使因为筹码/底池被顶掉而整帧丢弃，
+也会先挂到当前手牌上，不依赖 `state.ok`。
 `advices` 只在**这一手确实给过建议**时出现，按给出顺序排列；没有 AI 建议时连键都不出现。
 其余 `advice` 记录仍会照常单独写一份，方便实时流式查看；复盘用 `hand.advices` 即可，不必再按 `hand_id` join。
 

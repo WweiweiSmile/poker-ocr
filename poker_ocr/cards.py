@@ -22,6 +22,10 @@
      跨亮/暗状态（hero 弃牌后牌面会变灰）。模板图集由
      tools/build_card_templates.py 从标注样本生成。
 
+  3. **摊牌亮牌。**
+     对手主动秀牌/摊牌时，两张牌画在该座的 action_slot 区域；两张牌常常
+     紧贴成一个白色轮廓，先沿中间的缝切开，再走同一套花色 + 点数识别。
+
 版式：优先用 profile 的 global_slots（board / hero_cards）。配置里没有时退回
 WPK 移动端的默认归一化坐标 —— 默认坐标是 0-1 相对值，换分辨率不用改。
 """
@@ -67,6 +71,10 @@ _CARD_MAX_SAT = 60
 _CARD_MIN_AREA_FRAC = 0.04     # 占 ROI 面积的下限；D 庄位圆片远小于它
 _CARD_HEIGHT_FRAC = 0.60       # 牌高至少占 ROI 高度的 60%
 _CARD_ASPECT = (0.50, 0.95)
+# 摊牌时两张亮出的手牌常常紧贴在一起，白色牌面会被闭运算连成一个轮廓，
+# 宽高比约等于单张的 2 倍（实测 AQ 样张 199x144 ≈ 1.38）。这个区间用来
+# 识别「两张牌粘在一起」，再沿中间的缝切开。
+_CARD_PAIR_ASPECT = (1.05, 1.90)
 _MAX_CARDS = 5
 
 # 花色符号区（占牌面的比例）：下半部中间，避开左上角的点数。
@@ -167,11 +175,13 @@ class CardSlotRead:
 
 @dataclass
 class CardsResult:
-    """一帧的公共牌 + hero 手牌。"""
+    """一帧的公共牌 + hero 手牌 + 摊牌/主动秀出的对手手牌。"""
 
     size: Size
     board: CardSlotRead
     hero_cards: CardSlotRead
+    # seat_id → 该座亮出的两张牌。只有识别到正好 2 张、点数都读出来才会进来。
+    shows: dict[str, CardSlotRead] = dc_field(default_factory=dict)
     warnings: list[str] = dc_field(default_factory=list)
 
     @property
@@ -182,6 +192,10 @@ class CardsResult:
     def hero_codes(self) -> list[str]:
         return self.hero_cards.codes
 
+    @property
+    def show_codes(self) -> dict[str, list[str]]:
+        return {seat_id: read.codes for seat_id, read in self.shows.items()}
+
     def to_dict(self, include_details: bool = False) -> dict[str, Any]:
         d: dict[str, Any] = {
             "size": list(self.size),
@@ -191,6 +205,11 @@ class CardsResult:
         if include_details:
             d["board_read"] = self.board.to_dict()
             d["hero_cards_read"] = self.hero_cards.to_dict()
+        if self.shows:
+            d["shows"] = {
+                seat_id: read.to_dict(include_details=include_details)
+                for seat_id, read in self.shows.items()
+            }
         if self.warnings:
             d["warnings"] = self.warnings
         return d
@@ -198,12 +217,17 @@ class CardsResult:
 
 # ─────────────────────────── 牌面切分 ───────────────────────────
 
-def _detect_card_rects(roi: np.ndarray) -> list[tuple[int, int, int, int]]:
+def _detect_card_rects(roi: np.ndarray, *,
+                       split_pairs: bool = False) -> list[tuple[int, int, int, int]]:
     """在 ROI 里找出牌面矩形，按从左到右排序。
 
     牌面是白/灰低饱和，毛毡是绿色高饱和 —— 这个差异很稳。只取外轮廓
     （RETR_EXTERNAL），再用「面积 + 宽高比 + 高度」三道几何门过滤，
     不做颜色以外的内容判断。
+
+    `split_pairs=True` 时，把「两张牌粘成一个宽轮廓」的情况沿中间的缝切开。
+    摊牌亮牌区（座位 action_slot）里两张牌往往只隔几个像素，5x5 闭运算会把
+    它们连成一块；公共牌/hero 牌的间距更大，保持默认 False 不受影响。
     """
     hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
     mask = ((hsv[..., 2] >= _CARD_MIN_VALUE) & (hsv[..., 1] <= _CARD_MAX_SAT))
@@ -220,11 +244,33 @@ def _detect_card_rects(roi: np.ndarray) -> list[tuple[int, int, int, int]]:
         x, y, w, h = cv2.boundingRect(c)
         if w * h < min_area:
             continue
-        if not (_CARD_ASPECT[0] < w / max(1, h) < _CARD_ASPECT[1]):
-            continue
         if h < roi_h * _CARD_HEIGHT_FRAC:
             continue
-        rects.append((x, y, w, h))
+        aspect = w / max(1, h)
+        if _CARD_ASPECT[0] < aspect < _CARD_ASPECT[1]:
+            rects.append((x, y, w, h))
+            continue
+        if not (split_pairs and _CARD_PAIR_ASPECT[0] <= aspect <= _CARD_PAIR_ASPECT[1]):
+            continue
+
+        # 在轮廓中间 ±15% 宽度范围内找白色像素最少的一列，就是两张牌之间的缝；
+        # 找不到明显低谷时退回几何中点。
+        sub = (mask[y:y + h, x:x + w] > 0)
+        cols = sub.sum(axis=0)
+        mid = w // 2
+        lo = max(1, mid - int(w * 0.15))
+        hi = min(w - 1, mid + int(w * 0.15))
+        split = mid
+        if hi > lo:
+            k = lo + int(np.argmin(cols[lo:hi]))
+            if cols[k] < 0.5 * max(1, cols[mid]):
+                split = k
+        for rx, rw in ((x, split), (x + split, w - split)):
+            if rw <= 0:
+                continue
+            half_aspect = rw / max(1, h)
+            if _CARD_ASPECT[0] < half_aspect < _CARD_ASPECT[1]:
+                rects.append((rx, y, rw, h))
 
     rects.sort(key=lambda r: r[0])
     return rects[:_MAX_CARDS]
@@ -428,16 +474,68 @@ def _ncc(a: np.ndarray, b: np.ndarray) -> float:
     return float((aa * bb).sum() / denom) if denom else 0.0
 
 
-def _classify_rank(glyph: np.ndarray | None) -> tuple[str, float, float, dict[str, float]]:
-    """返回 (rank, score, margin, 全部分数)。"""
+def _glyph_holes(glyph: np.ndarray | None) -> int | None:
+    """点数字形里闭合孔的数量。
+
+    3 和 8 的字形轮廓几乎一样，NCC 在低分辨率/抗锯齿下只差 1–2 个百分点；
+    但拓扑差异是硬的：**3 没有闭合孔，8 有两个**。这个特征只用来给
+    「3 vs 8」这一对做兜底，不参与其他点数的判断。
+    """
     if glyph is None:
-        return "", 0.0, 0.0, {}
+        return None
+    contours, hierarchy = cv2.findContours(
+        (glyph > 0).astype(np.uint8), cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
+    if hierarchy is None:
+        return 0
+    # RETR_CCOMP 的层级里 parent != -1 的轮廓是孔（外层背景的 parent 为 -1）
+    return sum(1 for h in hierarchy[0] if h[3] != -1)
+
+
+def _classify_rank(
+        glyph: np.ndarray | None
+) -> tuple[str, float, float, dict[str, float], dict[str, Any]]:
+    """返回 (rank, score, margin, 全部分数, 额外证据)。"""
+    if glyph is None:
+        return "", 0.0, 0.0, {}, {"glyph_holes": None}
     templates = _load_templates()
     scores = {rank: _ncc(glyph > 0, tpl) for rank, tpl in templates.items()}
     ordered = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
     rank, score = ordered[0]
-    margin = score - ordered[1][1]
-    return rank, float(score), float(margin), {k: round(v, 4) for k, v in scores.items()}
+    second_rank, second_score = ordered[1]
+    holes = _glyph_holes(glyph)
+
+    # 3 和 8 在模板分数上经常只差 0.01（实测 3♠ 0.860 vs 8 0.848）。用闭合
+    # 孔数量做硬判据：0 孔 = 3，≥2 孔 = 8。即使模板赢家是 8 但字形 0 孔，
+    # 也要改判成 3（反过来同理）；1 孔更像字形被遮挡/切坏，保留模板结果。
+    topology_rank: str | None = None
+    override = False
+    if rank == "8" and holes is not None:
+        if holes == 0:
+            topology_rank, override = "3", True
+        elif holes >= 2:
+            topology_rank = "8"
+    elif rank == "3" and holes is not None:
+        if holes >= 2:
+            topology_rank, override = "8", True
+        elif holes == 0:
+            topology_rank = "3"
+
+    if override and topology_rank is not None:
+        rank = topology_rank
+        # 模板分不出胜负时，用两者较高的分数当作「字形匹配度」；
+        # margin 记为 0，表示这一判由拓扑决定，而不是 NCC。
+        score = max(scores["3"], scores["8"])
+        second_score = score
+        margin = 0.0
+    else:
+        margin = score - second_score
+    extra = {
+        "glyph_holes": holes,
+        "topology_rank": topology_rank,
+        "topology_resolved": topology_rank is not None,
+    }
+    return (rank, float(score), float(margin),
+            {k: round(v, 4) for k, v in scores.items()}, extra)
 
 
 # ─────────────────────────── 单张牌 / 单块区域 ───────────────────────────
@@ -456,13 +554,16 @@ def _read_card(roi: np.ndarray, rect: tuple[int, int, int, int],
             "已按颜色输出")
 
     glyph = _rank_glyph(card_img, suit)
-    rank, rank_score, margin, scores = _classify_rank(glyph)
+    rank, rank_score, margin, scores, rank_evidence = _classify_rank(glyph)
     evidence["rank_scores"] = scores
     evidence["rank_margin"] = round(margin, 4)
+    evidence.update(rank_evidence)
     if not rank:
         rank = "?"
         warnings.append(f"{slot_name}: 点数没读出来")
-    elif rank_score < _MIN_RANK_SCORE or margin < _MIN_RANK_MARGIN:
+    elif rank_score < _MIN_RANK_SCORE or (
+            margin < _MIN_RANK_MARGIN
+            and not rank_evidence.get("topology_resolved")):
         warnings.append(
             f"{slot_name}: 点数 {rank} 置信度偏低（score={rank_score:.2f}, margin={margin:.2f}）")
 
@@ -483,8 +584,12 @@ def _read_card(roi: np.ndarray, rect: tuple[int, int, int, int],
 
 def recognize_region(img: np.ndarray, rect: tuple[int, int, int, int], *,
                      name: str = "cards", slot: Slot = (0.0, 0.0, 1.0, 1.0),
-                     max_cards: int = _MAX_CARDS) -> CardSlotRead:
-    """识别图像中一个**像素矩形**里的牌。rect 是原图坐标 (x1,y1,x2,y2)。"""
+                     max_cards: int = _MAX_CARDS,
+                     split_pairs: bool = False) -> CardSlotRead:
+    """识别图像中一个**像素矩形**里的牌。rect 是原图坐标 (x1,y1,x2,y2)。
+
+    `split_pairs=True` 用于摊牌亮牌区：两张牌紧贴时会粘成一个轮廓，需要切开。
+    """
     h, w = img.shape[:2]
     x1, y1, x2, y2 = rect
     x1, y1 = max(0, min(x1, w)), max(0, min(y1, h))
@@ -497,7 +602,7 @@ def recognize_region(img: np.ndarray, rect: tuple[int, int, int, int], *,
         read.warnings.append(f"{name}: 牌区为空")
         return read
 
-    rects = _detect_card_rects(roi)[:max_cards]
+    rects = _detect_card_rects(roi, split_pairs=split_pairs)[:max_cards]
     for r in rects:
         card, warnings = _read_card(roi, r, (x1, y1), name)
         read.cards.append(card)
@@ -509,6 +614,51 @@ def recognize_region(img: np.ndarray, rect: tuple[int, int, int, int], *,
 
 
 # ─────────────────────────── 对外的入口 ───────────────────────────
+
+# 亮牌识别的置信度门槛。比公共牌略严：这里没有「翻前本来就没有牌」的合法空态，
+# 任何误检都会直接写进对手手牌记录。
+_MIN_SHOW_CONFIDENCE = 0.55
+
+
+def recognize_shown_cards(img: np.ndarray, profile: Profile | None, *,
+                          seats: list[str] | None = None) -> dict[str, CardSlotRead]:
+    """识别每个对手座位亮出的两张手牌。
+
+    摊牌/主动秀牌时，WPK 会把两张牌画在该座的 action_slot 区域（实测
+    `images/card/show_card.jpg` 的 midL：A♣Q♥ 正好落在 action_slot 内）。
+    这里逐座裁 action_slot，按「两张紧贴的牌」模式识别；只有正好 2 张、
+    点数都读出来且置信度够高的座位才会返回。
+
+    返回 {seat_id: CardSlotRead}。hero 自己的牌由 hero_cards 负责，跳过。
+    """
+    if profile is None:
+        return {}
+
+    h, w = img.shape[:2]
+    wanted = set(seats) if seats is not None else None
+    out: dict[str, CardSlotRead] = {}
+    for seat in profile.seats:
+        if seat.seat_id == profile.hero_seat_id:
+            continue
+        if wanted is not None and seat.seat_id not in wanted:
+            continue
+        if seat.action_slot is None:
+            continue
+        px = profile.slot_to_px(seat.action_slot, (w, h))
+        read = recognize_region(
+            img, px, name=f"show:{seat.seat_id}", slot=seat.action_slot,
+            max_cards=2, split_pairs=True)
+        if len(read.cards) != 2:
+            continue
+        if any(c.rank == "?" for c in read.cards):
+            continue
+        if read.cards[0].code == read.cards[1].code:
+            continue
+        if min(c.confidence for c in read.cards) < _MIN_SHOW_CONFIDENCE:
+            continue
+        out[seat.seat_id] = read
+    return out
+
 
 def recognize_cards(img: np.ndarray, profile: Profile | None = None, *,
                     slots: dict[str, Slot] | None = None) -> CardsResult:
@@ -554,8 +704,10 @@ def recognize_cards(img: np.ndarray, profile: Profile | None = None, *,
         warnings.append(
             f"公共牌只识别出 {len(reads['board'].cards)} 张（正常是 0/3/4/5 张）")
 
+    shows = recognize_shown_cards(img, profile)
     return CardsResult(size=size, board=reads["board"],
-                       hero_cards=reads["hero_cards"], warnings=warnings)
+                       hero_cards=reads["hero_cards"], shows=shows,
+                       warnings=warnings)
 
 
 def recognize_cards_of_file(path: str | Path,
@@ -577,4 +729,5 @@ __all__ = [
     "recognize_cards",
     "recognize_cards_of_file",
     "recognize_region",
+    "recognize_shown_cards",
 ]

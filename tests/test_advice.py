@@ -384,6 +384,32 @@ def test_snapshot_marks_limped_pot() -> None:
           f"一次溜入应判 limped，实际 {getattr(point, 'preflop_shapes', None)}")
 
 
+def test_hand_record_includes_shown_cards() -> None:
+    """摊牌亮牌写进 hand 记录；亮牌跨手停留时不能写进下一手。"""
+    tr = LiveHandTracker(confirm_frames=1)
+    st = state(player("hero", position="BTN"),
+               player("a", name="老王", position="BB"),
+               pot=3.0, pbs=3.0, dealer="hero")
+    feed(tr, st, ["Ah", "Kd"], [])
+    tr.record_shows({"a": ["Ac", "Qh"]})
+    rec = tr._hand_dict(tr.hand)
+    check(rec.get("shows") == [{"seat_id": "a", "name": "老王",
+                                "position": "BB", "cards": ["Ac", "Qh"]}],
+          f"hand 记录应带上亮牌：{rec.get('shows')}")
+
+    # 换手（庄位变化）后，上一手的亮牌还停留在屏幕上：不能写进新手牌
+    st2 = state(player("hero", position="BTN"),
+                player("a", name="老王", position="BB"),
+                pot=3.0, pbs=3.0, dealer="a")
+    feed(tr, st2, ["2c", "3d"], [])
+    tr.record_shows({"a": ["Ac", "Qh"]})
+    check("shows" not in tr._hand_dict(tr.hand),
+          "跨手停留的亮牌不应写进新手牌")
+    finished = tr.take_finished()
+    check(finished is not None and finished.get("shows"),
+          f"上一手仍应保留亮牌：{finished}")
+
+
 def test_table_size_uses_seats_not_players_in_hand() -> None:
     """9 人桌打到只剩 2 人在局，桌型仍是 9-handed。
 
@@ -1385,6 +1411,7 @@ def main() -> int:
         test_snapshot_to_call_and_preflop_shape,
         test_snapshot_marks_limped_pot,
         test_table_size_uses_seats_not_players_in_hand,
+        test_hand_record_includes_shown_cards,
         test_skill_library_loads_all_files,
         test_skill_text_matches_call_back_copy,
         test_skill_selection_is_street_scoped,
