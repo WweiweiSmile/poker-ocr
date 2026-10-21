@@ -450,6 +450,133 @@ def test_ai_advice_waits_for_hero_cards() -> None:
     check(runner.count == 1, f"读到手牌后应补投一次，实际 {runner.count}")
 
 
+def test_hand_memory_keeps_action_line_and_advices() -> None:
+    """换手/退出时，hand 记录（手牌记忆）要同时带上完整行动线和这一手的建议。"""
+    from poker_ocr.advice import Advice, Option
+
+    class FakeTracker:
+        def __init__(self) -> None:
+            self.finished: dict | None = None
+            self.current: dict | None = None
+
+        def take_finished(self):
+            hand, self.finished = self.finished, None
+            return hand
+
+        def take_current(self):
+            hand, self.current = self.current, None
+            return hand
+
+    class FakeRunner:
+        busy = False
+
+        def __init__(self, advices) -> None:
+            self._advices = list(advices)
+
+        def poll(self):
+            out, self._advices = self._advices, []
+            return out
+
+        def submit(self, sit) -> bool:      # pragma: no cover
+            return True
+
+    def advice(hand_id: str, reason: str) -> Advice:
+        return Advice(hand_id=hand_id, street="flop",
+                      option=Option("call", "Call 4BB", "call"),
+                      reason=reason, source="model", model="jev-1.14",
+                      duration_ms=1800, pot=10.0, to_call=4.0,
+                      hero_cards=("Ah", "Kd"), board=("Ks", "7d", "2c"))
+
+    flop = {"street": "flop", "pot_start": 6.0,
+            "actions": [{"seat_id": "a", "action": "bet", "amount": 4.0,
+                         "is_hero": False}]}
+    tracker = FakeTracker()
+    tracker.finished = {"hand_id": "h1", "streets": [flop]}
+    writer = StubWriter()
+    proc = LiveProcessor(StubStateStream(), writer, quiet=True,
+                         hand_tracker=tracker,
+                         advice_runner=FakeRunner([advice("h1", "pot odds")]),
+                         log=lambda *_: None)
+    proc.drain_advice()
+
+    kinds = [r["type"] for r in writer.rows]
+    check(kinds == ["advice", "hand"],
+          f"应先写建议再写手牌记忆，实际 {kinds}")
+    hand_row = writer.rows[1]
+    check(hand_row["hand_id"] == "h1" and hand_row["streets"] == [flop],
+          f"手牌记忆应保留完整行动线：{hand_row}")
+    advices = hand_row.get("advices") or []
+    check(len(advices) == 1 and advices[0]["hand_id"] == "h1"
+          and advices[0]["option"]["id"] == "call"
+          and advices[0]["reason"] == "pot odds"
+          and advices[0]["duration_ms"] == 1800,
+          f"手牌记忆应带上这一手的建议：{advices}")
+
+    # 退出时最后一手还没换手：partial 记录同样带建议
+    tracker.current = {"hand_id": "h2", "streets": [flop]}
+    writer2 = StubWriter()
+    proc2 = LiveProcessor(StubStateStream(), writer2, quiet=True,
+                          hand_tracker=tracker,
+                          advice_runner=FakeRunner([advice("h2", "exit")]),
+                          log=lambda *_: None)
+    proc2.drain_advice(final=True)
+    partial = next(r for r in writer2.rows if r["type"] == "hand")
+    check(partial.get("partial") is True and partial["hand_id"] == "h2",
+          f"最后一手应标 partial：{partial}")
+    check([a["reason"] for a in partial.get("advices", [])] == ["exit"],
+          f"partial 手牌记忆也要带建议：{partial}")
+
+    # 没有建议时保持旧输出，不出现 advices 键
+    tracker.current = {"hand_id": "h3", "streets": [flop]}
+    writer3 = StubWriter()
+    proc3 = LiveProcessor(StubStateStream(), writer3, quiet=True,
+                          hand_tracker=tracker, log=lambda *_: None)
+    proc3.drain_advice(final=True)
+    row3 = next(r for r in writer3.rows if r["type"] == "hand")
+    check("advices" not in row3, f"没有建议时不该多出 advices 键：{row3}")
+
+
+def test_hand_memory_flushes_on_switch_frame() -> None:
+    """换手是在 observe 内部判定的：同一帧就要把上一手落库，不等下一帧。"""
+    class SwitchStream(StubStateStream):
+        def __init__(self) -> None:
+            super().__init__()
+            self.dealers = ["h", "a"]
+
+        def ingest(self, img, frame_id: str, t: float, *,
+                   extra_signature: tuple | None = None) -> FrameOutcome:
+            dealer = self.dealers.pop(0) if self.dealers else "a"
+            st = FrameState(
+                frame_id=frame_id, table_seats=2, players_in_hand=2,
+                players=[
+                    PlayerState("hero", name="me", position="BTN", stack=100.0,
+                                bet=0.0, in_hand=True),
+                    PlayerState("a", name="A", position="BB", stack=99.0,
+                                bet=1.0, in_hand=True),
+                ],
+                blinds=live.parse_blinds("1/2"), dealer=dealer,
+                hero_seat_id="hero", hero_turn=False, pot=1.5,
+                pot_before_street=0.0)
+            return FrameOutcome("no_change", st, [], None, 0, 0)
+
+    tracker = LiveHandTracker(confirm_frames=1)
+    writer = StubWriter()
+    cards = SimpleNamespace(hero_codes=["Ah", "Kd"], board_codes=[],
+                            warnings=[])
+    with patch.object(live, "recognize_cards", lambda img, profile: cards):
+        proc = LiveProcessor(SwitchStream(), writer, quiet=True,
+                             profile=SimpleNamespace(), hand_tracker=tracker,
+                             log=lambda *_: None)
+        proc.handle(packet(1))
+        check(not any(r["type"] == "hand" for r in writer.rows),
+              f"第一帧不该产出上一手记录：{writer.rows}")
+        proc.handle(packet(2))
+
+    hands = [r for r in writer.rows if r["type"] == "hand"]
+    check(len(hands) == 1 and hands[0]["hand_id"] == "h1",
+          f"换手那一帧就应落库上一手：{hands}")
+
+
 def test_processor_pauses_while_advice_is_generating() -> None:
     """模型返回前 waiting_for_advice=True，主循环据此跳过识别。"""
     class BusyRunner:
@@ -500,6 +627,8 @@ def main() -> int:
         test_jsonl_is_one_complete_object_per_line,
         test_ai_advice_submits_on_hero_turn_once,
         test_ai_advice_waits_for_hero_cards,
+        test_hand_memory_keeps_action_line_and_advices,
+        test_hand_memory_flushes_on_switch_frame,
         test_processor_pauses_while_advice_is_generating,
     ]
     for t in tests:

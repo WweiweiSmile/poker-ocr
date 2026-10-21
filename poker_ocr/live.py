@@ -505,6 +505,10 @@ class LiveProcessor:
         self.hand_tracker = hand_tracker
         self.advice_runner = advice_runner
         self.advice_count = 0
+        # hand_id → 这一手已经给出的建议（按时间顺序）。换手 / 退出时并进
+        # `hand` 记录，让「完整行动线 + 模型建议」落在同一个手牌记忆条目里，
+        # 复盘时不用再按 hand_id 去 join 两条独立记录。
+        self._hand_advice: dict[str, list[dict]] = {}
         self.clock = clock
         self.log = log
 
@@ -607,6 +611,9 @@ class LiveProcessor:
         hero_codes = cards.hero_codes if cards is not None else []
         board = cards.board_codes if cards is not None else []
         point = self.hand_tracker.observe(outcome.state, hero_codes, board)
+        # 换手是在 observe 内部判定的：紧接着再 drain 一次，把上一手的
+        # 手牌记忆（行动线 + 建议）在换手这一帧就落库，不必等下一帧。
+        self.drain_advice()
         if point is not None:
             self.advice_count += 1
             if self.advice_runner is not None:
@@ -635,23 +642,38 @@ class LiveProcessor:
         """把已完成的手牌/建议写进 JSONL 并打印。
 
         `final=True` 在退出时调用：最后一手牌等不到「换手」，也要落库。
-        """
-        if self.hand_tracker is not None:
-            finished = self.hand_tracker.take_finished()
-            if finished is not None:
-                self.writer.write({"type": "hand", "ts": _iso_now(), **finished})
-            if final:
-                current = self.hand_tracker.take_current()
-                if current is not None:
-                    self.writer.write({"type": "hand", "ts": _iso_now(),
-                                       "partial": True, **current})
 
-        if self.advice_runner is None:
+        顺序很重要：**先收建议、再写手牌**。换手那一帧要把这一手最后一条
+        建议一起并进 `hand` 记录；反过来会漏掉同一帧刚返回的那条。
+        """
+        if self.advice_runner is not None:
+            for advice in self.advice_runner.poll():
+                data = advice.to_dict()
+                self._hand_advice.setdefault(data["hand_id"], []).append(data)
+                self.writer.write({"type": "advice", "ts": _iso_now(), **data})
+                self._log_advice(advice)
+
+        if self.hand_tracker is None:
             return
-        for advice in self.advice_runner.poll():
-            self.writer.write({"type": "advice", "ts": _iso_now(),
-                               **advice.to_dict()})
-            self._log_advice(advice)
+        finished = self.hand_tracker.take_finished()
+        if finished is not None:
+            self._write_hand(finished, partial=False)
+        if final:
+            current = self.hand_tracker.take_current()
+            if current is not None:
+                self._write_hand(current, partial=True)
+
+    def _write_hand(self, hand: dict, *, partial: bool) -> None:
+        """写一条手牌记忆：完整行动线 + 这一手给出过的全部建议。"""
+        advices = self._hand_advice.pop(hand.get("hand_id"), [])
+        record: dict = {"type": "hand", "ts": _iso_now()}
+        if partial:
+            record["partial"] = True
+        record.update(hand)
+        if advices:
+            # 没有建议时连键都不出现，保持无 AI 模式下的输出与旧版一致
+            record["advices"] = advices
+        self.writer.write(record)
 
     def _log_advice(self, advice) -> None:
         option = advice.option

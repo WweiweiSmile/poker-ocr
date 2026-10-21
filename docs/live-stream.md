@@ -508,7 +508,8 @@ cd ~/codes/poker-ocr
 
 ### 6.6 `hand`
 
-换手时写一条，内容是**上一手完整的逐街行动线**（对手与自己都记），可直接用于复盘。
+换手时写一条，内容是**上一手完整的逐街行动线 + 这一手给过的全部 AI 建议**
+（对手与自己都记），这条记录就是一手牌的“手牌记忆”，可直接用于复盘。
 退出时若最后一手还没换手，也会写一条并标 `"partial":true`。
 
 ```json
@@ -527,10 +528,19 @@ cd ~/codes/poker-ocr
       "amount":22.0,"all_in":false,"is_hero":false},
      {"seat_id":"hero","name":"me","position":"CO","action":"call",
       "amount":22.0,"all_in":false,"is_hero":true,"inferred":true}]}
+ ],
+ "advices":[
+   {"hand_id":"h6","street":"flop","hero_cards":["Ah","Kd"],
+    "board":["Ks","7d","2c"],"pot":19.5,"to_call":22.0,
+    "option":{"id":"call","label":"Call 22BB","kind":"call"},
+    "reason":"...","source":"model","model":"typesafe/jev-1.14",
+    "skill_codes":["..."],"duration_ms":1840}
  ]}
 ```
 
 `inferred: true` 只在**街末底池对账补出来**的记录上出现（正常抓到的记录没有这个键）。
+`advices` 只在**这一手确实给过建议**时出现，按给出顺序排列；没有 AI 建议时连键都不出现。
+其余 `advice` 记录仍会照常单独写一份，方便实时流式查看；复盘用 `hand.advices` 即可，不必再按 `hand_id` join。
 
 ### 6.7 丢弃语义
 
