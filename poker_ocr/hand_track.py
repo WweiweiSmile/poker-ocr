@@ -18,9 +18,10 @@
   · **徽章漏读时从下注额反推**：下注额升到当前水位以上就是加注（新街第一次
     是下注），追平就是跟注。盲注是基线，不会被记成「跟注」。
   · **街末用底池对账补漏**：下一街的 `pot_before_street` 就是这一街结算后的底池，
-    减去这一街起始底池即「这一街所有人投进去的总和」。它比行动线记录的总额多、
-    而差额恰好等于「还在池里的人补齐到当前下注额」时，说明中间有跟注没抓到
-    （典型：最后位置预设跟注，下注那一帧被视频流跳过）。对得上才补，对不上不猜。
+    减去这一街起始底池即「这一街所有人投进去的总和」。它比行动线记录的总额多时，
+    先按已知水位补跟注；对不上再用剩余人数反解最终水位，补「一次加注 + 跟注」。
+    加注金额由底池精确反解，但谁是加注者只能按行动顺序取最早能行动的人；
+    两种情况都对不上就留空不猜。
   · **换手判据**：庄位变了 / 公共牌掉回 0 或 3 张 / hero 手牌变成另一组 / 人数骤变。
     1/2 张牌是发牌动画，5→4 更像读错一张，都不算换手。
   · **轮到我用「连续帧确认 + 决策点指纹」去重**，不用单帧上升沿。真机上预设按钮
@@ -448,7 +449,7 @@ class LiveHandTracker:
 
     def _reconcile_street(self, hand: _LiveHand, new_street: str,
                           state: FrameState) -> None:
-        """换街时用底池账单补齐上一街漏抓的跟注。
+        """换街时用底池账单补齐上一街漏抓的动作。
 
         下一街的 `pot_before_street` = 上一街结算后的底池，所以
 
@@ -457,10 +458,12 @@ class LiveHandTracker:
         行动线里能算出来的投入是每座「盲注基线 / 已记录动作金额」之和
         （金额都是「本街加到总额」，同一座取最大值）。两者相减就是没抓到的钱。
 
-        只在差额**正好**等于「还在池里的人补齐到当前下注额」时补记录：
-        典型场景是最后位置预设了跟注，视频流没抓到他下注的那一帧，下一条
-        记录已经是下一街（下注 pill 已被收走）。对不上就说明中间可能还有
-        加注/弃牌/读错，宁可留空也不猜。
+        先试最保守的**只补跟注**：差额正好等于「还在池里的人补齐到当前水位」。
+        再试**单次加注**：把弃牌者已记录的投入扣掉后，用剩余人数反解最终水位。
+        典型场景都是最后位置预设了动作，视频流没抓到那一帧就换街（下注 pill
+        已被收走）。加注者身份用行动顺序取「最后一个已记录动作之后最早能行动的
+        人」—— 金额是底池反解出来的精确值，但谁加注无法从底池唯一确定，所以
+        落库和提示词里都标 `inferred`。
         """
         street = hand.street
         # 只接受往后推进。公共牌 5→3 的单帧误读会走到这里，不能倒着补
@@ -486,37 +489,155 @@ class LiveHandTracker:
         if missing <= 1e-9:
             return
 
-        # 还在池里的人，理论上街末都应该补齐到当前水位。弃牌/离桌的人不用补；
+        # 还在池里的人，理论上街末都应该补齐到最终水位。弃牌/离桌的人不用补；
         # 全下的人可能只跟到更少的钱，不当作漏抓（否则金额会猜错）
-        owed: list[tuple[int, PlayerState, float]] = []
-        for p in state.players:
-            if not p.in_hand or p.fold is True or p.status == "folded" or p.all_in:
-                continue
-            delta = round(level - known.get(p.seat_id, 0.0), 2)
-            if delta > 1e-9:
-                owed.append((self._action_rank(p), p, delta))
-        if not owed:
-            return
-        if abs(sum(d for _, _, d in owed) - missing) > RECONCILE_TOLERANCE:
+        remaining = [p for p in state.players
+                     if p.in_hand and p.fold is not True
+                     and p.status != "folded" and not p.all_in]
+        if not remaining:
             return
 
-        owed.sort(key=lambda item: item[0])
-        for _, p, _ in owed:
+        # ① 只补跟注：所有人补齐到已经记录到的当前水位
+        owed = sorted(
+            ((p, round(level - known.get(p.seat_id, 0.0), 2))
+             for p in remaining),
+            key=lambda item: self._action_rank(item[0]))
+        owed = [(p, d) for p, d in owed if d > 1e-9]
+        if owed and abs(sum(d for _, d in owed) - missing) <= RECONCILE_TOLERANCE:
+            self._append_inferred(hand, street, state,
+                                  [(p, "call", level) for p, _ in owed])
+            return
+
+        # ② 单次加注：底池反解最终水位，再按行动顺序补加注 + 跟注
+        self._infer_single_raise(hand, street, state, actual, known,
+                                 remaining, level)
+
+    def _infer_single_raise(self, hand: _LiveHand, street: str,
+                            state: FrameState, actual: float,
+                            known: dict[str, float],
+                            remaining: list[PlayerState], level: float) -> None:
+        """反解「一次加注后所有人跟注」的漏抓线路。
+
+        底池只能给出**金额**，给不出「谁加注」：SB bet 22 → hero raise 66 →
+        BTN call → SB call，和 SB bet 22 → hero call → BTN raise 66 → SB call →
+        hero call，底池与每人最终投入完全一样。这里取最早能行动的人当加注者，
+        让补出来的序列自洽；身份是推断，金额是精确值。
+        """
+        if level <= 1e-9:
+            return
+        acts = hand.street_actions(street)
+        aggressive = [i for i, a in enumerate(acts) if a.action in AGGRESSIVE]
+        if not aggressive:
+            return
+        # level 是记录到的最高水位；锚点取最后一个达到这个水位的激进动作
+        anchor_i = aggressive[-1]
+        for i in reversed(aggressive):
+            if (acts[i].amount or 0.0) >= level - RECONCILE_TOLERANCE:
+                anchor_i = i
+                break
+
+        # 锚点（最后一次已记录的下注/加注）之后，只允许有仍在旧水位上的动作。
+        # 如果已经有「投入高于旧水位」的记录，加注发生在它之前，补出来的记录
+        # 没法插到正确位置 —— 不猜。
+        lower = acts[anchor_i]
+        for a in acts[anchor_i + 1:]:
+            if (a.amount or 0.0) > level + RECONCILE_TOLERANCE:
+                return
+            lower = a
+        lower_rank = self._rank_or_none(lower.position)
+        if lower_rank is None:
+            return
+
+        # 非剩余座位（已弃牌/全下/离桌）的投入已记录在 known 里，先从账单扣掉；
+        # 剩下的人每人最终都投到 final
+        ids = {p.seat_id for p in remaining}
+        other_known = sum(v for seat, v in known.items() if seat not in ids)
+        n = len(remaining)
+        final = round((actual - other_known) / n, 2)
+        if final <= level + RECONCILE_TOLERANCE:
+            return
+        # 投入都是整 chip（1/2 盲注下 0.5BB 一格）。反解出 73.33 这种数，
+        # 多半是有弃牌者的投入没记到，不能当成一个合法加注
+        if abs(final - round(final * 2) / 2) > RECONCILE_TOLERANCE:
+            return
+        if abs(n * final + other_known - actual) > RECONCILE_TOLERANCE:
+            return
+        if any(known.get(p.seat_id, 0.0) > final + RECONCILE_TOLERANCE
+               for p in remaining):
+            return
+
+        # 加注者 = 最后一个已记录动作之后、还差钱的人里最早能行动的那个
+        candidates = [p for p in remaining
+                      if known.get(p.seat_id, 0.0) < final - RECONCILE_TOLERANCE]
+
+        def after_key(p: PlayerState) -> int:
+            distance = self._after_rank(lower_rank, p)
+            return len(ACTION_ORDER) + 1 if distance is None else distance
+
+        candidates.sort(key=after_key)
+        if not candidates:
+            return
+        raiser = candidates[0]
+        if self._after_rank(lower_rank, raiser) is None:
+            return
+
+        ring = self._ring_from(raiser, remaining)
+        if not ring or ring[0] is not raiser:
+            return
+        items = [(raiser, "raise", final)]
+        items += [(p, "call", final) for p in ring[1:]
+                  if known.get(p.seat_id, 0.0) < final - RECONCILE_TOLERANCE]
+        self._append_inferred(hand, street, state, items)
+
+    def _append_inferred(self, hand: _LiveHand, street: str,
+                         state: FrameState,
+                         items: list[tuple[PlayerState, str, float]]) -> None:
+        """把补出来的动作按发生顺序追加到这一街，并标 inferred。"""
+        for p, action, amount in items:
             hand.actions.append(ActionRecord(
                 street=street, seat_id=p.seat_id, name=p.name,
-                position=p.position, action="call", amount=level,
+                position=p.position, action=action, amount=amount,
                 all_in=p.all_in, is_hero=p.seat_id == state.hero_seat_id,
                 inferred=True))
             hand.last_index[(street, p.seat_id)] = len(hand.actions) - 1
-            hand.baseline[(street, p.seat_id)] = level
+            hand.baseline[(street, p.seat_id)] = amount
 
     @staticmethod
     def _action_rank(p: PlayerState) -> int:
-        """按行动顺序给补记的跟注排序；位置读不到时保持 state.players 顺序。"""
+        """按行动顺序排序；位置读不到时保持 state.players 顺序。"""
         try:
             return ACTION_ORDER.index(p.position)
-        except ValueError:
+        except (TypeError, ValueError):
             return len(ACTION_ORDER)
+
+    @staticmethod
+    def _rank_or_none(position: str | None) -> int | None:
+        try:
+            return ACTION_ORDER.index(position)
+        except (TypeError, ValueError):
+            return None
+
+    def _after_rank(self, from_rank: int, p: PlayerState) -> int | None:
+        """从 from_rank 之后绕到 p 还要经过几个位置；未知位置返回 None。"""
+        rank = self._rank_or_none(p.position)
+        if rank is None:
+            return None
+        distance = (rank - from_rank) % len(ACTION_ORDER)
+        return distance or len(ACTION_ORDER)
+
+    def _ring_from(self, first: PlayerState,
+                   players: list[PlayerState]) -> list[PlayerState] | None:
+        """按行动顺序从 first 开始绕一圈（first 排第一）。"""
+        first_rank = self._rank_or_none(first.position)
+        if first_rank is None:
+            return None
+
+        def key(p: PlayerState) -> int:
+            rank = self._rank_or_none(p.position)
+            return (len(ACTION_ORDER) + 1 if rank is None
+                    else (rank - first_rank) % len(ACTION_ORDER))
+
+        return sorted(players, key=key)
 
     # ─────────────────────────── 决策点 ───────────────────────────
 

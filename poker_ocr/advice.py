@@ -557,7 +557,9 @@ def render_hand_facts(sit: Situation) -> str:
     if any(a.inferred for rec in snap.streets for a in rec.actions):
         lines.append('Actions tagged "inferred" were reconstructed from the pot '
                      'ledger after the video missed that frame; treat them as real '
-                     'actions (amounts are "total invested on the street").')
+                     'actions (amounts are "total invested on the street"). If an '
+                     'inferred raise is present, its size is exact, but the raiser '
+                     'is the earliest actor consistent with the pot and action order.')
     for rec in snap.streets:
         pot_start = f" (pot before street {rec.pot_start}BB)" \
             if rec.pot_start is not None else ""

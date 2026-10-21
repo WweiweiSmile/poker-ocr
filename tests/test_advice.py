@@ -175,9 +175,13 @@ def test_tracker_ignores_stale_badge_after_others_acted() -> None:
           f"第一次加注不该被覆盖或重复：{acts}")
 
 
-def _flop_scene(turn_pbs: float):
+def _flop_scene(turn_pbs: float, hero_call_before_raise: bool = False):
     """复现「最后位置秒跟、视频流漏抓」：SB 在翻牌下注 22，hero(CO) 与
-    BTN 跟注后直接进入转牌（下注 pill 已被底池收走）。返回喂完转牌的 tracker。"""
+    BTN 跟注后直接进入转牌（下注 pill 已被底池收走）。返回喂完转牌的 tracker。
+
+    `hero_call_before_raise=True` 时，在 SB 下注后多喂一帧 hero 跟注 22，
+    用于测试「加注帧漏了、但加注前的跟注帧抓到了」的线路。
+    """
     tr = LiveHandTracker(confirm_frames=1)
     feed(tr, state(
         player("a", position="SB", bet=0.5, name="老王"),
@@ -202,11 +206,21 @@ def _flop_scene(turn_pbs: float):
         player("c", position="BTN", name="阿强"),
         pot=23.5, pbs=1.5, dealer="c"), ["Ah", "Qd"], ["Ks", "7d", "2c"])
 
+    if hero_call_before_raise:
+        # 加注之前 hero 跟注 22 的这一帧抓到了（加注帧仍然漏掉）
+        feed(tr, state(
+            player("a", position="SB", bet=22.0, action="bet", name="老王"),
+            player("b", position="BB", fold=True, status="folded", name="小李"),
+            player("hero", position="CO", bet=22.0, action="call", stack=78.0),
+            player("c", position="BTN", name="阿强"),
+            pot=45.5, pbs=1.5, dealer="c"), ["Ah", "Qd"], ["Ks", "7d", "2c"])
+
     # 转牌：底池 1.5+66，大家的本街下注已清零 —— 中间两帧跟注没抓到
     feed(tr, state(
         player("a", position="SB", name="老王"),
         player("b", position="BB", fold=True, status="folded", name="小李"),
-        player("hero", position="CO", stack=100.0),
+        player("hero", position="CO",
+               stack=78.0 if hero_call_before_raise else 100.0),
         player("c", position="BTN", name="阿强"),
         pot=turn_pbs, pbs=turn_pbs, dealer="c"),
         ["Ah", "Qd"], ["Ks", "7d", "2c", "Th"])
@@ -237,6 +251,34 @@ def test_tracker_backfills_missed_calls_at_street_end() -> None:
     flop = next(s for s in rec["streets"] if s["street"] == "flop")
     check("inferred" not in flop["actions"][0], "正常记录不应带 inferred")
     check(flop["actions"][1].get("inferred") is True, "补记的跟注应标 inferred")
+
+
+def test_tracker_backfills_missed_raise_at_street_end() -> None:
+    """SB bet 22、hero raise 66、BTN/SB 秒跟，加注和两个跟注帧全漏掉：
+    转牌底池 +198 = 3×66 —— 反解最终水位 66，按行动顺序补成
+    hero raise 66 → BTN call 66 → SB call 66。"""
+    tr = _flop_scene(turn_pbs=199.5)   # 1.5 + 3×66
+    acts = [(a.seat_id, a.action, a.amount, a.inferred)
+            for a in tr.hand.street_actions("flop")]
+    check(acts == [("a", "bet", 22.0, False),
+                   ("hero", "raise", 66.0, True),
+                   ("c", "call", 66.0, True),
+                   ("a", "call", 66.0, True)],
+          f"漏抓的加注线应按行动顺序补齐：{acts}")
+
+
+def test_tracker_backfills_raise_after_recorded_call() -> None:
+    """加注前 hero 跟注 22 的那一帧抓到了：加注者仍按「最后一个已记录动作
+    之后最早能行动的人」推出来（BTN），hero 的记录保留为 call 22。"""
+    tr = _flop_scene(turn_pbs=199.5, hero_call_before_raise=True)
+    acts = [(a.seat_id, a.action, a.amount, a.inferred)
+            for a in tr.hand.street_actions("flop")]
+    check(acts == [("a", "bet", 22.0, False),
+                   ("hero", "call", 22.0, False),
+                   ("c", "raise", 66.0, True),
+                   ("a", "call", 66.0, True),
+                   ("hero", "call", 66.0, True)],
+          f"加注前的跟注应保留、加注者应从它之后取：{acts}")
 
 
 def test_tracker_does_not_guess_when_pot_does_not_match() -> None:
@@ -1036,6 +1078,8 @@ def main() -> int:
         test_tracker_infers_actions_when_badges_are_missed,
         test_tracker_ignores_stale_badge_after_others_acted,
         test_tracker_backfills_missed_calls_at_street_end,
+        test_tracker_backfills_missed_raise_at_street_end,
+        test_tracker_backfills_raise_after_recorded_call,
         test_tracker_does_not_guess_when_pot_does_not_match,
         test_tracker_new_hand_on_dealer_change,
         test_tracker_board_drop_needs_two_frames,
