@@ -139,7 +139,9 @@ JEV 模式下候选动作会被转成一道 `choice` 题（criteria 的 key 就�
 
 ### 输出
 
-每行一个 JSON：`session_start` / `stream_info` / `state` / `session_end`。
+每行一个 JSON：`session_start` / `stream_info` / `state` / `hand` / `advice` /
+`session_end`。默认**追加**到 `--out`，重启不会清掉历史手牌；需要每次覆盖时加
+`--no-append`。
 `state` 里包含：
 
 - `players[]`：每座的 `position/name/stack/bet/action/fold/in_hand/all_in/status`
