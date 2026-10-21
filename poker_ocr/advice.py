@@ -148,6 +148,18 @@ def build_preflop_options(snap: HandSnapshot) -> list[Option]:
     min_raise_to = max_bet + increment
     hero_max = (hero_bet + stack) if stack is not None else None
 
+    # 下注/加注已经超过后手：跟注就是全下，牌桌上不存在「再加注」。
+    # 此时只能弃牌或 all-in —— 与客户端只显示 Fold / All in 一致。
+    call_all_in = (stack is not None and stack > 0 and to_call >= stack)
+    if call_all_in:
+        options = [
+            Option("call", "Call all-in", "call", _round_bb(stack),
+                   "the bet covers my stack; calling puts me all-in"),
+            Option("fold", "Fold", "fold"),
+        ]
+        by_id = {o.id: o for o in options}
+        return [by_id[i] for i in OPTION_ORDER if i in by_id]
+
     # 判断「前面有没有人加注」用形态，不用 to_call：小盲面对大盲时 to_call=0.5，
     # 那是补齐盲注，不是面对加注
     facing_raise = any(s in ("single-raise", "three-bet")
@@ -224,6 +236,14 @@ def build_options(snap: HandSnapshot) -> list[Option]:
         options.append(Option("call", "Check", "check",
                               note="no bet yet, check"))
     else:
+        # 下注超过后手：跟注即全下，且不能再加注。客户端此时只给
+        # Fold / All in 两个按钮，选项必须与牌桌一致。
+        if stack is not None and stack > 0 and to_call >= stack:
+            options.append(Option("call", "Call all-in", "call", _round_bb(stack),
+                                  "the bet covers my stack; calling puts me all-in"))
+            options.append(Option("fold", "Fold", "fold"))
+            by_id = {o.id: o for o in options}
+            return [by_id[i] for i in OPTION_ORDER if i in by_id]
         options.append(Option("call", "Call", "call", _round_bb(to_call)))
         options.append(Option("fold", "Fold", "fold"))
 
@@ -549,15 +569,23 @@ def render_hand_facts(sit: Situation) -> str:
 
     lines.append("")
     to_call = round(snap.to_call, 2)
+    # 后手不足以下注额时，实际只需跟到全下：客户端也只会给 Fold / All in。
+    # 赔率和跟注比例必须按**实际能跟出的金额**算，否则会把门槛算高。
+    call_amount = to_call
+    if snap.hero_stack is not None and 0 < snap.hero_stack < to_call:
+        call_amount = round(snap.hero_stack, 2)
     lines.append(f"Street: {_STREET_EN.get(snap.street, snap.street)}｜"
                  f"Board: {''.join(snap.board) or 'none'}｜"
                  f"Pot: {snap.pot if snap.pot is not None else 'unknown'}BB｜"
-                 f"To call: {to_call}BB")
-    if to_call > 0 and snap.pot:
+                 f"To call: {call_amount}BB")
+    if call_amount < to_call:
+        lines.append(f"The bet covers my stack: calling {call_amount}BB puts me "
+                     f"all-in; raising is not possible.")
+    if call_amount > 0 and snap.pot:
         # 赔率门槛：跟注额 ÷ 跟注后的底池。技能里的赔率表就是按这个口径
-        bep = to_call / (snap.pot + to_call) * 100
+        bep = call_amount / (snap.pot + call_amount) * 100
         lines.append(f"Break-even equity to call: {bep:.0f}%; "
-                     f"call is {to_call / snap.pot:.0%} of the pot")
+                     f"call is {call_amount / snap.pot:.0%} of the pot")
 
     lines.append("")
     lines.append("## Action line")
@@ -724,6 +752,26 @@ def _skill_context(sit: Situation) -> skills.SkillContext:
 
 # ─────────────────────────── 模型调用 ───────────────────────────
 
+def _env_text(env: dict[str, str], key: str) -> str | None:
+    """可选配置：空值等同于没配，避免 `.env` 里的 `KEY=` 覆盖掉默认。"""
+    value = (env.get(key) or "").strip()
+    return value or None
+
+
+def _env_number(env: dict[str, str], key: str, cast, low: float,
+                high: float) -> float | int | None:
+    raw = _env_text(env, key)
+    if raw is None:
+        return None
+    try:
+        value = cast(raw)
+    except ValueError:
+        raise ValueError(f"{key} 不是合法数字：{raw!r}") from None
+    if not low <= value <= high:
+        raise ValueError(f"{key} 应在 {low}–{high} 之间，实际 {raw!r}")
+    return value
+
+
 @dataclass(frozen=True)
 class AISettings:
     api_key: str
@@ -733,14 +781,25 @@ class AISettings:
     # OpenRouter 的可选排名头（JEV 走 OpenRouter 时用）
     referer: str = ""
     title: str = ""
+    # 采样/思考参数。None = 不传，用服务端默认。
+    # 注意：deepseek-flash 默认开启思考（effort=high），思考模式下 temperature
+    # 不生效，见 AI_SERVER_THINKING 的说明。
+    temperature: float | None = 0.2
+    top_p: float | None = None
+    max_tokens: int | None = None
+    thinking: str | None = None           # enabled | disabled
+    reasoning_effort: str | None = None   # none | low | high | max
 
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None,
                  source: str = "env") -> "AISettings | None":
-        """从环境变量读凭据。缺任何一项都返回 None（= 没配置，调用方应跳过）。
+        """从环境变量读凭据与采样参数。缺凭据返回 None（= 没配置）。
 
         与 call-back 的 AI_SERVER_* 同口径：同一台机器上两边共用一套配置。
         `.env` 由 poker_ocr.env 先加载进环境变量，这里不关心值从哪来。
+
+        采样参数非法时抛 ValueError（而不是静默退回默认）：
+        「配了却没生效」是这类配置最难查的故障。
         """
         env = os.environ if env is None else env
         key = (env.get("AI_SERVER_API_KEY") or "").strip()
@@ -748,10 +807,33 @@ class AISettings:
         model = (env.get("AI_SERVER_MODEL") or "").strip()
         if not (key and base and model):
             return None
+
+        thinking = _env_text(env, "AI_SERVER_THINKING")
+        if thinking is not None:
+            thinking = thinking.lower()
+            if thinking not in ("enabled", "disabled"):
+                raise ValueError("AI_SERVER_THINKING 只能是 enabled 或 disabled")
+        effort = _env_text(env, "AI_SERVER_REASONING_EFFORT")
+        if effort is not None:
+            effort = effort.lower()
+            if effort not in ("none", "low", "high", "max"):
+                raise ValueError(
+                    "AI_SERVER_REASONING_EFFORT 只能是 none / low / high / max")
+
+        temperature = _env_number(env, "AI_SERVER_TEMPERATURE", float, 0.0, 2.0)
+        if temperature is None:
+            temperature = 0.2
+
         return cls(api_key=key, base_url=base.rstrip("/"), model=model,
                    source=source,
                    referer=(env.get("AI_SERVER_REFERER") or "").strip(),
-                   title=(env.get("AI_SERVER_TITLE") or "").strip())
+                   title=(env.get("AI_SERVER_TITLE") or "").strip(),
+                   temperature=temperature,
+                   top_p=_env_number(env, "AI_SERVER_TOP_P", float, 0.0, 1.0),
+                   max_tokens=_env_number(env, "AI_SERVER_MAX_TOKENS", int,
+                                          1, 393216),
+                   thinking=thinking,
+                   reasoning_effort=effort)
 
 
 class AIError(RuntimeError):
@@ -883,9 +965,20 @@ def complete_json(settings: AISettings, system: str, user: str,
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
-            "temperature": 0.2,
             "stream": False,
         }
+        # 只发显式配置过的参数。deepseek-flash 思考模式会忽略 temperature，
+        # 所以实时链路默认在 .env 里关掉思考（AI_SERVER_THINKING=disabled）。
+        if settings.temperature is not None:
+            body["temperature"] = settings.temperature
+        if settings.top_p is not None:
+            body["top_p"] = settings.top_p
+        if settings.max_tokens is not None:
+            body["max_tokens"] = settings.max_tokens
+        if settings.thinking is not None:
+            body["thinking"] = {"type": settings.thinking}
+        if settings.reasoning_effort is not None:
+            body["reasoning_effort"] = settings.reasoning_effort
         if json_mode:
             body["response_format"] = {"type": "json_object"}
         return body

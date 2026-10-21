@@ -53,9 +53,13 @@ def player(seat_id: str, *, name: str | None = None, position: str | None = None
 
 def state(*players: PlayerState, pot: float = 3.0, pbs: float = 3.0,
           dealer: str = "a", hero_turn: bool | None = False,
-          hero_seat: str = "hero", errors: list[str] | None = None) -> FrameState:
+          hero_seat: str = "hero", errors: list[str] | None = None,
+          table_seats: int | None = None,
+          in_hand: int | None = None) -> FrameState:
     return FrameState(
-        frame_id="f", table_seats=len(players), players_in_hand=len(players),
+        frame_id="f",
+        table_seats=len(players) if table_seats is None else table_seats,
+        players_in_hand=len(players) if in_hand is None else in_hand,
         players=list(players), blinds=BLINDS, dealer=dealer,
         hero_seat_id=hero_seat, hero_turn=hero_turn, pot=pot,
         pot_before_street=pbs, errors=errors or [])
@@ -374,6 +378,28 @@ def test_snapshot_marks_limped_pot() -> None:
                  ["4s", "4h"], [])
     check(point is not None and point.preflop_shapes == ("limped",),
           f"一次溜入应判 limped，实际 {getattr(point, 'preflop_shapes', None)}")
+
+
+def test_table_size_uses_seats_not_players_in_hand() -> None:
+    """9 人桌打到只剩 2 人在局，桌型仍是 9-handed。
+
+    修复前 table_size 取的是 players_in_hand（弃牌后会一路变小），
+    提示词会写成「Table: 2-handed」，让模型误判桌型。
+    """
+    tr = LiveHandTracker(confirm_frames=1)
+    players = (player("hero", position="BTN"),
+               player("a", position="BB", name="老王"))
+    feed(tr, state(*players, pot=1.5, pbs=0.0, table_seats=9, in_hand=2),
+         ["Jd", "Jh"], [])
+    point = feed(tr, state(*players, pot=1.5, pbs=0.0, table_seats=9,
+                           in_hand=2, hero_turn=True), ["Jd", "Jh"], [])
+    check(point is not None, "轮到我时应给决策点")
+    check(point.table_size == 9,
+          f"桌型应按座位数 9，实际 {point.table_size}")
+    check(tr._hand_dict(tr.hand)["table_size"] == 9,
+          "落库的手牌记录也应保存座位数")
+    user = render_hand_facts(build_situation(point))
+    check("Table: 9-handed" in user, f"提示词桌型不对：\n{user}")
 
 
 # ─────────────────────────── 技能路由 ───────────────────────────
@@ -741,6 +767,42 @@ def test_options_capped_by_stack() -> None:
     check("all-in" in by["raise-1"].note, "封顶的档位应注明等同全下")
 
 
+def test_covered_stack_has_only_fold_or_all_in() -> None:
+    """下注超过后手时，牌桌上只有 Fold / All in：选项不能再出现 Call 40
+    或五个一模一样的「加注到 28.5」。跟注额按后手算，赔率也按后手算。"""
+    from poker_ocr.hand_track import ActionRecord, OpponentSnapshot, StreetRecord
+
+    sit = build_situation(make_point(
+        street="river", board=("5h", "5s", "2h", "Td", "8c"),
+        hero_cards=("Jd", "Jh"), hero_stack=28.5, hero_bet=0.0,
+        to_call=40.0, pot=190.0,
+        opponents=(OpponentSnapshot("v", "villain", "BB", 229.5, 40.0, False),),
+        streets=(StreetRecord("preflop", 0.0, ()), StreetRecord("flop", 0.0, ()),
+                 StreetRecord("turn", 0.0, ()),
+                 StreetRecord("river", 150.0, (
+                     ActionRecord("river", "v", "villain", "BB", "bet", 40.0),)))))
+    ids = [o.id for o in sit.options]
+    check(ids == ["fold", "call"], f"被 cover 时只应有 fold/call：{ids}")
+    call = sit.options[1]
+    check(call.amount == 28.5 and "all-in" in call.label.lower(),
+          f"跟注应是后手全下 28.5BB：{call}")
+
+    user = render_hand_facts(sit)
+    check("To call: 28.5BB" in user, f"应显示实际跟注额 28.5：\n{user}")
+    check("Break-even equity to call: 13%" in user,
+          f"赔率门槛应按 28.5 算（13%）：\n{user}")
+    check("raising is not possible" in user, f"应说明不能再加注：\n{user}")
+    check("raise-1/2" not in user, f"不该出现加注选项：\n{user}")
+
+    # 翻前面对超过后手的加注，同样只剩 fold / call all-in
+    pre = make_point(street="preflop", board=(), hero_stack=10.0, hero_bet=0.0,
+                     to_call=25.0, pot=30.0, preflop_shapes=("three-bet",),
+                     cbet_spot=False)
+    by = {o.id: o for o in build_options(pre)}
+    check(set(by) == {"fold", "call"}, f"翻前被 cover 也只应有 fold/call：{by}")
+    check(by["call"].amount == 10.0, f"翻前跟注应封顶到后手 10：{by['call']}")
+
+
 # ─────────────────────────── 提示词 ───────────────────────────
 
 def test_prompt_marks_inferred_actions() -> None:
@@ -1055,6 +1117,74 @@ def test_ai_settings_reads_referer_and_title() -> None:
           f"可选头没读进来：{settings}")
 
 
+def test_ai_settings_reads_sampling_env() -> None:
+    """采样参数从 .env 读进来；没配的项保持 None（= 不发给服务端）。"""
+    env = {"AI_SERVER_API_KEY": "k", "AI_SERVER_BASE_URL": "https://x",
+           "AI_SERVER_MODEL": "deepseek-flash",
+           "AI_SERVER_THINKING": "disabled",
+           "AI_SERVER_TEMPERATURE": "0.2",
+           "AI_SERVER_MAX_TOKENS": "200"}
+    settings = AISettings.from_env(env)
+    check(settings.thinking == "disabled", f"thinking 没读进来：{settings}")
+    check(settings.temperature == 0.2, f"temperature 没读进来：{settings}")
+    check(settings.max_tokens == 200, f"max_tokens 没读进来：{settings}")
+    check(settings.top_p is None and settings.reasoning_effort is None,
+          f"没配的采样参数应为 None：{settings}")
+
+    # 不配 temperature 时保留原先的 0.2 默认，其余仍为 None
+    bare = AISettings.from_env({"AI_SERVER_API_KEY": "k",
+                                "AI_SERVER_BASE_URL": "https://x",
+                                "AI_SERVER_MODEL": "m"})
+    check(bare.temperature == 0.2 and bare.thinking is None,
+          f"默认采样参数不对：{bare}")
+
+
+def test_ai_settings_rejects_bad_sampling_env() -> None:
+    base = {"AI_SERVER_API_KEY": "k", "AI_SERVER_BASE_URL": "https://x",
+            "AI_SERVER_MODEL": "m"}
+    for key, value in (("AI_SERVER_THINKING", "on"),
+                       ("AI_SERVER_REASONING_EFFORT", "medium"),
+                       ("AI_SERVER_TEMPERATURE", "3"),
+                       ("AI_SERVER_MAX_TOKENS", "abc")):
+        try:
+            AISettings.from_env({**base, key: value})
+        except ValueError as exc:
+            check(key in str(exc), f"报错应点名 {key}：{exc}")
+        else:
+            FAILS.append(f"{key}={value} 应该抛 ValueError")
+
+
+def test_complete_json_sends_sampling_params() -> None:
+    """配置过的采样参数要真的进请求体；没配的不能发空值。"""
+    seen: dict = {}
+
+    def fake(url, payload, headers, timeout):
+        seen.update(payload)
+        return json.dumps({"choices": [{"message": {
+            "content": '{"option": "call", "reason": "x"}'}}]}).encode()
+
+    settings = AISettings("k", "https://example.invalid", "deepseek-flash",
+                          temperature=0.2, max_tokens=200,
+                          thinking="disabled")
+    got = complete_json(settings, "s", "u", request=fake)
+    check(got["option"] == "call", f"响应解析不对：{got}")
+    check(seen["temperature"] == 0.2, f"temperature 没进请求体：{seen}")
+    check(seen["max_tokens"] == 200, f"max_tokens 没进请求体：{seen}")
+    check(seen["thinking"] == {"type": "disabled"},
+          f"thinking 没进请求体：{seen}")
+    check("top_p" not in seen and "reasoning_effort" not in seen,
+          f"没配的参数不该发送：{seen}")
+
+    seen.clear()
+    thinking = AISettings("k", "https://example.invalid", "deepseek-flash",
+                          temperature=None, top_p=0.95, thinking="enabled",
+                          reasoning_effort="low")
+    complete_json(thinking, "s", "u", request=fake)
+    check("temperature" not in seen, f"思考模式不该发 temperature：{seen}")
+    check(seen["top_p"] == 0.95 and seen["reasoning_effort"] == "low",
+          f"思考参数没进请求体：{seen}")
+
+
 def test_parse_json_content_tolerates_fence() -> None:
     got = parse_json_content('```json\n{"option": "call", "reason": "x"}\n```')
     check(got["option"] == "call", f"应剥掉 markdown 围栏：{got}")
@@ -1140,6 +1270,7 @@ def main() -> int:
         test_tracker_decision_point_confirmed_and_deduped,
         test_snapshot_to_call_and_preflop_shape,
         test_snapshot_marks_limped_pot,
+        test_table_size_uses_seats_not_players_in_hand,
         test_skill_library_loads_all_files,
         test_skill_text_matches_call_back_copy,
         test_skill_selection_is_street_scoped,
@@ -1158,6 +1289,7 @@ def main() -> int:
         test_options_facing_bet_uses_pot_after_call,
         test_options_bump_to_min_raise_when_fraction_too_small,
         test_options_capped_by_stack,
+        test_covered_stack_has_only_fold_or_all_in,
         test_prompt_marks_inferred_actions,
         test_prompt_contains_full_action_line_and_options,
         test_prompt_preflop_has_no_strength_facts,
@@ -1172,6 +1304,9 @@ def main() -> int:
         test_complete_json_dispatches_by_model_name,
         test_post_json_reuses_connection,
         test_ai_settings_reads_referer_and_title,
+        test_ai_settings_reads_sampling_env,
+        test_ai_settings_rejects_bad_sampling_env,
+        test_complete_json_sends_sampling_params,
         test_parse_json_content_tolerates_fence,
         test_advice_runner_does_not_block,
         test_advice_runner_reports_busy_while_waiting,

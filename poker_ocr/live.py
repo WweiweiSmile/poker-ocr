@@ -1042,8 +1042,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help="轮到我时按当前街加载技能并调用 AI 给一个选项"
                          "（默认开启；用 --no-ai-advice 关闭。需要 AI_SERVER_API_KEY / "
                          "AI_SERVER_BASE_URL / AI_SERVER_MODEL；仅 roi 模式）")
-    ap.add_argument("--ai-timeout", type=float, default=20.0,
-                    help="单次 AI 建议的超时秒数（默认 20）")
+    ap.add_argument("--ai-timeout", type=float, default=None,
+                    help="单次 AI 建议的超时秒数（默认读 AI_SERVER_TIMEOUT，"
+                         "否则 20）。实时链路建议 5–8 秒")
     ap.add_argument("--ai-confirm", type=int, default=1,
                     help="轮到我需要连续几帧确认（默认 1 = 第一帧就触发，"
                          "配合蓝色下注按钮；按钮会闪断的旧 UI 可调回 2）")
@@ -1094,7 +1095,6 @@ def _install_signals(stop: threading.Event) -> None:
 def main(argv: list[str] | None = None) -> int:
     ap = build_parser()
     args = ap.parse_args(argv)
-    _validate_args(ap, args)
 
     # `.env` 在任何配置读取之前加载：已存在的环境变量优先，文件只补齐。
     # 找不到文件不报错（全靠环境变量是合法部署方式），但 --ai-advice 下会告警 ——
@@ -1107,6 +1107,14 @@ def main(argv: list[str] | None = None) -> int:
         overridden = (f"，其中 {len(env_load.kept)} 项环境变量已存在、未覆盖"
                       if env_load.kept else "")
         _log(f"[启动] 已加载 .env：{env_load.path}（{len(env_load.applied)} 项{overridden}）")
+
+    if args.ai_timeout is None:
+        raw = (os.environ.get("AI_SERVER_TIMEOUT") or "").strip()
+        try:
+            args.ai_timeout = float(raw) if raw else 20.0
+        except ValueError:
+            ap.error(f"AI_SERVER_TIMEOUT 不是数字：{raw!r}")
+    _validate_args(ap, args)
 
     if args.crop is None:
         args.crop = "auto"
@@ -1162,7 +1170,10 @@ def main(argv: list[str] | None = None) -> int:
                  + "、".join(str(p) for p in env_load.tried)
                  + "），改用环境变量")
         source = "dotenv" if "AI_SERVER_API_KEY" in env_load.applied else "env"
-        settings = AISettings.from_env(source=source)
+        try:
+            settings = AISettings.from_env(source=source)
+        except ValueError as exc:
+            ap.error(f"AI 采样配置有误：{exc}")
         if settings is None:
             ap.error("--ai-advice 需要 AI_SERVER_API_KEY、AI_SERVER_BASE_URL、"
                      "AI_SERVER_MODEL（写在项目根目录的 .env 里，或直接设为环境变量）")
@@ -1181,9 +1192,20 @@ def main(argv: list[str] | None = None) -> int:
                 "blue_button（用 hero 头像槽判蓝色下注按钮），或补上 hero_turn_probe")
         advice_runner = AdviceRunner(settings, timeout=args.ai_timeout, log=_log)
         hand_tracker = LiveHandTracker(confirm_frames=args.ai_confirm)
+        sampling = []
+        if settings.thinking is not None:
+            sampling.append(f"thinking={settings.thinking}")
+        if settings.reasoning_effort is not None:
+            sampling.append(f"effort={settings.reasoning_effort}")
+        if settings.temperature is not None:
+            sampling.append(f"temperature={settings.temperature:g}")
+        if settings.max_tokens is not None:
+            sampling.append(f"max_tokens={settings.max_tokens}")
         _log(f"[建议] 已启用 AI 建议：{settings.model}"
-             f"（凭据来源 {settings.source}，超时 {args.ai_timeout}s，"
-             f"连续 {args.ai_confirm} 帧确认）")
+             f"（凭据来源 {settings.source}，超时 {args.ai_timeout:g}s，"
+             f"连续 {args.ai_confirm} 帧确认，"
+             + ("，".join(sampling) if sampling else "采样参数用服务端默认")
+             + "）")
 
     writer = JsonlWriter(args.out)
     writer.write({

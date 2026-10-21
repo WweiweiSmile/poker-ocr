@@ -54,8 +54,8 @@ ACTION_TYPES = ("check", "call", "bet", "raise", "fold")
 
 AGGRESSIVE = ("bet", "raise")
 
-# 换手时「人数骤变」的阈值：一桌人同时换掉一大半，只可能是换了手/换了桌
-TABLE_SIZE_JUMP = 2
+# 换手时「在局人数骤变」的阈值。注意这不是桌型座位数（那个用 state.table_seats）
+IN_HAND_JUMP = 2
 
 # 翻前/翻后共用的行动顺序（各人数下的位置表都是它的子序列）。
 # 街末补漏时用它给同一批跟注排序，避免按物理座位顺序把 CO 排到 BTN 后面。
@@ -137,6 +137,8 @@ class HandSnapshot:
     second_bet: float | None
     pot: float | None
     pot_before_street: float | None
+    # 牌桌座位数（9 人桌 = 9），不是当前还在局的人数。
+    # 后者用 opponents_in_hand（已弃牌的人仍留在 opponents 里）。
     table_size: int
     blinds: Blinds | None
     opponents: tuple[OpponentSnapshot, ...]
@@ -219,9 +221,9 @@ class LiveHandTracker:
         self.turn_frames = 0
         # 已经建议过的决策点。同一个回合里按钮闪断会重复给出同一个 key
         self.advised: set[tuple] = set()
-        # 上一帧的 hero 手牌/人数，用来判换手
+        # 上一帧的 hero 手牌 / 在局人数，用来判换手（后者不是桌型座位数）
         self._prev_hero_cards: tuple[str, ...] = ()
-        self._prev_table_size = 0
+        self._prev_in_hand = 0
         # 公共牌掉回翻前/翻牌的确认计数。单帧读空可能只是遮挡，连续两帧才算换手
         self._drop_frames = 0
         # 上一手结束时的工作副本。调用方 start_hand 时取走，落成一条 hand 记录
@@ -260,7 +262,9 @@ class LiveHandTracker:
             hand.hero_position = hero.position
         if hand.start_stack is None and hero is not None and hero.stack is not None:
             hand.start_stack = hero.stack
-        hand.table_size = state.players_in_hand
+        # 桌型 = 座位数。不能再拿 players_in_hand：弃牌会让 9 人桌越打越小，
+        # 提示词里就会写成「2-handed」，误导模型。
+        hand.table_size = state.table_seats
         hand.dealer = state.dealer or hand.dealer
         hand.blinds = state.blinds or hand.blinds
         hand.pot = state.pot
@@ -283,7 +287,7 @@ class LiveHandTracker:
 
         self._record_actions(state, hand)
         self._prev_hero_cards = cards or self._prev_hero_cards
-        self._prev_table_size = state.players_in_hand
+        self._prev_in_hand = state.players_in_hand
 
         return self._maybe_decision(state, hand)
 
@@ -292,7 +296,7 @@ class LiveHandTracker:
         self.hand = None
         self.turn_frames = 0
         self._prev_hero_cards = ()
-        self._prev_table_size = 0
+        self._prev_in_hand = 0
         self._drop_frames = 0
 
     # ─────────────────────────── 换手 ───────────────────────────
@@ -327,8 +331,9 @@ class LiveHandTracker:
         if len(cards) == 2 and len(self._prev_hero_cards) == 2 \
                 and cards != self._prev_hero_cards:
             return True
-        if (self._prev_table_size
-                and abs(state.players_in_hand - self._prev_table_size) >= TABLE_SIZE_JUMP):
+        # 在局人数一次变化 ≥2：更像是一手结束/换桌，而不是单个人弃牌
+        if (self._prev_in_hand
+                and abs(state.players_in_hand - self._prev_in_hand) >= IN_HAND_JUMP):
             return True
         return False
 
@@ -342,7 +347,7 @@ class LiveHandTracker:
             hand_index=self.hand_seq,
             hero_cards=cards,
             hero_position=hero.position if hero else None,
-            table_size=state.players_in_hand,
+            table_size=state.table_seats,
             dealer=state.dealer,
             blinds=state.blinds,
             start_stack=hero.stack if hero else None,
@@ -725,7 +730,7 @@ class LiveHandTracker:
             second_bet=second,
             pot=state.pot,
             pot_before_street=state.pot_before_street,
-            table_size=state.players_in_hand,
+            table_size=state.table_seats,
             blinds=state.blinds or hand.blinds,
             opponents=opponents,
             streets=hand.snapshot(),
