@@ -10,8 +10,9 @@
 
   · **只保留最新帧**。reader 线程按源帧率连续 read，邮箱里永远只有一帧；
     处理不过来就覆盖旧帧，绝不让延迟越积越大。
-  · **单 OCR 线程**。onnxruntime 的 session 不保证线程安全，reader 只做解码，
-    `StateStream.ingest()` 永远只在主循环里调用。
+  · **单处理线程**。reader 只做解码，`StateStream.ingest()` 永远只在主循环里
+    调用；一帧内的多块 ROI rec 由线程池并行（`--roi-threads`，默认 4，1=串行）。
+    共享同一个 OcrEngine/ONNX session，实测并发结果与串行逐字一致。
   · **默认不节流**。处理完当前帧立刻回到邮箱取最新帧，中间帧直接丢弃；
     `--every > 0` 才按固定间隔降频（调试/降压用）。
   · **断流自动重连**。重连后清空 ROI 缓存和状态机，下一帧重新当基线；
@@ -55,7 +56,7 @@ from .ocr import OcrEngine
 from .parse import parse_blinds
 from .profile import Profile
 from .roi_reader import hero_turn_method
-from .state_stream import StateStream
+from .state_stream import DEFAULT_ROI_THREADS, StateStream
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_PROFILE = PROJECT_ROOT / "config" / "table_wpk_1080x2400.json"
@@ -790,6 +791,10 @@ def build_parser() -> argparse.ArgumentParser:
                     help="最多处理多少帧（调试用，0=不限）")
     ap.add_argument("--no-dedup", action="store_true", help="关掉 ROI 去重")
     ap.add_argument("--no-fold", action="store_true", help="不读头像（省 9 块 ROI）")
+    ap.add_argument("--roi-threads", type=int, default=DEFAULT_ROI_THREADS,
+                    help="帧内 ROI OCR 并行线程数（默认 "
+                         f"{DEFAULT_ROI_THREADS}；1=串行）。"
+                         "线程只并行同一帧里的多块 ROI，帧与帧之间仍串行")
     ap.add_argument("--dump-frames", type=Path, default=None,
                     help="把每个采样帧存成 JPEG，文件名带墙钟时间（量延迟用）")
     ap.add_argument("--ai-advice", action=argparse.BooleanOptionalAction,
@@ -827,6 +832,8 @@ def _validate_args(ap: argparse.ArgumentParser, args) -> None:
         ap.error("--ai-timeout 必须大于 0")
     if args.ai_confirm < 1:
         ap.error("--ai-confirm 至少为 1")
+    if args.roi_threads < 1:
+        ap.error("--roi-threads 至少为 1（1 = 串行）")
 
 
 def _install_signals(stop: threading.Event) -> None:
@@ -898,7 +905,10 @@ def main(argv: list[str] | None = None) -> int:
             name_confirm=args.name_confirm,
             initial_blinds=initial_blinds,
             lenient_chips=args.lenient_chips,
+            roi_threads=args.roi_threads,
         )
+        _log(f"[启动] ROI 并行线程={args.roi_threads}"
+             + ("（串行）" if args.roi_threads <= 1 else ""))
 
     advice_runner = None
     hand_tracker = None
@@ -1090,6 +1100,8 @@ def main(argv: list[str] | None = None) -> int:
         writer.write({"type": "session_end", "ended_at": _iso_now(),
                       "summary": summary})
         writer.close()
+        if state_stream is not None:
+            state_stream.close()
 
         _log(f"\n会话结束：读帧 {reader.grabbed}，处理 {processor.processed}，"
              f"记录 {summary['record_count']} 条，重连 {reader.reconnects} 次；"

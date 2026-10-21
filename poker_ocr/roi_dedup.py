@@ -47,6 +47,7 @@ M2.1 实测：单帧 30 块 ROI 全量要 376ms，而 0.5s 抽帧间隔里绝大
 
 from __future__ import annotations
 
+from concurrent.futures import Executor
 from dataclasses import dataclass, field as dc_field
 from time import perf_counter
 
@@ -321,9 +322,12 @@ class RoiStream:
                  global_fields: tuple[str, ...] = GLOBAL_FIELDS,
                  mode: str = "raw", upscale: float = 1.0,
                  pad: float = ROI_PAD, with_dealer: bool = True,
-                 dedup: bool = True) -> None:
+                 dedup: bool = True,
+                 executor: Executor | None = None) -> None:
         self.profile = profile
         self.engine = engine
+        # 帧内 ROI rec 的线程池（None = 串行）。由调用方持有，RoiStream 只借用
+        self.executor = executor
         self.dealer_detector = dealer_detector
         self.seat_fields = tuple(seat_fields)
         self.global_fields = tuple(global_fields)
@@ -365,7 +369,8 @@ class RoiStream:
                            global_fields=self.global_fields,
                            mode=self.mode, upscale=self.upscale, pad=self.pad,
                            dealer_detector=self.dealer_detector,
-                           with_dealer=self.with_dealer, cache=self.cache)
+                           with_dealer=self.with_dealer, cache=self.cache,
+                           executor=self.executor)
 
         self.stats.frames += 1
         self.stats.roi_total += frame.n_roi

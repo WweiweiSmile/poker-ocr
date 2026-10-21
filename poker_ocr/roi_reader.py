@@ -8,6 +8,12 @@ M2 把「全图 det + 几何分配」换成「槽位裁剪 + 纯识别」。本�
 把图缩到长边 640 再跑全图 det+rec 仍然 1.06s；固定 ROI 只 rec 是 1.11s → 18 个
 ROI 共 0.25s（单 ROI 14ms）。「通过全图 det 找文本」本身就是慢的根因。
 
+**块间并行**：同一帧的各块 ROI 完全独立，所以 `read_slots` 可以把未命中缓存的
+rec 交给线程池并发跑（M2 实测：39 块全跑 475ms → 4 线程 282ms，约 1.7×）。
+裁剪、`RoiDedupCache` 的 check/store 仍留在调用线程 —— 缓存的 dict 没有锁。
+并行只共享 `OcrEngine`/ONNX session：RapidOCR 在 `use_det=False` 路径上只读
+session，实测并发结果与串行逐字一致；`--roi-threads 1` 可整体回退。
+
 ⚠️ 三条别再踩的坑（README / 配置里的回退记录 / 本模块 11 帧实测）：
 
 1. **名字槽是「搜索区域」不是「文字紧框」** —— 按它裁不会切掉长名字的开头
@@ -30,6 +36,7 @@ from __future__ import annotations
 
 import re
 import time
+from concurrent.futures import Executor
 from dataclasses import dataclass, field as dc_field, replace as dc_replace
 from typing import Protocol, runtime_checkable
 
@@ -248,10 +255,93 @@ def crop_slot(img: np.ndarray, profile: Profile, slot: Slot, size: Size,
     return (x1, y1, x2, y2), img[y1:y2, x1:x2]
 
 
+def _rec_read(engine: OcrEngine, prepared: np.ndarray,
+              ) -> tuple[list[tuple[str, float]] | None, float, str | None]:
+    """跑一块已预处理好的 ROI。返回 (hits, ms, error)；异常不往外抛。"""
+    t0 = time.perf_counter()
+    try:
+        hits = engine.read_text(prepared)
+    except Exception as exc:                       # 单块失败不该带崩整帧
+        return None, (time.perf_counter() - t0) * 1000, \
+            f"rec 抛异常：{type(exc).__name__}"
+    return hits, (time.perf_counter() - t0) * 1000, None
+
+
+def _run_reads(engine: OcrEngine, images: list[np.ndarray],
+               executor: Executor | None) -> list[tuple]:
+    """并行跑一批 rec；结果顺序与输入一致。"""
+    if executor is None or len(images) <= 1:
+        return [_rec_read(engine, img) for img in images]
+    futures = [executor.submit(_rec_read, engine, img) for img in images]
+    return [future.result() for future in futures]
+
+
+def _read_from_hits(key: str, rect: tuple[int, int, int, int],
+                    hits: list[tuple[str, float]] | None, ms: float,
+                    error: str | None) -> RoiRead:
+    if error is not None:
+        return RoiRead(key, rect, ms=ms, note=error)
+    parts = [(t.strip(), float(s)) for t, s in (hits or ()) if t and t.strip()]
+    if not parts:
+        return RoiRead(key, rect, ms=ms, note="rec 没识别出文字")
+    return RoiRead(key, rect, parts=parts, ms=ms)
+
+
+def read_slots(img: np.ndarray, profile: Profile, engine: OcrEngine,
+               slots: list[tuple[Slot, str, str]], size: Size,
+               mode: str = "raw", upscale: float = 1.0, pad: float = ROI_PAD,
+               cache: RoiCache | None = None,
+               executor: Executor | None = None) -> list[RoiRead]:
+    """批量读多块槽位，返回顺序与 `slots` 一致。
+
+    `slots` 是 `[(slot, key, cache_key)]`。**裁剪、缓存 check/store 都在调用
+    线程（主线程）里做** —— `RoiDedupCache` 的 dict 没有锁，不能跨线程；
+    `cache.check` 还会写「这一帧的 hash」，并发调用会互相踩。真正值得并行的
+    只有 `engine.read_text`（单块约 12ms），所以只把它交给 `executor`。
+
+    共享同一个 `OcrEngine`/ONNX session 并发跑 rec：RapidOCR 在
+    `use_det=False` 路径上只读 session、不写共享状态，实测结果与串行逐字一致。
+    如需回退，调用方传 `executor=None` 即可（`--roi-threads 1`）。
+    """
+    out: list[RoiRead | None] = [None] * len(slots)
+    pending: list[tuple[int, tuple[int, int, int, int], np.ndarray]] = []
+
+    for i, (slot, key, cache_key) in enumerate(slots):
+        rect, roi = crop_slot(img, profile, slot, size, pad=pad)
+        if roi.size == 0:
+            out[i] = RoiRead(key, rect, note="裁剪区为空（槽位落到了图外）")
+            continue
+
+        if cache is not None:
+            hit, hash_ms = cache.check(cache_key or key, roi)
+            if hit is not None:
+                # 复制一份再标 reused：直接改会把缓存里那份也标上，
+                # 下一帧命中时它看上去就像「当初也是复用来的」
+                out[i] = dc_replace(hit, key=key, rect=rect,
+                                    reused=True, ms=hash_ms)
+                continue
+
+        pending.append((i, rect, preprocess_variant(roi, mode, upscale)))
+
+    results = _run_reads(engine, [p[2] for p in pending], executor)
+    for (i, rect, _), (hits, ms, error) in zip(pending, results):
+        key, cache_key = slots[i][1], slots[i][2]
+        read = _read_from_hits(key, rect, hits, ms, error)
+        if cache is not None:
+            # 读不出文字也要存：下一帧同样读不出时，没必要再跑一次 rec 确认
+            cache.store(cache_key or key, read)
+        out[i] = read
+
+    # 每个槽位都必须有结果（空裁剪/缓存命中/rec 结果三选一），别静默缩短列表
+    assert all(read is not None for read in out)
+    return [read for read in out if read is not None]
+
+
 def read_slot(img: np.ndarray, profile: Profile, engine: OcrEngine, slot: Slot,
               key: str, size: Size, mode: str = "raw", upscale: float = 1.0,
               pad: float = ROI_PAD, cache: RoiCache | None = None,
-              cache_key: str | None = None) -> RoiRead:
+              cache_key: str | None = None,
+              executor: Executor | None = None) -> RoiRead:
     """裁一块槽位跑纯 rec（缓存命中就一次 rec 都不跑）。
 
     **只调 engine.read_text（use_det=False）** —— 全图 det 是一次都不跑的，
@@ -259,34 +349,12 @@ def read_slot(img: np.ndarray, profile: Profile, engine: OcrEngine, slot: Slot,
 
     `key` 是给人看的字段名（name/chip/…），`cache_key` 必须**全场唯一**
     （座位字段传 `座位.字段`，全局传 `@字段`）—— 否则 9 个座位的 name 会互相顶掉。
+
+    单块读取只是 `read_slots` 的特例；需要并行时直接调 `read_slots`。
     """
-    rect, roi = crop_slot(img, profile, slot, size, pad=pad)
-    if roi.size == 0:
-        return RoiRead(key, rect, note="裁剪区为空（槽位落到了图外）")
-
-    if cache is not None:
-        hit, hash_ms = cache.check(cache_key or key, roi)
-        if hit is not None:
-            # 复制一份再标 reused：直接改会把缓存里那份也标上，
-            # 下一帧命中时它看上去就像「当初也是复用来的」
-            return dc_replace(hit, key=key, rect=rect, reused=True, ms=hash_ms)
-
-    prepared = preprocess_variant(roi, mode, upscale)
-    t0 = time.perf_counter()
-    try:
-        hits = engine.read_text(prepared)
-    except Exception as exc:                       # 单块失败不该带崩整帧
-        return RoiRead(key, rect, ms=(time.perf_counter() - t0) * 1000,
-                       note=f"rec 抛异常：{type(exc).__name__}")
-    ms = (time.perf_counter() - t0) * 1000
-
-    parts = [(t.strip(), float(s)) for t, s in hits if t and t.strip()]
-    read = (RoiRead(key, rect, ms=ms, note="rec 没识别出文字") if not parts
-            else RoiRead(key, rect, parts=parts, ms=ms))
-    if cache is not None:
-        # 读不出文字也要存：下一帧同样读不出时，没必要再跑一次 rec 确认
-        cache.store(cache_key or key, read)
-    return read
+    return read_slots(img, profile, engine, [(slot, key, cache_key or key)],
+                      size, mode=mode, upscale=upscale, pad=pad, cache=cache,
+                      executor=executor)[0]
 
 
 def _seat_slot(seat, key: str) -> tuple[Slot | None, str]:
@@ -433,7 +501,9 @@ def measure_hero_turn(img: np.ndarray, profile: Profile, engine: OcrEngine,
 
 def read_avatars(img: np.ndarray, profile: Profile, engine: OcrEngine,
                  cache: RoiCache | None = None,
-                 detect_fold: bool = True) -> dict[str, tuple[str, float]]:
+                 detect_fold: bool = True,
+                 executor: Executor | None = None,
+                 ) -> dict[str, tuple[str, float]]:
     """每座的头像区读一遍，用于弃牌 / 正在带入检测（best-effort）。
 
     头像不是文字，rec 只会吐碎片；这里只把原文和分数原样交出去，
@@ -442,14 +512,14 @@ def read_avatars(img: np.ndarray, profile: Profile, engine: OcrEngine,
     """
     if not detect_fold:
         return {}
-    out: dict[str, tuple[str, float]] = {}
     size = (img.shape[1], img.shape[0])
-    for seat in profile.seats:
-        read = read_slot(img, profile, engine, seat.avatar_slot, "avatar", size,
-                         pad=0.0, cache=cache,
-                         cache_key=f"{seat.seat_id}.@avatar")
-        out[seat.seat_id] = (read.text, read.score)
-    return out
+    reads = read_slots(
+        img, profile, engine,
+        [(seat.avatar_slot, "avatar", f"{seat.seat_id}.@avatar")
+         for seat in profile.seats],
+        size, pad=0.0, cache=cache, executor=executor)
+    return {seat.seat_id: (read.text, read.score)
+            for seat, read in zip(profile.seats, reads)}
 
 
 def read_frame(img: np.ndarray, profile: Profile, engine: OcrEngine,
@@ -458,7 +528,8 @@ def read_frame(img: np.ndarray, profile: Profile, engine: OcrEngine,
                global_fields: tuple[str, ...] = GLOBAL_FIELDS,
                mode: str = "raw", upscale: float = 1.0, pad: float = ROI_PAD,
                dealer_detector: DealerDetector | None = None,
-               with_dealer: bool = True, cache: RoiCache | None = None) -> RoiFrame:
+               with_dealer: bool = True, cache: RoiCache | None = None,
+               executor: Executor | None = None) -> RoiFrame:
     """一帧 → 每座原始文本 + 全局原始文本。
 
     庄位默认开着，但它走的是**独立的全图 blob 路径**（不是 OCR det），
@@ -468,49 +539,76 @@ def read_frame(img: np.ndarray, profile: Profile, engine: OcrEngine,
     `cache` 是 M2.2 的 ROI 去重（见 roi_dedup）。**本函数自己不持有任何跨帧状态** ——
     缓存对象由调用方持有并传进来，所以「单帧读数」这条路永远是干净的，
     要跨帧复用才需要显式构造（推荐走 roi_dedup.RoiStream）。
+
+    `executor` 非空时，这一帧里所有未命中缓存的 ROI 会并行跑 rec；裁剪与
+    缓存读写仍在调用线程。返回的座位/字段顺序与串行完全一致。
     """
     size: Size = (img.shape[1], img.shape[0])
     t0 = time.perf_counter()          # 计时把座位 ROI 和全局 ROI 算在一起
 
-    seats: list[SeatRoi] = []
+    # 先把所有槽位收集起来，一次批量读。`resolved` 用 (座位下标, 字段) 定位，
+    # 座位下标 -1 表示全局槽 —— 这样输出顺序仍由 seat_fields / global_fields 决定。
+    resolved: dict[tuple[int, str], RoiRead] = {}
+    batch: list[tuple[Slot, str, str]] = []
+    targets: list[tuple[int, str]] = []
+
     for ring_index, seat in enumerate(profile.seats_in_ring_order):
-        fields: dict[str, RoiRead] = {}
         for key in seat_fields:
             slot, why = _seat_slot(seat, key)
             if slot is None:
-                fields[key] = RoiRead(key, (0, 0, 0, 0), note=why)
+                resolved[(ring_index, key)] = RoiRead(
+                    key, (0, 0, 0, 0), note=why)
                 continue
-            read = read_slot(img, profile, engine, slot, key, size,
-                             mode=mode, upscale=upscale, pad=pad,
-                             cache=cache, cache_key=f"{seat.seat_id}.{key}")
-            # 主槽读不到时再试备选槽。只判「空」不判内容：有牌时 hero 的
-            # 筹码在 alt 位置以外，主槽读到东西就绝不去碰备选块。
-            if (key == "chip" and not read.text
-                    and seat.chip_slot_alt is not None):
-                alt = read_slot(img, profile, engine, seat.chip_slot_alt, key,
-                                size, mode=mode, upscale=upscale, pad=pad,
-                                cache=cache,
-                                cache_key=f"{seat.seat_id}.chip_alt")
-                if alt.text:
-                    alt.note = "；".join(
-                        n for n in (alt.note, "主 chip 槽为空，改用 chip_slot_alt")
-                        if n)
-                    read = alt
-            fields[key] = read
-        seats.append(SeatRoi(seat.seat_id, ring_index, fields))
+            batch.append((slot, key, f"{seat.seat_id}.{key}"))
+            targets.append((ring_index, key))
 
-    globals_: dict[str, RoiRead] = {}
     for key in global_fields:
         slot = profile.global_slots.get(key)
         if slot is None:
-            globals_[key] = RoiRead(key, (0, 0, 0, 0),
-                                    note="profile 的 global_slots 里没有这一项")
+            resolved[(-1, key)] = RoiRead(
+                key, (0, 0, 0, 0), note="profile 的 global_slots 里没有这一项")
             continue
-        globals_[key] = read_slot(img, profile, engine, slot, key, size,
-                                  mode=mode, upscale=upscale, pad=pad,
-                                  cache=cache, cache_key=f"@{key}")
+        batch.append((slot, key, f"@{key}"))
+        targets.append((-1, key))
 
-    # hero_turn 也是块 ROI（只是很小），算在同一笔账里
+    for (ring_index, key), read in zip(
+            targets, read_slots(img, profile, engine, batch, size,
+                                mode=mode, upscale=upscale, pad=pad,
+                                cache=cache, executor=executor)):
+        resolved[(ring_index, key)] = read
+
+    # 主槽读不到时再试备选槽。只判「空」不判内容：有牌时 hero 的筹码在
+    # alt 位置以外，主槽读到东西就绝不去碰备选块。依赖主槽结果，单独第二批。
+    alt_batch: list[tuple[Slot, str, str]] = []
+    alt_seats: list[int] = []
+    for ring_index, seat in enumerate(profile.seats_in_ring_order):
+        chip = resolved.get((ring_index, "chip"))
+        if (chip is not None and not chip.text
+                and seat.chip_slot_alt is not None):
+            alt_batch.append((seat.chip_slot_alt, "chip",
+                              f"{seat.seat_id}.chip_alt"))
+            alt_seats.append(ring_index)
+    if alt_batch:
+        for ring_index, alt in zip(
+                alt_seats,
+                read_slots(img, profile, engine, alt_batch, size,
+                           mode=mode, upscale=upscale, pad=pad,
+                           cache=cache, executor=executor)):
+            if alt.text:
+                alt.note = "；".join(
+                    n for n in (alt.note, "主 chip 槽为空，改用 chip_slot_alt")
+                    if n)
+                resolved[(ring_index, "chip")] = alt
+
+    seats = [
+        SeatRoi(seat.seat_id, ring_index,
+                {key: resolved[(ring_index, key)] for key in seat_fields})
+        for ring_index, seat in enumerate(profile.seats_in_ring_order)
+    ]
+    globals_ = {key: resolved[(-1, key)] for key in global_fields}
+
+    # hero_turn 也是块 ROI（只是很小），算在同一笔账里。
+    # 蓝色按钮判据不跑 rec；只有灰区/老 UI 才会顺序读一次探针。
     hero_turn, turn_evidence = measure_hero_turn(img, profile, engine, size, cache)
 
     # 全局槽也算在「一帧的 ROI 耗时」里 —— 调用方关心的是这帧总共花了多久

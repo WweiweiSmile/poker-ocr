@@ -40,7 +40,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from poker_ocr.live import AspectFit      # noqa: E402
 from poker_ocr.ocr import OcrEngine       # noqa: E402
 from poker_ocr.profile import Profile     # noqa: E402
-from poker_ocr.state_stream import StateStream  # noqa: E402
+from poker_ocr.state_stream import DEFAULT_ROI_THREADS, StateStream  # noqa: E402
 
 DEFAULT_PROFILE = PROJECT_ROOT / "config" / "table_wpk_1080x2400.json"
 
@@ -61,6 +61,9 @@ def main() -> int:
     ap.add_argument("--max-frames", type=int, default=0, help="最多处理多少抽帧（调试用）")
     ap.add_argument("--no-dedup", action="store_true", help="关掉 ROI 去重")
     ap.add_argument("--no-fold", action="store_true", help="不读头像（省 9 块 ROI）")
+    ap.add_argument("--roi-threads", type=int, default=DEFAULT_ROI_THREADS,
+                    help=f"帧内 ROI OCR 并行线程数（默认 {DEFAULT_ROI_THREADS}；"
+                         "1=串行）。输出结果与串行逐字一致")
     ap.add_argument("--quiet", action="store_true", help="只打记录和最终汇总")
     args = ap.parse_args()
 
@@ -74,6 +77,7 @@ def main() -> int:
         stable_frames=args.stable_frames,
         max_vanish=args.max_vanish,
         name_confirm=args.name_confirm,
+        roi_threads=args.roi_threads,
     )
 
     cap = cv2.VideoCapture(str(args.video))
@@ -137,6 +141,7 @@ def main() -> int:
     cap.release()
     elapsed = time.perf_counter() - t0
     summary = state_stream.summary()
+    state_stream.close()
 
     payload = {
         "video": args.video.name,
@@ -149,6 +154,7 @@ def main() -> int:
         "discarded_reasons": summary["discarded_reasons"],
         "record_count": summary["record_count"],
         "processing_seconds": round(elapsed, 1),
+        "roi_threads": summary.get("roi_threads"),
         "roi_reuse": summary["roi_reuse"],
         "states": states,
     }

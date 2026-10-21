@@ -41,7 +41,10 @@ ROI 路线只裁固定槽位、只跑 rec，不跑全图检测，是实时链路
 
 - **只保留最新帧**：reader 线程持续 `read()`，邮箱里永远只有一帧；处理不过来
   就覆盖旧帧，延迟不会越积越大。
-- **单 OCR 线程**：onnxruntime session 不保证线程安全，reader 只解码。
+- **帧间串行、帧内并行**：reader 只解码，`StateStream.ingest()` 仍只在一个
+  处理线程里调用；同一帧里未命中缓存的 ROI rec 由线程池并行（`--roi-threads`，
+  默认 4，`1`=串行）。共享同一个 OcrEngine/ONNX session，实测并发结果与串行
+  逐字一致（M2：39 块全跑 475ms → 4 线程 282ms，约 1.7×）。
 - **严格质量闸**：一帧里任何一个字段无法精准识别，整帧丢弃（`discard`），
   不把猜测写进输出。
 - **ROI 相对位置**：所有槽位都是 0–1 归一化坐标。画面宽高比和 profile 参考
@@ -476,7 +479,7 @@ cd ~/codes/poker-ocr
   "avg_proc_ms":526.9,"eff_hz":1.17,"reconnects":6,
   "sampled_frames":63,"accepted_frames":2,"discarded_frames":61,
   "discarded_reasons":{"dealer":60,"bet":13,"pot":21,"stack":180},
-  "record_count":1,"roi_reuse":{...},"recognizer":"roi"}}
+  "record_count":1,"roi_threads":4,"roi_reuse":{...},"recognizer":"roi"}}
 ```
 
 ### 6.5 `advice`

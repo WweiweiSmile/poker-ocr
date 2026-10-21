@@ -91,7 +91,13 @@ def print_frame(frame, path: Path, img=None, dump_dir: Path | None = None,
     n_roi = frame.n_roi
     n_reused = frame.n_reused
     fresh = n_roi - n_reused
-    avg = frame.ms_roi / max(1, fresh)          # 均值只算真跑了的，别被 0 拉低
+    # 均值只算真跑了的。ROI 并行后 frame.ms_roi 是墙钟时间，不能再除以块数
+    # 当「单块耗时」；改用每块自己记的 rec 时间求和。
+    fresh_reads = [r for s in frame.seats for r in s.fields.values()
+                   if not r.reused]
+    fresh_reads += [r for r in frame.globals.values() if not r.reused]
+    avg = (sum(r.ms for r in fresh_reads) / len(fresh_reads)
+           if fresh_reads else 0.0)
     dealer = frame.dealer.to_debug() if frame.dealer else None
     if dealer is None:
         d_str = "跳过了"

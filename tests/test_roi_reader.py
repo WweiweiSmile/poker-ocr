@@ -382,6 +382,51 @@ def test_to_dict_and_strip() -> None:
           f"strip 后应只剩 text/score，实际 {lean['seats'][0]['fields']['name'].keys()}")
 
 
+def test_parallel_reads_match_serial_and_use_multiple_threads() -> None:
+    """executor 非空时帧内 ROI 并行跑 rec：结果/顺序与串行一致，且确实多线程。"""
+    import threading
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+
+    profile = Profile.load(WPK)
+    img = make_marked()
+    engine = StubEngine(build_table(profile))
+
+    def timed_read(roi):
+        time.sleep(0.004)                 # 让并发真的有机会重叠
+        return StubEngine.read_text(engine, roi)
+
+    engine.read_text = timed_read
+    serial = read_frame(img, profile, engine, with_dealer=False)
+
+    threads: set[int] = set()
+    lock = threading.Lock()
+
+    def recording_read(roi):
+        with lock:
+            threads.add(threading.get_ident())
+        return timed_read(roi)
+
+    engine.read_text = recording_read
+    engine.crops.clear()
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        parallel = read_frame(img, profile, engine, with_dealer=False,
+                              executor=pool)
+
+    def shape(frame):
+        return (
+            [(s.seat_id, {k: (r.text, r.rect) for k, r in s.fields.items()})
+             for s in frame.seats],
+            {k: (r.text, r.rect) for k, r in frame.globals.items()},
+            frame.hero_turn,
+        )
+
+    check(shape(serial) == shape(parallel),
+          "并行读取的结果/顺序必须与串行一致")
+    check(len(threads) > 1,
+          f"executor 路径应真正用到多个线程，实际 {len(threads)} 个")
+
+
 def main() -> int:
     tests = [
         test_read_avatars_reads_all_nine_seats,
@@ -397,6 +442,7 @@ def main() -> int:
         test_legacy_profile_degrades_with_a_note_not_a_crash,
         test_crops_never_leave_the_image,
         test_to_dict_and_strip,
+        test_parallel_reads_match_serial_and_use_multiple_threads,
     ]
     for t in tests:
         before = len(FAILS)

@@ -21,7 +21,9 @@
 
 from __future__ import annotations
 
+import os
 from collections import Counter, defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 import numpy as np
@@ -33,6 +35,12 @@ from .ocr import OcrEngine
 from .profile import Profile
 from .roi_dedup import RoiStream
 from .roi_reader import read_avatars
+
+# 一帧里通常有 30+ 块 ROI，但真正未命中缓存的只有变化的那些。4 线程在
+# M2（8 核）上实测最划算（39 块全跑 475ms → 282ms）；再高会和 ONNX 的
+# intra-op 线程、RTSP 解码线程抢核，反而变慢。小机器按一半核数封顶。
+# `--roi-threads 1` 可整体回退到串行。
+DEFAULT_ROI_THREADS = max(1, min(4, (os.cpu_count() or 2) // 2))
 
 
 @dataclass(frozen=True)
@@ -61,10 +69,17 @@ class StateStream:
                  stable_frames: int = 2, max_vanish: int = 3,
                  name_confirm: int = 3,
                  initial_blinds: Blinds | None = None,
-                 lenient_chips: bool = False) -> None:
+                 lenient_chips: bool = False,
+                 roi_threads: int = DEFAULT_ROI_THREADS) -> None:
         self.profile = profile
         self.engine = engine or OcrEngine()
         self.detect_fold = detect_fold
+        # 帧内 ROI rec 的线程池：1 = 串行。线程池随 StateStream 长驻，
+        # `reset()` 不清它（断流重连后继续用同一批线程）。
+        self.roi_threads = max(1, int(roi_threads))
+        self._roi_pool = (ThreadPoolExecutor(
+            max_workers=self.roi_threads, thread_name_prefix="roi-rec")
+            if self.roi_threads > 1 else None)
         self.stable_frames = max(1, int(stable_frames))
         self.max_vanish = max(0, int(max_vanish))
         self.name_confirm = max(1, int(name_confirm))
@@ -75,7 +90,8 @@ class StateStream:
 
         detector = build_detector(profile, None, self.engine)
         self.stream = RoiStream(profile, self.engine, detector,
-                                with_dealer=True, dedup=dedup)
+                                with_dealer=True, dedup=dedup,
+                                executor=self._roi_pool)
         self.names = NameTracker(confirm=self.name_confirm)
 
         self.prev: FrameState | None = None
@@ -108,7 +124,8 @@ class StateStream:
 
         frame = self.stream.read(img, frame_id=frame_id)
         avatars = read_avatars(img, self.profile, self.engine,
-                               self.stream.cache, self.detect_fold)
+                               self.stream.cache, self.detect_fold,
+                               executor=self._roi_pool)
 
         # 庄位轮转 = 新的一手：上一手的全下状态不能带进来
         dealer_now = (frame.dealer.seat_id
@@ -197,6 +214,14 @@ class StateStream:
         self.cand_n = 0
         self.stream.reset()
 
+    def close(self) -> None:
+        """释放帧内 OCR 线程池。关闭后不应再调用 ingest。"""
+        if self._roi_pool is not None:
+            self._roi_pool.shutdown(wait=False)
+            self._roi_pool = None
+            # 万一关闭后还有人读帧，退回串行，别对着已 shutdown 的池 submit
+            self.stream.executor = None
+
     def summary(self) -> dict:
         return {
             "sampled_frames": self.sampled,
@@ -204,6 +229,7 @@ class StateStream:
             "discarded_frames": self.sampled - self.accepted,
             "discarded_reasons": dict(self.discarded),
             "record_count": self.records,
+            "roi_threads": self.roi_threads,
             "roi_reuse": (self.stream.cache.to_debug()
                           if self.stream.cache is not None else {"disabled": True}),
         }
