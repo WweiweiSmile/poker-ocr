@@ -38,7 +38,8 @@ from .coach import (
     DRY, OVERPAIR, STRONG_DRAW, STRONG_MADE, TPTK, TP_WEAK, WEAK_DRAW,
     board_texture, opponent_strength, parse_cards, read_hand,
 )
-from .hand_track import ActionRecord, HandSnapshot, PREFLOP
+from .hand_track import ActionRecord, HandSnapshot, PREFLOP, RIVER, TURN
+from .table_dynamics import value_heavy_aggression
 
 # ─────────────────────────── 选项 ───────────────────────────
 
@@ -292,6 +293,8 @@ class Situation:
     opponent_strength_en: dict | None = None
     # 四二法则估的成牌率（0-100）。给提示词做「赔率 vs 胜率」比较用
     equity_pct: float | None = None
+    # 人工维护的牌桌动态（根目录 .table_dy）。空/None = 按「未知对手」标准线。
+    table_dynamics: str | None = None
 
     @property
     def street(self) -> str:
@@ -311,7 +314,14 @@ def _read(snap: HandSnapshot):
         return None
 
 
-def build_situation(snap: HandSnapshot) -> Situation:
+def build_situation(snap: HandSnapshot,
+                    table_dynamics: str | None = None) -> Situation:
+    """把快照整理成一次决策的事实。
+
+    `table_dynamics` 是根目录 `.table_dy` 的解析文本（见 table_dynamics.py）。
+    由调用方显式传入，而不是在这里读文件：单测和离线重放不会因为仓库里恰好
+    有一份动态文件而改变结果。
+    """
     read = _read(snap)
     warnings: list[str] = list(snap.warnings)
 
@@ -346,6 +356,7 @@ def build_situation(snap: HandSnapshot) -> Situation:
         texture_en=_TEXTURE_EN.get(texture, texture) if texture else None,
         opponent_strength_en=opp_en,
         equity_pct=read.equity_pct if read else None,
+        table_dynamics=(table_dynamics or "").strip() or None,
     )
 
 
@@ -398,6 +409,22 @@ def _facing_raise(snap: HandSnapshot) -> bool:
                for a in snap.actions_of(snap.street))
 
 
+def _is_two_pair(sit: Situation) -> bool:
+    label = f"{sit.hand_label_en or ''} {sit.hand_label or ''}".lower()
+    return "two pair" in label or "两对" in label
+
+
+def _passive_value_line(sit: Situation) -> bool:
+    """桌风是否把对手本街的多街 aggression 读成价值线。
+
+    只在转牌/河牌、面对下注时触发；翻牌的单条街下注不在此列——那时的价格
+    通常还够用，过早弃掉 JJ 这类牌会变成另一种漏洞。
+    """
+    return (sit.street in (TURN, RIVER)
+            and (sit.snap.to_call or 0.0) > 0
+            and value_heavy_aggression(sit.table_dynamics))
+
+
 def value_directive(sit: Situation) -> str | None:
     """把「强牌默认拿价值」写成一句贴着当前分档的硬指令。
 
@@ -418,6 +445,13 @@ def value_directive(sit: Situation) -> str | None:
                     and (_flush_possible(sit.snap.board)
                          or _board_paired(sit.snap.board)))
         if facing and not_nuts:
+            if _passive_value_line(sit) and _is_two_pair(sit):
+                return ("TABLE DYNAMICS OVERRIDE: the player's table notes say this "
+                        "opponent's raises and multi-street barrels are value-heavy. "
+                        "Two pair is a bluff-catcher here, not a value hand. Do NOT raise. "
+                        "FOLD to the turn/river barrel; call only with a set/straight/"
+                        "flush or a strong draw at the right price. Pot odds alone do not "
+                        "justify paying off a value-heavy range.")
             return ("VALUE CAUTION: strong made hand, but the board allows a better hand "
                     "(three to a flush or a paired board), so your straight/set/two pair "
                     "is NOT the nuts. Do NOT raise. Call a normal-sized bet (up to about "
@@ -443,6 +477,11 @@ def value_directive(sit: Situation) -> str | None:
                     "FOLD unless you have a set, two pair, or a strong draw. One pair is "
                     "not a stack-off hand; do not pay off a raise.")
         if facing:
+            if _passive_value_line(sit):
+                return ("TABLE DYNAMICS OVERRIDE: the player's table notes say this "
+                        "opponent's raises and multi-street barrels are value-heavy. "
+                        "One pair is a bluff-catcher, not a call-down hand. FOLD to the "
+                        "turn/river barrel; do not pay off a value-heavy range.")
             return ("VALUE/DEFEND DEFAULT: overpair or top pair with a strong kicker "
                     "facing a single bet — calling or raising is usually correct. Fold "
                     "only if the board is four-to-a-straight/flush or several opponents "
@@ -464,6 +503,11 @@ def value_directive(sit: Situation) -> str | None:
             return ("ONE PAIR vs AGGRESSION: top pair with a weak kicker facing a raise "
                     "or all-in — FOLD. The raise says your top pair is beaten; do not "
                     "stack off.")
+        if _passive_value_line(sit):
+            return ("TABLE DYNAMICS OVERRIDE: the player's table notes say this "
+                    "opponent's raises and multi-street barrels are value-heavy. Top "
+                    "pair with a weak kicker is a bluff-catcher; FOLD to the turn/river "
+                    "barrel.")
         if (sit.snap.to_call or 0) <= 0.6 * max(sit.snap.pot or 0.0, 1e-9):
             return ("SHOWDOWN DEFAULT: top pair facing a small single bet — calling is "
                     "usually correct. Fold to a large bet or multiway aggression.")
@@ -648,6 +692,13 @@ def render_hand_facts(sit: Situation) -> str:
         lines.append("")
         lines.append("Data gaps: " + "; ".join(sit.warnings))
 
+    if sit.table_dynamics:
+        # 人工维护的整桌倾向。放在选项之前：模型对「最后看到的几条事实」
+        # 更敏感，而且它不是本手牌的计算结果，不该混进 Computed facts。
+        lines.append("")
+        lines.append("## Table dynamics (player-provided, authoritative)")
+        lines.append(sit.table_dynamics)
+
     lines.append("")
     lines.append("## Options (pick exactly one id)")
     for o in sit.options:
@@ -670,9 +721,14 @@ def build_messages(sit: Situation) -> tuple[str, str]:
         "## Output format",
         "Output a single JSON object, no markdown code fence, no explanatory text:",
         '{"option": "<option id>", "reason": "<one-sentence reason in English, under 30 words, '
-        "must cite a rule from the skills>\"}",
+        "must cite a rule from the skills or the table dynamics>\"}",
         "",
         "## Hard constraints",
+        "0. «Table dynamics» (when present in the user facts) is the highest-priority "
+        "exploitative instruction. When it says the opponent's raises or multi-street "
+        "barrels are value-heavy, fold marginal made hands (one pair, two pair) even if "
+        "a «Value directive» default says to call. Pot odds only tell you the price; "
+        "they do not create bluffs in a value-heavy range.",
         "1. option must come strictly from the ids in the user message's «Options» section; "
         "no extras, no rewrites.",
         "2. All amounts are computed by the program. Do **not** compute the pot yourself, do not "
@@ -685,8 +741,9 @@ def build_messages(sit: Situation) -> tuple[str, str]:
         "5. Default order of thought: with a strong made hand, first ask «bet or raise for "
         "value»; only then ask «check or call». Checking/folding must justify itself "
         "(«an unjustifiable check is also a leak»).",
-        "6. Always treat the opponent as «unknown» — the live pipeline has no history, so no "
-        "exploitative deviation.",
+        "6. If the user facts include a «Table dynamics» section, treat it as authoritative "
+        "exploitative context for the current table. Otherwise, treat the opponent as "
+        "«unknown» — the live pipeline has no history, so no exploitative deviation.",
         "7. Do not guess the opponent's exact hand, only describe range tendencies.",
         "8. Reason in English; keep card notation in AsKh format.",
         "",
@@ -713,7 +770,11 @@ def build_messages(sit: Situation) -> tuple[str, str]:
         "Facing a bet, compare the stated estimated equity with the break-even equity; do "
         "not fold a draw that has enough equity.",
         "7. The user facts include an explicit «Value directive» when one of these rules "
-        "applies. Treat it as binding unless a listed exception clearly applies.",
+        "applies. It is a default for strong made hands; the «Table dynamics» section "
+        "overrides it when it describes the opponent's aggression as value-heavy. In "
+        "particular, a Value directive that says «call a normal-sized bet» does NOT bind "
+        "you to call a turn/river barrel with one pair or two pair when the table notes "
+        "say that line is value-heavy.",
         "8. One pair is not a stack-off hand: overpair/top pair facing a raise or all-in "
         "→ fold unless you have a set, two pair, or a strong draw. Do not call off a "
         "large bet with one pair.",
@@ -721,6 +782,30 @@ def build_messages(sit: Situation) -> tuple[str, str]:
         "three or more of one suit → a flush is possible; a paired board → a full house "
         "or quads are possible. A straight/two pair/set is NOT the nuts then. On such a "
         "board, call for showdown instead of raising — a raise only gets called by better.",
+        "",
+        "## Table dynamics (user-provided, when present)",
+        "The user facts may include a «Table dynamics» section written by the player. "
+        "Treat it as authoritative for the current table and adjust exploitative choices:",
+        "- loose-passive / calling station / novice: bluff less, value-bet thinner "
+        "(more marginal hands) and size up, and never slow-play strong hands. Their "
+        "raises and multi-street barrels are value-heavy: fold marginal made hands "
+        "(including two pair on a paired board) instead of paying them off, unless you "
+        "have a set/straight/flush or a strong draw with the right price;",
+        "- tight / rarely bluffs / nit: fold marginal bluff-catchers, do not pay off, "
+        "value-bet tighter (fewer marginal value hands), respect raises, and bluff more "
+        "selectively;",
+        "- loose-aggressive / maniac: trap with strong hands, call down lighter, and avoid "
+        "bluffing wars;",
+        "- tight-aggressive / solid: play straightforwardly, avoid fancy plays, and give "
+        "credit to aggression.",
+        "Example: on 55 2 T 8, hero has JJ (two pair) and a loose-passive opponent bets "
+        "flop, turn and river. Their line is value-heavy (5x trips, boats); fold the "
+        "turn/river even though the small sizes give a low break-even equity.",
+        "It overrides the default «unknown opponent» assumption and may justify deviating "
+        "from a default call/fold/check line when the hand is marginal (bluff-catcher or "
+        "medium strength). It never overrides computed hand strength or pot odds: with a "
+        "strong made hand still bet/raise for value; with a strong draw still compare "
+        "equity. When the dynamics change the line, say which tendency drove it.",
         "",
     ]
     system_parts.append(skills.render_catalog(all_, selected))

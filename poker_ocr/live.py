@@ -46,6 +46,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Callable
 
 import cv2
 import numpy as np
@@ -62,6 +63,7 @@ from .profile import Profile
 from .roi_dedup import pixel_mad
 from .roi_reader import hero_turn_method
 from .state_stream import DEFAULT_ROI_THREADS, StateStream
+from .table_dynamics import TableDynamics, load_table_dynamics
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_PROFILE = PROJECT_ROOT / "config" / "table_wpk_1080x2400.json"
@@ -692,6 +694,8 @@ class LiveProcessor:
                  dump_dir: Path | None = None, quiet: bool = False,
                  hand_tracker: LiveHandTracker | None = None,
                  advice_runner: AdviceRunner | None = None,
+                 table_dynamics_loader: Callable[[], TableDynamics] | None = None,
+                 table_dynamics_text: str = "",
                  clock=time.monotonic, log=_log) -> None:
         if recognizer not in ("roi", "full"):
             raise ValueError(f"未知 recognizer：{recognizer}")
@@ -719,6 +723,12 @@ class LiveProcessor:
         # 也没有 hero_turn，算不出跟注额与选项金额
         self.hand_tracker = hand_tracker
         self.advice_runner = advice_runner
+        # 返回 TableDynamics 的可调用对象；None = 不读牌桌动态（单测默认）。
+        # 之所以传 loader 而不是一段固定文本：换桌后改 .table_dy 不必重启。
+        self.table_dynamics_loader = table_dynamics_loader
+        # 启动时已加载的文本：第一手不必再打一遍「已加载」；之后文件变化才提示。
+        self._table_dynamics_text = table_dynamics_text
+        self._table_dynamics_error: str | None = None
         self.advice_count = 0
         # hand_id → 这一手已经给出的建议（按时间顺序）。换手 / 退出时并进
         # `hand` 记录，让「完整行动线 + 模型建议」落在同一个手牌记忆条目里，
@@ -834,9 +844,32 @@ class LiveProcessor:
         if point is not None:
             self.advice_count += 1
             if self.advice_runner is not None:
+                dynamics = ""
+                if self.table_dynamics_loader is not None:
+                    try:
+                        loaded = self.table_dynamics_loader()
+                    except Exception as exc:  # noqa: BLE001 — 动态文件不能拖垮主链路
+                        loaded = TableDynamics(
+                            error=f"{type(exc).__name__}: {exc}")
+                    if loaded.error:
+                        # 同一个错误只报一次，避免每个决策点刷屏
+                        if loaded.error != self._table_dynamics_error:
+                            self.log(f"  [建议] 牌桌动态读取失败：{loaded.error}")
+                        self._table_dynamics_error = loaded.error
+                    else:
+                        self._table_dynamics_error = None
+                        dynamics = loaded.text
+                        if dynamics != self._table_dynamics_text:
+                            if dynamics:
+                                self.log(f"  [建议] 牌桌动态已加载/更新"
+                                         f"（{len(dynamics)} 字）")
+                            else:
+                                self.log("  [建议] 牌桌动态已清空，"
+                                         "回到「未知对手」标准线")
+                            self._table_dynamics_text = dynamics
                 # 一个坏快照不能把整条拉流链路带下去
                 try:
-                    situation = build_situation(point)
+                    situation = build_situation(point, table_dynamics=dynamics)
                 except Exception as exc:      # noqa: BLE001
                     self.log(f"  [建议] 局面构建失败：{type(exc).__name__}: {exc}")
                     return
@@ -1199,6 +1232,7 @@ def main(argv: list[str] | None = None) -> int:
 
     advice_runner = None
     hand_tracker = None
+    table_dynamics_text = ""
     if args.ai_advice:
         if not env_load.found:
             _log("[建议] 没找到 .env（找过 "
@@ -1227,6 +1261,17 @@ def main(argv: list[str] | None = None) -> int:
                 "blue_button（用 hero 头像槽判蓝色下注按钮），或补上 hero_turn_probe")
         advice_runner = AdviceRunner(settings, timeout=args.ai_timeout, log=_log)
         hand_tracker = LiveHandTracker(confirm_frames=args.ai_confirm)
+        dynamics = load_table_dynamics()
+        table_dynamics_text = dynamics.text
+        if dynamics.found:
+            _log(f"[建议] 已加载牌桌动态：{dynamics.path}"
+                 f"（{len(dynamics.text)} 字）")
+        elif dynamics.error:
+            _log(f"[建议] 牌桌动态读取失败：{dynamics.error}")
+        elif dynamics.exists:
+            _log(f"[建议] {dynamics.path} 为空（只有注释），按「未知对手」标准线")
+        else:
+            _log(f"[建议] 未找到 {dynamics.path}，按「未知对手」标准线")
         sampling = []
         if settings.thinking is not None:
             sampling.append(f"thinking={settings.thinking}")
@@ -1253,6 +1298,8 @@ def main(argv: list[str] | None = None) -> int:
         "every": args.every,
         "ai_advice": bool(args.ai_advice),
         "resolution": None,
+        # 本会话生效的牌桌动态原文。没有就不写这个键，保持旧记录形状。
+        **({"table_dynamics": table_dynamics_text} if table_dynamics_text else {}),
     })
 
     mailbox = LatestFrame()
@@ -1264,7 +1311,9 @@ def main(argv: list[str] | None = None) -> int:
         stable_frames=args.stable_frames, dealer_carry=args.dealer_carry,
         every=args.every, max_frame_age=args.max_frame_age,
         dump_dir=args.dump_frames, quiet=args.quiet,
-        hand_tracker=hand_tracker, advice_runner=advice_runner)
+        hand_tracker=hand_tracker, advice_runner=advice_runner,
+        table_dynamics_loader=load_table_dynamics if args.ai_advice else None,
+        table_dynamics_text=table_dynamics_text)
 
     # 动作区静止闸只用于 roi 路线：它的区域来自固定槽位；full 路线没有布局。
     settle_gate = (SettleGate(profile, settle=args.settle,

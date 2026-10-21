@@ -33,6 +33,7 @@ from poker_ocr.live import (  # noqa: E402
 from poker_ocr.frame_state import FrameState, PlayerState  # noqa: E402
 from poker_ocr.hand_track import LiveHandTracker  # noqa: E402
 from poker_ocr.state_stream import FrameOutcome  # noqa: E402
+from poker_ocr.table_dynamics import TableDynamics  # noqa: E402
 
 FAILS: list[str] = []
 IMG = np.zeros((4, 4, 3), np.uint8)
@@ -514,7 +515,8 @@ def test_ai_advice_submits_on_hero_turn_once() -> None:
 
         def submit(self, sit) -> bool:
             self.situations.append({"street": sit.street,
-                                    "options": [o.id for o in sit.options]})
+                                    "options": [o.id for o in sit.options],
+                                    "table_dynamics": sit.table_dynamics})
             return True
 
         def poll(self):
@@ -527,13 +529,17 @@ def test_ai_advice_submits_on_hero_turn_once() -> None:
     with patch.object(live, "recognize_cards", lambda img, profile: fake_cards):
         proc = LiveProcessor(TurnStream(), StubWriter(), quiet=True,
                              profile=SimpleNamespace(), hand_tracker=tracker,
-                             advice_runner=runner)
+                             advice_runner=runner,
+                             table_dynamics_loader=lambda: TableDynamics(
+                                 "松弱，诈唬少。", exists=True))
         proc.handle(packet(1))
         proc.handle(packet(2))
     check(len(runner.situations) == 1,
           f"轮到我应投一次建议，实际 {runner.situations}")
     check("open-3.5" in runner.situations[0]["options"],
           f"翻前选项应是 bb 口径的开池：{runner.situations[0]}")
+    check(runner.situations[0]["table_dynamics"] == "松弱，诈唬少。",
+          f"决策点应带上 .table_dy 的动态：{runner.situations[0]}")
     with patch.object(live, "recognize_cards", lambda img, profile: fake_cards):
         proc.handle(packet(2))
     check(len(runner.situations) == 1,

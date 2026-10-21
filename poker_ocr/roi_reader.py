@@ -30,6 +30,11 @@ session，实测并发结果与串行逐字一致；`--roi-threads 1` 可整体�
    但**单个钮的 BB 值行**（`hero_turn_probe` 槽）在两个分辨率上都读得干净。
    中间试过「浅灰圆片占比」的视觉判据，在真机视频上翻车了：表情面板误报、这台设备
    按钮更暗导致漏报 —— **色彩门槛跨设备不成立，文本才成立**。详见 measure_hero_turn。
+4. **「轮到我」还有一条更稳的视觉判据：底部动作按钮的颜色**（只对 WPK 布局）。
+   轮到我时左右按钮是红/蓝（弃牌 / 加注·跟注·All in）；没轮到但没弃牌时是灰色；
+   弃牌后整块消失。旧判据只看 hero 头像槽是否被蓝色按钮覆盖，遇到「只剩弃牌 +
+   All in」会把轮到我误判成 False —— 此时蓝色按钮在右下角，不覆盖头像。
+   见 `measure_hero_action_buttons` 与 `images/position/` 的四张真机图。
 """
 
 from __future__ import annotations
@@ -391,6 +396,56 @@ def _blue_fraction(roi: np.ndarray) -> float:
     return float(mask.mean()) / 255.0
 
 
+def _red_fraction(roi: np.ndarray) -> float:
+    """ROI 里按钮红像素的占比。红色跨 0° 环绕，必须两段 hue 合起来。"""
+    if roi.size == 0:
+        return 0.0
+    hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+    mask = (cv2.inRange(hsv, (0, 120, 120), (10, 255, 255))
+            | cv2.inRange(hsv, (170, 120, 120), (180, 255, 255)))
+    return float(mask.mean()) / 255.0
+
+
+# 底部左右两个动作按钮的位置（归一化，WPK 1080x2400 布局）。
+# 左：弃牌（回合红 / 非回合灰）；右：跟注/加注/All in（回合蓝 / 非回合灰）。
+# 只取按钮本身，避开中间的 hero 头像与手牌，防止头像照片里的红/蓝被骗到。
+_HERO_ACTION_BUTTONS: dict[str, Slot] = {
+    "left": (0.17, 0.795, 0.35, 0.875),
+    "right": (0.66, 0.795, 0.88, 0.875),
+}
+# 按钮被激活时红/蓝占比 ≥ 0.25（实测 0.27–0.34）；灰色按钮和非回合帧为 0.00
+_HERO_ACTION_COLOR_MIN = 0.15
+
+
+def measure_hero_action_buttons(img: np.ndarray, profile: Profile,
+                                size: Size | None = None
+                                ) -> tuple[bool, dict]:
+    """底部动作按钮的颜色 → 轮到 hero 了吗。
+
+    真机四种状态（images/position/）：
+
+      · action_me / byCover —— 轮到我：左按钮红、右按钮蓝（All in），占比 0.27–0.34
+      · noFold —— 没轮到我但还没弃牌：左右按钮都是灰的，红/蓝占比 0.00
+      · fold —— 已经弃牌：按钮整块消失，红/蓝占比 0.00
+
+    这条判据补上了旧「蓝色按钮覆盖 hero 头像槽」的漏洞：只剩弃牌 / All in 时，
+    蓝色按钮在右下角而不是头像位置，旧判据会把**轮到我**误判成 False。
+    """
+    size = size or (img.shape[1], img.shape[0])
+    evidence: dict = {"method": "action_buttons", "rects": {}}
+    best = 0.0
+    for name, slot in _HERO_ACTION_BUTTONS.items():
+        rect, roi = crop_slot(img, profile, slot, size, pad=0.0)
+        red = _red_fraction(roi)
+        blue = _blue_fraction(roi)
+        evidence["rects"][name] = list(rect)
+        evidence[f"{name}_red"] = round(red, 4)
+        evidence[f"{name}_blue"] = round(blue, 4)
+        best = max(best, red + blue)
+    evidence["colored"] = round(best, 4)
+    return best >= _HERO_ACTION_COLOR_MIN, evidence
+
+
 def measure_hero_bet_button(img: np.ndarray, profile: Profile,
                             engine: OcrEngine, size: Size | None = None,
                             cache: RoiCache | None = None) -> tuple[bool | None, dict]:
@@ -446,10 +501,12 @@ def measure_hero_turn(img: np.ndarray, profile: Profile, engine: OcrEngine,
                       cache: RoiCache | None = None) -> tuple[bool | None, dict]:
     """轮到 hero 了吗。三态。
 
-    **优先走蓝色下注按钮**（`hero_turn_method = "blue_button"`）：
-    `measure_hero_bet_button` 直接判头像槽的蓝色占比，拿到 True/False 就返回。
-    灰区或该方法不适用时，回退到旧的 `hero_turn_probe`（第一个预设钮的 BB 值行）
-    文本判据 —— 老配置（table_default 等）没有蓝色按钮，仍然能工作。
+    **优先走视觉判据**（`hero_turn_method = "blue_button"`），两条独立证据取并集：
+    `measure_hero_bet_button` 判头像槽是否被蓝色按钮覆盖；`measure_hero_action_buttons`
+    判底部左右按钮是不是红/蓝。后者专门覆盖「只剩弃牌 + All in」——此时蓝色按钮在
+    右下角，头像槽判据会漏。两条都明确否定才判 False；否则回退到旧的
+    `hero_turn_probe`（第一个预设钮的 BB 值行）文本判据 —— 老配置（table_default 等）
+    没有蓝色按钮，仍然能工作。
 
     旧判据为什么不删：它是 1080x2400 那套 UI 的实测结论（见配置的
     `_hero_turn_comment`），而且蓝色按钮在别的皮肤/分辨率上未必存在。
@@ -460,8 +517,17 @@ def measure_hero_turn(img: np.ndarray, profile: Profile, engine: OcrEngine,
     bet_ev: dict = {}
     if method == "blue_button":
         bet_turn, bet_ev = measure_hero_bet_button(img, profile, engine, size, cache)
-        if bet_turn is not None:
-            return bet_turn, bet_ev
+        # 第二条独立判据：底部左右按钮的颜色。旧判据只看 hero 头像槽，
+        # 「只剩弃牌 / All in」时蓝色按钮在右下角，会漏判成 False。
+        btn_turn, btn_ev = measure_hero_action_buttons(img, profile, size)
+        if bet_turn is True:
+            return True, {**bet_ev, "action_buttons": btn_ev}
+        if btn_turn is True:
+            return True, {**btn_ev, "blue_button": bet_ev}
+        if bet_turn is False and btn_turn is False:
+            return False, {"blue_button": bet_ev, "action_buttons": btn_ev}
+        # 一个不确定、一个否定：继续走旧探针（有的话）补齐证据
+        bet_ev = {"blue_button": bet_ev, "action_buttons": btn_ev}
 
     slot = profile.global_slots.get("hero_turn_probe")
     if slot is None:
@@ -482,7 +548,7 @@ def measure_hero_turn(img: np.ndarray, profile: Profile, engine: OcrEngine,
         "ms": round(read.ms, 2),
     }
     if bet_ev:
-        evidence["blue_button"] = bet_ev
+        evidence.update(bet_ev)
     if read.reused:
         evidence["reused"] = True
     if read.text:

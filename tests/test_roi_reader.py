@@ -19,6 +19,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import cv2
 import numpy as np
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -26,8 +27,8 @@ sys.path.insert(0, str(ROOT))
 
 from poker_ocr.profile import Profile  # noqa: E402
 from poker_ocr.roi_reader import (  # noqa: E402
-    GLOBAL_FIELDS, ROI_PAD, SEAT_FIELDS, RoiRead, measure_hero_bet_button,
-    measure_hero_turn, read_avatars, read_frame,
+    GLOBAL_FIELDS, ROI_PAD, SEAT_FIELDS, RoiRead, measure_hero_action_buttons,
+    measure_hero_bet_button, measure_hero_turn, read_avatars, read_frame,
 )
 
 WPK = ROOT / "config" / "table_wpk_1080x2400.json"
@@ -315,6 +316,35 @@ def test_hero_turn_blue_button_without_legacy_probe() -> None:
     check(turn is False, f"live profile 非蓝头像应判 False：{turn} {ev}")
 
 
+def test_hero_turn_by_action_button_colors() -> None:
+    """底部按钮颜色判「轮到我」：红/蓝=是，灰/无=否。
+
+    四张真机图覆盖全部状态：
+      action_me / byCoverjpg → 红弃牌 + 蓝加注/All in → True
+      noFold                 → 左右都是灰按钮          → False
+      fold                   → 已弃牌，按钮消失        → False
+    重点是 byCoverjpg：蓝色 All in 在右下角、不覆盖头像槽，旧判据会漏。
+    """
+    profile = Profile.load(WPK)
+    cases = {
+        "action_me": True,
+        "byCoverjpg": True,
+        "noFold": False,
+        "fold": False,
+    }
+    for name, want in cases.items():
+        path = ROOT / "images" / "position" / name
+        if not path.is_file():
+            continue                    # 图片是本地参考资料，缺失时跳过
+        img = cv2.imread(str(path))
+        turn, ev = measure_hero_action_buttons(img, profile)
+        check(turn is want,
+              f"{name} 按钮颜色应判 {want}，实际 {turn}：{ev}")
+        turn, ev = measure_hero_turn(img, profile, StubEngine({}))
+        check(turn is want,
+              f"{name} 整体判据应判 {want}，实际 {turn}：{ev}")
+
+
 def test_hero_turn_unknown_without_the_slot() -> None:
     """老配置没有 hero_turn_probe：报 None + 原因，不能猜。"""
     profile = Profile.load(LEGACY)
@@ -437,6 +467,7 @@ def main() -> int:
         test_hero_turn_by_button_text,
         test_hero_turn_by_blue_bet_button,
         test_hero_turn_blue_button_without_legacy_probe,
+        test_hero_turn_by_action_button_colors,
         test_hero_turn_unknown_without_the_slot,
         test_score_is_the_worst_box_and_text_is_concatenated,
         test_legacy_profile_degrades_with_a_note_not_a_crash,

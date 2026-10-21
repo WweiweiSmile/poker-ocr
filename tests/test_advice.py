@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -29,6 +30,9 @@ from poker_ocr.advice import (  # noqa: E402
 from poker_ocr.frame_state import FrameState, PlayerState  # noqa: E402
 from poker_ocr.hand_track import LiveHandTracker, street_of_board  # noqa: E402
 from poker_ocr.parse import Blinds  # noqa: E402
+from poker_ocr.table_dynamics import (  # noqa: E402
+    MAX_CHARS, load_table_dynamics, parse_table_dynamics, value_heavy_aggression,
+)
 
 FAILS: list[str] = []
 
@@ -864,7 +868,8 @@ def test_prompt_contains_full_action_line_and_options() -> None:
 def test_prompt_is_english_only() -> None:
     """JEV 等模型对中文的识别较差：喂给模型的提示词不能有中文文案。
 
-    例外只有 OCR 读到的玩家真实名字（那是数据，不是提示词文案）。
+    例外只有 OCR 读到的玩家真实名字和用户手写的 `.table_dy` 内容
+    （那是数据，不是提示词文案）。
     """
     import re
     cjk = re.compile(r"[一-鿿]")
@@ -892,6 +897,115 @@ def test_prompt_preflop_has_no_strength_facts() -> None:
     check("Preflop shape: one raise already" in user, f"翻前局面没写：\n{user}")
     check("My hand strength" not in user, "翻前不该给成牌分档")
     check("preflop-vs-open" in system, f"翻前技能应被展开：\n{system[:500]}")
+
+
+# ─────────────────────────── 牌桌动态 ───────────────────────────
+
+def test_table_dynamics_parse_and_load() -> None:
+    """`.table_dy`：注释/空行不进入提示词，缺文件不报错，改文件后热更新。"""
+    raw = ("# 当前桌子\n\n新手玩家，比较松弱，诈唬很少。\n"
+           "# 下面这条是位置备注\nBTN 老王紧凶，翻后加注基本是强牌。\n")
+    want = ("新手玩家，比较松弱，诈唬很少。\n"
+            "BTN 老王紧凶，翻后加注基本是强牌。")
+    check(parse_table_dynamics(raw) == want,
+          f"注释/空行应被去掉，实际 {parse_table_dynamics(raw)!r}")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / ".table_dy"
+        path.write_text(raw, encoding="utf-8")
+        dyn = load_table_dynamics(path)
+        check(dyn.found and dyn.exists and dyn.text == want,
+              f"应读到并解析动态：{dyn}")
+        check(dyn.error is None, f"正常文件不该有 error：{dyn.error}")
+
+        # 默认路径不存在是合法的空动态（没有动态就不注入）
+        import poker_ocr.table_dynamics as td
+        old_root = td.PROJECT_ROOT
+        empty_root = Path(tmp) / "empty"
+        empty_root.mkdir()
+        td.PROJECT_ROOT = empty_root
+        try:
+            default_missing = td.load_table_dynamics(env={})
+            check(not default_missing.found and not default_missing.exists
+                  and default_missing.error is None,
+                  f"默认路径不存在应是合法的空动态：{default_missing}")
+        finally:
+            td.PROJECT_ROOT = old_root
+
+        # 显式指定的路径不存在：不抛错，但必须留下可诊断的 error
+        missing = load_table_dynamics(Path(tmp) / "not-there")
+        check(not missing.found and missing.error is not None,
+              f"显式路径读不到应报 error：{missing}")
+
+        # 换桌后直接改文件：内容长度也变，mtime+size 缓存会失效
+        path.write_text("紧弱，很少诈唬。\n", encoding="utf-8")
+        updated = load_table_dynamics(path)
+        check(updated.text == "紧弱，很少诈唬。",
+              f"改文件后应读到新内容：{updated}")
+
+    long_text = parse_table_dynamics("x" * (MAX_CHARS + 50))
+    check(len(long_text) == MAX_CHARS + 1 and long_text.endswith("…"),
+          f"超长动态应截断到 {MAX_CHARS} 字：{len(long_text)}")
+
+
+def test_table_dynamics_in_prompt() -> None:
+    """有动态时进 user facts，并告诉模型怎么按桌风调整；没有时不多出这段。"""
+    dyn = "新手玩家，比较松弱，诈唬很少。"
+    sit = build_situation(make_point(to_call=4.0, pot=10.0, hero_stack=90.0),
+                          table_dynamics=dyn)
+    check(sit.table_dynamics == dyn, "Situation 应保存动态原文")
+    system, user = build_messages(sit)
+    check("## Table dynamics (player-provided, authoritative)" in user,
+          f"user facts 应含牌桌动态段：\n{user}")
+    check(dyn in user, f"动态原文应进入提示词：\n{user}")
+    check("## Table dynamics (user-provided, when present)" in system,
+          "system 应解释如何使用桌风动态")
+    check("It overrides the default «unknown opponent» assumption" in system,
+          "system 应说明动态覆盖「未知对手」默认假设")
+
+    blank = build_situation(make_point(to_call=4.0, pot=10.0, hero_stack=90.0),
+                            table_dynamics="  \n ")
+    check(blank.table_dynamics is None, "空白动态应归一成 None")
+    _, plain_user = build_messages(blank)
+    check("## Table dynamics" not in plain_user,
+          f"没有动态时不该多出这段：\n{plain_user}")
+
+
+def test_value_heavy_aggression_flags() -> None:
+    """松弱/很少诈唬/尊重持续下注 → 价值线；松凶/爱诈唬 → 不触发。"""
+    for text in ("新手玩家，比较松弱，诈唬很少。",
+                 "基本都是新手、偏松弱，尊重他们的加注和持续下注",
+                 "这些玩家都是松弱玩家，当他们加注、连续下注时，往往都是顶对以上的牌力"):
+        check(value_heavy_aggression(text), f"应判为价值线：{text}")
+    for text in ("松凶玩家，经常诈唬", "爱诈唬的 maniac", None, ""):
+        check(not value_heavy_aggression(text), f"不该判为价值线：{text}")
+
+
+def test_value_directive_table_dynamics_override() -> None:
+    """松弱桌风 + 转/河牌被下注 + 两对 → 硬指令从 call 改成 fold。"""
+    dyn = "这些玩家都是松弱玩家，当他们加注、连续下注时，往往都是顶对以上的牌力"
+    turn = dict(street="turn", board=("5h", "5s", "2h", "Td"),
+                hero_cards=("Jd", "Jh"), to_call=37.5, pot=112.5)
+    river = dict(street="river", board=("5h", "5s", "2h", "Td", "8c"),
+                 hero_cards=("Jd", "Jh"), to_call=40.0, pot=190.0)
+
+    for street, kw in (("turn", turn), ("river", river)):
+        plain = value_directive(build_situation(make_point(**kw)))
+        check(plain and "Call a normal-sized bet" in plain,
+              f"{street} 无桌风时应保持默认跟注线：{plain}")
+        dyn_sit = build_situation(make_point(**kw), table_dynamics=dyn)
+        directive = value_directive(dyn_sit)
+        check(directive and "TABLE DYNAMICS OVERRIDE" in directive,
+              f"{street} 松弱桌风应触发覆盖：{directive}")
+        check("FOLD" in directive, f"{street} 覆盖指令应明确 fold：{directive}")
+
+    # 翻牌只有一条街，价格还够，不能被同一条桌风提前劝退
+    flop = build_situation(make_point(
+        street="flop", board=("5h", "5s", "2h"), hero_cards=("Jd", "Jh"),
+        to_call=15.0, pot=60.0), table_dynamics=dyn)
+    flop_directive = value_directive(flop)
+    check(flop_directive and "TABLE DYNAMICS OVERRIDE" not in flop_directive,
+          f"翻牌不该触发多街覆盖：{flop_directive}")
 
 
 # ─────────────────────────── 模型调用 ───────────────────────────
@@ -1293,6 +1407,10 @@ def main() -> int:
         test_prompt_marks_inferred_actions,
         test_prompt_contains_full_action_line_and_options,
         test_prompt_preflop_has_no_strength_facts,
+        test_table_dynamics_parse_and_load,
+        test_table_dynamics_in_prompt,
+        test_value_heavy_aggression_flags,
+        test_value_directive_table_dynamics_override,
         test_advise_uses_model_choice,
         test_advise_rejects_unknown_option,
         test_advise_fallback_without_settings,
