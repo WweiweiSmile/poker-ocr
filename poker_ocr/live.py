@@ -84,8 +84,21 @@ def _log(msg: str) -> None:
 # 终端没法用 ANSI 改字号，「加大」靠加粗 + 高亮底色 + 上下留白来拉开层次。
 # 只在真终端里上色：重定向到文件 / NO_COLOR 时保持纯文本，方便 grep。
 _ANSI_RESET = "\033[0m"
-_ANSI_ADVICE_BAR = "\033[1;30;103m"   # 粗体黑字 + 亮黄底
+# 建议横幅的底色按动作区分：弃牌=红、跟注/过牌=蓝、下注/加注=绿。
+_ANSI_ADVICE_BAR = {
+    "fold": "\033[1;97;41m",          # 粗体白字 + 红底
+    "call": "\033[1;97;44m",          # 粗体白字 + 蓝底
+    "check": "\033[1;97;44m",         # 过牌是被动动作，跟 call 同色
+    "raise": "\033[1;30;42m",         # 粗体黑字 + 绿底
+    "bet": "\033[1;30;42m",           # 下注/加注同属主动进攻
+}
+_ANSI_ADVICE_BAR_DEFAULT = "\033[1;30;103m"   # 未知动作退回原来的亮黄底
 _ANSI_ADVICE_TEXT = "\033[1m"         # 粗体
+
+
+def _advice_bar(kind: str) -> str:
+    """建议横幅的 ANSI 样式：动作类型 → 背景色。"""
+    return _ANSI_ADVICE_BAR.get(kind, _ANSI_ADVICE_BAR_DEFAULT)
 
 
 def _use_ansi() -> bool:
@@ -447,12 +460,29 @@ class SettleGate:
 
 
 class JsonlWriter:
-    """一行一个 JSON；每条立即 flush。默认覆盖写。"""
+    """一行一个 JSON；每条立即 flush。
 
-    def __init__(self, path: Path) -> None:
+    默认**追加**：每次启动不清空历史手牌，多天的记录留在同一个文件里。
+    需要回到旧行为时用 `append=False`（CLI 的 --no-append）。
+    """
+
+    def __init__(self, path: Path, append: bool = True) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         self.path = path
-        self._fh = open(path, "w", encoding="utf-8", newline="\n")
+        self.append = append
+
+        # 上次被 Ctrl-C / kill 时可能停在半行。补一个换行，保证新记录不会
+        # 接在坏行后面（坏行本身保留，读取方按 JSON 解析失败跳过即可）。
+        needs_newline = False
+        if append and path.is_file() and path.stat().st_size > 0:
+            with open(path, "rb") as fh:
+                fh.seek(-1, os.SEEK_END)
+                needs_newline = fh.read(1) != b"\n"
+
+        self._fh = open(path, "a" if append else "w",
+                        encoding="utf-8", newline="\n")
+        if needs_newline:
+            self._fh.write("\n")
 
     def write(self, record: dict) -> None:
         self._fh.write(json.dumps(record, ensure_ascii=False) + "\n")
@@ -893,10 +923,11 @@ class LiveProcessor:
         bar = "═" * 60
         headline = (f" ▶ 建议  {advice.street} ⇒ {option.label}{amount}"
                     f"  ·  {elapsed} ")
+        style = _advice_bar(option.kind)
         self.log("")
-        self.log(f"{_ANSI_ADVICE_BAR}{bar}{_ANSI_RESET}")
-        self.log(f"{_ANSI_ADVICE_BAR}{headline}{_ANSI_RESET}")
-        self.log(f"{_ANSI_ADVICE_BAR}{bar}{_ANSI_RESET}")
+        self.log(f"{style}{bar}{_ANSI_RESET}")
+        self.log(f"{style}{headline}{_ANSI_RESET}")
+        self.log(f"{style}{bar}{_ANSI_RESET}")
         self.log(f"{_ANSI_ADVICE_TEXT} 理由：{advice.reason}{tail}{_ANSI_RESET}")
         self.log("")
 
@@ -1014,6 +1045,10 @@ def build_parser() -> argparse.ArgumentParser:
                          f"就先识别一帧（默认 {DEFAULT_SETTLE_MAX}）")
     ap.add_argument("--out", type=Path, default=DEFAULT_OUT,
                     help=f"JSONL 输出（默认 {DEFAULT_OUT}）")
+    ap.add_argument("--append", action=argparse.BooleanOptionalAction,
+                    default=True,
+                    help="追加到 --out，保留历次启动的手牌记录（默认）；"
+                         "--no-append 每次启动清空")
     ap.add_argument("--stable-frames", type=int, default=1,
                     help="新状态连续出现几帧才记录（默认 1 = 不做多帧确认）")
     ap.add_argument("--max-vanish", type=int, default=3,
@@ -1207,7 +1242,7 @@ def main(argv: list[str] | None = None) -> int:
              + ("，".join(sampling) if sampling else "采样参数用服务端默认")
              + "）")
 
-    writer = JsonlWriter(args.out)
+    writer = JsonlWriter(args.out, append=args.append)
     writer.write({
         "type": "session_start",
         "started_at": started_wall,
@@ -1242,7 +1277,8 @@ def main(argv: list[str] | None = None) -> int:
     if settle_gate is not None:
         cadence += (f"；动作区静止 {args.settle}s 后识别"
                     f"（上限 {args.settle_max}s）")
-    _log(f"[启动] 输出 {args.out}；{cadence}；Ctrl-C 结束")
+    mode = "追加" if args.append else "覆盖"
+    _log(f"[启动] 输出 {args.out}（{mode}）；{cadence}；Ctrl-C 结束")
     reader.start()
 
     last_seq = -1

@@ -448,6 +448,45 @@ def test_jsonl_is_one_complete_object_per_line() -> None:
         check(parsed[1]["pot"] == 40.0, "第二行应完整")
 
 
+def test_jsonl_appends_by_default() -> None:
+    """默认追加：重启后上一轮的手牌记录还在；--no-append 才清空。"""
+    with tempfile.TemporaryDirectory() as td:
+        path = Path(td) / "live.jsonl"
+        w = JsonlWriter(path)
+        w.write({"type": "hand", "hand_id": "h1"})
+        w.close()
+
+        w = JsonlWriter(path)
+        w.write({"type": "hand", "hand_id": "h2"})
+        w.close()
+        parsed = [json.loads(line) for line in
+                  path.read_text(encoding="utf-8").splitlines()]
+        check([r["hand_id"] for r in parsed] == ["h1", "h2"],
+              f"默认应追加，实际 {parsed}")
+
+        w = JsonlWriter(path, append=False)
+        w.write({"type": "hand", "hand_id": "h3"})
+        w.close()
+        parsed = [json.loads(line) for line in
+                  path.read_text(encoding="utf-8").splitlines()]
+        check([r["hand_id"] for r in parsed] == ["h3"],
+              f"append=False 应覆盖，实际 {parsed}")
+
+
+def test_jsonl_append_repairs_partial_last_line() -> None:
+    """上次被硬杀留下的半行不能拖累新记录：新记录必须独立成行。"""
+    with tempfile.TemporaryDirectory() as td:
+        path = Path(td) / "live.jsonl"
+        path.write_text('{"type": "hand", "hand_id": "h1"',
+                        encoding="utf-8")      # 没有结尾换行
+        w = JsonlWriter(path)
+        w.write({"type": "hand", "hand_id": "h2"})
+        w.close()
+        lines = path.read_text(encoding="utf-8").splitlines()
+        check(lines[-1].startswith("{") and json.loads(lines[-1])["hand_id"] == "h2",
+              f"新记录应独立成行，实际 {lines}")
+
+
 def test_ai_advice_submits_on_hero_turn_once() -> None:
     """轮到我时投一次决策点；同一个回合的后续帧不重复投。"""
     class TurnStream(StubStateStream):
@@ -796,6 +835,22 @@ def test_advice_wait_logs_heartbeat_each_second() -> None:
     check(logs[-1].endswith("1s"), f"新一次建议应重新从 1s 报：{logs}")
 
 
+def test_advice_bar_colors_by_action() -> None:
+    """建议横幅：弃牌红底、跟注/过牌蓝底、下注/加注绿底。"""
+    check(live._advice_bar("fold") == "\033[1;97;41m",
+          f"弃牌应是红底：{live._advice_bar('fold')!r}")
+    check(live._advice_bar("call") == "\033[1;97;44m",
+          f"跟注应是蓝底：{live._advice_bar('call')!r}")
+    check(live._advice_bar("check") == live._advice_bar("call"),
+          "过牌是被动动作，应与跟注同色")
+    check(live._advice_bar("raise") == "\033[1;30;42m",
+          f"加注应是绿底：{live._advice_bar('raise')!r}")
+    check(live._advice_bar("bet") == live._advice_bar("raise"),
+          "下注与加注同属主动进攻，应同色")
+    check(live._advice_bar("anything") == live._ANSI_ADVICE_BAR_DEFAULT,
+          "未知动作应退回默认样式")
+
+
 def main() -> int:
     tests = [
         test_defaults_are_no_throttle_and_instant_turn,
@@ -821,12 +876,15 @@ def main() -> int:
         test_full_recognizer_writes_state,
         test_state_payload_orders_hero_board_opponents,
         test_jsonl_is_one_complete_object_per_line,
+        test_jsonl_appends_by_default,
+        test_jsonl_append_repairs_partial_last_line,
         test_ai_advice_submits_on_hero_turn_once,
         test_ai_advice_waits_for_hero_cards,
         test_hand_memory_keeps_action_line_and_advices,
         test_hand_memory_flushes_on_switch_frame,
         test_processor_pauses_while_advice_is_generating,
         test_advice_wait_logs_heartbeat_each_second,
+        test_advice_bar_colors_by_action,
         test_rotate_frame_clockwise,
         test_open_capture_supports_virtual_camera_index,
     ]
