@@ -1106,10 +1106,14 @@ class LiveProcessor:
                     self._pending_decision_key = situation.snap.decision_key
                     self._click_retry = None
                 if not self.quiet:
+                    pot_tag = ""
+                    if situation.explosive_pot:
+                        pot_tag = (f"｜爆炸底池 "
+                                   f"{situation.pot_per_player:.2f}BB/人")
                     self.log(f"  [建议] 轮到我：{point.street} 手牌 "
                              f"{''.join(point.hero_cards) or '?'} "
                              f"牌面 {''.join(point.board) or '-'} "
-                             f"需跟 {point.to_call}BB（生成中…）")
+                             f"需跟 {point.to_call}BB{pot_tag}（生成中…）")
             elif not self.quiet:
                 self.log(f"  [建议] 轮到我：{point.street} 需跟 {point.to_call}BB"
                          f"（未开启 AI 建议）")

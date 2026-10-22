@@ -326,6 +326,10 @@ class Situation:
     equity_pct: float | None = None
     # 人工维护的牌桌动态（根目录 .table_dy）。空/None = 按「未知对手」标准线。
     table_dynamics: str | None = None
+    # 爆炸底池：上一街底池 ÷ 桌面人数（BB/人）及其是否达到 5BB 门槛。
+    # 见 previous_street_pot() / is_explosive_pot()。
+    pot_per_player: float | None = None
+    explosive_pot: bool = False
 
     @property
     def street(self) -> str:
@@ -372,6 +376,7 @@ def build_situation(snap: HandSnapshot,
         opp_en = {"value": opp_read.value, "label": opp_read.label_en,
                   "reason": opp_read.reason_en}
 
+    per_player = pot_per_player(snap)
     return Situation(
         snap=snap,
         options=build_options(snap),
@@ -388,6 +393,9 @@ def build_situation(snap: HandSnapshot,
         opponent_strength_en=opp_en,
         equity_pct=read.equity_pct if read else None,
         table_dynamics=(table_dynamics or "").strip() or None,
+        pot_per_player=per_player,
+        explosive_pot=(per_player is not None
+                       and per_player >= EXPLOSIVE_POT_BB_PER_PLAYER),
     )
 
 
@@ -456,6 +464,58 @@ def _passive_value_line(sit: Situation) -> bool:
             and value_heavy_aggression(sit.table_dynamics))
 
 
+# ─────────────────────────── 爆炸底池 ───────────────────────────
+
+# 爆炸底池：翻后「上一街结束时底池 ÷ 桌面人数 ≥ 5BB」。
+# 换算成每个人的平均投入，5BB 意味着翻前已经有人加注、而且几乎全桌都跟了
+# （松弱局常见「溜入 + 加注 + 一堆跟注」）。所有人都进了池，翻后会有大量
+# 歪中的两对/三条；顶对只是中等牌，松弱玩家在这个池里主动打出来的牌也不会小。
+EXPLOSIVE_POT_BB_PER_PLAYER = 5.0
+
+
+def previous_street_pot(snap: HandSnapshot) -> float | None:
+    """上一街结束时的底池（BB）。翻前或数据缺失 → None。
+
+    主口径是 `pot_before_street`（界面上的 pbs pill，正是「本街开始前的底池」）。
+    这个 pill 实测偶尔会把底池值读到 pbs 槽：当本街已有下注、pbs 却等于底池时，
+    用 `pot − 本街所有下注` 反推（客户端底池含本街下注）。反推需要每座下注额
+    都读到；有任一未知就继续用 pbs，最后退回本街的 `pot_start`。
+    """
+    if snap.street == PREFLOP:
+        return None
+    bets = [snap.hero_bet, *(o.bet for o in snap.opponents)]
+    bets_known = all(b is not None for b in bets)
+    street_bets = sum(bets) if bets_known else 0.0
+
+    pbs = snap.pot_before_street
+    if pbs is not None:
+        misread = (snap.pot is not None and bets_known and street_bets > 0
+                   and pbs >= snap.pot - 1e-9)
+        if misread:
+            return max(snap.pot - street_bets, 0.0)
+        return pbs
+    if snap.pot is not None and bets_known:
+        return max(snap.pot - street_bets, 0.0)
+    for rec in snap.streets:
+        if rec.street == snap.street:
+            return rec.pot_start
+    return None
+
+
+def pot_per_player(snap: HandSnapshot) -> float | None:
+    """上一街底池 ÷ 桌面人数（BB/人）。翻前 / 人数未知 / 底池未知 → None。"""
+    pot = previous_street_pot(snap)
+    if pot is None or snap.table_size <= 0:
+        return None
+    return pot / snap.table_size
+
+
+def is_explosive_pot(snap: HandSnapshot) -> bool:
+    """翻后上一街底池 ÷ 桌面人数是否达到爆炸底池门槛（≥5BB/人）。"""
+    ratio = pot_per_player(snap)
+    return ratio is not None and ratio >= EXPLOSIVE_POT_BB_PER_PLAYER
+
+
 def value_directive(sit: Situation) -> str | None:
     """把「强牌默认拿价值」写成一句贴着当前分档的硬指令。
 
@@ -503,6 +563,23 @@ def value_directive(sit: Situation) -> str | None:
                 f"hands call.")
 
     if tier in (OVERPAIR, TPTK):
+        if sit.explosive_pot:
+            if facing_raise:
+                return ("EXPLOSIVE POT: the pot entering this street is 5BB+ per table "
+                        "player, so everyone is in and a raise is rarely a bluff or a "
+                        "small sizing. Top pair/overpair is only a MEDIUM hand here — "
+                        "FOLD. Do not stack off with one pair.")
+            if facing:
+                return ("EXPLOSIVE POT: the pot entering this street is 5BB+ per table "
+                        "player, so the field is wide and full of random two pair/trips. "
+                        "Top pair/overpair is only a MEDIUM hand — do NOT raise. Call one "
+                        "small bet only (up to about 1/2 pot); fold to a larger bet or to "
+                        "any turn/river barrel.")
+            return ("EXPLOSIVE POT: the pot entering this street is 5BB+ per table "
+                    "player, so everyone is in and random two pair/trips are common. Top "
+                    "pair/overpair is only a MEDIUM hand — bet small for value/protection "
+                    "(1/3–1/2 pot) and pot-control; do not build a huge pot. Fold to a "
+                    "raise or to multi-street aggression.")
         if facing_raise:
             return ("ONE PAIR vs AGGRESSION: overpair/top pair facing a raise or all-in — "
                     "FOLD unless you have a set, two pair, or a strong draw. One pair is "
@@ -530,6 +607,14 @@ def value_directive(sit: Situation) -> str | None:
                 "preferred (it can win by fold equity or by hitting).")
 
     if tier == TP_WEAK and facing:
+        if sit.explosive_pot:
+            if facing_raise:
+                return ("EXPLOSIVE POT: top pair with a weak kicker is only a "
+                        "bluff-catcher in this big multiway pot — FOLD to the raise. Do "
+                        "not pay off.")
+            return ("EXPLOSIVE POT: top pair with a weak kicker is only a medium/"
+                    "bluff-catcher hand here. Call only a very small bet (up to about "
+                    "1/3 pot); fold to a larger bet or any turn/river barrel.")
         if facing_raise:
             return ("ONE PAIR vs AGGRESSION: top pair with a weak kicker facing a raise "
                     "or all-in — FOLD. The raise says your top pair is beaten; do not "
@@ -702,6 +787,13 @@ def render_hand_facts(sit: Situation) -> str:
                      f"Draw: {'yes' if sit.has_draw else 'no'}｜"
                      f"Plays the board (best five all from board): "
                      f"{'yes' if sit.plays_board else 'no'}")
+        prev_pot = previous_street_pot(snap)
+        if sit.pot_per_player is not None and prev_pot is not None:
+            lines.append(
+                f"Pot per table player entering this street: "
+                f"{sit.pot_per_player:.2f}BB ({prev_pot:g}BB ÷ {snap.table_size})｜"
+                f"Explosive pot: {'YES' if sit.explosive_pot else 'no'} "
+                f"(threshold {EXPLOSIVE_POT_BB_PER_PLAYER:g}BB/player)")
         if sit.opponent_strength_en:
             o = sit.opponent_strength_en
             lines.append(f"Opponent strength from actions: {o['label']} ({o['reason']})")
@@ -755,11 +847,12 @@ def build_messages(sit: Situation) -> tuple[str, str]:
         "must cite a rule from the skills or the table dynamics>\"}",
         "",
         "## Hard constraints",
-        "0. «Table dynamics» (when present in the user facts) is the highest-priority "
-        "exploitative instruction. When it says the opponent's raises or multi-street "
-        "barrels are value-heavy, fold marginal made hands (one pair, two pair) even if "
-        "a «Value directive» default says to call. Pot odds only tell you the price; "
-        "they do not create bluffs in a value-heavy range.",
+        "0. «Table dynamics» (when present in the user facts) and «Explosive pot: YES» "
+        "are the highest-priority exploitative instructions. When the table notes say "
+        "the opponent's raises or multi-street barrels are value-heavy, or the pot is "
+        "explosive, fold marginal made hands (one pair, two pair) even if a «Value "
+        "directive» default says to call. Pot odds only tell you the price; they do "
+        "not create bluffs in a value-heavy range.",
         "1. option must come strictly from the ids in the user message's «Options» section; "
         "no extras, no rewrites.",
         "2. All amounts are computed by the program. Do **not** compute the pot yourself, do not "
@@ -814,6 +907,27 @@ def build_messages(sit: Situation) -> tuple[str, str]:
         "or quads are possible. A straight/two pair/set is NOT the nuts then. On such a "
         "board, call for showdown instead of raising — a raise only gets called by better.",
         "",
+        "## Explosive pot (multiway / big preflop pot)",
+        "«Explosive pot: YES» in the user facts means the pot entering this street is "
+        "at least 5BB per player at the table (previous-street pot ÷ table players ≥ "
+        "5BB). Everyone was in the pot, so the field is wide and full of «weird» two "
+        "pair / trips from hands that would normally fold. Loose-passive players do not "
+        "put chips in this pot with nothing, and their bet/raise sizes here will not be "
+        "small. Be especially careful:",
+        "- One pair (overpair or top pair) is only a MEDIUM hand in an explosive pot. Do "
+        "not raise it, do not stack off with it, and do not call down multiple streets. "
+        "Call at most one small bet; fold to a raise, a large bet, or a turn/river "
+        "barrel.",
+        "- Do not assume top pair is good just because the board looks dry — in a "
+        "multiway limped/raised pot, random two pair and trips are exactly what the "
+        "field holds.",
+        "- Value-bet strong made hands (two pair, set, straight, flush), but pot-control "
+        "medium hands. Do not bloat the pot with one pair.",
+        "- Explosive pot overrides the default «VALUE DEFAULT: bet/call with top pair» "
+        "directives: top pair is a medium hand / bluff-catcher here, so do not raise or "
+        "stack off with it even though the table notes say to value-bet thin. A small "
+        "value bet when checked to is still fine.",
+        "",
         "## Table dynamics (user-provided, when present)",
         "The user facts may include a «Table dynamics» section written by the player. "
         "Treat it as authoritative for the current table and adjust exploitative choices:",
@@ -829,6 +943,9 @@ def build_messages(sit: Situation) -> tuple[str, str]:
         "bluffing wars;",
         "- tight-aggressive / solid: play straightforwardly, avoid fancy plays, and give "
         "credit to aggression.",
+        "- in an explosive pot (≥5BB per table player, everyone in), these tendencies "
+        "amplify: a loose-passive player's bet or raise is value and will not be small, "
+        "top pair is only medium, and bluffing a field this wide is burning money;",
         "Example: on 55 2 T 8, hero has JJ (two pair) and a loose-passive opponent bets "
         "flop, turn and river. Their line is value-heavy (5x trips, boats); fold the "
         "turn/river even though the small sizes give a low break-even equity.",

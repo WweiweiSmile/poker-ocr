@@ -22,10 +22,11 @@ from unittest.mock import patch  # noqa: E402
 import poker_ocr.advice as advice_mod  # noqa: E402
 from poker_ocr import skills  # noqa: E402
 from poker_ocr.advice import (  # noqa: E402
-    AISettings, AIError, AdviceRunner, OPTION_ORDER, advise,
-    build_messages, build_options, build_situation, complete_jev, complete_json,
-    is_jev_model, jev_decisions, jev_headers, jev_payload, parse_json_content,
-    preset_amounts, preset_targets, render_hand_facts, value_directive,
+    AISettings, AIError, AdviceRunner, EXPLOSIVE_POT_BB_PER_PLAYER, OPTION_ORDER,
+    advise, build_messages, build_options, build_situation, complete_jev,
+    complete_json, is_explosive_pot, is_jev_model, jev_decisions, jev_headers,
+    jev_payload, parse_json_content, pot_per_player, preset_amounts,
+    preset_targets, previous_street_pot, render_hand_facts, value_directive,
 )
 from poker_ocr.frame_state import FrameState, PlayerState  # noqa: E402
 from poker_ocr.hand_track import LiveHandTracker, street_of_board  # noqa: E402
@@ -1570,6 +1571,105 @@ def test_advice_runner_reports_busy_while_waiting() -> None:
     runner.close()
 
 
+# ─────────────────────────── 爆炸底池 ───────────────────────────
+
+def test_explosive_pot_detection() -> None:
+    """翻后上一街底池 ÷ 桌面人数 ≥ 5BB 才算爆炸底池。"""
+    # 默认 fixture：上一街 6BB / 6 人 = 1BB，不是爆炸池
+    normal = make_point(pot=6.0, pot_before_street=6.0)
+    check(previous_street_pot(normal) == 6.0,
+          f"上一街底池应为 6BB：{previous_street_pot(normal)}")
+    check(pot_per_player(normal) == 1.0,
+          f"人均应为 1BB：{pot_per_player(normal)}")
+    check(not is_explosive_pot(normal), "1BB/人不该是爆炸底池")
+
+    # 刚好 5BB/人（30BB / 6 人）→ 命中门槛
+    edge = make_point(street="flop", pot=30.0, pot_before_street=30.0,
+                      table_size=6)
+    check(pot_per_player(edge) == EXPLOSIVE_POT_BB_PER_PLAYER,
+          f"刚好 5BB/人：{pot_per_player(edge)}")
+    check(is_explosive_pot(edge), "5BB/人应算爆炸底池")
+
+    # 低于门槛不算
+    below = make_point(street="turn", pot=29.0, pot_before_street=29.0,
+                       table_size=6)
+    check(not is_explosive_pot(below), "4.83BB/人不该是爆炸底池")
+
+    # 同样底池，桌子人数越多，人均越低
+    wide = make_point(pot=30.0, pot_before_street=30.0, table_size=9)
+    check(not is_explosive_pot(wide), "30BB / 9 人不足 5BB/人")
+
+    # 翻前不判定
+    pre = make_point(street="preflop", pot=30.0, pot_before_street=30.0)
+    check(previous_street_pot(pre) is None and not is_explosive_pot(pre),
+          "翻前不该判爆炸底池")
+
+    # 桌型/底池缺失 → 无法判定，按非爆炸处理（保守，不误报）
+    unknown = make_point(pot=30.0, pot_before_street=30.0, table_size=0)
+    check(pot_per_player(unknown) is None and not is_explosive_pot(unknown),
+          f"人数未知时不该判定：{pot_per_player(unknown)}")
+    from poker_ocr.hand_track import StreetRecord
+    no_pot = make_point(
+        pot=None, pot_before_street=None,
+        streets=(StreetRecord("preflop", 0.0, ()),
+                 StreetRecord("flop", None, ())))
+    check(previous_street_pot(no_pot) is None and not is_explosive_pot(no_pot),
+          f"底池未知时不该判定：{previous_street_pot(no_pot)}")
+
+
+def test_explosive_pot_pbs_misread_falls_back_to_pot_minus_bets() -> None:
+    """pbs pill 误把底池值读进来时，用 pot − 本街下注反推上一街底池。"""
+    from poker_ocr.hand_track import OpponentSnapshot
+
+    snap = make_point(
+        pot=30.0, pot_before_street=30.0, hero_bet=0.0, table_size=6,
+        opponents=(OpponentSnapshot("a", "老王", "BB", 97.0, 20.0, False),))
+    check(previous_street_pot(snap) == 10.0,
+          f"应反推出上一街底池 10BB：{previous_street_pot(snap)}")
+    check(not is_explosive_pot(snap),
+          "10BB / 6 人 = 1.67BB/人，不该误报爆炸底池")
+
+
+def test_explosive_pot_prompt_and_directive() -> None:
+    """爆炸底池要写进事实和系统提示词，并把顶对降级为中等牌。"""
+    spot = make_point(pot=30.0, pot_before_street=30.0, table_size=6)
+    sit = build_situation(spot)
+    check(sit.explosive_pot and sit.pot_per_player == 5.0,
+          f"Situation 应带爆炸标记：{sit.explosive_pot} / {sit.pot_per_player}")
+
+    user = render_hand_facts(sit)
+    check("Explosive pot: YES" in user, f"事实里应标爆炸底池：\n{user}")
+    check("5.00BB (30BB ÷ 6)" in user, f"事实里应写清口径：\n{user}")
+
+    system, _ = build_messages(sit)
+    check("## Explosive pot" in system, "系统提示词应有爆炸底池一节")
+    check("MEDIUM hand" in system, "系统提示词应说明顶对只是中等牌")
+
+    # 顶对强踢、无人下注：不再默认「下注拿价值」，改成小注控池
+    d = value_directive(sit)
+    check("EXPLOSIVE POT" in (d or "") and "MEDIUM" in (d or ""),
+          f"顶对在爆炸池应降级：{d}")
+    check("bet small" in (d or ""), f"无人下注应建议小注控池：{d}")
+
+    # 面对普通下注：最多跟一个小注，不能加注
+    facing = build_situation(make_point(
+        pot=35.0, pot_before_street=30.0, to_call=5.0, table_size=6))
+    d = value_directive(facing)
+    check("EXPLOSIVE POT" in (d or "") and "do NOT raise" in (d or ""),
+          f"爆炸池顶对面对下注不该加注：{d}")
+
+    # 面对加注：直接弃牌
+    from poker_ocr.hand_track import ActionRecord, StreetRecord
+    raise_street = StreetRecord("flop", 30.0, (
+        ActionRecord("flop", "a", "老王", "BB", "raise", 20.0, False, False),))
+    vs_raise = build_situation(make_point(
+        pot=50.0, pot_before_street=30.0, to_call=20.0, table_size=6,
+        streets=(StreetRecord("preflop", 0.0, ()), raise_street)))
+    d = value_directive(vs_raise)
+    check("EXPLOSIVE POT" in (d or "") and "FOLD" in (d or ""),
+          f"爆炸池顶对面对加注应弃牌：{d}")
+
+
 # ─────────────────────────── 主流程 ───────────────────────────
 
 def main() -> int:
@@ -1624,6 +1724,9 @@ def main() -> int:
         test_table_dynamics_in_prompt,
         test_value_heavy_aggression_flags,
         test_value_directive_table_dynamics_override,
+        test_explosive_pot_detection,
+        test_explosive_pot_pbs_misread_falls_back_to_pot_minus_bets,
+        test_explosive_pot_prompt_and_directive,
         test_advise_uses_model_choice,
         test_advise_rejects_unknown_option,
         test_advise_fallback_without_settings,
