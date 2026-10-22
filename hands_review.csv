@@ -1,0 +1,56 @@
+hand_id,net,position,cards,board,pot,hero_actions,opponents_shown,cause
+h119,-55.5,BB,QhAd,2c 8c Qs Js 7d,117.5,preflop:raise19.5 flop:bet14.5,阿坝干嘛:8s 8h,真冷门:AQ 顶对顶踢 vs 88 中三条
+h75,-32.5,BB,2d2c,8d 8h 10h 4d 8s,95.0,flop:bet20.0 river:bet7.5,许文文啊:Js; 陈7程7:4h Kh,"牌型排名误判:8822 是最差的两对,flop ~88% 已落后"
+h4,-32.0,UTG+1,AhJs,7c 7h 10d 8c 6h,66.5,preflop:raise7.5 flop:bet6.5 turn:bet16.5,陈7程7:Kd Ad,"A高/弱牌当价值,连打两条街"
+h100,-22.0,UTG+1,4d4c,Qs Js 2s 6d 6c,48.5,preflop:raise5.0 river:bet12.0,阿坝干嘛:8c Qc,"牌型排名误判:6644 被板对反超,~86% 已落后"
+h104,-21.5,BB,AsKd,10s 8s 9s,98.0,preflop:raise10.0 preflop:raise14.5 flop:bet11.5,,赔率矛盾:自算 36%>29% 却 fold
+h88,-11.0,BB,Ad7c,Kh 4d Kd,57.5,preflop:raise11.0,许文文啊:Js,翻前表外加注:A7o 在 BB 隔离
+h90,-9.0,SB,Ac5d,2h 6s Kd 7d,48.0,preflop:raise9.0,,翻前表外加注:A5o 在 SB 隔离
+h21,-6.0,UTG+1,8dAd,,37.0,preflop:raise5.5,,"翻前表外加注:A8s 在 UTG+1,3bet 后正确弃牌"
+h71,-5.5,UTG+1,JdJc,3h 2c 7s 4d 3s,86.5,preflop:raise5.0,伯克利丁真:5h 5c; 八六上青山:Qs Ks,正确:JJ 面对松弱 25.5 3bet 弃牌
+h23,-5.0,UTG,7h8c,10h 3h Qd,17.5,,许文文啊:Js,其他小额损失
+h35,-5.0,HJ,Ad3s,2d 3c 7d,45.0,,,其他小额损失
+h49,-5.0,BTN,Ac2d,8d 7c 5h Kc Qd,45.0,,伯克利丁真:Qc 9c; 许文文啊:Js,其他小额损失
+h58,-5.0,BB,6dKd,Ks Qs 10c Qd 7h,35.0,,许文文啊:Js,其他小额损失
+h56,-2.0,UTG,2sKd,2h 7h As,5.0,flop:call1.0,,其他小额损失
+h43,-1.5,UTG,7h5c,7s 5h 7d,6.0,flop:call1.0,,仅 ante/小池
+h86,-1.5,UTG,2d7h,9c 4c 5c 8h 6d,60.5,,,仅 ante/小池
+h102,-1.5,UTG,10d2c,9h Kd 3d 2s,66.5,,许文文啊:Js,仅 ante/小池
+h117,-1.5,UTG,4c2s,7d 9h 7s,50.5,,,仅 ante/小池
+h6,-1.0,BB,6s10c,,15.0,,,仅 ante/小池
+h8,-1.0,SB,6s10h,5h 8d 6h,6.0,preflop:call1.0,,正确:中弱对面对 donk 弃牌
+h25,-1.0,BB,JsQc,Kd As Ad,67.5,,许文文啊:Js,仅 ante/小池
+h67,-1.0,HJ,8d9h,4s 9d 2c 10c As,221.0,,陈7程7:2d 10s; 阿坝干嘛:Qh Qd; 八六上青山:7s 7h,仅 ante/小池
+h106,-1.0,SB,2s9h,7c 6d 3h 8s,35.0,preflop:call1.0,,正确:空气面对 donk 弃牌
+h109,-1.0,CO,7h10s,2h Kh 2c 9d Qh,32.0,,伯克利丁真:8h; 许文文啊:10d Kc; 阿坝干嘛:10h 4h,仅 ante/小池
+h11,-0.5,BTN,8s2h,5h 8c Kc,19.0,,许文文啊:Js,仅 ante/小池
+h13,-0.5,CO,8c4h,,6.0,,,仅 ante/小池
+h15,-0.5,HJ,Ah6h,,16.0,,许文文啊:Js,仅 ante/小池
+h17,-0.5,LJ,4d5c,2h 3s 6d,21.0,,许文文啊:Js,仅 ante/小池
+h19,-0.5,UTG+2,4h5h,,15.0,,,仅 ante/小池
+h27,-0.5,SB,2h4c,,14.0,,,仅 ante/小池
+h29,-0.5,BTN,2h7d,3h 4h 7s 8c 7c,147.0,,陈7程7:3c,仅 ante/小池
+h37,-0.5,LJ,Qh7c,9c 4c 10h 5c 6h,105.0,,伯克利丁真:6d 10s; 许文文啊:Js,仅 ante/小池
+h39,-0.5,UTG+2,3h9c,4d 5s 10c 4s 5h,56.0,,许文文啊:Js,仅 ante/小池
+h41,-0.5,UTG+1,4d5s,,6.0,,,仅 ante/小池
+h46,-0.5,SB,6sQh,8c 10d Kc,32.5,preflop:call1.0,许文文啊:Js,正确:空气面对 donk 弃牌
+h47,-0.5,SB,8sQh,8c 10d Kc Ac Ad,157.5,,伯克利丁真:Ks 8s; 不服就干不:3c; 阿坝干嘛:Kd Js,仅 ante/小池
+h51,-0.5,CO,7hQs,Kh Jc Kc Ks 7s,96.0,,有容奶大8:6s Jd; 不服就干不:Qh Qc,仅 ante/小池
+h55,-0.5,LJ,4cQs,Qh 4d 6c Jc 4h,192.5,,伯克利丁真:Jd Js; 不服就干不:Kc Kh; 陈7程7:9h 9d,仅 ante/小池
+h61,-0.5,SB,JcJd,10h Ad Ks Kh 3h,197.0,,,仅 ante/小池
+h63,-0.5,BTN,3h8c,7d Ks Ad 5d,13.0,,阿坝干嘛:Kd,仅 ante/小池
+h65,-0.5,CO,Kh6c,Kc 6d 9c 8d 4d,216.5,,伯克利丁真:Ks 10c; 八六上青山:10d 10h,仅 ante/小池
+h73,-0.5,UTG,7c3h,5h 9s 10h Qh As,371.0,,许文文啊:Js; 陈7程7:Qd; 阿坝干嘛:10s 5s; 八六上青山:10c 9d,仅 ante/小池
+h80,-0.5,HJ,4h2c,3h 4d Qd 9h,544.0,,伯克利丁真:5h 6h,仅 ante/小池
+h82,-0.5,LJ,4d5d,8c Jc 2d 4s Qh,6.5,,许文文啊:Js; 有容奶大8:Kc 10h; 八六上青山:3d 6h,仅 ante/小池
+h98,-0.5,LJ,Kc9d,Ah Qh Kh Kd,48.0,,,仅 ante/小池
+h111,-0.5,HJ,2d6d,5c Ah 5s,10.0,,,仅 ante/小池
+h113,-0.5,LJ,8hQh,4h 6h 10d Qc 7s,5.5,,,仅 ante/小池
+h115,-0.5,UTG+1,3h4h,,16.5,,,仅 ante/小池
+h2,2.0,UTG+2,JhKs,6h 3d Qd 7h,42.5,preflop:raise8.0,,翻前表外加注:KJo 在 UTG+2(走运赢了)
+h92,4.5,BTN,3c8c,9d 5h Kc 9s 6s,52.5,,陈7程7:7d 5s; 阿坝干嘛:Jd Qc,仅 ante/小池
+h84,5.0,UTG+1,10hAs,,10.5,preflop:raise5.0,,翻前表外加注:ATo 在 UTG+1(走运赢了)
+h96,6.0,HJ,6cAs,10h Qc Kh 10s Ac,60.5,preflop:raise8.5 river:bet15.0,阿坝干嘛:7d Ad,翻前表外加注:A6o 在 HJ(走运赢了)
+h45,8.0,BB,AcJh,,20.5,preflop:raise12.0,,翻前表外加注:AJo 在 BB 挤压(赢了)
+h31,13.0,CO,7c6s,8s Qh 4s 9h 10d,33.0,preflop:call1.0 turn:bet5.0 river:bet13.0,,"正确:76s 在 CO 溜入,河牌中顺收价值"
+h78,13.5,CO,Kh10d,4c Kd Qh,23.0,preflop:raise8.5,,翻前表外加注:KTo 在 CO(走运赢了)

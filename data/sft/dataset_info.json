@@ -1,0 +1,20 @@
+{
+ "poker_sft": {
+  "file_name": "train.json",
+  "formatting": "alpaca",
+  "columns": {
+   "prompt": "instruction",
+   "response": "output",
+   "system": "system"
+  }
+ },
+ "poker_sft_eval": {
+  "file_name": "eval.json",
+  "formatting": "alpaca",
+  "columns": {
+   "prompt": "instruction",
+   "response": "output",
+   "system": "system"
+  }
+ }
+}

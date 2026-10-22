@@ -1,0 +1,55 @@
+### 第一阶段 SFT：LoRA 行为克隆
+### 用法（在仓库根目录跑，LLaMA-Factory 需 >= 0.9.3）：
+###   llamafactory-cli train config/llamafactory/sft_lora.yaml
+###
+### 超参对齐 SpinGPT 论文（LoRA r=8 / alpha=16 / 4 epoch / lr 5e-5 cosine），
+### 只把 seq 从 128 拉到 2048，因为你的事实层比论文的紧凑编码长得多。
+### 注意：推理时 advice.build_messages() 的 system 必须与 data/sft/system.txt 一致。
+
+### model
+model_name_or_path: Qwen/Qwen3-8B
+trust_remote_code: true
+
+### method
+stage: sft
+do_train: true
+finetuning_type: lora
+lora_rank: 8
+lora_alpha: 16
+lora_dropout: 0.0
+lora_target: all
+
+### dataset
+dataset: poker_sft
+dataset_dir: data/sft
+template: qwen3
+enable_thinking: false
+cutoff_len: 2048
+overwrite_cache: true
+preprocessing_num_workers: 8
+
+### output
+output_dir: saves/poker-8b/sft
+logging_steps: 10
+save_steps: 500
+save_total_limit: 2
+plot_loss: true
+overwrite_output_dir: true
+report_to: none
+
+### train
+per_device_train_batch_size: 2
+gradient_accumulation_steps: 8
+learning_rate: 5.0e-5
+num_train_epochs: 4.0
+lr_scheduler_type: cosine
+warmup_ratio: 0.03
+bf16: true
+gradient_checkpointing: true
+flash_attn: fa2
+ddp_timeout: 180000000
+
+### eval
+val_size: 0.0
+per_device_eval_batch_size: 4
+eval_strategy: "no"

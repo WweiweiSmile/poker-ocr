@@ -80,6 +80,9 @@ class Profile:
     global_slots: dict[str, Slot] = field(default_factory=dict)
     # runtime profile：由全图识别现场生成，环序/几何不要求人工标定那套校验
     runtime: bool = False
+    # 盲注横幅读丢前注时的兜底（BB）。这款 app 的 1/2 桌固定 0.5BB 前注；
+    # None = 不兜底，按横幅原样。
+    default_ante: float | None = None
 
     # ── 查询 ──────────────────────────────────────────────
 
@@ -253,6 +256,8 @@ class Profile:
                 if isinstance(v, list) and len(v) == 4
             },
             runtime=bool(raw.get("runtime", False)),
+            default_ante=(float(raw["default_ante"])
+                          if raw.get("default_ante") is not None else None),
         )
         profile.validate()
         return profile

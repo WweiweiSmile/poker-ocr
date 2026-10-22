@@ -35,11 +35,12 @@ from dataclasses import dataclass, field
 
 from . import skills
 from .coach import (
-    DRY, OVERPAIR, STRONG_DRAW, STRONG_MADE, TPTK, TP_WEAK, WEAK_DRAW,
-    board_texture, opponent_strength, parse_cards, read_hand,
+    DRY, MID_BOTTOM, OVERPAIR, STRONG_DRAW, STRONG_MADE, TPTK, TP_WEAK, TWO_PAIR,
+    WEAK_DRAW, board_texture, opponent_strength, parse_cards, read_hand,
 )
 from .hand_track import ActionRecord, HandSnapshot, PREFLOP, RIVER, TURN
-from .table_dynamics import value_heavy_aggression
+from .preflop_ranges import chart_text, range_verdict
+from .table_dynamics import is_loose_table, value_heavy_aggression
 
 # ─────────────────────────── 选项 ───────────────────────────
 
@@ -119,6 +120,28 @@ _OPEN_BASES: dict[str, tuple[float, ...]] = {
     "BB": (3.5, 4.0, 4.5),
 }
 
+# 松桌的开池加成（BB）：跟注站/松弱桌开大一点收价值；紧桌不加。
+# 叠加在「位置倍数 × 前注加成 + 溜入者加成」之后，再由 _cap 做全下/最小加注修正。
+LOOSE_OPEN_BONUS = 0.5
+# 溜入者的加成递减：前两个每个 +1BB，第 3 个起每个 +0.5BB。
+# 3-4 个 limper 时如果还按 +1BB 线性叠加，BTN 会开到 12.5BB（100BB 的 12%+），
+# 只会把能跟注的范围压成两极化；递减后 3-4 个 limper 的 BTN 约 10-11.5BB。
+LIMP_BONUS_FIRST = 1.0
+LIMP_BONUS_EXTRA = 0.5
+
+# 成手牌「**单个对手**能赢我」的比例超过这个值，就不再按价值牌处理。
+#
+# 为什么用单人比例、不用「全桌至少一家领先」：后者会被人数放大——同一手顶对，
+# 单挑时 15%、9 人池里就成了 76%，全被误判成「不能收价值」。人数应该影响**下注
+# 值不值**，不该影响**我的牌什么水平**。
+#
+# 22% 的取法来自实测（2026-10-23 那局）：
+#   8822@88T 25.9% / 6644@QJ266 40.9% → 拦下（这两手合计 −54.5）
+#   花面的顺子 4.3% / 公对面的同花 1.8% / 干燥面真两对 0.5% / 坚果顺 0.9%
+#   → 不动，仍然收价值
+# 设到 30% 会漏掉 h75（25.9%）；设到 15% 会误伤多路池里的顶对。
+DOMINATED_BEAT_PCT = 22.0
+
 
 def _cap(target: float, hero_max: float | None, min_raise_to: float) -> tuple[float, str]:
     """把目标额修正到合法范围：低于最小加注抬上去，高于后手封顶为全下。"""
@@ -132,8 +155,27 @@ def _cap(target: float, hero_max: float | None, min_raise_to: float) -> tuple[fl
     return _round_bb(target), note
 
 
-def build_preflop_options(snap: HandSnapshot) -> list[Option]:
-    """翻前选项：开池按「位置倍数 ×（有前注 ×2）+ 溜入者」，再加注按 3-4 倍。
+def count_limpers(snap: HandSnapshot) -> int:
+    """我行动前已经平跟进池的人数（不含盲注位）。
+
+    优先看行动线；但 limper 平跟 1BB 往往不生成动作徽章，行动线会漏。
+    再按「同帧各家下注额 == 1BB 且不是盲注位」补一次，取两者较大值。
+    """
+    bb = snap.blinds.bb if snap.blinds else 1.0
+    from_actions = sum(
+        1 for a in snap.all_actions()
+        if a.street == PREFLOP and a.action == "call" and not a.is_hero)
+    from_bets = sum(
+        1 for o in snap.opponents
+        if o.position not in ("SB", "BB") and not o.folded
+        and o.bet is not None and abs(float(o.bet) - bb) < 0.01)
+    return max(from_actions, from_bets)
+
+
+def build_preflop_options(snap: HandSnapshot,
+                          open_bonus: float = 0.0) -> list[Option]:
+    """翻前选项：开池按「位置倍数 ×（有前注 ×2）+ 溜入者 + 松桌加成」，
+    再加注按 3-4 倍。
 
     翻前的底池只有盲注那么大，用「底池的 1/3」表达尺度没有意义 ——
     preflop-open.md 也明确要求「一律用大盲倍数说，不要说加注到几倍底池」。
@@ -196,12 +238,14 @@ def build_preflop_options(snap: HandSnapshot) -> list[Option]:
     if to_call > 0:
         options.append(Option("fold", "Fold", "fold"))
 
-    limpers = sum(1 for a in snap.all_actions()
-                  if a.street == PREFLOP and a.action == "call" and not a.is_hero)
+    limpers = count_limpers(snap)
+    limper_bonus = (min(limpers, 2) * LIMP_BONUS_FIRST
+                    + max(limpers - 2, 0) * LIMP_BONUS_EXTRA)
     base = _OPEN_BASES.get(hero_pos, (3.0, 3.25, 3.5))
     ante_x = 2.0 if (snap.blinds and snap.blinds.ante) else 1.0
     for b in base:
-        target, note = _cap(b * ante_x + limpers, hero_max, min_raise_to)
+        target = b * ante_x + limper_bonus + max(open_bonus, 0.0)
+        target, note = _cap(target, hero_max, min_raise_to)
         options.append(Option(f"open-{b:g}", f"Raise to {target:g}BB (open)",
                               "raise", target, note))
     return options
@@ -250,8 +294,17 @@ def preset_amounts(snap: HandSnapshot) -> dict[str, float]:
     return {oid: amount for oid, (amount, _note) in preset_targets(snap).items()}
 
 
-def build_options(snap: HandSnapshot) -> list[Option]:
+def build_options(snap: HandSnapshot,
+                  open_bonus: float = 0.0,
+                  block_draw_bets: bool = False) -> list[Option]:
     """按现场底池与下注算出全部可执行选项。
+
+    `open_bonus` 只加在翻前开池上（松桌 +1BB），翻后按底池倍数的选项不动。
+
+    `block_draw_bets=True` 用于「只有听牌 + 3 家以上」：这种局面没有弃牌率，
+    主动下注/加注是白送（h31：4 家池里 8 张顺子听、没人下注，模型挑了下注 1/2）。
+    提示词管不住它把下注重新解释成「为权益而打」，所以干脆把这几档从动作空间里
+    拿掉：模型只选档位，不给它选错的机会。
 
     `to_call == 0` 是「轮到我、没人下注」：没有可跟的注，选项是过牌 + 各种下注。
     `to_call > 0` 是面对下注/加注：跟注 + 弃牌 + 各种加注。
@@ -267,7 +320,7 @@ def build_options(snap: HandSnapshot) -> list[Option]:
     超过后手的要封顶并注明等同全下。
     """
     if snap.street == PREFLOP:
-        return build_preflop_options(snap)
+        return build_preflop_options(snap, open_bonus=open_bonus)
 
     to_call = max(snap.to_call or 0.0, 0.0)
     stack = snap.hero_stack
@@ -288,6 +341,10 @@ def build_options(snap: HandSnapshot) -> list[Option]:
         options.append(Option("call", "Call", "call", _round_bb(to_call)))
         options.append(Option("fold", "Fold", "fold"))
 
+    if block_draw_bets:
+        # 只剩过牌/跟注（必要时还有弃牌）：多路听牌没有弃牌率，下注/加注不是选项。
+        by_id = {o.id: o for o in options}
+        return [by_id[i] for i in OPTION_ORDER if i in by_id]
     presets = preset_targets(snap)
     for name in ("1/3", "1/2", "2/3", "1", "1.2"):
         option_id = f"raise-{name}"
@@ -330,6 +387,15 @@ class Situation:
     # 见 previous_street_pot() / is_explosive_pot()。
     pot_per_player: float | None = None
     explosive_pot: bool = False
+    # 成手牌的**实际排名**：枚举对手两手牌，算多大概率比我这手大（0-100）。
+    # beat_pct 是单个对手，beat_at_least_pct 是当前还在手的人数下至少一家领先。
+    # 见 coach.beat_rate ——「两对」是个名字，这两个数才是强度。
+    beat_pct: float | None = None
+    beat_at_least_pct: float | None = None
+    opponents_in_hand: int | None = None
+    # 翻前：这手牌在该位置的开池范围归属（见 preflop_ranges.range_verdict）。
+    # 由程序算、作为事实注入，模型只负责在事实之上做选择。
+    range_verdict: str | None = None
 
     @property
     def street(self) -> str:
@@ -377,9 +443,25 @@ def build_situation(snap: HandSnapshot,
                   "reason": opp_read.reason_en}
 
     per_player = pot_per_player(snap)
+    n_opp = sum(1 for o in snap.opponents if not o.folded)
+    # 纯听牌 + 3 家以上：没有弃牌率，主动下注/加注不该出现在选项里（h31）。
+    # 「纯听」= 读牌分档在听牌档；已经成牌（一对以上）不在此列——
+    # 那种情况是价值下注，哪怕多路也允许。
+    draw_only = bool(read and read.tier in (STRONG_DRAW, WEAK_DRAW))
+    block_draw_bets = (snap.street != PREFLOP and n_opp >= 3 and draw_only)
+    beat_pct = beat_at_least = None
+    if read is not None:
+        # 复用 read_hand 里已经枚举过的单人比例，不重复跑一遍 beat_rate
+        p = read.beat_pct
+        beat_pct = round(p * 100, 1)
+        beat_at_least = round((1.0 - (1.0 - p) ** max(n_opp, 1)) * 100, 1)
     return Situation(
         snap=snap,
-        options=build_options(snap),
+        options=build_options(snap,
+                              open_bonus=(LOOSE_OPEN_BONUS
+                                          if is_loose_table(table_dynamics)
+                                          else 0.0),
+                              block_draw_bets=block_draw_bets),
         hand_label=read.label if read else None,
         hand_tier=read.tier if read else None,
         category=read.category if read else None,
@@ -395,6 +477,13 @@ def build_situation(snap: HandSnapshot,
         table_dynamics=(table_dynamics or "").strip() or None,
         pot_per_player=per_player,
         explosive_pot=is_explosive_pot(snap),
+        beat_pct=beat_pct,
+        beat_at_least_pct=beat_at_least,
+        opponents_in_hand=n_opp,
+        range_verdict=(
+            (lambda v: v.render() if v else None)(
+                range_verdict(snap.hero_position, snap.hero_cards))
+            if snap.street == PREFLOP else None),
     )
 
 
@@ -430,10 +519,21 @@ def _board_paired(board: tuple[str, ...] | list[str]) -> bool:
 
 
 def _is_flush_or_better(sit: Situation) -> bool:
-    """当前牌型本身是不是同花/葫芦/四条（这些不怕牌面成花或成对）。"""
+    """当前牌型本身是不是同花/葫芦/四条（花面上不怕被同花打败）。"""
     label = f"{sit.hand_label_en or ''} {sit.hand_label or ''}"
     return any(k in label for k in
                ("Flush", "Full house", "Quads", "同花", "葫芦", "四条"))
+
+
+def _is_boat_or_better(sit: Situation) -> bool:
+    """葫芦/四条 —— **公对面**上唯一能豁免的牌型。
+
+    公对面不能用 `_is_flush_or_better` 豁免：同花打得过三条，却打不过葫芦，
+    而跟注站的跟注范围里就有葫芦（h100 的 44、h75 的 22 都是被这一条吃掉的）。
+    """
+    label = f"{sit.hand_label_en or ''} {sit.hand_label or ''}"
+    return any(k in label for k in
+               ("Full house", "Quads", "Straight flush", "葫芦", "四条", "同花顺"))
 
 
 def _facing_raise(snap: HandSnapshot) -> bool:
@@ -551,6 +651,35 @@ def _explosive_reason(sit: Situation) -> str:
     return "the pot entering this street is exactly 5BB per player (the bomb ante)"
 
 
+def _pick_size(sit: Situation, want: float) -> str | None:
+    """在本次可选的档位里，挑最接近 `want`（底池倍数）的那个 option id。
+
+    为什么要点名：`value_directive` 原来只写「BET 2/3–full pot」，模型照样挑 1/3
+    （复盘里 12 次翻后下注有 9 次是 1/3，赢的池最大只有 60.5）。直接把 id 写进事实里，
+    比让它自己把「2/3」映射到某个按钮可靠。短码时档位会被 `_cap` 封顶，所以只在
+    **实际存在**的选项里挑。
+    """
+    targets = {"raise-1/3": 1 / 3, "raise-1/2": 0.5, "raise-2/3": 2 / 3,
+               "raise-1": 1.0, "raise-1.2": 1.2}
+    ids = [o.id for o in sit.options
+           if o.id in targets and o.kind in ("bet", "raise")]
+    if not ids:
+        return None
+    return min(ids, key=lambda i: abs(targets[i] - want))
+
+
+def _no_fold_equity(sit: Situation) -> bool:
+    """3 家以上、手里又只有听牌：主动下注/加注没有弃牌率。
+
+    跟注站不会因为一张听牌面弃掉任何对子或听牌；多路池里「用听牌下注」唯一的
+    效果是把底池做大、把跟注站留在手里。h31 就是这么输的（4 家、8 张顺子听、
+    下注 1/2 池），模型还把它解释成「为权益而打」，所以不能只靠提示词。
+    """
+    return (sit.street != PREFLOP
+            and (sit.opponents_in_hand or 0) >= 3
+            and sit.hand_tier in (STRONG_DRAW, WEAK_DRAW))
+
+
 def value_directive(sit: Situation) -> str | None:
     """把「强牌默认拿价值」写成一句贴着当前分档的硬指令。
 
@@ -558,18 +687,54 @@ def value_directive(sit: Situation) -> str | None:
     技能目录很长，模型容易只抓到最近的一条「对手弱可以过牌」；一条紧跟
     「My hand strength」的具体指令，比让它自己翻方法论可靠得多。
     """
-    if sit.street == PREFLOP or sit.plays_board:
+    if sit.street == PREFLOP:
+        return None
+    if sit.plays_board:
+        # 打牌面 = 最好的五张全靠公共牌，人人都有。它不是「一对」，没有摊牌价值。
+        # 只在板面自己只是「一对/两对」时才提醒：板面自己成了顺子/同花时，
+        # 「谁都比你大」是错的（那是分池的牌）。
+        if sit.category is not None and sit.category <= TWO_PAIR:
+            return ("BOARD PLAY: your best five are all community cards — you have no "
+                    "hand of your own, and any pair beats you. Betting is a pure bluff "
+                    "with no showdown value: at most ONE small bet on the flop. On the "
+                    "turn or river with no improvement, check and give up; never call a "
+                    "raise and never fire a second barrel.")
         return None
     tier = sit.hand_tier
     facing = (sit.snap.to_call or 0.0) > 0
     facing_raise = facing and _facing_raise(sit.snap)
 
+    # **牌型排名优先于牌型名字。** 下面这条必须在所有按分档写的指令之前：
+    # 一个「两对」如果枚举下来四分之一的随机牌都比它大，它就不是价值牌，
+    # 任何「bet small for value」的措辞都会把模型推向送钱。
+    # 用**单人**比例做判据（不是全桌）：全桌比例会被人数放大，见 DOMINATED_BEAT_PCT。
+    # 只对**成牌**生效：听牌的枚举结果反映的是「当前还没成牌」，没有意义。
+    if (not facing
+            and sit.hand_tier in (STRONG_MADE, OVERPAIR, TPTK, TP_WEAK, MID_BOTTOM)
+            and not sit.has_draw
+            and (sit.beat_pct or 0.0) >= DOMINATED_BEAT_PCT):
+        n = sit.opponents_in_hand or 1
+        return (f"NOT A VALUE HAND BY RANK: nominal {sit.hand_label_en or 'made hand'}, "
+                f"but an exact count over every opponent holding has it beaten by "
+                f"{sit.beat_pct:g}% of random hands per opponent "
+                f"(with {n} opponent(s) in, {sit.beat_at_least_pct:g}% chance at least "
+                f"one is ahead). The hand's NAME is not its RANK. "
+                f"Do NOT bet or raise for value — anything that calls has you beaten. "
+                f"Check and give up; call one small bet as a bluff-catcher only when the "
+                f"price is very good. If you bet, it is a bluff with no fold equity.")
+
     if tier == STRONG_MADE:
-        # 顺子/三条/两对不是坚果：牌面三张同花时对手两张同花就是同花；牌面对子时
-        # 对手可能有葫芦。这两种局面下不能按「强成牌 = 加注」处理。
-        not_nuts = (not _is_flush_or_better(sit)
-                    and (_flush_possible(sit.snap.board)
-                         or _board_paired(sit.snap.board)))
+        # 顺子/同花/两对不是「有名字就强」：牌力要看它在**这个牌面**上的排名。
+        #   · 公对面：连**同花**都可能被葫芦打败（h100 的 44 就是这一类），
+        #     只有葫芦/四条以上才豁免；
+        #   · 纯花面（未成对）：顺子/三条不是坚果，同花以上才豁免。
+        # 为什么同花也不再豁免：这桌是跟注站，能跟到底的正是同花和葫芦。
+        if _board_paired(sit.snap.board):
+            not_nuts = not _is_boat_or_better(sit)
+        elif _flush_possible(sit.snap.board):
+            not_nuts = not _is_flush_or_better(sit)
+        else:
+            not_nuts = False
         if facing and not_nuts:
             if _passive_value_line(sit) and _is_two_pair(sit):
                 return ("TABLE DYNAMICS OVERRIDE: the player's table notes say this "
@@ -588,14 +753,17 @@ def value_directive(sit: Situation) -> str | None:
                     "Call only if the board is four-to-a-straight/flush or the opponent's "
                     "line says you are beaten.")
         if not_nuts:
-            return ("VALUE CAUTION: strong made hand with no bet in front, but a flush or "
-                    "full house is possible. Bet small for value (1/2 pot); do not build a "
-                    "huge pot, and check behind on a very coordinated board.")
+            return ("VALUE CAUTION: this made hand is NOT the nuts on this board, and on a "
+                    "calling-station table the hands that continue are exactly the ones "
+                    "that beat it. Do NOT raise and do NOT bet big. Check, or bet small "
+                    "(1/3–1/2 pot) for a cheap price, and FOLD to a raise.")
         size = "1/2–2/3 pot" if sit.texture == DRY else "2/3–full pot"
+        pick = _pick_size(sit, 0.5 if sit.texture == DRY else 0.7)
+        hint = f" Use option {pick}." if pick else ""
         return (f"VALUE DEFAULT: strong made hand with no bet in front — BET for value "
-                f"({size}). Checking is only correct for a real slow-play: absolute nuts "
-                f"on a dry board vs an aggressive opponent, or a bet that only better "
-                f"hands call.")
+                f"({size}).{hint} Checking is only correct for a real slow-play: absolute "
+                f"nuts on a dry board vs an aggressive opponent, or a bet that only "
+                f"better hands call.")
 
     if tier in (OVERPAIR, TPTK):
         if sit.explosive_pot:
@@ -629,11 +797,19 @@ def value_directive(sit: Situation) -> str | None:
                     "facing a single bet — calling or raising is usually correct. Fold "
                     "only if the board is four-to-a-straight/flush or several opponents "
                     "have shown strength.")
+        pick = _pick_size(sit, 0.6)
+        hint = f" Use option {pick}." if pick else ""
         return ("VALUE DEFAULT: overpair/top pair with a strong kicker and no bet in "
-                "front — BET 1/2–2/3 pot for value and protection. Checking gives free "
-                "cards and misses value.")
+                "front — BET 1/2–2/3 pot for value and protection." + hint + " Checking "
+                "gives free cards and misses value.")
 
     if tier == STRONG_DRAW:
+        if _no_fold_equity(sit):
+            return ("NO FOLD EQUITY: 3+ opponents are in the pot, so betting a draw "
+                    "wins nothing — nobody folds a draw or top pair here, and the "
+                    "draw has no made hand to charge them with. CHECK. Call only if "
+                    "the price is right; never bet or raise (those options are "
+                    "withheld in this spot).")
         if facing:
             return ("DRAW ODDS: compare the estimated draw equity in the facts with "
                     "the break-even equity to call. With 8+ outs, folding is usually "
@@ -664,6 +840,10 @@ def value_directive(sit: Situation) -> str | None:
                     "usually correct. Fold to a large bet or multiway aggression.")
         return ("SHOWDOWN: top pair facing a large single bet — folding is acceptable; "
                 "call only if the opponent's line is bluff-heavy.")
+    if tier == WEAK_DRAW and _no_fold_equity(sit):
+        return ("NO FOLD EQUITY: 3+ opponents are in the pot and this is only a weak "
+                "draw — check/fold. Call only a small bet with the right price; never "
+                "bet or raise (those options are withheld in this spot).")
     return None
 
 
@@ -806,6 +986,15 @@ def render_hand_facts(sit: Situation) -> str:
         shapes = ", ".join(shape.get(s, s) for s in snap.preflop_shapes) or "unknown"
         lines.append(f"Preflop shape: {shapes}｜Hero is preflop raiser: "
                      f"{'yes' if snap.hero_is_pfr else 'no'}")
+        # 范围归属由程序算，不靠模型回忆那张表。实测模型会编出
+        # 「AJo is in UTG+1's RFI range」这种和表直接矛盾的理由。
+        if sit.range_verdict:
+            lines.append(sit.range_verdict)
+        limpers = count_limpers(snap)
+        if limpers:
+            # 行动线可能漏掉平跟（没有动作徽章）；用同帧下注额补出来，
+            # 让模型知道前面到底有几个人溜入，而不是只看底池猜。
+            lines.append(f"Limpers before me: {limpers}")
         # 抽 set 的隐含赔率：翻前不渲染成牌胜率，但小对子需要这组数字才能
         # 判断「跟 1BB 看翻牌」划不划算。阈值（15-20×）来自 preflop-limp.md
         if (to_call > 0 and effective is not None
@@ -822,6 +1011,26 @@ def render_hand_facts(sit: Situation) -> str:
                      f"Draw: {'yes' if sit.has_draw else 'no'}｜"
                      f"Plays the board (best five all from board): "
                      f"{'yes' if sit.plays_board else 'no'}")
+        # 「两对」「顺子」只是名字，不是强度。把实际排名算出来给模型看 ——
+        # 8822 在 88T 上 87.7% 已被领先，和「花面的顺子」19.9% 差一个量级，
+        # 靠 capped_by_board 这个布尔值分不开。见 coach.beat_rate。
+        if sit.beat_pct is not None and sit.beat_at_least_pct is not None:
+            n = sit.opponents_in_hand or 0
+            if sit.hand_tier in (STRONG_DRAW, WEAK_DRAW):
+                # 听牌时这个数只反映「还没成牌」（坚果同花听牌此刻只是 A 高，
+                # 会被算成 40%+ 已落后）。不提示清楚会把它推去弃牌。
+                lines.append(
+                    f"Made-hand rank of the CURRENT (unmade) hand: "
+                    f"{sit.beat_at_least_pct:g}% of the time someone already has "
+                    f"you beaten right now. This does NOT apply to a draw — judge "
+                    f"a draw by its outs and the pot odds, not by this number.")
+            else:
+                lines.append(
+                    f"Made-hand rank (exact count over all {n + 1}-way holdings): "
+                    f"beaten by {sit.beat_pct:g}% of random hands per opponent; with "
+                    f"{n} opponent(s) in the hand, {sit.beat_at_least_pct:g}% chance at "
+                    f"least one is ahead. Random hands are a LOWER bound — anyone who "
+                    f"called or raised has a stronger range than random.")
         if snap.bomb_pot:
             lines.append("Bomb pot banner: YES (幸运暴击 / BOMB POT shown on screen)")
         prev_pot = previous_street_pot(snap)
@@ -872,7 +1081,16 @@ def render_hand_facts(sit: Situation) -> str:
     return "\n".join(lines)
 
 
-def build_messages(sit: Situation) -> tuple[str, str]:
+PROMPT_STYLE_LEAN = "lean"
+PROMPT_STYLE_SKILLS = "skills"
+PROMPT_STYLES = (PROMPT_STYLE_LEAN, PROMPT_STYLE_SKILLS)
+# 默认精简版：契约 + 计算事实 + 桌面动态 + 一份紧凑的现代范围框架。
+# 旧版（15 篇 2005 年《Little Green Book》技能，system 约 20k 字符）保留给
+# A/B 对比：`--advice-style skills`。lean 版不再展开技能库。
+DEFAULT_PROMPT_STYLE = PROMPT_STYLE_LEAN
+
+
+def _build_messages_skills(sit: Situation) -> tuple[str, str]:
     """返回 (system, user)。system 由「角色 + 输出契约 + 技能层」拼成。"""
     all_ = skills.all_skills()
     selected = skills.select_skills(_skill_context(sit), all_)
@@ -931,8 +1149,10 @@ def build_messages(sit: Situation) -> tuple[str, str]:
         "full house on a dry board against an aggressive opponent.",
         "5. Size for value: 1/2–2/3 pot on a dry board, 2/3–full pot on a wet/draw-heavy "
         "board. Do not default to the smallest size.",
-        "6. Strong draw (8+ outs) with no bet in front → betting (semi-bluff) is preferred. "
-        "Facing a bet, compare the stated estimated equity with the break-even equity; do "
+        "6. Strong draw (8+ outs) with no bet in front → betting (semi-bluff) is preferred — "
+        "**heads-up only**: with 3+ opponents in the pot, check instead, because a draw has "
+        "no fold equity against a calling field. Facing a bet, compare the stated estimated "
+        "equity with the break-even equity; do "
         "not fold a draw that has enough equity.",
         "7. The user facts include an explicit «Value directive» when one of these rules "
         "applies. It is a default for strong made hands; the «Table dynamics» section "
@@ -1008,6 +1228,127 @@ def build_messages(sit: Situation) -> tuple[str, str]:
     return "\n".join(system_parts), render_hand_facts(sit)
 
 
+# ── lean 提示词：契约 + 事实 + 桌面动态 + 现代范围框架 ──────────────
+# 刻意不加载 skills_md_en：那套是 2005 年《Little Green Book》的绝对化打法，
+# 没有范围表，system 约 20k 字符。这里只保留模型做「范围决策」真正需要的：
+# 输出契约、怎么用事实/赔率、按位置的 RFI/3-bet/冷跟范围、翻后纹理与尺度、
+# 爆炸底池一行、以及桌面动态的调频方式。
+_LEAN_SYSTEM = """\
+You are a Texas Hold'em cash-game advisor working in real time. Hero has a few seconds \
+and needs one directly executable action.
+
+## Who you are playing (this game — read first)
+Loose-passive **calling stations**. Every rule below is subordinate to this:
+- They call too much and raise too little: calling range ≈ any draw + top pair or better.
+- Their bets and raises are value. A passive raise has it; a multi-street barrel is \
+near-nuts.
+- Bluffing is dead money — you cannot fold out a draw or top pair.
+- The only way to win is value.
+
+## The question that decides every bet
+Ask **"which worse hands actually CALL me?"**
+- Two or more worse hands that call → bet 2/3 to full pot.
+- "Only better hands call, worse hands fold" → check.
+- That is why raising is never right with a non-nut hand: a raise narrows their range to \
+its top.
+
+## Hand RANK on this board (not its name)
+- Straight on a flush board (3+ suited): a flush beats you and made flushes are exactly \
+what they call with. No raise; bet small or check-call; fold to a raise.
+- Flush or straight on a paired board: a full house beats you, and they call with \
+trips/boats. No raise; check-call or a small bet; fold to a raise.
+- Small two pair built on a board pair (8822 on 88T, 6644 on QJ266): the worst two pair — \
+any pocket pair above yours, or an over-card that pairs, beats it. Not a value hand.
+- Only the nut straight/flush may be raised.
+
+## Output
+Return exactly one JSON object, no markdown fence and no other text:
+{"option": "<id from Options>", "reason": "<one sentence, under 25 words>"}
+- option must be exactly one id from the user's «Options» section. Never invent ids or \
+amounts; all amounts are computed by the program.
+- reason must cite the range, computed fact, or table tendency that decided it.
+
+## Ground rules
+1. Computed facts are authoritative: positions, stack, pot, to_call, break-even equity, \
+hand tier, draw, texture, explosive pot. Do not recompute amounts.
+2. Preflop: choose by position and range. Open-raise, 3-bet, cold-call or fold; do not \
+limp as the first player in (except an SB complete).
+3. Postflop: judge the calling range and board texture first; then value/check/size.
+4. Call only when your equity beats the stated break-even equity. Implied odds need \
+position and stack depth.
+5. Table dynamics shift frequencies and sizings; they never override computed equity or \
+pot odds, and override the default «unknown opponent» assumption.
+6. If calling covers Hero's stack, the decision is all-in or fold.
+7. A «Value directive» in the facts is a coarse default. Overrule it when the \
+calling-range reasoning above disagrees.
+
+## Preflop ranges (9-handed, ~100BB, ante)
+RFI by position (cumulative: each row adds to the previous; raise to the offered size,
+fold the rest):
+<<RFI_CHART>>
+SB: open ~30%, raise-or-fold vs opens (not vs limps). In a limped pot, completing for \
+0.5BB is cheap, but **raw pot odds never justify it — you need realized equity**. Complete \
+only hands that can flop something you can bet: suited, connected with gap 2 or less, a \
+pocket pair, or an ace with a real kicker. FOLD offsuit trash (92o, T6o, Q6o): it flops no \
+draw, and when it hits it is a second-best one-pair hand, out of position, paying off.
+The facts may carry a «Preflop range» line computed from this chart. It is authoritative: \
+when it says OUT, FOLD. One exception — a small pocket pair (22-66) may over-limp for 1BB \
+to set-mine. A non-pair hand never qualifies. Limpers, table dynamics and "isolation" never \
+move a hand into an earlier seat's open range. Raise the chart hands only.
+3-bet: value QQ+/AK; bluffs A5s-A2s, KQs, KJs vs late opens; 3x IP, 4x OOP.
+Cold-call IP: 22-99, 54s-JTs, KTs, QJs; no offsuit broadways vs early opens.
+BB vs late open: defend wide; 3-bet linear 55+, A9s+, KTs+, ATo+, KQo.
+At 6-8 handed, widen each early-position range by roughly one seat.
+
+## Postflop
+- C-bet dry A/K-high or paired boards at 1/3 pot only with equity; air is a donation here.
+- Value size **2/3 to full pot**, dry or wet. They call either way — charge them. 1/3 is \
+never a value size against a station.
+- Bluff only with a real draw. Heads-up: a strong draw with no bet in front is a BET \
+(semi-bluff) — fold equity is real there, and checking gives the pot away. \
+**3+ opponents: never bet or raise a draw.** A multiway pot has no fold equity — \
+the calling stations come along with any draw or top pair, and a draw has no made hand \
+to charge them with. Check; call only when the price is right. (The program withholds \
+the bet/raise options in that multiway spot; heads-up it does not.)
+- One pair: one bet, then pot-control; do not stack off.
+- Facing a raise or a multi-street barrel from a passive player: FOLD one pair and non-nut \
+made hands. Their line is value.
+- MDF assumes an opponent who bluffs. This table does not — fold more than MDF says.
+
+## Explosive pot
+«Explosive pot: YES» (bomb banner, or 5BB per player) means wide ranges and many two \
+pair/trips. Top pair/overpair is a MEDIUM hand — pot-control it.
+
+## Table dynamics (user-provided, when present)
+It overrides the default «unknown opponent» assumption: loose-passive → no bluffs, \
+value-bet big, respect raises; nit → steal more, fold marginal; loose-aggressive → trap, \
+call down lighter; tight-aggressive → straightforward. Never overrides computed hand \
+strength or pot odds. When it changes the line, say which tendency drove it.
+"""
+
+# 范围表由 preflop_ranges 生成，不再手写两份：手写一定漂移，而模型拿到
+# 和代码判定不一致的表时，会挑对自己有利的那份用。
+_LEAN_SYSTEM = _LEAN_SYSTEM.replace("<<RFI_CHART>>", chart_text())
+
+
+def _build_messages_lean(sit: Situation) -> tuple[str, str]:
+    return _LEAN_SYSTEM, render_hand_facts(sit)
+
+
+def build_messages(sit: Situation,
+                   style: str = DEFAULT_PROMPT_STYLE) -> tuple[str, str]:
+    """按风格拼 (system, user)。
+
+    lean（默认）= 契约 + 事实 + 现代范围框架；skills = 旧的技能库全量注入。
+    未知风格直接报错，避免拼写错误静默退回某个版本。
+    """
+    if style == PROMPT_STYLE_SKILLS:
+        return _build_messages_skills(sit)
+    if style == PROMPT_STYLE_LEAN:
+        return _build_messages_lean(sit)
+    raise ValueError(f"未知提示词风格：{style!r}（可选：{', '.join(PROMPT_STYLES)}）")
+
+
 def _skill_context(sit: Situation) -> skills.SkillContext:
     snap = sit.snap
     known = sum(1 for o in snap.opponents if o.name or o.position)
@@ -1066,8 +1407,11 @@ class AISettings:
     temperature: float | None = 0.2
     top_p: float | None = None
     max_tokens: int | None = None
-    thinking: str | None = None           # enabled | disabled
+    thinking: str | None = None           # enabled | disabled（DeepSeek）
     reasoning_effort: str | None = None   # none | low | high | max
+    # OpenRouter 推理开关：请求体里是 {"reasoning": {"enabled": bool}}。
+    # 与 DeepSeek 的 thinking 是两套字段，各自按供应商填写。None = 不传。
+    reasoning: bool | None = None
 
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None,
@@ -1099,8 +1443,19 @@ class AISettings:
                 raise ValueError(
                     "AI_SERVER_REASONING_EFFORT 只能是 none / low / high / max")
 
+        reasoning_text = _env_text(env, "AI_SERVER_REASONING")
+        if reasoning_text is not None:
+            reasoning_text = reasoning_text.lower()
+            if reasoning_text not in ("enabled", "disabled"):
+                raise ValueError("AI_SERVER_REASONING 只能是 enabled 或 disabled")
+        reasoning = (None if reasoning_text is None
+                     else reasoning_text == "enabled")
+
         temperature = _env_number(env, "AI_SERVER_TEMPERATURE", float, 0.0, 2.0)
-        if temperature is None:
+        # 推理模型（OpenRouter 的 GPT/o 系列）只接受默认 temperature，
+        # 显式发 0.2 会被服务端拒绝。没配 temperature 时只在非推理模式
+        # 保留原来的 0.2 默认；开了 reasoning 就不发。
+        if temperature is None and not reasoning:
             temperature = 0.2
 
         return cls(api_key=key, base_url=base.rstrip("/"), model=model,
@@ -1112,7 +1467,8 @@ class AISettings:
                    max_tokens=_env_number(env, "AI_SERVER_MAX_TOKENS", int,
                                           1, 393216),
                    thinking=thinking,
-                   reasoning_effort=effort)
+                   reasoning_effort=effort,
+                   reasoning=reasoning)
 
 
 class AIError(RuntimeError):
@@ -1211,20 +1567,121 @@ def _post_json(url: str, payload: dict, headers: dict, timeout: float) -> bytes:
 
 
 def _http_error(exc: urllib.error.HTTPError) -> AIError:
-    # 鉴权失败不回显 body：供应商常在里面回显 Key 片段
-    if exc.code in (401, 403):
+    # 不回显 body：供应商常在里面回显 Key 片段
+    if exc.code == 401:
         return AIError("模型鉴权失败，请检查 AI_SERVER_API_KEY")
+    if exc.code == 403:
+        # 403 不一定是 Key 错：OpenRouter 对 OpenAI 模型常因账号/地区/
+        # 供应商条款拒绝，Key 本身仍然有效。两者分开报才查得动。
+        return AIError("模型服务拒绝访问（HTTP 403）：可能是账号、地区或供应商"
+                       "条款限制，不一定是 Key 写错。OpenRouter 可在 Activity "
+                       "页查看被拒原因")
     return AIError(f"模型服务返回 HTTP {exc.code}")
+
+
+def chat_headers(settings: AISettings) -> dict:
+    """OpenAI 兼容 /chat/completions 的请求头。
+
+    `HTTP-Referer` / `X-OpenRouter-Title` 只在配置了 `AI_SERVER_REFERER` /
+    `AI_SERVER_TITLE` 时发送（OpenRouter 用它做可选排名，其他供应商会忽略）。
+    """
+    headers = {"Content-Type": "application/json",
+               "Authorization": "Bearer " + settings.api_key}
+    if settings.referer:
+        headers["HTTP-Referer"] = settings.referer
+    if settings.title:
+        headers["X-OpenRouter-Title"] = settings.title
+    return headers
+
+
+def chat_payload(settings: AISettings, messages: list[dict],
+                 json_mode: bool = False) -> dict:
+    """组装 /chat/completions 请求体。只发显式配置过的参数。
+
+    `thinking` 是 DeepSeek 的字段；`reasoning` 是 OpenRouter 的字段
+    （`{"enabled": true}`）。两者互不替代，按 `.env` 里实际配置的发。
+    `reasoning_effort` 在 OpenRouter 下嵌进 reasoning.effort，其余供应商
+    仍发顶层字段（DeepSeek 的口径）。
+    """
+    body = {"model": settings.model, "messages": messages, "stream": False}
+    if settings.temperature is not None:
+        body["temperature"] = settings.temperature
+    if settings.top_p is not None:
+        body["top_p"] = settings.top_p
+    if settings.max_tokens is not None:
+        body["max_tokens"] = settings.max_tokens
+    if settings.thinking is not None:
+        body["thinking"] = {"type": settings.thinking}
+    if settings.reasoning is not None:
+        reasoning: dict = {"enabled": settings.reasoning}
+        if settings.reasoning_effort is not None:
+            reasoning["effort"] = settings.reasoning_effort
+        body["reasoning"] = reasoning
+    elif settings.reasoning_effort is not None:
+        body["reasoning_effort"] = settings.reasoning_effort
+    if json_mode:
+        body["response_format"] = {"type": "json_object"}
+    return body
+
+
+def chat_message(settings: AISettings, messages: list[dict],
+                 timeout: float = 20.0, request=None,
+                 json_mode: bool = False) -> dict:
+    """POST `{BASE_URL}/chat/completions`，返回 assistant message 原对象。
+
+    返回的 message 可能带 `reasoning` / `reasoning_details`。**多轮续推**时把
+    上一条 assistant message 原样放回 `messages` 即可（`reasoning_details`
+    不要裁剪或改写，OpenRouter 需要它来续接推理）::
+
+        first = chat_message(settings, messages)
+        messages += [{"role": "assistant",
+                      "content": first.get("content"),
+                      "reasoning_details": first.get("reasoning_details")},
+                     {"role": "user", "content": "Are you sure?"}]
+        second = chat_message(settings, messages)
+
+    `json_mode` 打开时先带 `response_format=json_object` 请求；兼容层不认它
+    会回 400，此时自动退回不带该字段重试一次（保留原有行为）。
+    """
+    url = settings.base_url + "/chat/completions"
+    post = request or _post_json
+    headers = chat_headers(settings)
+    try:
+        try:
+            raw = post(url, chat_payload(settings, messages, json_mode),
+                       headers, timeout)
+        except urllib.error.HTTPError as exc:
+            # 有些兼容层不认 response_format（回 400）。它只是个增强，
+            # 退一步重来，而不是把整次建议判失败
+            if exc.code != 400 or not json_mode:
+                raise
+            raw = post(url, chat_payload(settings, messages, False),
+                       headers, timeout)
+    except urllib.error.HTTPError as exc:
+        raise _http_error(exc) from exc
+
+    try:
+        body = json.loads(raw)
+        message = body["choices"][0]["message"]
+    except (ValueError, KeyError, IndexError, TypeError) as exc:
+        raise AIError("模型响应结构不对") from exc
+    if not isinstance(message, dict):
+        raise AIError("模型响应结构不对")
+    return message
 
 
 def complete_json(settings: AISettings, system: str, user: str,
                   timeout: float = 20.0, options: list[dict] | None = None,
-                  request=None) -> dict:
+                  request=None, history: list[dict] | None = None) -> dict:
     """调用模型并解析成 `{"option": ..., "reason": ...}`。失败抛 AIError。
 
     **模型名决定协议**：JEV 系列（`jev-*` / `vendor/jev-*`）走 OpenRouter 的
     decisions 接口（见 `complete_jev`），其余走 OpenAI 兼容的
     `/chat/completions`。`options` 是 JEV 需要的候选动作；chat 模式忽略它。
+
+    `history` 是多轮对话里位于 system 之后、本轮 user 之前的消息。要续接
+    推理模型的思考，把上一次的 assistant message（含 `reasoning_details`）
+    原样放进去；返回值也会带上本次的 `reasoning_details`。
 
     chat 模式刻意不引 SDK、不走流式：一次只回几十个 token，urllib 足够，
     也避免给实时链路增加依赖。`response_format=json_object` 能显著降低
@@ -1234,68 +1691,30 @@ def complete_json(settings: AISettings, system: str, user: str,
         return complete_jev(settings, system, user, timeout=timeout,
                             options=options, request=request)
 
-    headers = {"Content-Type": "application/json",
-               "Authorization": "Bearer " + settings.api_key}
+    messages = [{"role": "system", "content": system}]
+    if history:
+        messages.extend(history)
+    messages.append({"role": "user", "content": user})
 
-    def payload(json_mode: bool) -> dict:
-        body = {
-            "model": settings.model,
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            "stream": False,
-        }
-        # 只发显式配置过的参数。deepseek-flash 思考模式会忽略 temperature，
-        # 所以实时链路默认在 .env 里关掉思考（AI_SERVER_THINKING=disabled）。
-        if settings.temperature is not None:
-            body["temperature"] = settings.temperature
-        if settings.top_p is not None:
-            body["top_p"] = settings.top_p
-        if settings.max_tokens is not None:
-            body["max_tokens"] = settings.max_tokens
-        if settings.thinking is not None:
-            body["thinking"] = {"type": settings.thinking}
-        if settings.reasoning_effort is not None:
-            body["reasoning_effort"] = settings.reasoning_effort
-        if json_mode:
-            body["response_format"] = {"type": "json_object"}
-        return body
+    message = chat_message(settings, messages, timeout=timeout,
+                           request=request, json_mode=True)
+    content = message.get("content")
+    if not isinstance(content, str):
+        # 推理模型偶尔只回 reasoning、content 为空；这不能当成合法选项
+        raise AIError("模型响应结构不对（content 为空）")
 
-    url = settings.base_url + "/chat/completions"
-    post = request or _post_json
-    try:
-        try:
-            raw = post(url, payload(True), headers, timeout)
-        except urllib.error.HTTPError as exc:
-            # 有些兼容层不认 response_format（回 400）。它只是个增强，
-            # 退一步重来，而不是把整次建议判失败
-            if exc.code != 400:
-                raise
-            raw = post(url, payload(False), headers, timeout)
-    except urllib.error.HTTPError as exc:
-        raise _http_error(exc) from exc
-
-    try:
-        body = json.loads(raw)
-        content = body["choices"][0]["message"]["content"]
-    except (ValueError, KeyError, IndexError, TypeError) as exc:
-        raise AIError("模型响应结构不对") from exc
-
-    return parse_json_content(content)
+    data = parse_json_content(content)
+    # 保留原样的 reasoning_details：调用方续推时直接回传，不做任何改写
+    if message.get("reasoning_details") is not None:
+        data["reasoning_details"] = message["reasoning_details"]
+    return data
 
 
 # ─────────────────────────── JEV decisions ───────────────────────────
 
 def jev_headers(settings: AISettings) -> dict:
-    """JEV（OpenRouter）请求头。Referer/Title 是可选的排名信息。"""
-    headers = {"Content-Type": "application/json",
-               "Authorization": "Bearer " + settings.api_key}
-    if settings.referer:
-        headers["HTTP-Referer"] = settings.referer
-    if settings.title:
-        headers["X-OpenRouter-Title"] = settings.title
-    return headers
+    """JEV（OpenRouter decisions）请求头，与 chat 模式共用同一套鉴权/排名头。"""
+    return chat_headers(settings)
 
 
 def jev_payload(settings: AISettings, state: list, questions: dict) -> dict:
@@ -1472,11 +1891,14 @@ class Advice:
 
 
 def advise(sit: Situation, settings: AISettings | None,
-           timeout: float = 20.0, complete=None) -> Advice:
+           timeout: float = 20.0, complete=None,
+           style: str = DEFAULT_PROMPT_STYLE) -> Advice:
     """出一次建议。`complete` 可注入（单测用），默认走 complete_json。"""
     started = time.monotonic()
     by_id = {o.id: o for o in sit.options}
-    selected = skills.select_skills(_skill_context(sit))
+    # lean 不加载技能库，skill_codes 留空（它只是复盘时的元数据）。
+    selected = (skills.select_skills(_skill_context(sit))
+                if style == PROMPT_STYLE_SKILLS else [])
 
     def make(option: Option, reason: str, source: str,
              error: str | None = None) -> Advice:
@@ -1495,7 +1917,7 @@ def advise(sit: Situation, settings: AISettings | None,
                     "未配置 AI_SERVER_*，按最保守的默认动作",
                     "fallback", "未配置模型凭据")
 
-    system, user = build_messages(sit)
+    system, user = build_messages(sit, style)
     caller = complete or complete_json
     try:
         # options 只给 JEV 用：它需要把候选动作变成一道 choice 题。
@@ -1524,13 +1946,15 @@ class AdviceRunner:
     """
 
     def __init__(self, settings: AISettings | None, *, timeout: float = 20.0,
-                 complete=None, log=None) -> None:
+                 complete=None, log=None,
+                 style: str = DEFAULT_PROMPT_STYLE) -> None:
         import queue
         import threading
 
         self.settings = settings
         self.timeout = timeout
         self._complete = complete
+        self.style = style
         self._log = log or (lambda _msg: None)
         self._queue: queue.Queue = queue.Queue(maxsize=1)
         self._done: queue.Queue = queue.Queue()
@@ -1589,7 +2013,8 @@ class AdviceRunner:
             self._busy.set()
             try:
                 try:
-                    advice = advise(sit, self.settings, self.timeout, self._complete)
+                    advice = advise(sit, self.settings, self.timeout,
+                                    self._complete, style=self.style)
                 except Exception as exc:  # noqa: BLE001 — 后台线程不能死
                     self._log(f"[建议] 生成失败：{type(exc).__name__}: {exc}")
                     continue

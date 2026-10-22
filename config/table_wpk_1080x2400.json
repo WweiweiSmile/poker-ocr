@@ -7,6 +7,7 @@
     "date": "2026-10-16"
   },
   "reference_size": [1080, 2400],
+  "default_ante": 0.5,
   "canvas": null,
   "table_center": [0.5, 0.3593],
   "hero_seat_id": "hero",

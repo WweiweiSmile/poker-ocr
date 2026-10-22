@@ -168,9 +168,10 @@ ROI 路线只裁固定槽位、只跑 rec，不跑全图检测，是实时链路
   `inferred: true`）。金额是底池精确反解出来的，但加注者身份只能按行动顺序取
   「最后一个已记录动作之后最早能行动的人」，无法由底池唯一确定。专门覆盖最后
   位置预设动作、视频流没抓到那一帧就换街的情况；两种模型都对不上账就不猜。
-- **技能**：只加载**当前行动街**的技能（与 call-back 的
-  `services/skills/*.md` 正文逐字一致），常驻 `core-stance` + `odds-table`，
-  再按翻前形态 / 牌力分档 / 听牌 / 多人池 / cbet 点路由专项技能。
+- **提示词（默认 lean）**：输出契约 + 计算事实 + 桌面动态 + 一份紧凑的现代
+  范围框架（按位置 RFI、3-bet/冷跟、翻后纹理与尺度、MDF），约 4k 字符。
+  不再注入 2005 年《Little Green Book》技能库；需要 A/B 时用
+  `--advice-style skills` 切回旧版（约 20k 字符，含技能目录与选中正文）。
 - **牌桌动态**：项目根目录的 `.table_dy`（纯文本，`#` 开头为注释）会作为
   `Table dynamics` 注入提示词，用来描述当前桌子的整体倾向，例如
   「新手玩家，比较松弱，诈唬很少」。模型据此做剥削性调整：对松弱/跟注站少
@@ -193,7 +194,12 @@ ROI 路线只裁固定槽位、只跑 rec，不跑全图检测，是实时链路
   无人下注时小注控池；强成牌（两对/三条/顺子/同花）仍正常拿价值。
 - **选项**：翻后是弃牌、跟注（没人下注时是过牌）、加注到底池 1/3、1/2、2/3、1、
   1.2 倍；翻前换成 bb 口径 —— 平跟/过牌 + 开池到 2.5~4BB（按位置档、前注×2、
-  每个溜入者 +1BB），面对加注时是 3×/4× 上家加注。
+  前两个溜入者每个 +1BB、第 3 个起每个 +0.5BB、**松桌再 +0.5BB**），
+  面对加注时是 3×/4× 上家加注。溜入者优先看行动线；limper 平跟 1BB 往往
+  不生成动作徽章，会按「同帧各家下注额 == 1BB 且不是盲注位」补数。
+  盲注横幅把括号里的前注读空（`1/2(）`）时，用 profile 的 `default_ante`
+  （本 app 的 1/2 桌是 0.5BB）兜底 —— 否则前注 ×2 的放大整段丢失，
+  开池会从 6-8BB 掉回 3BB。
   金额由程序算好（翻后口径为「当前最高下注 + f ×（底池 + 需跟额）」），低于最小
   加注额会抬到合法值，超过后手会封顶为全下；模型只返回选项 id。
 - **执行**：模型调用在后台线程，单次超时 `--ai-timeout`。生成建议期间主循环
@@ -225,9 +231,16 @@ ROI 路线只裁固定槽位、只跑 rec，不跑全图检测，是实时链路
   OpenRouter 的 decisions 接口 —— `POST AI_SERVER_BASE_URL`，请求体是
   `{"model", "state", "questions"}`，候选动作变成一道 `choice` 题
   （criteria 的 key 是选项 id），从 `answers.option` 取选择与概率。
-  其他模型走 OpenAI 兼容的 `{BASE_URL}/chat/completions`。
+  其他模型走 OpenAI 兼容的 `{BASE_URL}/chat/completions`，包括 OpenRouter 上的
+  GPT（`AI_SERVER_BASE_URL=https://openrouter.ai/api/v1`）。
   两套协议对下游输出相同的 `{option, reason}`。
   `AI_SERVER_REFERER` / `AI_SERVER_TITLE` 是 OpenRouter 的可选排名头。
+- **OpenRouter 推理**：`AI_SERVER_REASONING=enabled` 时请求体带
+  `{"reasoning": {"enabled": true}}`（`AI_SERVER_REASONING_EFFORT` 会嵌成
+  `reasoning.effort`）。响应里的 `reasoning_details` 原样保留，多轮续推时
+  连同 assistant message 回传即可继续推理。开推理会明显变慢，实时链路把
+  `AI_SERVER_TIMEOUT` 调到 15–30 秒；推理模型别设 `AI_SERVER_TEMPERATURE`，
+  也不要用太小的 `AI_SERVER_MAX_TOKENS`。
 
 ### 工具链（抓帧 → 裁剪 → 验证 → 重新标注）
 
@@ -241,6 +254,7 @@ ROI 路线只裁固定槽位、只跑 rec，不跑全图检测，是实时链路
 | `tools/calibrate_clicker.py` | 全屏拖框标定自动点击按钮，生成 `config/clicker_local.json` |
 | `tools/video_to_states.py` | 离线视频 → 状态 JSON（不经过 OBS/RTSP） |
 | `tools/export_live_hands.py` | 从 `live.states.jsonl` 筛出完整手牌 → `hands.json` |
+| `tools/compare_advice_styles.py` | 筛出大幅盈亏手牌，回放对比 lean / skills 提示词 |
 
 ---
 
@@ -736,7 +750,7 @@ cd ~/codes/poker-ocr
 | `option.id` | 模型选的选项。翻后：`fold` / `call` / `raise-1/3` / `raise-1/2` / `raise-2/3` / `raise-1` / `raise-1.2`（没人下注时 `call` 表示**过牌**）；翻前：`fold` / `call` / `open-2.5`…`open-4` / `raise-3x` / `raise-4x` |
 | `option.amount_bb` | 加注后的**本街总额**；跟注为需跟额 |
 | `source` | `model` = 模型选的；`fallback` = 超时/报错/非法选项，按最保守动作 |
-| `skill_codes` | 本次按当前街展开的技能 |
+| `skill_codes` | 本次展开的技能（lean 风格为空，skills 风格记录技能码） |
 | `error` | 仅 `fallback` 时出现，说明原因 |
 | `duration_ms` | 模型调用耗时（后台，不影响采样） |
 | `click` | 自动点击结果（仅 `--auto-click`）：`status / steps / mapping / reason` |
@@ -860,7 +874,8 @@ All-in 文本）会立即收掉当前手牌，不依赖牌面/庄位变化。
 | `--no-fold` | 关 | 不读头像，省 9 块 ROI，失去弃牌检测 |
 | `--dump-frames` | 无 | 采样帧存 JPEG |
 | `--max-frames` | `0` | 最多处理多少帧（0 = 不限） |
-| `--ai-advice` / `--no-ai-advice` | 开 | 轮到我时加载当前街技能并调用 AI 选一个选项（仅 roi 模式） |
+| `--ai-advice` / `--no-ai-advice` | 开 | 轮到我时拼提示词并调用 AI 选一个选项（仅 roi 模式） |
+| `--advice-style` | `lean` | `lean`=契约+事实+现代范围框架；`skills`=旧的 2005 技能库全量注入（A/B 对比用） |
 | `--ai-timeout` | `20` | 单次 AI 建议超时（秒）；后台线程，不阻塞采样 |
 | `--ai-confirm` | `1` | `hero_turn` 连续几帧才认定轮到我（蓝色下注按钮下第一帧即可） |
 | `--auto-click` / `--no-auto-click` | 开 | AI 建议返回后自动点击桌面客户端（需先标定；仅 macOS） |

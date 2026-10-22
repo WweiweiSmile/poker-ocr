@@ -176,7 +176,8 @@ def build_state(frame: RoiFrame, profile: Profile,
                 lenient_chips: bool = False,
                 card_icons: dict[str, bool | None] | None = None,
                 shown_seats: set[str] | None = None,
-                prev_fold: dict[str, bool | None] | None = None) -> FrameState:
+                prev_fold: dict[str, bool | None] | None = None,
+                ante_fallback: float | None = None) -> FrameState:
     """一帧 RoiFrame → FrameState（含解析错误清单）。
 
     `prev_names` 是**上一份被接受的状态**里的名字（名称粘性用）；
@@ -211,6 +212,11 @@ def build_state(frame: RoiFrame, profile: Profile,
         # 只在升级时变；让它跟着 OCR 在 0 / 0.5 之间跳会制造假状态变化。
         blinds = Blinds(sb=blinds.sb, bb=blinds.bb, ante=prev_blinds.ante,
                         raw=blinds.raw)
+    if blinds is not None and blinds.ante is None and ante_fallback:
+        # 横幅把括号里的前注读空（`1/2(）`）时，用 profile 的默认前注兜底。
+        # 前注直接影响开池尺寸（有前注要放大）和底池计算，不能当 0。
+        blinds = Blinds(sb=blinds.sb, bb=blinds.bb,
+                        ante=float(ante_fallback), raw=blinds.raw)
 
     pot_a = parse_amount(frame.text("pot"))
     pbs_a = parse_amount(frame.text("pot_before_street"))

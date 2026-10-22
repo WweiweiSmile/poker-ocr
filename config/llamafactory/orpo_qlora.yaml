@@ -1,0 +1,66 @@
+### 第二阶段 偏好对齐：ORPO（QLoRA 4bit）
+###   llamafactory-cli train config/llamafactory/orpo_qlora.yaml
+###
+### 数据集格式（sharegpt + ranking），data/sft/orpo.json：
+### [
+###   {
+###     "system": "<与 SFT 完全相同的 system>",
+###     "conversations": [{"from": "human", "value": "<facts>"}],
+###     "chosen":   {"from": "gpt", "value": "{\"option\": \"raise-2/3\"}"},
+###     "rejected": {"from": "gpt", "value": "{\"option\": \"call\"}"}
+###   }
+### ]
+### dataset_info.json 里对应条目要写 "ranking": true。
+###
+### chosen = 求解器 argmax-EV 动作；rejected = 同 spot 下 EV 差距 >= 0.5BB 的次优动作。
+### 混 20-30% 第一阶段数据防灾难性遗忘（论文是 50k/320k ≈ 16%，你的分布更窄，建议高一点）。
+
+### model
+model_name_or_path: Qwen/Qwen3-8B
+trust_remote_code: true
+
+### method
+stage: orpo
+do_train: true
+finetuning_type: lora
+lora_rank: 8
+lora_alpha: 16
+lora_dropout: 0.0
+lora_target: all
+pref_beta: 0.1
+pref_loss: orpo
+
+### quantization（QLoRA：24G 卡也能跑 8B）
+quantization_bit: 4
+quantization_method: bnb
+double_quantization: true
+
+### dataset
+dataset: poker_orpo
+dataset_dir: data/orpo
+template: qwen3
+enable_thinking: false
+cutoff_len: 2048
+overwrite_cache: true
+preprocessing_num_workers: 8
+
+### output
+output_dir: saves/poker-8b/orpo
+logging_steps: 10
+save_steps: 500
+save_total_limit: 2
+plot_loss: true
+overwrite_output_dir: true
+report_to: none
+
+### train
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 16
+learning_rate: 2.0e-5
+num_train_epochs: 2.0
+lr_scheduler_type: cosine
+warmup_ratio: 0.03
+bf16: true
+gradient_checkpointing: true
+flash_attn: fa2
+ddp_timeout: 180000000

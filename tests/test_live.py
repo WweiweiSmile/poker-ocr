@@ -50,6 +50,8 @@ def test_defaults_are_no_throttle_and_instant_turn() -> None:
     check(args.ai_confirm == 1,
           f"默认应第一帧就认定轮到我，实际 {args.ai_confirm}")
     check(args.ai_advice is True, "AI 建议默认应开启")
+    check(args.advice_style == "lean",
+          f"提示词默认应是 lean，实际 {args.advice_style}")
     check(args.auto_click is True, "自动点击默认应开启")
     check(args.url == "cam:auto",
           f"默认应自动选择虚拟摄像头，实际 {args.url}")

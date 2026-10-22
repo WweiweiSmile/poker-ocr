@@ -57,7 +57,8 @@ from typing import Callable
 import cv2
 import numpy as np
 
-from .advice import AISettings, AdviceRunner, build_situation
+from .advice import (AISettings, AdviceRunner, DEFAULT_PROMPT_STYLE,
+                     PROMPT_STYLES, build_situation)
 from .cards import (DEFAULT_CARD_SLOTS, DEFAULT_DOUBT_WINDOW, CardsResult,
                     StableCards, recognize_cards, recognize_shown_cards)
 from .clicker import (DEFAULT_CONFIG_PATH as DEFAULT_CLICKER_CONFIG,
@@ -1773,9 +1774,13 @@ def build_parser() -> argparse.ArgumentParser:
                     help="把每个采样帧存成 JPEG，文件名带墙钟时间（量延迟用）")
     ap.add_argument("--ai-advice", action=argparse.BooleanOptionalAction,
                     default=True,
-                    help="轮到我时按当前街加载技能并调用 AI 给一个选项"
+                    help="轮到我时按当前街拼提示词并调用 AI 给一个选项"
                          "（默认开启；用 --no-ai-advice 关闭。需要 AI_SERVER_API_KEY / "
                          "AI_SERVER_BASE_URL / AI_SERVER_MODEL；仅 roi 模式）")
+    ap.add_argument("--advice-style", choices=PROMPT_STYLES,
+                    default=DEFAULT_PROMPT_STYLE,
+                    help="提示词风格：lean=契约+事实+现代范围框架（默认）；"
+                         "skills=旧的 2005 技能库全量注入（A/B 对比用）")
     ap.add_argument("--ai-timeout", type=float, default=None,
                     help="单次 AI 建议的超时秒数（默认读 AI_SERVER_TIMEOUT，"
                          "否则 20）。实时链路建议 5–8 秒")
@@ -1915,6 +1920,7 @@ def main(argv: list[str] | None = None) -> int:
             name_confirm=args.name_confirm,
             initial_blinds=initial_blinds,
             lenient_chips=args.lenient_chips,
+            ante_fallback=profile.default_ante,
             roi_threads=args.roi_threads,
         )
         _log(f"[启动] ROI 并行线程={args.roi_threads}"
@@ -1950,8 +1956,12 @@ def main(argv: list[str] | None = None) -> int:
                 "当前 profile 没有 hero_turn_probe 槽位，判不出「轮到我」，"
                 "AI 建议永远不会触发。请把 thresholds.hero_turn_method 设为 "
                 "blue_button（用 hero 头像槽判蓝色下注按钮），或补上 hero_turn_probe")
-        advice_runner = AdviceRunner(settings, timeout=args.ai_timeout, log=_log)
+        advice_runner = AdviceRunner(settings, timeout=args.ai_timeout, log=_log,
+                                     style=args.advice_style)
         hand_tracker = LiveHandTracker(confirm_frames=args.ai_confirm)
+        _log(f"[建议] 提示词风格={args.advice_style}"
+             + ("（契约+事实+现代范围框架）" if args.advice_style == "lean"
+                else "（旧技能库全量注入）"))
         dynamics = load_table_dynamics()
         table_dynamics_text = dynamics.text
         if dynamics.found:
@@ -1966,6 +1976,9 @@ def main(argv: list[str] | None = None) -> int:
         sampling = []
         if settings.thinking is not None:
             sampling.append(f"thinking={settings.thinking}")
+        if settings.reasoning is not None:
+            sampling.append("reasoning="
+                            + ("enabled" if settings.reasoning else "disabled"))
         if settings.reasoning_effort is not None:
             sampling.append(f"effort={settings.reasoning_effort}")
         if settings.temperature is not None:
@@ -2027,6 +2040,7 @@ def main(argv: list[str] | None = None) -> int:
         "full_config": str(args.full_config) if args.full_config else None,
         "every": args.every,
         "ai_advice": bool(args.ai_advice),
+        **({"advice_style": args.advice_style} if args.ai_advice else {}),
         "auto_click": bool(args.auto_click),
         **({"clicker_config": str(args.clicker_config or DEFAULT_CLICKER_CONFIG),
             "clicker_dry_run": bool(args.clicker_dry_run)}

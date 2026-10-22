@@ -29,3 +29,4 @@ auto.key
 server.crt
 server.key
 /:memory:.ses
+/hands/

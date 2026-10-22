@@ -52,6 +52,25 @@ _RARELY_BLUFFS_WORDS = ("诈唬很少", "很少诈唬", "不诈唬", "rarely blu
                         "never bluffs")
 
 
+# 「松」桌的判断只用于开池尺度：松桌跟注多，开池要放大收价值；
+# 紧桌不在这里放大（紧弱/尊重加注不是「松」）。
+_LOOSE_WORDS = (
+    "松弱", "松凶", "偏松", "很松", "松的", "松散", "跟注站",
+    "loose-passive", "loose passive", "loose-aggressive", "loose aggressive",
+    "calling station", "新手", "鱼",
+)
+
+
+def is_loose_table(text: str | None) -> bool:
+    """桌风是否明确是「松」桌（松弱/松凶/跟注站/新手鱼）。
+
+    只影响翻前开池尺度（`advice.build_options` 的 `open_bonus`）。
+    没有桌风、或写的是紧弱/尊重加注，都不算松 —— 紧桌反而该缩小开池。
+    """
+    t = (text or "").lower()
+    return bool(t) and any(w in t for w in _LOOSE_WORDS)
+
+
 def value_heavy_aggression(text: str | None) -> bool:
     """桌风是否明确说「对手的加注/连续下注以价值为主」。
 

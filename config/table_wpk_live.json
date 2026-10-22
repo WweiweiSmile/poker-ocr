@@ -13,6 +13,7 @@
     982,
     2182
   ],
+  "default_ante": 0.5,
   "canvas": null,
   "table_center": [
     0.5,

@@ -848,6 +848,59 @@ def test_straight_is_not_nuts_on_a_flush_board() -> None:
           f"对子面两对应允许跟正常下注：{d}")
 
 
+def test_multiway_draw_cannot_bet() -> None:
+    """h31 回归：4 家池里 8 张顺子听，不许再挑「下注 1/2 池」。
+
+    只写在提示词里不管用 —— 当时模型把下注重新解释成「为权益而打」。
+    约束放在动作空间上：纯听牌 + 3 家以上，下注/加注直接从选项里拿掉。
+    """
+    from poker_ocr.hand_track import OpponentSnapshot
+
+    def multiway(n: int):
+        return tuple(OpponentSnapshot(f"o{i}", "", "BB", 90.0, 0.0, False)
+                     for i in range(n))
+
+    # h31 的牌面：转牌 8s Qh 4s 9h，76s = 8 张顺子听，4 家，没人下注
+    sit = build_situation(make_point(
+        street="turn", board=("8s", "Qh", "4s", "9h"), hero_cards=("7c", "6s"),
+        opponents=multiway(4), pot=10.0, to_call=0.0))
+    ids = [o.id for o in sit.options]
+    check(ids == ["call"], f"多路纯听牌只该有过牌：{ids}")
+    check(sit.options[0].kind == "check", f"call 这个 id 应是过牌：{sit.options[0]}")
+    d = value_directive(sit) or ""
+    check(d.startswith("NO FOLD EQUITY"), f"应给「没有弃牌率」指令，实际：{d}")
+
+    # 同一手牌单挑：半诈唬仍然合法，选项和指令都不能被误伤
+    heads_up = build_situation(make_point(
+        street="turn", board=("8s", "Qh", "4s", "9h"), hero_cards=("7c", "6s"),
+        pot=10.0, to_call=0.0))
+    check("raise-1/2" in [o.id for o in heads_up.options],
+          f"单挑听牌应仍可下注：{[o.id for o in heads_up.options]}")
+    check("SEMI-BLUFF" in (value_directive(heads_up) or ""),
+          f"单挑强听应仍是半诈唬默认：{value_directive(heads_up)}")
+
+    # 成牌多路照常收价值：一对/暗三不在这条约束里
+    made = build_situation(make_point(
+        hero_cards=("Kd", "Kc"), opponents=multiway(3), pot=10.0))
+    check("raise-1/2" in [o.id for o in made.options],
+          f"多路成牌不该被砍掉下注：{[o.id for o in made.options]}")
+
+
+def test_multiway_draw_cannot_raise() -> None:
+    """面对下注也一样：多路听牌没有加注选项，只剩跟注/弃牌。"""
+    from poker_ocr.hand_track import OpponentSnapshot
+
+    four = tuple(OpponentSnapshot(f"o{i}", "", "BB", 90.0, 0.0, False)
+                 for i in range(4))
+    sit = build_situation(make_point(
+        street="turn", board=("8s", "Qh", "4s", "9h"), hero_cards=("7c", "6s"),
+        opponents=four, pot=40.0, to_call=10.0, hero_stack=60.0))
+    ids = [o.id for o in sit.options]
+    check(ids == ["fold", "call"], f"多路听牌面对下注只该有弃牌/跟注：{ids}")
+    check("NO FOLD EQUITY" in (value_directive(sit) or ""),
+          f"应给「没有弃牌率」指令：{value_directive(sit)}")
+
+
 def test_prompt_renders_value_directive_and_draw_equity() -> None:
     draw = build_situation(make_point(hero_cards=("Ah", "Qh"),
                                       board=("9h", "6h", "5s")))
@@ -881,6 +934,57 @@ def test_prompt_renders_implied_odds_for_pocket_pair() -> None:
 
     check("Implied odds" not in render_hand_facts(preflop(("Ah", "Kd"))),
           "非口袋对不该渲染抽 set 隐含赔率")
+
+
+def test_limpers_count_from_state_and_bonus_decays() -> None:
+    """3-4 个 limper：limper 从同帧下注额补数，第 3 个起每个只 +0.5BB。"""
+    from poker_ocr.hand_track import OpponentSnapshot
+    opps = tuple(OpponentSnapshot(f"o{i}", None, "UTG+1", 100.0, 1.0, False)
+                 for i in range(4))
+    snap = make_point(street="preflop", board=(), to_call=1.0, pot=9.5,
+                      hero_position="HJ", hero_bet=0.0, hero_stack=100.0,
+                      preflop_shapes=("limped",), cbet_spot=False,
+                      blinds=Blinds(0.5, 1.0, 0.5, "1/2(1)"),
+                      opponents=opps, streets=())
+    by = {o.id: o for o in build_options(snap)}
+    # HJ 基础 3.0 × 前注 2 = 6；4 个 limper = 1+1+0.5+0.5 = 3
+    check(abs(by["open-3"].amount - 9.0) < 1e-9,
+          f"4 个 limper 应开到 9.0：{by['open-3'].amount}")
+    check(abs(by["open-3.5"].amount - 10.0) < 1e-9,
+          f"4 个 limper 最大档应 10.0：{by['open-3.5'].amount}")
+    facts = render_hand_facts(build_situation(snap))
+    check("Limpers before me: 4" in facts,
+          f"提示词事实应写出溜入人数：{facts}")
+
+
+def test_loose_table_adds_open_bonus() -> None:
+    """松桌开池 +0.5BB；紧桌不加（紧弱/尊重加注不是松）。"""
+    from poker_ocr.advice import LOOSE_OPEN_BONUS
+    from poker_ocr.table_dynamics import is_loose_table
+    point = make_point(street="preflop", board=(), to_call=1.0, pot=5.5,
+                       hero_position="HJ", hero_bet=0.0, hero_stack=96.0,
+                       preflop_shapes=("limped",), cbet_spot=False,
+                       blinds=Blinds(0.5, 1.0, 0.5, "1/2(1)"))
+    tight = {o.id: o for o in build_options(point)}
+    loose = {o.id: o for o in build_options(
+        point, open_bonus=LOOSE_OPEN_BONUS)}
+    check(abs(loose["open-3.5"].amount - tight["open-3.5"].amount - 0.5) < 1e-9,
+          f"松桌应 +0.5BB：{tight['open-3.5'].amount} → "
+          f"{loose['open-3.5'].amount}")
+
+    check(is_loose_table("松弱玩家，跟注站，很少诈唬"), "松弱应判松桌")
+    check(not is_loose_table("紧弱，尊重加注"), "紧弱不该判松桌")
+    check(not is_loose_table(None), "没有桌风不该判松桌")
+
+    sit_loose = build_situation(point, table_dynamics="松弱玩家，跟注站")
+    sit_tight = build_situation(point, table_dynamics="紧弱，尊重加注")
+    amounts_loose = {o.id: o.amount for o in sit_loose.options
+                     if o.id.startswith("open-")}
+    amounts_tight = {o.id: o.amount for o in sit_tight.options
+                     if o.id.startswith("open-")}
+    check(all(abs(amounts_loose[k] - amounts_tight[k] - 0.5) < 1e-9
+              for k in amounts_tight),
+          f"松桌开池应整体 +0.5：{amounts_tight} vs {amounts_loose}")
 
 
 def test_options_preflop_uses_bb_sizing() -> None:
@@ -1078,7 +1182,7 @@ def test_prompt_contains_full_action_line_and_options() -> None:
         streets=(StreetRecord("preflop", 0.0, acts[:2]),
                  StreetRecord("flop", 6.0, acts[2:])))
     sit = build_situation(point)
-    system, user = build_messages(sit)
+    system, user = build_messages(sit, style="skills")
 
     check("## Coach Skill Catalog" in system, "system 应含技能目录")
     check("## Core Stance & Decision Flow" in system, "system 应含常驻技能正文")
@@ -1122,7 +1226,7 @@ def test_prompt_preflop_has_no_strength_facts() -> None:
                        cbet_spot=False, hero_is_pfr=False,
                        preflop_shapes=("single-raise",))
     sit = build_situation(point)
-    system, user = build_messages(sit)
+    system, user = build_messages(sit, style="skills")
     check("Preflop shape: one raise already" in user, f"翻前局面没写：\n{user}")
     check("My hand strength" not in user, "翻前不该给成牌分档")
     check("preflop-vs-open" in system, f"翻前技能应被展开：\n{system[:500]}")
@@ -1254,8 +1358,46 @@ def test_advise_uses_model_choice() -> None:
     check(advice.source == "model", f"应来自模型，实际 {advice.source}")
     check(advice.option.id == "raise-2/3", f"选项不对：{advice.option.id}")
     check(advice.option.amount is not None, "金额应由程序算好")
-    check("Coach Skill Catalog" in seen["system"], "调模型时应带上技能层")
+    check("Coach Skill Catalog" not in seen["system"],
+          "默认 lean 不该再注入技能库")
+    check("## Preflop ranges" in seen["system"], "lean 应带范围框架")
+    check(advice.skill_codes == (), f"lean 不该记录技能码：{advice.skill_codes}")
     check(advice.to_dict()["street"] == "flop", "落库结构不对")
+
+    # A/B：显式 skills 风格仍走旧技能库
+    seen2: dict = {}
+
+    def fake_skills(settings, system, user, timeout=20.0, options=None):
+        seen2["system"] = system
+        return {"option": "raise-2/3", "reason": "value bet"}
+
+    old = advise(sit, SETTINGS, complete=fake_skills, style="skills")
+    check("Coach Skill Catalog" in seen2["system"], "skills 风格应带技能层")
+    check(bool(old.skill_codes), "skills 风格应记录技能码")
+
+
+def test_lean_prompt_is_compact_and_range_based() -> None:
+    """lean 版：不注入技能库，但保留契约、事实和范围/纹理框架。"""
+    sit = build_situation(make_point())
+    system, user = build_messages(sit)
+    check("Coach Skill Catalog" not in system, "lean 不该注入技能目录")
+    check("Core Stance" not in system, "lean 不该注入旧技能正文")
+    check("## Preflop ranges" in system, "lean 应给出翻前范围")
+    check("RFI by position" in system, "lean 应给出按位置 RFI")
+    check("## Postflop" in system and "C-bet" in system, "lean 应有翻后框架")
+    check("Break-even equity" in user or "My hand strength" in user,
+          "计算事实仍应完整")
+    check(len(system) < 6000, f"lean system 应显著变短，实际 {len(system)}")
+
+    with_skills, _ = build_messages(sit, style="skills")
+    check("Coach Skill Catalog" in with_skills, "skills 风格应保留")
+    check(len(with_skills) > len(system) * 2, "skills 版应明显更长")
+    try:
+        build_messages(sit, style="nope")
+    except ValueError:
+        pass
+    else:
+        check(False, "未知提示词风格应直接报错")
 
 
 def test_advise_rejects_unknown_option() -> None:
@@ -1486,6 +1628,7 @@ def test_ai_settings_rejects_bad_sampling_env() -> None:
     base = {"AI_SERVER_API_KEY": "k", "AI_SERVER_BASE_URL": "https://x",
             "AI_SERVER_MODEL": "m"}
     for key, value in (("AI_SERVER_THINKING", "on"),
+                       ("AI_SERVER_REASONING", "on"),
                        ("AI_SERVER_REASONING_EFFORT", "medium"),
                        ("AI_SERVER_TEMPERATURE", "3"),
                        ("AI_SERVER_MAX_TOKENS", "abc")):
@@ -1495,6 +1638,27 @@ def test_ai_settings_rejects_bad_sampling_env() -> None:
             check(key in str(exc), f"报错应点名 {key}：{exc}")
         else:
             FAILS.append(f"{key}={value} 应该抛 ValueError")
+
+
+def test_ai_settings_reads_openrouter_reasoning() -> None:
+    """OpenRouter 的推理开关走独立字段；开推理时默认不发 temperature。"""
+    env = {"AI_SERVER_API_KEY": "k",
+           "AI_SERVER_BASE_URL": "https://openrouter.ai/api/v1",
+           "AI_SERVER_MODEL": "openai/gpt-5.6-luna",
+           "AI_SERVER_REASONING": "enabled"}
+    settings = AISettings.from_env(env)
+    check(settings.reasoning is True, f"reasoning 没读进来：{settings}")
+    check(settings.temperature is None,
+          f"推理模式不该默认发 0.2 temperature：{settings}")
+    check(settings.thinking is None, f"不该误开 DeepSeek 的 thinking：{settings}")
+
+    off = AISettings.from_env({**env, "AI_SERVER_REASONING": "disabled"})
+    check(off.reasoning is False, f"reasoning=disabled 应读成 False：{off}")
+    check(off.temperature == 0.2, f"非推理模式仍用 0.2 默认：{off}")
+
+    # 显式配了 temperature 就尊重它（比如 OpenAI 要求的 1）
+    hot = AISettings.from_env({**env, "AI_SERVER_TEMPERATURE": "1"})
+    check(hot.temperature == 1.0, f"显式 temperature 被覆盖：{hot}")
 
 
 def test_complete_json_sends_sampling_params() -> None:
@@ -1526,6 +1690,88 @@ def test_complete_json_sends_sampling_params() -> None:
     check("temperature" not in seen, f"思考模式不该发 temperature：{seen}")
     check(seen["top_p"] == 0.95 and seen["reasoning_effort"] == "low",
           f"思考参数没进请求体：{seen}")
+
+
+def test_complete_json_sends_openrouter_reasoning() -> None:
+    """GPT/OpenRouter：reasoning 用 {"enabled": true}，并带排名头。"""
+    seen: dict = {}
+    details = [{"type": "reasoning.text", "text": "let me think",
+                "signature": "sig-1"}]
+
+    def fake(url, payload, headers, timeout):
+        seen.update(payload)
+        seen["url"] = url
+        seen["headers"] = headers
+        return json.dumps({"choices": [{"message": {
+            "content": '{"option": "call", "reason": "x"}',
+            "reasoning": "hidden chain",
+            "reasoning_details": details}}]}).encode()
+
+    settings = AISettings(
+        "or-key", "https://openrouter.ai/api/v1", "openai/gpt-5.6-luna",
+        referer="https://site", title="poker-ocr",
+        temperature=None, reasoning=True, reasoning_effort="low")
+    got = complete_json(settings, "s", "u", request=fake)
+    check(got["option"] == "call", f"响应解析不对：{got}")
+    check(seen["url"] == "https://openrouter.ai/api/v1/chat/completions",
+          f"URL 不对：{seen['url']}")
+    check(seen["reasoning"] == {"enabled": True, "effort": "low"},
+          f"OpenRouter reasoning 没进请求体：{seen}")
+    check("thinking" not in seen and "temperature" not in seen,
+          f"不该把 DeepSeek 字段混进 OpenRouter 请求：{seen}")
+    check(seen["headers"]["HTTP-Referer"] == "https://site"
+          and seen["headers"]["X-OpenRouter-Title"] == "poker-ocr",
+          f"OpenRouter 排名头没发送：{seen['headers']}")
+    check(got["reasoning_details"] == details,
+          f"reasoning_details 应原样带回：{got}")
+
+    # 没显式配 effort 时只发 enabled，不塞空值
+    seen.clear()
+    plain = AISettings("k", "https://openrouter.ai/api/v1",
+                       "openai/gpt-5.6-luna", temperature=None,
+                       reasoning=False)
+    complete_json(plain, "s", "u", request=fake)
+    check(seen["reasoning"] == {"enabled": False},
+          f"reasoning=disabled 也应显式发送：{seen}")
+
+
+def test_complete_json_passes_history_reasoning_details() -> None:
+    """多轮续推：history 里的 assistant message 连同 reasoning_details 原样回传。"""
+    details = [{"type": "reasoning.text", "text": "first pass",
+                "signature": "sig-2"}]
+    history = [{"role": "assistant", "content": "4",
+                "reasoning_details": details}]
+    seen: dict = {}
+
+    def fake(url, payload, headers, timeout):
+        seen.update(payload)
+        return json.dumps({"choices": [{"message": {
+            "content": '{"option": "call", "reason": "x"}'}}]}).encode()
+
+    settings = AISettings("k", "https://openrouter.ai/api/v1",
+                          "openai/gpt-5.6-luna", temperature=None,
+                          reasoning=True)
+    complete_json(settings, "s", "Are you sure?", history=history,
+                  request=fake)
+    messages = seen["messages"]
+    check([m["role"] for m in messages] == ["system", "assistant", "user"],
+          f"history 应插在 system 与本轮 user 之间：{messages}")
+    check(messages[1]["reasoning_details"] == details,
+          f"reasoning_details 必须原样回传：{messages[1]}")
+    check(messages[2]["content"] == "Are you sure?",
+          f"本轮提问应最后一条：{messages}")
+
+
+def test_http_error_distinguishes_403_from_401() -> None:
+    """403 常见于账号/地区/供应商条款，不该一律报成 Key 错。"""
+    import urllib.error
+
+    e401 = urllib.error.HTTPError("u", 401, "Unauthorized", {}, None)
+    e403 = urllib.error.HTTPError("u", 403, "Forbidden", {}, None)
+    m401, m403 = str(advice_mod._http_error(e401)), str(advice_mod._http_error(e403))
+    check("AI_SERVER_API_KEY" in m401, f"401 应提示检查 Key：{m401}")
+    check("403" in m403 and "账号" in m403 and m401 != m403,
+          f"403 应提示账号/地区/条款限制：{m403}")
 
 
 def test_parse_json_content_tolerates_fence() -> None:
@@ -1689,9 +1935,9 @@ def test_explosive_pot_from_screen_banner() -> None:
           and "forced ante" in (d or ""),
           f"触发原因应写成炸弹池强制前注，而不是人均 5BB：{d}")
 
-    system, _ = build_messages(sit)
+    system, _ = build_messages(sit, style="skills")
     check("幸运暴击 / BOMB POT" in system,
-          "系统提示词应说明横幅也是爆炸底池的来源")
+          "技能版系统提示词应说明横幅也是爆炸底池的来源")
 
 
 def test_tracker_latches_bomb_pot_across_frames() -> None:
@@ -1795,6 +2041,8 @@ def main() -> int:
         test_straight_is_not_nuts_on_a_flush_board,
         test_prompt_renders_value_directive_and_draw_equity,
         test_prompt_renders_implied_odds_for_pocket_pair,
+        test_limpers_count_from_state_and_bonus_decays,
+        test_loose_table_adds_open_bonus,
         test_options_preflop_uses_bb_sizing,
         test_options_facing_bet_uses_pot_after_call,
         test_options_bump_to_min_raise_when_fraction_too_small,
@@ -1816,6 +2064,7 @@ def main() -> int:
         test_tracker_latches_bomb_pot_across_frames,
         test_explosive_pot_prompt_and_directive,
         test_advise_uses_model_choice,
+        test_lean_prompt_is_compact_and_range_based,
         test_advise_rejects_unknown_option,
         test_advise_fallback_without_settings,
         test_is_jev_model,
@@ -1828,7 +2077,11 @@ def main() -> int:
         test_ai_settings_reads_referer_and_title,
         test_ai_settings_reads_sampling_env,
         test_ai_settings_rejects_bad_sampling_env,
+        test_ai_settings_reads_openrouter_reasoning,
         test_complete_json_sends_sampling_params,
+        test_complete_json_sends_openrouter_reasoning,
+        test_complete_json_passes_history_reasoning_details,
+        test_http_error_distinguishes_403_from_401,
         test_parse_json_content_tolerates_fence,
         test_advice_runner_does_not_block,
         test_advice_runner_reports_busy_while_waiting,

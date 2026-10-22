@@ -401,6 +401,17 @@ def test_ante_inherited_when_parenthesis_lost() -> None:
     check(s.blinds.ante == 0.5, f"前注应继承 0.5，实际 {s.blinds.ante}")
 
 
+def test_ante_fallback_when_banner_loses_it() -> None:
+    """横幅读成 `1/2(）` 时用 profile 的 default_ante 兜底，不能当没前注。"""
+    frame = make_frame(blinds="1/2(）49939300:22:24")
+    s = build_state(frame, PROFILE, ante_fallback=0.5)
+    check(s.blinds is not None and s.blinds.ante == 0.5,
+          f"应兜底前注 0.5：{s.blinds}")
+    plain = build_state(make_frame(blinds="1/2(）49939300:22:24"), PROFILE)
+    check(plain.blinds is not None and plain.blinds.ante is None,
+          f"不传兜底时应保持 None：{plain.blinds}")
+
+
 def test_pbs_gt_pot_is_an_error() -> None:
     s = state(pot="10BB", pbs="20BB")
     check("pbs_gt_pot" in s.errors, f"pbs>pot 应报错，实际 {s.errors}")
@@ -524,6 +535,7 @@ def main() -> int:
         test_unreadable_chip_is_an_error,
         test_unparseable_blinds_without_previous,
         test_blinds_carried_from_previous,
+        test_ante_fallback_when_banner_loses_it,
         test_ante_inherited_when_parenthesis_lost,
         test_pbs_gt_pot_is_an_error,
         test_pbs_equal_pot_with_bets_is_an_error,

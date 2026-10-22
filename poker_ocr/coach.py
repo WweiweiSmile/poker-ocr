@@ -29,10 +29,14 @@
   - **转牌隐含赔率是保守近似**（只算潜在收益的一小部分），见 _implied_need_pct。
   - **河牌价值下注的「钟形曲线」是读人的东西，机械引擎做不了**：
     退化成固定尺度档（强牌 2/3、薄价值 1/2）。抓诈唬同理，只按牌面与下注大小判。
-  - **相对牌力只看牌面，不看对手范围**：`board_ceiling` 判「牌面上可能构成什么牌」，
-    据此压制我的牌（成花/成顺/公对面撞三条葫芦 → 强成牌不加注）。
+  - **相对牌力：结构 + 频率，两个都要看**。`board_ceiling` 判「牌面上**可能**构成
+    什么牌」，`beat_rate` 枚举出「**多大概率**有人的牌比我大」。只用一个会出错：
+      · 只看结构 → 「公对面的同花」被判成被压制（实际只有 1.8% 的随机牌赢它），
+        规则引擎就会教人把同花扔给半池下注；
+      · 只看名字 → 「8822」被当成「两对 = 强成牌」，而 7 家池里 87.7% 已经落后。
+    所以 `capped_by_board` = 上限更高 **且** ≥ `CAPPED_MIN_BEAT_PCT` 的随机牌赢我。
     它**不建模对手的打法范围**——技能文档明确不引入范围理论（opponent-read.md）。
-    所以「对手紧凶」这类信息只能经由 §8 的粗档位体现。
+    随机两手牌是下界，真实范围只会更强。所以「对手紧凶」这类信息只能经由 §8 的粗档位体现。
   - **牌面已成花/成顺时，听牌先过「坚果关」再看赔率**（用户口径）：只在这种牌面
     （3 张同花、或 567 这种 3 连 → `board_made_threat`）上，非坚果听牌一律自动弃；
     达标（坚果）才按赔率决定。2 张同花之类的"只是可能"牌面不触发，仍按赔率。
@@ -46,6 +50,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field as dc_field, replace
+from itertools import combinations
 
 # ─────────────────────────── 牌 ───────────────────────────
 
@@ -259,10 +264,15 @@ def board_ceiling(board: list[tuple[int, str]]) -> int:
     否则任何牌面都"可能有三条"，所有牌都得降级，等于没判。
 
       - 公共牌已是三条 → 对手可能四条
-      - 公共牌两对     → 对手可能葫芦
-      - 公共牌一对     → 对手可能该三条
+      - 公共牌成对     → 对手可能葫芦（**成一对就是葫芦**，不是三条，见下）
+      - 无对子         → 对手可能三条（口袋对撞三条属于「特定持牌」，不计）
       - ≥3 张同花      → 对手可能同花
       - ≥3 张连张      → 对手可能顺子
+
+    **成一对就算葫芦，不是三条。** 7,7,8 板上对手拿 78 就是 77788；7,7,K 板上
+    对手拿 7K 就是 777KK。只需要「对子那一 rank 一张 + 另一个板面 rank 一张」，
+    是很普通的持牌，不是奇迹。旧实现返回 TRIPS，于是「公对面的同花/顺子」
+    永远标不成被压制（同花 > 三条），这是这两类局面漏判的根因。
     """
     counts: dict[int, int] = {}
     for r, _ in board:
@@ -270,12 +280,49 @@ def board_ceiling(board: list[tuple[int, str]]) -> int:
     pairs = sum(1 for c in counts.values() if c >= 2)
     if any(c >= 3 for c in counts.values()):
         return QUADS
-    ceiling = FULL_HOUSE if pairs >= 2 else (TRIPS if pairs == 1 else ONE_PAIR)
+    ceiling = FULL_HOUSE if pairs >= 1 else ONE_PAIR
     if max(_suit_counts(board).values()) >= 3:
         ceiling = max(ceiling, FLUSH)
     if _has_run({r for r, _ in board}, 3):
         ceiling = max(ceiling, STRAIGHT)
     return ceiling
+
+
+def beat_rate(hole: list[tuple[int, str]], board: list[tuple[int, str]],
+              opponents: int = 1) -> tuple[float, float]:
+    """枚举对手所有两手牌，算「多大概率比我这手大」，返回 0..1 的两个比例。
+
+    返回 `(单个对手赢我的比例, opponents 家至少一家赢我的概率)`。
+
+    为什么要有这个：`board_ceiling` 只能回答「**有没有可能**被压」（布尔），
+    回答不了「**多大概率**」。而这两件事决策含义完全不同 ——
+
+      · 8822 在 88T 上：单个对手 25.9% 赢我们，7 家 **87.7%** 至少一家领先
+        → 这不是价值牌，是诈唬牌；收价值必被跟死。
+      · 花面的顺子（TsJd / 9h8h7h2c）：单个对手 4.3%，5 家 19.9%
+        → 仍然是该收价值的好牌，只是别打光。
+
+    两者被 `capped_by_board` 标成同一个东西，但差了一个数量级。用布尔判断
+    会把它们抹平，所以这里直接把概率算出来。
+
+    基准是**随机两手牌**，因此是**下界**：对手既然进了池、跟了注或加了注，
+    实际范围只会比随机更窄更强，真实概率只会更高。
+
+    纯 Python 枚举一次约 5ms（47 张牌 C(47,2)=1081 组），每个决策点算一次可以接受。
+    """
+    me = evaluate(list(hole) + list(board))
+    used = set(hole) | set(board)
+    deck = [(r, s) for r in range(len(RANK_CHARS)) for s in VALID_SUITS
+            if (r, s) not in used]
+    better = total = 0
+    for c1, c2 in combinations(deck, 2):
+        total += 1
+        if evaluate([c1, c2] + list(board)) > me:
+            better += 1
+    if not total:
+        return 0.0, 0.0
+    p = better / total
+    return p, 1.0 - (1.0 - p) ** max(opponents, 1)
 
 
 # ─────────────────────────── 牌力分档 ───────────────────────────
@@ -294,6 +341,7 @@ BOARD_PLAY = "打牌面"        # 最好的 5 张全靠公共牌（公共牌自�
 KICKER_STRONG_MIN = 9           # J（下标 9）及以上的踢脚算「强踢」（KJ 在 K 高面算强踢）
 
 
+
 @dataclass(frozen=True)
 class Read:
     """一手牌在某个牌面上的读牌结果。"""
@@ -309,6 +357,9 @@ class Read:
     combo: bool = False                    # 成牌 + ≥8 outs 的强听（"有牌又有听"，盲点①）
     plays_board: bool = False              # 最好的 5 张全靠公共牌（盲点②）
     label_en: str = ""                     # 英文标签，只给 AI 提示词用（advice.py）
+    # 单个对手（随机两手牌）赢我的比例，0..1，见 beat_rate。
+    # capped_by_board 用它做闸门：牌面上限更高**且**真有人能赢我才算被压制。
+    beat_pct: float = 0.0
 
     def to_dict(self) -> dict:
         return {"tier": self.tier, "label": self.label,
@@ -316,6 +367,7 @@ class Read:
                 "outs": self.outs, "equity_pct": round(self.equity_pct, 1),
                 "relative_strength": ("被牌面压制" if self.capped_by_board else "坚果/牌面之上"),
                 "board_ceiling": CATEGORY_NAMES[self.ceiling],
+                "beat_by_random_pct": round(self.beat_pct * 100, 1),
                 "nut_draw": self.nut_draw, "combo": self.combo,
                 "plays_board": self.plays_board}
 
@@ -417,13 +469,21 @@ def read_hand(hole: list[tuple[int, str]], board: list[tuple[int, str]]) -> Read
 
     paired_tiers = (OVERPAIR, TPTK, TP_WEAK, MID_BOTTOM)
 
+    # capped_by_board 是**结构判断**（牌面上可能构成更大的牌），不带频率闸门。
+    # 为什么不用频率：「随机两手牌赢我的比例」对跟注站是错的基准 —— 他们不会拿
+    # 随机牌跟，能跟/能加的是听牌和顶对以上。花面拿顺子只输 4.3% 的随机牌，
+    # 但**跟注范围里的同花全赢我们**。所以这里保留「结构上更高 = 被压制」，
+    # 由规则引擎给出「不加注 / 小注跟 / 大注弃」。
+    # 频率（beat_pct）另行提供给提示词做定量判断，不参与这里的布尔判定。
+    ceil = board_ceiling(board)
+    beat = beat_rate(hole, board, 1)[0] if len(board) >= 3 else 0.0
+
     def mk(tier: str, label: str, label_en: str) -> Read:
-        ceil = board_ceiling(board)
         return Read(tier, label, cat, outs, equity, cat < ceil, ceil,
                     _nut_draw(hole, board),
                     combo=(outs >= 8 and tier in paired_tiers),   # 有牌又有听
                     plays_board=(tier == BOARD_PLAY),
-                    label_en=label_en)
+                    label_en=label_en, beat_pct=beat)
 
     # ── 打牌面：最好的 5 张全靠公共牌（人人都有），只有更好的牌会跟 ──
     if cat >= ONE_PAIR and _plays_board(hole, board):

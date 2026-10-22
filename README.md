@@ -94,13 +94,15 @@ ROI 识别座位、筹码、下注、动作、庄位、底池和盲注，输出�
 
 ### AI 实时建议（默认开启）
 
-worker 在**轮到我**时把这一手的完整行动线交给模型（`--no-ai-advice` 可关闭），
-按**当前行动街**加载教练技能（方法论文本与 call-back 的 `services/skills/` 一致），
-让它从固定选项里选一个：
+worker 在**轮到我**时把这一手的完整行动线交给模型（`--no-ai-advice` 可关闭）。
+默认用 **lean 提示词**：输出契约 + 程序算好的事实（位置/筹码/赔率/牌力/听牌）
++ 桌面动态 + 一份紧凑的现代范围框架（按位置 RFI、3bet/冷跟、翻后纹理与尺度）。
+旧的 2005 年《Little Green Book》技能库不再默认注入，需要对比时加
+`--advice-style skills` 切回。模型从固定选项里选一个：
 
 ```
 翻后：弃牌 / 跟注（没人下注时是过牌）/ 加注到底池 1/3 / 1/2 / 2/3 / 1 倍 / 1.2 倍
-翻前：弃牌 / 平跟（或过牌）/ 开池到 2.5-4BB（按位置档）/ 面对加注时 3× 或 4× 上家加注
+翻前：弃牌 / 平跟（或过牌）/ 开池到 2.5-4BB（按位置档；有前注 ×2、前两个溜入者各 +1BB、第 3 个起每个 +0.5BB、松桌再 +0.5BB）/ 面对加注时 3× 或 4× 上家加注
 ```
 
 翻前不用底池倍数：底池只有盲注那么大，而且 `preflop-open.md` 明确要求尺度用
@@ -163,11 +165,29 @@ cp .env.example .env      # 然后编辑 .env，填入 AI_SERVER_API_KEY
 |---|---|---|
 | `typesafe/jev-1.14`、`jev-*`（名字里带 jev） | JEV decisions：`state` + 带类型的 `questions` → `answers` | **完整**地址，如 `https://openrouter.ai/api/alpha/decisions` |
 | 其他（`deepseek-flash` 等） | OpenAI 兼容 `/chat/completions` | 基址，如 `https://api.deepseek.com` |
+| OpenRouter 上的 GPT（如 `openai/gpt-5.6-luna`） | 同上，额外支持 `reasoning` | 基址 `https://openrouter.ai/api/v1` |
 
 JEV 模式下候选动作会被转成一道 `choice` 题（criteria 的 key 就是选项 id），
 返回值仍是 `{option, reason}`，所以下游与 DeepSeek 完全一致；`confidence`
 （选择概率）只写日志，不进 JSONL。`AI_SERVER_REFERER` / `AI_SERVER_TITLE`
-是 OpenRouter 的可选排名头。
+是 OpenRouter 的可选排名头（JEV 和 chat 模式都会带）。
+
+**OpenRouter GPT 的推理**：`.env` 里设 `AI_SERVER_REASONING=enabled`，请求体发
+`"reasoning": {"enabled": true}`（配了 `AI_SERVER_REASONING_EFFORT` 时会嵌成
+`reasoning.effort`）。响应里的 `reasoning_details` 会被原样保留在
+`complete_json` 的返回值里；`advice.chat_message` 返回完整的 assistant
+message，多轮续推时把它连同 `reasoning_details` 放回 `messages` 即可继续
+推理，不要裁剪或改写这个字段。开推理会明显拉长单次耗时，实时链路记得把
+`AI_SERVER_TIMEOUT` 调到 15–30 秒；推理模型通常只接受默认 temperature，
+这一段不要设 `AI_SERVER_TEMPERATURE` / 太小的 `AI_SERVER_MAX_TOKENS`。
+`.env` / `.env.example` 里都有可直接取消注释的 GPT 配置段（与 JEV 共用同一个
+OpenRouter Key）。
+
+**403 `provider Terms Of Service` 不是 Key 错**：同一把 Key 调 `/api/v1/key`
+和 Llama/DeepSeek 都正常、只有 OpenAI 模型被拒时，是 OpenRouter 账号/地区/
+供应商条款对 OpenAI 模型的限制（OpenAI 供应商对部分地区直接拒绝）。去
+OpenRouter 的 Activity 页看被拒原因，或换一个有 OpenAI 模型权限的账号/Key；
+代码侧不用改。`_http_error` 已把 403 和 401 分开报，日志里能直接看到这个提示。
 
 - **「轮到我」默认看 hero 头像槽的蓝色「下注/加注」按钮**（`images/roi/hero_bet.jpg`
   实测蓝色占比 0.85–0.86，非回合帧 0.000–0.003），所以 `table_wpk_live.json`
@@ -779,12 +799,14 @@ tests/
   test_stable_cards.py    # 跨帧牌面稳定闸（回退/张数/牌背/2 帧确认/多帧投票）
   test_doubt_window.py    # 疑惑帧时间窗仲裁（低置信度/牌背/无多数/提前解除）
   test_export_live_hands.py  # 从 live.states.jsonl 导出完整手牌
+  test_compare_advice_styles.py # 回放对比脚本的筛选/决策点/对比口径
   test_card_replay.py     # 真实样张回放：一手牌只落一条记录、牌面只前进
   test_extract.py         # 端到端回归测试
   test_api.py             # HTTP 接口测试
   golden/*.expected.json
 tools/
   export_live_hands.py    # 从 live.states.jsonl 筛出完整手牌 → hands.json
+  compare_advice_styles.py # 大幅盈亏手牌回放，对比 lean / skills 提示词
   build_card_templates.py # 从标注样本重建点数模板图集
   card_probe.py           # 单图读牌 CLI
 scan.py                   # 旧的第 0 步验证脚本，已冻结

@@ -102,6 +102,7 @@ class StateStream:
                  name_confirm: int = 3,
                  initial_blinds: Blinds | None = None,
                  lenient_chips: bool = False,
+                 ante_fallback: float | None = None,
                  roi_threads: int = DEFAULT_ROI_THREADS) -> None:
         self.profile = profile
         self.engine = engine or OcrEngine()
@@ -119,6 +120,9 @@ class StateStream:
         self.initial_blinds = initial_blinds
         # 固定 ROI 的筹码槽上下文明确；单位被读坏时允许取前导数字
         self.lenient_chips = bool(lenient_chips)
+        # 横幅读丢括号里的前注时的兜底（BB）。来自 profile.default_ante：
+        # 这款 app 的 1/2 桌固定 0.5BB 前注，前注直接影响开池尺寸。
+        self.ante_fallback = ante_fallback
 
         detector = build_detector(profile, None, self.engine)
         self.stream = RoiStream(profile, self.engine, detector,
@@ -310,6 +314,7 @@ class StateStream:
             card_icons=icons,
             shown_seats=shown,
             prev_fold=prev_fold,
+            ante_fallback=self.ante_fallback,
         )
         # 横幅是瞬时信号（开局 ~2s），但「这手是爆炸底池」要一直有效：
         # 看到就钉住，本手内所有状态都带 bomb_pot=True；换手时
