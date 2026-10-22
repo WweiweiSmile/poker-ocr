@@ -24,8 +24,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field as dc_field
 
 from .parse import (
-    Amount, Blinds, NameTracker, is_fold_badge, parse_action, parse_amount,
-    parse_blinds, parse_chip_loose, sticky_name,
+    Amount, Blinds, NameTracker, is_all_in_badge, is_fold_badge, parse_action,
+    parse_amount, parse_blinds, parse_chip_loose, parse_equity, parse_percent,
+    sticky_name,
 )
 from .positions import assign_positions
 from .profile import Profile
@@ -46,6 +47,8 @@ class PlayerState:
     fold: bool | None = None         # 头像徽章 best-effort
     in_hand: bool = False
     all_in: bool = False
+    # 全下后筹码位置可能显示实时胜率（如 `30%`）。不是百分数时为 None。
+    equity: float | None = None
     status: str = "away"             # playing / folded / buying_in / away
     notes: list[str] = dc_field(default_factory=list)
 
@@ -60,6 +63,7 @@ class PlayerState:
             "fold": self.fold,
             "in_hand": self.in_hand,
             "all_in": self.all_in,
+            **({"equity": self.equity} if self.equity is not None else {}),
             "status": self.status,
             **({"notes": self.notes} if self.notes else {}),
         }
@@ -117,6 +121,7 @@ def build_state(frame: RoiFrame, profile: Profile,
                 prev_names: dict[str, str] | None = None,
                 prev_blinds: Blinds | None = None,
                 avatar_reads: dict[str, tuple[str, float]] | None = None,
+                equity_reads: dict[str, tuple[str, float]] | None = None,
                 name_tracker: "NameTracker | None" = None,
                 prev_all_in: set[str] | None = None,
                 lenient_chips: bool = False) -> FrameState:
@@ -124,10 +129,12 @@ def build_state(frame: RoiFrame, profile: Profile,
 
     `prev_names` 是**上一份被接受的状态**里的名字（名称粘性用）；
     `prev_blinds` 用于盲注横幅被盖住时继承；`avatar_reads` 是头像 ROI 的
-    `{seat_id: (text, score)}`（弃牌检测，可选）。
+    `{seat_id: (text, score)}`（弃牌 / All-in 徽章，可选）；`equity_reads`
+    是筹码胶囊下方胜率槽的 `{seat_id: (text, score)}`（全下摊牌时可选）。
     """
     prev_names = prev_names or {}
     avatar_reads = avatar_reads or {}
+    equity_reads = equity_reads or {}
     prev_all_in = prev_all_in or set()
 
     # ── 全局 ──────────────────────────────────────────────
@@ -176,42 +183,67 @@ def build_state(frame: RoiFrame, profile: Profile,
             name = (None if not has_evidence else
                     prev_name if action else sticky_name(prev_name, name_raw or None))
 
+        avatar_text, avatar_score = avatar_reads.get(sid, ("", 0.0))
+        all_in_badge = is_all_in_badge(avatar_text, avatar_score)
+
+        # 全下后筹码/下注位可能显示实时胜率（`30%`/`69%`）。百分数不是金额，
+        # parse_amount 会拒掉；这里单独解析成 equity，并让 stack/bet 保持 None。
+        chip_equity = parse_percent(chip_raw)
+        bet_equity = parse_percent(bet_raw)
+        eq_text, eq_score = equity_reads.get(sid, ("", 0.0))
+        slot_equity = None
+        if eq_score >= 0.3 and not fold:
+            # 胜率槽必须有 `%`；裸数字很容易是牌背/筹码上的 1、8 之类。
+            # 只有头像已经确认 All-in 时，才接受 OCR 吞掉 `%` 的裸数字。
+            slot_equity = parse_equity(eq_text)
+            if slot_equity is None and all_in_badge is True:
+                slot_equity = parse_equity(eq_text, allow_bare=True)
+        equity = (bet_equity if bet_equity is not None else
+                  chip_equity if chip_equity is not None else slot_equity)
+
         chip: Amount = parse_amount(chip_raw)
         chip_loose = False
-        if lenient_chips and not chip.ok:
+        if lenient_chips and not chip.ok and chip_equity is None:
             loose = parse_chip_loose(chip_raw)
             if loose is not None:
                 chip = Amount(chip_raw, loose, "?", error=None)
                 chip_loose = True
         bet_a: Amount = parse_amount(bet_raw)
         bet_loose = False
-        if lenient_chips and bet_raw.strip() and not bet_a.ok:
+        if lenient_chips and bet_raw.strip() and not bet_a.ok and bet_equity is None:
             loose = parse_chip_loose(bet_raw)
             if loose is not None:
                 bet_a = Amount(bet_raw, loose, "?", error=None)
                 bet_loose = True
-        # 空 bet 文本 = 这款 app 没渲染 pill = 本街 0；读到乱码才是「未知」
-        bet = 0.0 if not bet_raw.strip() else (bet_a.value if bet_a.ok else None)
-        stack = chip.value if chip.ok else None
+        # 空 bet 文本 = 这款 app 没渲染 pill = 本街 0；读到乱码才是「未知」。
+        # 百分数是胜率，不是下注额。
+        bet = (None if bet_equity is not None else
+               0.0 if not bet_raw.strip() else
+               (bet_a.value if bet_a.ok else None))
+        stack = None if chip_equity is not None else (chip.value if chip.ok else None)
 
         # 「正在带入」：头像上写着带入 + 筹码为 0 → 人坐在桌边但没被发牌。
         #
         # 光靠头像文字不够（实测 rec 时好时坏，人数会在 8/9 之间跳）——再加一条
         # 结构化判据：**筹码 0、本街没下注、也没有动作** 的人一定不在这一手
         # （全下的人 bet>0；跟注/下注过的人 pill 至少在结算前还在；hero 除外）。
-        avatar_text = (avatar_reads.get(sid) or ("", 0.0))[0]
         buying_in = "带入" in avatar_text and stack == 0.0
         # 全下玩家在**下注结算后**会变成「筹码 0、pill 已收走」，看起来和离桌一样。
         # 用上一帧的全下集合区分：他全下过、筹码还是 0，就还是全下。
         was_all_in = sid in prev_all_in
         zero_idle = (stack == 0.0 and (bet or 0) == 0 and not action
-                     and sid != frame.hero_seat_id and not was_all_in)
+                     and sid != frame.hero_seat_id and not was_all_in
+                     and all_in_badge is not True and equity is None)
         sitting_out = zero_idle and not buying_in
 
-        in_hand = ((name is not None or stack is not None or bet is not None)
+        in_hand = ((name is not None or stack is not None or bet is not None
+                    or all_in_badge is True or equity is not None)
                    and not buying_in and not sitting_out)
-        all_in = bool(in_hand and stack == 0.0
-                      and ((bet or 0) > 0 or was_all_in))
+        # 头像黄色 All-in 徽章是最直接的证据；胜率显示也只在全下后出现。
+        # 旧的结构化判据（筹码 0 + 有下注/曾经全下）保留给徽章读不到时兜底。
+        all_in = bool(in_hand and (
+            all_in_badge is True or equity is not None
+            or (stack == 0.0 and ((bet or 0) > 0 or was_all_in))))
         status = ("buying_in" if buying_in else
                   "sitting_out" if sitting_out else
                   "away" if not in_hand else
@@ -220,16 +252,19 @@ def build_state(frame: RoiFrame, profile: Profile,
         notes: list[str] = []
         if chip_loose:
             notes.append(f"chip: 宽松解析 {chip_raw!r} → {chip.value}")
-        elif chip_raw.strip() and not chip.ok:
+        elif chip_raw.strip() and not chip.ok and not all_in:
             notes.append(f"chip: {chip.error}")
         if bet_loose:
             notes.append(f"bet: 宽松解析 {bet_raw!r} → {bet_a.value}")
-        elif bet_raw.strip() and not bet_a.ok:
+        elif bet_raw.strip() and not bet_a.ok and not all_in:
             notes.append(f"bet: {bet_a.error}")
+        if equity is not None:
+            notes.append(f"equity: {equity:g}%")
 
         players.append(PlayerState(
             seat_id=sid, name=name, stack=stack, bet=bet, action=action,
-            fold=fold, in_hand=in_hand, all_in=all_in, status=status, notes=notes,
+            fold=fold, in_hand=in_hand, all_in=all_in, equity=equity,
+            status=status, notes=notes,
         ))
 
     in_hand = [p for p in players if p.in_hand]
@@ -262,9 +297,11 @@ def build_state(frame: RoiFrame, profile: Profile,
         errors.append("pbs_inconsistent")
 
     for p in in_hand:
-        if p.stack is None:
+        # 全下玩家的筹码/下注位可能被 All-in 徽章或胜率百分比替代，允许读不到；
+        # 其他玩家仍然要求这两个字段精准，否则整帧丢弃。
+        if p.stack is None and not p.all_in:
             errors.append(f"stack:{p.seat_id}")
-        if p.bet is None:
+        if p.bet is None and not p.all_in:
             errors.append(f"bet:{p.seat_id}")
         if p.bet is not None and pot is not None and p.bet > pot + 1e-6:
             errors.append(f"bet_gt_pot:{p.seat_id}")
@@ -311,7 +348,29 @@ def signature(state: FrameState) -> tuple:
         _r(state.pot),
         state.players_in_hand,
         tuple(
-            (p.seat_id, p.position, p.name, _r(p.stack), _r(p.bet), p.in_hand, p.all_in)
+            (p.seat_id, p.position, p.name, _r(p.stack), _r(p.bet), p.in_hand,
+             p.all_in, _r(p.equity) if p.equity is not None else None)
+            for p in state.players
+        ),
+    )
+
+
+def action_signature(state: FrameState) -> tuple:
+    """动作是否生效的指纹：比 `signature()` 多收 `hero_turn` / `action` / `fold`。
+
+    记录用的 `signature()` 刻意排除这些字段（按钮闪断会制造假记录），但自动
+    点击的重试恰好要判断「点完之后回合有没有结束 / 动作徽章有没有变」。所以
+    单独一份：只要这一份变了，就认为点击已被客户端接受，不再重试。
+    """
+    return (
+        state.hero_turn,
+        state.dealer,
+        _r(state.pot),
+        _r(state.pot_before_street),
+        state.players_in_hand,
+        tuple(
+            (p.seat_id, p.action, p.fold, p.in_hand,
+             _r(p.stack), _r(p.bet), p.all_in, _r(p.equity))
             for p in state.players
         ),
     )

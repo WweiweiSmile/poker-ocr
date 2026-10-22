@@ -207,6 +207,49 @@ def build_preflop_options(snap: HandSnapshot) -> list[Option]:
     return options
 
 
+def _raise_geometry(snap: HandSnapshot) -> tuple[float, float, float, float | None, float]:
+    """加注金额的公共几何：需跟额、底池、当前最高下注、后手封顶、最小加注到。
+
+    `build_options()` 和 `preset_targets()` 共用，避免两处对「最小加注 / 全下
+    封顶」的算法漂移。
+    """
+    to_call = max(snap.to_call or 0.0, 0.0)
+    pot = snap.pot or 0.0
+    hero_bet = snap.hero_bet or 0.0
+    stack = snap.hero_stack
+    bb = snap.blinds.bb if snap.blinds else 1.0
+    max_bet = hero_bet + to_call
+    second = snap.second_bet
+    increment = max(max_bet - second if second is not None else max_bet, bb)
+    min_raise_to = max_bet + increment
+    hero_max = (hero_bet + stack) if stack is not None else None
+    return to_call, pot, max_bet, hero_max, min_raise_to
+
+
+def preset_targets(snap: HandSnapshot) -> dict[str, tuple[float, str]]:
+    """五个快捷档位（底池 1/3 … 1.2）在当前局面的目标额。
+
+    与 `build_options()` 的翻后档位使用同一套公式和 `_cap()`：面对下注时
+    `最高下注 + f × (底池 + 需跟额)`，没人下注时 `f × 底池`。翻前也一样算，
+    虽然翻前建议用的是 bb 口径，但客户端按钮仍按底池档位显示，点击器要拿它
+    做「最近档位」映射。返回 `{option_id: (amount_bb, note)}`。
+    """
+    to_call, pot, max_bet, hero_max, min_raise_to = _raise_geometry(snap)
+    out: dict[str, tuple[float, str]] = {}
+    for name in ("1/3", "1/2", "2/3", "1", "1.2"):
+        if to_call > 0:
+            target = max_bet + RAISE_FRACTIONS[name] * (pot + to_call)
+        else:
+            target = RAISE_FRACTIONS[name] * pot
+        out[f"raise-{name}"] = _cap(target, hero_max, min_raise_to)
+    return out
+
+
+def preset_amounts(snap: HandSnapshot) -> dict[str, float]:
+    """`preset_targets()` 的金额部分，给点击器做最近档位选择。"""
+    return {oid: amount for oid, (amount, _note) in preset_targets(snap).items()}
+
+
 def build_options(snap: HandSnapshot) -> list[Option]:
     """按现场底池与下注算出全部可执行选项。
 
@@ -227,10 +270,7 @@ def build_options(snap: HandSnapshot) -> list[Option]:
         return build_preflop_options(snap)
 
     to_call = max(snap.to_call or 0.0, 0.0)
-    pot = snap.pot or 0.0
-    hero_bet = snap.hero_bet or 0.0
     stack = snap.hero_stack
-    bb = snap.blinds.bb if snap.blinds else 1.0
 
     options: list[Option] = []
     if to_call <= 0:
@@ -248,24 +288,15 @@ def build_options(snap: HandSnapshot) -> list[Option]:
         options.append(Option("call", "Call", "call", _round_bb(to_call)))
         options.append(Option("fold", "Fold", "fold"))
 
-    # 当前最高下注 = 我已投 + 需跟额
-    max_bet = hero_bet + to_call
-    # 最小加注额：上一次加注的增量；没有上一次（第一条下注）就是下注本身，
-    # 但至少一个大盲（翻前盲注是强制下注，不能被当成 0.5BB 的增量）
-    second = snap.second_bet
-    increment = max(max_bet - second if second is not None else max_bet, bb)
-    min_raise_to = max_bet + increment
-    hero_max = (hero_bet + stack) if stack is not None else None
-
+    presets = preset_targets(snap)
     for name in ("1/3", "1/2", "2/3", "1", "1.2"):
+        option_id = f"raise-{name}"
         if to_call > 0:
-            target = max_bet + RAISE_FRACTIONS[name] * (pot + to_call)
-            label, kind = OPTION_LABELS[f"raise-{name}"], "raise"
+            label, kind = OPTION_LABELS[option_id], "raise"
         else:
-            target = RAISE_FRACTIONS[name] * pot
-            label, kind = BET_LABELS[f"raise-{name}"], "bet"
-        amount, note = _cap(target, hero_max, min_raise_to)
-        options.append(Option(f"raise-{name}", label, kind, amount, note))
+            label, kind = BET_LABELS[option_id], "bet"
+        amount, note = presets[option_id]
+        options.append(Option(option_id, label, kind, amount, note))
 
     by_id = {o.id: o for o in options}
     return [by_id[i] for i in OPTION_ORDER if i in by_id]
@@ -1254,6 +1285,10 @@ class Advice:
     to_call: float = 0.0
     hero_cards: tuple[str, ...] = ()
     board: tuple[str, ...] = ()
+    # 决策点身份与五个快捷档位的当前目标额。点击器用前者判过期、用后者做
+    # 「翻前建议 → 最近底池档位」映射；不写进 JSONL，保持输出形状稳定。
+    decision_key: tuple = ()
+    preset_amounts: tuple[tuple[str, float], ...] = ()
 
     def to_dict(self) -> dict:
         return {
@@ -1288,7 +1323,9 @@ def advise(sit: Situation, settings: AISettings | None,
                       tuple(s.code for s in selected),
                       int((time.monotonic() - started) * 1000),
                       error, snap.pot, snap.to_call,
-                      snap.hero_cards, snap.board)
+                      snap.hero_cards, snap.board,
+                      decision_key=snap.decision_key,
+                      preset_amounts=tuple(preset_amounts(snap).items()))
 
     if settings is None:
         return make(by_id[fallback_option(sit)],

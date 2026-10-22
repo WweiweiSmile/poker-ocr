@@ -47,7 +47,30 @@ ROI 路线只裁固定槽位、只跑 rec，不跑全图检测，是实时链路
   帧继续等；静止 `--settle` 秒（默认 0.25）后才把邮箱里**最新的一帧**交给识别。
   动作一直不停时 `--settle-max`（默认 1.5s）兜底。盲注横幅的倒计时、头像边缘
   的计时环不参与判据，否则画面永远不会「静止」。`--settle 0` 关闭。
+  **公共牌 / hero 手牌两块 ROI 总是参与静止判定**：profile 没标 `board` /
+  `hero_cards` 时用 `cards.DEFAULT_CARD_SLOTS` 补上（与读牌用的是同一套坐标），
+  换街后宁可晚 1–2 帧读干净图，也不拿动画中间帧。
   仅 roi 路线：区域来自固定槽位，full 路线没有布局可用。
+- **牌面跨帧稳定闸（`StableCards`）**：公共牌只允许 0/3/4/5 张且只前进，
+  **4→3、5→4 一律不采用**（只记异常并继续用 last-good）；hero 只接受 0/2 张，
+  1 张只走主动亮牌路径。新读数要连续 `--card-confirm-frames` 帧（默认 2）
+  一致才替换 last-good；连续两帧不一致时，用最近 3 帧的 top-1 点数/花色做
+  多数投票（同一位置至少 2 帧一致才采用），兜住 3/8、6/8 逐帧跳字。
+  牌背/遮挡/`?`/低置信度即使连续多帧一致也不采用。
+  确认公共牌归零（新一手）会清空 hero last-good；hero 换了一组两张牌会同步
+  重置公共牌，兜住「从翻牌开始接管」。异常期间输出上一帧的稳定牌面，
+  原因写进 `cards_warnings`。
+- **牌面质量闸联动 AI**：稳定结果仍不可靠（张数异常、`?`、低置信度、牌背、
+  遮挡）时**跳过这一帧的 AI 建议**，并打印 `[建议] 跳过：牌面不可靠（…）`；
+  决策点不会被标记成已建议，牌面恢复后同一决策点会补投一次。该手最终记录
+  会带 `cards_unreliable=true` 和 `cards_warnings`，汇总里增加
+  `cards_unreliable_skips`。
+- **牌区 ROI 去重**：board / hero_cards 的灰度缩略图没变时复用上一帧读数，
+  只重读亮牌区域（亮牌在别的 `action_slot`，不能一起复用）。
+- **事故帧留存**：内存环形缓冲最近 `--incident-frames` 帧（默认 10，只存引用
+  不逐帧编码）。遇到公共牌回退、张数异常、牌背/遮挡时，把最近帧 + `meta.json`
+  落到 `--incident-dir`（默认 `logs/incidents`），同类异常 5 秒内只存一次；
+  `--no-incident` 关闭。
 - **帧间串行、帧内并行**：reader 只解码，`StateStream.ingest()` 仍只在一个
   处理线程里调用；同一帧里未命中缓存的 ROI rec 由线程池并行（`--roi-threads`，
   默认 4，`1`=串行）。共享同一个 OcrEngine/ONNX session，实测并发结果与串行
@@ -88,6 +111,9 @@ ROI 路线只裁固定槽位、只跑 rec，不跑全图检测，是实时链路
   写入 `state.shows` 和 `hand.shows`；亮牌帧即使整帧被质量闸丢弃也能记录
 - **3/8 防误判**：3 和 8 的字形 NCC 经常只差约 0.01；用闭合孔数量兜底
   （3 = 0 孔，8 = 2 孔），识别证据里记录 `glyph_holes/topology_rank`
+- **全下 / 胜率 / 换手**：头像黄色 All-in 徽章 → `all_in`；全下摊牌时筹码
+  或下注位显示实时胜率 → `equity`；徽章从 All-in 变成可读的其他状态 =
+  这手结束，立即收手并等下一手
 
 ### 工程能力
 
@@ -140,6 +166,17 @@ ROI 路线只裁固定槽位、只跑 rec，不跑全图检测，是实时链路
   暂停期间每秒打一行 `[建议] 生成中… Ns` 心跳（实测 JEV 一次 1.7–3.4s），
   避免控制台先静默、再把建议和恢复后的识别日志一次性吐出来；建议行同时带上
   本次耗时，慢在模型还是识别一眼可见。失败时回退到最保守动作并记录原因。
+- **自动点击（`--auto-click`，默认关闭）**：先用
+  `tools/calibrate_clicker.py` 在客户端上方拖出按钮外接框，标定
+  `fold / call / confirm` 和五个快捷档位；默认按圆形采样（内切椭圆，按 `C`
+  可切换方形），建议返回后在区域内缩一圈的范围里取**随机坐标**点击。
+  弃牌点左侧、跟注/过牌/跟全下点右侧；加注先点档位再点蓝色确认按钮。
+  翻前 `open-* / raise-3x` 按金额选最近的底池档位。
+  只有当前帧仍 `hero_turn=true`、`state.ok`、决策点/手牌一致、牌面可靠且未
+  点过时才执行；`source=fallback` 默认不点（配置 `allow_fallback: true` 可开）。
+  点击后约 0.5s 用动作指纹（`hero_turn` / 动作徽章 / 底池 / 下注 / 筹码）确认
+  是否生效；没变化会再点一次（`retry_delay_ms=500`、`retry_count=1`，可配置）。
+  真实点击需要 macOS「辅助功能」权限，且客户端要保持在最前。
 - **连接复用**：同一 host 的 HTTP/1.1 长连接会缓存下来，省掉每次建议的 TLS
   握手（国内到 OpenRouter 实测 0.4–1.4s，常常比模型本身还慢）。配置了
   `HTTPS_PROXY` 等代理变量时退回 urllib 的默认行为，不绕过代理。
@@ -164,6 +201,7 @@ ROI 路线只裁固定槽位、只跑 rec，不跑全图检测，是实时链路
 | `tools/validate_roi.py` | 用现有 profile 跑 ROI，输出叠加图 + JSON 报告 |
 | `tools/refit_profile.py` | 用真实帧重新标注槽位，生成新 profile |
 | `tools/calibrate_live.py` | 从实时流跑一次全图识别，直接生成 runtime profile |
+| `tools/calibrate_clicker.py` | 全屏拖框标定自动点击按钮，生成 `config/clicker_local.json` |
 | `tools/video_to_states.py` | 离线视频 → 状态 JSON（不经过 OBS/RTSP） |
 
 ---
@@ -326,7 +364,7 @@ srt://<Mac IP>:8890?streamid=publish:live&passphrase=<口令>&pbkeylen=16&latenc
 ```bash
 # 1) OBS 浏览器源加载 docs/live-clock.html，放在画面顶部
 # 2) 启动 worker 并保存采样帧
-.venv/bin/python -m poker_ocr.live --dump-frames /tmp/liveframes
+.venv/bin/python -m poker_ocr.live --dump-frames /tmp/liveframes --no-ai-advice
 # 3) 对比 dump 帧文件名的墙钟时间和画面里的时钟
 ```
 
@@ -338,15 +376,20 @@ OBS/SRT/RTSP，所以它很小不代表端到端不慢。
 ```bash
 cd ~/codes/poker-ocr
 
-# 先跑 10 帧冒烟
-.venv/bin/python -m poker_ocr.live --max-frames 10
+# 先跑 10 帧冒烟（不调模型、不点击）
+.venv/bin/python -m poker_ocr.live --max-frames 10 --no-ai-advice
 
 # 正式运行（Ctrl-C 结束，自动写 session_end）
+# 默认 --url cam:0（OBS 虚拟摄像头）、--auto-click 开启
 .venv/bin/python -m poker_ocr.live \
-  --url rtsp://127.0.0.1:8554/live \
   --profile config/table_wpk_1080x2400.json \
   --every 0.5 \
   --out logs/live.states.jsonl
+
+# 走 MediaMTX 时：
+#   --url rtsp://127.0.0.1:8554/live
+# 不要自动点击时：
+#   --no-auto-click
 ```
 
 启动顺序无所谓：worker 连不上会每 1s 重试。
@@ -443,12 +486,15 @@ cd ~/codes/poker-ocr
 ### 实时 ROI（推荐）
 
 ```bash
+# 默认 cam:0 + 自动点击；自动点击需先标定 config/clicker_local.json
 .venv/bin/python -m poker_ocr.live \
-  --url rtsp://127.0.0.1:8554/live \
   --profile config/table_wpk_live.json \
   --initial-blinds 1/2 \
   --every 0.5 \
   --out logs/live.states.jsonl
+
+# 走 MediaMTX：加 --url rtsp://127.0.0.1:8554/live
+# 不自动点击：加 --no-auto-click
 ```
 
 ### 实时 ROI（使用通用 1080x2400 profile）
@@ -482,7 +528,7 @@ cd ~/codes/poker-ocr
 
 ```bash
 .venv/bin/python -m poker_ocr.live \
-  --recognizer full \
+  --recognizer full --no-ai-advice \
   --full-config config/full_browser.json \
   --out logs/live.states.jsonl
 ```
@@ -497,11 +543,11 @@ cd ~/codes/poker-ocr
 ### 冒烟 / 调试
 
 ```bash
-# 只处理 10 帧
-.venv/bin/python -m poker_ocr.live --max-frames 10
+# 只处理 10 帧（不调模型、不点击）
+.venv/bin/python -m poker_ocr.live --max-frames 10 --no-ai-advice
 
 # 保存每个采样帧
-.venv/bin/python -m poker_ocr.live --dump-frames /tmp/liveframes
+.venv/bin/python -m poker_ocr.live --dump-frames /tmp/liveframes --no-ai-advice
 
 # 关掉 ROI 去重
 .venv/bin/python -m poker_ocr.live --no-dedup
@@ -529,7 +575,7 @@ cd ~/codes/poker-ocr
 
 ```json
 {"type":"session_start","started_at":"2026-10-19T21:30:53.441+08:00",
- "url":"rtsp://127.0.0.1:8554/live","profile":"table_wpk_live.json",
+ "url":"cam:0","profile":"table_wpk_live.json",
  "recognizer":"roi","full_config":null,"every":0.5,"resolution":null}
 ```
 
@@ -593,9 +639,13 @@ cd ~/codes/poker-ocr
 | `players[].bet` | 本街已下注（BB） |
 | `players[].action` | `check/call/bet/raise/fold` |
 | `players[].fold` | 弃牌检测，三态：`true/false/null` |
+| `players[].all_in` | 是否全下：头像黄色 All-in 徽章 / 胜率显示 / 筹码 0 + 有下注或曾经全下 |
+| `players[].equity` | 全下摊牌时界面显示的实时胜率（0–100，可选） |
 | `players[].status` | `playing/folded/buying_in/sitting_out/away` |
 | `players[].notes` | 宽松解析等诊断信息（可选） |
-| `shows` | 摊牌/主动秀牌时该座亮出的两张牌（可选；`seat_id/name/position/cards`） |
+| `shows` | 摊牌/主动秀牌时该座亮出的手牌（1–2 张；可选；`seat_id/name/position/cards`） |
+| `cards_reliable` | 这一帧稳定后的牌面是否可靠（张数合法、无 `?`/低置信度/牌背/遮挡） |
+| `cards_warnings` | 牌面稳定闸的异常说明（回退/待确认/牌背/遮挡；可选） |
 
 ### 6.4 `session_end`
 
@@ -619,7 +669,29 @@ cd ~/codes/poker-ocr
  "reason":"顶对顶踢被加注，牌面干燥，按成牌打法加注求价值",
  "source":"model","model":"deepseek-chat",
  "skill_codes":["core-stance","odds-table","opponent-read","postflop-made-hand"],
- "duration_ms":1840}
+ "duration_ms":1840,
+ "click":{"status":"clicked","action":"raise","preset":"raise-1/2",
+          "mapping":"direct",
+          "steps":[{"button":"raise-1/2","x":812.4,"y":703.1},
+                   {"button":"confirm","x":901.2,"y":650.4}],
+          "elapsed_ms":168}}
+```
+
+`click` 只在启用 `--auto-click` 时出现；未启用 / 不需要点击时保持旧记录形状。
+`status` 为 `clicked` / `dry_run` / `skipped` / `error`；`skipped` 带 `reason`
+（如 `hero_turn_false`、`stale_decision`、`fallback_advice`、
+`already_clicked`、`missing_preset:raise-1/2`）。
+
+点击后 0.5s 页面仍无变化时会补点一次，另写一条记录：
+
+```json
+{"type":"click_retry","ts":"...","hand_id":"h7",
+ "decision_key":["h7","flop",6,19.5,8.0,["Ah","Kd"]],
+ "attempt":1,
+ "click":{"status":"clicked","action":"raise","preset":"raise-1/2",
+          "steps":[{"button":"raise-1/2","x":810.1,"y":701.7},
+                   {"button":"confirm","x":899.8,"y":651.2}],
+          "elapsed_ms":171}}
 ```
 
 | 字段 | 含义 |
@@ -631,6 +703,7 @@ cd ~/codes/poker-ocr
 | `skill_codes` | 本次按当前街展开的技能 |
 | `error` | 仅 `fallback` 时出现，说明原因 |
 | `duration_ms` | 模型调用耗时（后台，不影响采样） |
+| `click` | 自动点击结果（仅 `--auto-click`）：`status / steps / mapping / reason` |
 
 ### 6.6 `hand`
 
@@ -658,6 +731,9 @@ cd ~/codes/poker-ocr
  "shows":[
    {"seat_id":"midL","name":"许文文啊","position":"CO","cards":["Ac","Qh"]}
  ],
+ "all_ins":[
+   {"seat_id":"hero","name":"me","position":"BTN","amount":60.5,"equity":30.0}
+ ],
  "advices":[
    {"hand_id":"h6","street":"flop","hero_cards":["Ah","Kd"],
     "board":["Ks","7d","2c"],"pot":19.5,"to_call":22.0,
@@ -669,8 +745,15 @@ cd ~/codes/poker-ocr
 
 `inferred: true` 只在**街末底池对账补出来**的记录上出现（正常抓到的记录没有这个键）。
 `shows` 只在摊牌或对手主动秀牌时出现，来源是各座 `action_slot` 的亮牌识别
-（样张 `images/card/show_card.jpg`）。亮牌帧即使因为筹码/底池被顶掉而整帧丢弃，
-也会先挂到当前手牌上，不依赖 `state.ok`。
+（样张 `images/card/show_card.jpg`、`images/card/showOne`）。正常摊牌记 2 张；
+河牌主动只秀 1 张时 `cards` 只有 1 张，另一张 POKER 牌背会被过滤掉。
+亮牌帧即使因为筹码/底池被顶掉而整帧丢弃，也会先挂到当前手牌上，不依赖 `state.ok`。
+`all_ins` 只在有全下时出现：`amount` 取全下时的下注 pill（读不到退回筹码胶囊），
+`equity` 取界面显示的实时胜率；全下要连续 2 帧确认，胜率槽只认带 `%` 的读数
+（裸数字很容易是牌背/筹码的误读）。头像 All-in 徽章消失（连续 2 帧可读的非
+All-in 文本）会立即收掉当前手牌，不依赖牌面/庄位变化。
+牌面稳定闸在这一手遇到过异常时，记录会带 `cards_warnings`（去重后的前 20 条）；
+只要有一帧因牌面不可靠跳过了 AI 建议，还会带 `"cards_unreliable": true`。
 `advices` 只在**这一手确实给过建议**时出现，按给出顺序排列；没有 AI 建议时连键都不出现。
 其余 `advice` 记录仍会照常单独写一份，方便实时流式查看；复盘用 `hand.advices` 即可，不必再按 `hand_id` join。
 
@@ -681,8 +764,8 @@ cd ~/codes/poker-ocr
 | `discarded_reasons` | 典型原因 |
 |---|---|
 | `dealer` | 庄位 D 被遮挡 / 太暗 / 不在画面 |
-| `stack:<seat>` | 摊牌手牌顶掉筹码胶囊、全下显示裸 `0`、弹窗遮挡 |
-| `bet:<seat>` | 下注 pill 读成非金额文本 |
+| `stack:<seat>` | 摊牌手牌顶掉筹码胶囊、全下显示裸 `0`、弹窗遮挡。**全下玩家例外**：筹码/下注位可能被 All-in 徽章或胜率替代，允许读不到 |
+| `bet:<seat>` | 下注 pill 读成非金额文本。**全下玩家例外**：pill 可能显示的是实时胜率 |
 | `pot` / `blinds` | 底池横幅只显示标签、盲注行被融合读坏 |
 | `vanished:<seat>` | 整座空白超过 `--max-vanish` 帧 |
 
@@ -694,7 +777,7 @@ cd ~/codes/poker-ocr
 
 | 参数 | 默认 | 说明 |
 |---|---|---|
-| `--url` | `rtsp://127.0.0.1:8554/live` | MediaMTX RTSP 地址 |
+| `--url` | `cam:0` | 视频源。默认 OBS 虚拟摄像头；走 MediaMTX 时写 `rtsp://127.0.0.1:8554/live` |
 | `--profile` | `config/table_wpk_1080x2400.json` | ROI 布局配置 |
 | `--recognizer` | `roi` | `roi`=固定槽位；`full`=全图 OCR + 座位聚类 |
 | `--full-config` | 无 | full 模式参数 JSON |
@@ -706,6 +789,10 @@ cd ~/codes/poker-ocr
 | `--out` | `logs/live.states.jsonl` | JSONL 输出（默认追加） |
 | `--append` | 开 | 追加到 `--out`，保留历次启动的手牌记录；`--no-append` 每次启动清空 |
 | `--stable-frames` | `1` | 新状态连续出现几帧才记录（`1` = 不做多帧确认） |
+| `--card-confirm-frames` | `2` | 公共牌/hero 新读数连续几帧一致才替换 last-good；4→3、5→4 回退永不采用 |
+| `--incident-dir` | `logs/incidents` | 事故帧落盘目录（公共牌回退/张数异常/牌背） |
+| `--incident-frames` | `10` | 事故帧环形缓冲保留多少帧 |
+| `--no-incident` | 关 | 关闭事故帧留存（不占内存、不落盘） |
 | `--max-vanish` | `3` | 整座空白连续几帧才认定离开 |
 | `--name-confirm` | `3` | 名字连续确认几帧才更换 |
 | `--dealer-carry` | `4` | full 模式 D 读不到时沿用上一庄位的最大帧数；`0` 关闭 |
@@ -718,6 +805,9 @@ cd ~/codes/poker-ocr
 | `--ai-advice` / `--no-ai-advice` | 开 | 轮到我时加载当前街技能并调用 AI 选一个选项（仅 roi 模式） |
 | `--ai-timeout` | `20` | 单次 AI 建议超时（秒）；后台线程，不阻塞采样 |
 | `--ai-confirm` | `1` | `hero_turn` 连续几帧才认定轮到我（蓝色下注按钮下第一帧即可） |
+| `--auto-click` / `--no-auto-click` | 开 | AI 建议返回后自动点击桌面客户端（需先标定；仅 macOS） |
+| `--clicker-config` | `config/clicker_local.json` | 自动点击按钮坐标 JSON |
+| `--clicker-dry-run` | 关 | 只打印将点击的随机坐标，不发送真实鼠标事件 |
 | `--quiet` | 关 | 只打状态行和最终汇总 |
 
 ---
@@ -741,7 +831,7 @@ worker 采用最新帧优先，处理不过来就丢中间帧，队列深度恒�
 ```bash
 # 1) OBS 浏览器源加载 docs/live-clock.html，放在画面顶部
 # 2) 启动 worker 并保存采样帧
-.venv/bin/python -m poker_ocr.live --dump-frames /tmp/liveframes
+.venv/bin/python -m poker_ocr.live --dump-frames /tmp/liveframes --no-ai-advice
 # 3) 对比记录 ts、dump 帧文件名墙钟和画面里的时钟
 ```
 
@@ -786,6 +876,16 @@ worker 采用最新帧优先，处理不过来就丢中间帧，队列深度恒�
   「最高下注 > 大盲」兜底判成至少一次加注，但更细的形态（3bet/4bet）判不出来。
 - 模型延迟通常在数秒级，建议返回时 hero 可能已经行动；`advice` 记录照常落库，
   但实时提示价值随延迟下降。需要更快时换更快的模型/网关。
+- **自动点击**依赖绝对屏幕坐标：客户端窗口移动/缩放、改分辨率或显示器排列后
+  必须重新运行 `tools/calibrate_clicker.py`。它不会把客户端拉到前台；客户端不在
+  最前时鼠标事件会落到别的窗口。客户端建议用窗口模式（不要 macOS 全屏/独立
+  Space），否则标定遮罩可能和客户端不在同一个 Space。真实点击需要 macOS
+  「辅助功能」权限，且没有「点击是否被客户端接受」的回执。
+- 翻前的最近档位是金额近似映射，客户端五个快捷按钮的实际金额/可用性由客户端
+  决定；全下加注也没有专用按钮，必要时仍应人工确认。
+- 自动点击的 0.5s 重试判据是**识别出的动作指纹**，不是像素比对。如果客户端
+  0.5s 内还没渲染出「回合结束 / 动作徽章」的变化，可能会补点一次；不想承担
+  这个风险时把 `clicker_local.json` 的 `retry_count` 设为 `0`。
 
 ## 11. 测试
 

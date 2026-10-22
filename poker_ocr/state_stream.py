@@ -30,11 +30,11 @@ import numpy as np
 
 from .dealer import DealerResult, build_detector
 from .frame_state import FrameState, NameTracker, build_state, signature
-from .parse import Blinds, parse_action, parse_blinds
+from .parse import Blinds, is_all_in_badge, parse_action, parse_blinds
 from .ocr import OcrEngine
 from .profile import Profile
 from .roi_dedup import RoiStream
-from .roi_reader import read_avatars
+from .roi_reader import read_avatars, read_slots
 
 # 一帧里通常有 30+ 块 ROI，但真正未命中缓存的只有变化的那些。4 线程在
 # M2（8 核）上实测最划算（39 块全跑 475ms → 282ms）；再高会和 ONNX 的
@@ -49,6 +49,17 @@ DEFAULT_ROI_THREADS = max(1, min(4, (os.cpu_count() or 2) // 2))
 DEALER_RECHECK_SECONDS = 2.0     # 定期复核庄位，兜住漏掉的换手信号
 DEALER_CONFIRM_FRAMES = 2        # 换手后多detect几帧，等轮转动画落位
 NAME_PIN_MIN_SCORE = 0.8         # 低于这个分数不钉，等下帧重读到可信名字
+
+
+def _equity_slot(chip: tuple[float, float, float, float]) -> tuple[float, float, float, float]:
+    """筹码胶囊下方那一小块：全下摊牌时显示实时胜率（如 `69%`）。
+
+    样张 `images/card/show_card.jpg` 的 midL：筹码 `15.5BB` 下面紧跟 `69%`。
+    向上多留 15% 兜住胶囊下沿，向下扩 95% 兜住百分比行。
+    """
+    x1, y1, x2, y2 = chip
+    h = y2 - y1
+    return (x1, max(0.0, y2 - 0.15 * h), x2, min(1.0, y2 + 0.95 * h))
 
 
 @dataclass(frozen=True)
@@ -67,6 +78,12 @@ class FrameOutcome:
     record: dict | None
     reused: int
     n_roi: int
+    # 头像上的 All-in 徽章消失（连续 2 帧可读的非 All-in 文本）= 这手结束。
+    # 与 kind 独立：这一帧可能因为摊牌遮挡被 discard，但换手事实仍然有效。
+    hand_end: bool = False
+    # 本帧检测到换手（庄位轮换 / 牌面归零确认 / hero 换牌 / All-in 收手）。
+    # live 用它重置跨帧牌面稳定闸并重读这一帧的牌，避免新手继承上一手的 board。
+    new_hand: bool = False
 
 
 class StateStream:
@@ -104,6 +121,10 @@ class StateStream:
 
         self.prev: FrameState | None = None
         self.prev_all_in: set[str] = set()
+        # 头像上读到过 All-in 徽章的座位，以及「徽章连续消失」计数。
+        # 徽章消失（连续 2 帧可读的非 All-in 文本）是换手的额外信号。
+        self.prev_all_in_badges: set[str] = set()
+        self._all_in_gone: dict[str, int] = {}
         self.prev_dealer: str | None = None
         self.vanish: dict[str, int] = defaultdict(int)
 
@@ -188,17 +209,83 @@ class StateStream:
                                self.stream.cache, self.detect_fold,
                                executor=self._roi_pool)
 
+        # 头像 All-in 徽章：既用于 build_state 的 all_in，也用于换手判断。
+        # 徽章消失必须连续 2 帧可读的非 All-in 文本，避免单帧遮挡/照片幻觉。
+        avatar_flags = {sid: is_all_in_badge(text, score)
+                        for sid, (text, score) in avatars.items()}
+        current_all_in_badges = {sid for sid, flag in avatar_flags.items()
+                                 if flag is True}
+        badge_ended = False
+        if self.prev_all_in_badges:
+            for sid in self.prev_all_in_badges:
+                flag = avatar_flags.get(sid)
+                if flag is False:
+                    self._all_in_gone[sid] = self._all_in_gone.get(sid, 0) + 1
+                else:
+                    self._all_in_gone[sid] = 0
+                if self._all_in_gone.get(sid, 0) >= 2:
+                    badge_ended = True
+            # 本帧没读到（None）或只消失了一帧（False）都要继续留在活动集合里：
+            # 前者不等于消失，后者还要再确认一帧才能判换手。
+            current_all_in_badges |= {
+                sid for sid in self.prev_all_in_badges
+                if avatar_flags.get(sid) is not True}
+        if badge_ended and frame.hero_turn is True:
+            # 还轮到 hero 行动，说明这手显然没结束。刚才的「All-in」更像是
+            # hero 的 All-in 按钮/头像照片被误读；不能凭徽章消失收手，否则
+            # 会把正在进行的牌劈成两半，后面真正的 all-in/亮牌就丢了。
+            badge_ended = False
+            self._all_in_gone.clear()
+            # 只保留本帧仍然是 All-in 的座位，别让误读的徽章反复计数
+            current_all_in_badges = {
+                sid for sid, flag in avatar_flags.items() if flag is True}
+        if (badge_ended and self._board_len is not None
+                and self._board_len < 5):
+            # 全下后还在发公共牌（flop/turn）：徽章可能只是被牌面/胜率盖住，
+            # 不能收手。等河牌到齐，或下一手的庄位/手牌信号。
+            badge_ended = False
+        if badge_ended:
+            new_hand = True
+            self._dealer_confirm_left = DEALER_CONFIRM_FRAMES
+            self._restart_sticky()
+            current_all_in_badges = set()
+        self.prev_all_in_badges = current_all_in_badges
+
+        # 全下摊牌时，筹码胶囊下方可能显示实时胜率。只在有全下信号时多读
+        # 每座这一小块，避免普通帧多付 9 块 ROI 的 OCR。
+        equity_reads: dict[str, tuple[str, float]] = {}
+        if current_all_in_badges:
+            slots = []
+            seat_ids = []
+            for seat in self.profile.seats:
+                chip = seat.chip_slot or seat.chip_slot_alt
+                if chip is None:
+                    continue
+                slots.append((_equity_slot(chip), "equity",
+                              f"{seat.seat_id}.equity"))
+                seat_ids.append(seat.seat_id)
+            if slots:
+                reads = read_slots(
+                    img, self.profile, self.engine, slots,
+                    (img.shape[1], img.shape[0]), pad=0.0,
+                    cache=self.stream.cache, executor=self._roi_pool)
+                equity_reads = {sid: (read.text, read.score)
+                                for sid, read in zip(seat_ids, reads)}
+
         # 庄位轮转 = 新的一手：上一手的全下状态不能带进来
         dealer_now = (frame.dealer.seat_id
                       if frame.dealer and frame.dealer.status == "found" else None)
         if dealer_now and self.prev_dealer and dealer_now != self.prev_dealer:
             self.prev_all_in = set()
+            self.prev_all_in_badges = set()
+            self._all_in_gone.clear()
 
         state = build_state(
             frame, self.profile,
             prev_blinds=(self.prev.blinds if self.prev is not None
                          else self.initial_blinds),
             avatar_reads=avatars,
+            equity_reads=equity_reads,
             name_tracker=self.names,
             prev_all_in=self.prev_all_in,
             lenient_chips=self.lenient_chips,
@@ -226,7 +313,8 @@ class StateStream:
             for e in state.errors:
                 self.discarded[e.split(":", 1)[0]] += 1
             return FrameOutcome("discard", state, list(state.errors), None,
-                                frame.n_reused, frame.n_roi)
+                                frame.n_reused, frame.n_roi,
+                                hand_end=badge_ended, new_hand=new_hand)
 
         self.accepted += 1
         sig = signature(state)
@@ -250,9 +338,11 @@ class StateStream:
             self.last_sig = sig
             self.records += 1
             return FrameOutcome("record", state, [], record,
-                                frame.n_reused, frame.n_roi)
+                                frame.n_reused, frame.n_roi,
+                                hand_end=badge_ended, new_hand=new_hand)
         return FrameOutcome("no_change", state, [], None,
-                            frame.n_reused, frame.n_roi)
+                            frame.n_reused, frame.n_roi,
+                            hand_end=badge_ended, new_hand=new_hand)
 
     # ─────────────────────────── 辅助 ───────────────────────────
 
@@ -263,7 +353,8 @@ class StateStream:
         离线工具不传，这时不做换手推断（行为与以前一致，慢变量按需重读）。
         board 从 >0 掉回 0、或 hero 的两张牌换了一组，都是新一手。
         """
-        if extra_signature is None or len(extra_signature) != 2:
+        # 第 3 位起是亮牌等附加信息，不参与换手判断；只要前两位（hero/board）
+        if extra_signature is None or len(extra_signature) < 2:
             return False
         hero = tuple(extra_signature[0] or ())
         board = tuple(extra_signature[1] or ())
@@ -287,11 +378,14 @@ class StateStream:
         return new_hand
 
     def _restart_sticky(self) -> None:
-        """换手：名字/盲注解钉，庄位结果作废（下一帧重新检测）。"""
+        """换手：名字/盲注解钉，庄位结果作废，上一手的全下状态清空。"""
         cache = self.stream.cache
         if cache is not None:
             cache.unpin_all()
         self._dealer_result = None
+        self.prev_all_in = set()
+        self.prev_all_in_badges = set()
+        self._all_in_gone.clear()
 
     def _pin_slow_fields(self, frame) -> None:
         """把这一帧读到的可信名字 / 盲注钉住，之后同手内不再 OCR。
@@ -327,6 +421,8 @@ class StateStream:
         """断流重连 / 换桌时清掉跨帧状态。累计计数保留。"""
         self.prev = None
         self.prev_all_in = set()
+        self.prev_all_in_badges = set()
+        self._all_in_gone.clear()
         self.prev_dealer = None
         self.vanish.clear()
         self.names = NameTracker(confirm=self.name_confirm)

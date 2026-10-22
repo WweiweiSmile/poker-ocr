@@ -17,8 +17,9 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from poker_ocr.parse import (  # noqa: E402
-    NameTracker, is_fold_badge, names_similar, parse_action, parse_amount,
-    parse_blinds, parse_chip_loose, sticky_name,
+    NameTracker, is_all_in_badge, is_fold_badge, names_similar, parse_action,
+    parse_amount, parse_blinds, parse_chip_loose, parse_equity, parse_percent,
+    sticky_name,
 )
 
 FAILS: list[str] = []
@@ -157,6 +158,24 @@ def test_fold_badge_is_best_effort() -> None:
     check(is_fold_badge("国", 0.9) is False, "头像照片的噪声不该判弃牌")
 
 
+def test_all_in_badge_and_equity() -> None:
+    """头像 All-in 徽章会被读成 Alin；筹码位的 `30%` 是胜率，不是下注。"""
+    check(is_all_in_badge("Alin", 0.74) is True, "Alin(0.74) 应判 All in")
+    check(is_all_in_badge("ALL IN", 0.8) is True, "ALL IN 应判 All in")
+    check(is_all_in_badge("aiin", 0.6) is True, "aiin(0.6) 应判 All in")
+    check(is_all_in_badge("奔牌", 0.92) is False, "弃牌徽章不是 All in")
+    check(is_all_in_badge("", 0.9) is None, "空读数应报 None")
+    check(is_all_in_badge("Alin", 0.2) is None, "分数太低应报 None")
+
+    check(parse_percent("30%") == 30.0, "30% 应解析成 30")
+    check(parse_percent("胜率 69%") == 69.0, "胜率 69% 应解析成 69")
+    check(parse_percent("入池36%") is None, "HUD 的入池36% 不是胜率")
+    check(parse_percent("15.5BB") is None, "金额不是胜率")
+    check(parse_equity("69", allow_bare=True) == 69.0,
+          "胜率槽的裸数字 69 应能解析")
+    check(parse_equity("69") is None, "非胜率槽不接受裸数字")
+
+
 def test_names_similar() -> None:
     """实测抖动要合并，真实换人要分开。"""
     for a, b in (("YKY", "YkY"), ("YKY", "YKkY"), ("一只猫i", "一只猫ii"),
@@ -200,6 +219,7 @@ def main() -> int:
         test_blinds_rejects_bad_ratio,
         test_actions,
         test_fold_badge_is_best_effort,
+        test_all_in_badge_and_equity,
         test_names_similar,
         test_sticky_name,
         test_name_tracker_needs_confirmation,

@@ -56,7 +56,8 @@ class StubRoiStream:
 def stub_env():
     with patch.object(ss, "RoiStream", StubRoiStream), \
             patch.object(ss, "build_detector", lambda *a, **k: None), \
-            patch.object(ss, "read_avatars", lambda *a, **k: {}):
+            patch.object(ss, "read_avatars", lambda *a, **k: {}), \
+            patch.object(ss, "read_slots", lambda *a, **k: []):
         yield
 
 
@@ -181,6 +182,64 @@ def test_dealer_rotation_clears_all_in_carry() -> None:
               f"庄位轮转应清空全下继承，实际 {s.prev_all_in}")
 
 
+def test_all_in_badge_disappearance_ends_hand() -> None:
+    """头像 All-in 徽章连续 2 帧变成可读的非 All-in 文本 = 这手结束。"""
+    reads = [{"hero": ("Alin", 0.7)}, {"hero": ("Alin", 0.7)},
+             {"hero": ("弃牌", 0.9)}, {"hero": ("弃牌", 0.9)}]
+    with stub_env(), patch.object(ss, "read_avatars",
+                                  lambda *a, **k: reads.pop(0)):
+        s = new_stream()
+        first = feed(s, make_frame())
+        check(not first.hand_end, "刚读到 All-in 不该判换手")
+        check(s.prev_all_in_badges == {"hero"},
+              f"应记住 hero 全下：{s.prev_all_in_badges}")
+        second = feed(s, make_frame(), t=0.5)
+        check(not second.hand_end, "徽章还在时不该判换手")
+        third = feed(s, make_frame(), t=1.0)
+        check(not third.hand_end, "单帧消失先不判，防遮挡/幻觉")
+        fourth = feed(s, make_frame(), t=1.5)
+        check(fourth.hand_end, "连续两帧消失应判这手结束")
+        check(s.prev_all_in_badges == set(),
+              f"换手后应清空全下徽章集合：{s.prev_all_in_badges}")
+
+
+def test_all_in_badge_disappears_during_hero_turn_is_not_hand_end() -> None:
+    """还轮到 hero 行动时，All-in 徽章消失不能收手（按钮/照片误读）。"""
+    reads = [{"hero": ("Alin", 0.7)}, {"hero": ("Alin", 0.7)},
+             {"hero": ("弃牌", 0.9)}, {"hero": ("弃牌", 0.9)}]
+    with stub_env(), patch.object(ss, "read_avatars",
+                                  lambda *a, **k: reads.pop(0)):
+        s = new_stream()
+        for i in range(4):
+            out = feed(s, make_frame(hero_turn=True), t=0.5 * i)
+        check(not out.hand_end,
+              "hero 还在行动时不能凭 All-in 徽章消失收手")
+
+
+def test_all_in_badge_end_waits_for_river() -> None:
+    """全下后公共牌还没发完，All-in 徽章消失不能提前收手。"""
+    reads = [{"hero": ("Alin", 0.7)}, {"hero": ("Alin", 0.7)},
+             {"hero": ("弃牌", 0.9)}, {"hero": ("弃牌", 0.9)},
+             {"hero": ("弃牌", 0.9)}]
+    with stub_env(), patch.object(ss, "read_avatars",
+                                  lambda *a, **k: reads.pop(0)):
+        s = new_stream()
+
+        def feed_board(board):
+            s.stream.frames.append(make_frame(hero_turn=False))
+            return s.ingest(np.zeros((4, 4, 3), np.uint8), frame_id="f", t=0.0,
+                            extra_signature=(("Ah", "Kd"), tuple(board)))
+
+        turn = ["Ks", "7d", "2c", "Qh"]
+        feed_board(turn)                 # Alin
+        feed_board(turn)                 # Alin
+        feed_board(turn)                 # 消失第 1 帧
+        out = feed_board(turn)           # 消失第 2 帧；turn 阶段不能收手
+        check(not out.hand_end, "turn 阶段不能凭徽章消失收手")
+        river = feed_board(turn + ["9s"])  # 河牌到齐
+        check(river.hand_end, "河牌到齐后应收手")
+
+
 class FakeCache:
     """只实现钉住相关的方法；StateStream 的慢变量缓存只用到这几个。"""
 
@@ -260,6 +319,9 @@ def main() -> int:
         test_initial_blinds_carried_when_banner_unreadable,
         test_reset_makes_next_frame_a_new_baseline,
         test_dealer_rotation_clears_all_in_carry,
+        test_all_in_badge_disappearance_ends_hand,
+        test_all_in_badge_disappears_during_hero_turn_is_not_hand_end,
+        test_all_in_badge_end_waits_for_river,
         test_hand_boundaries_from_cards_and_board,
         test_slow_fields_pinned_until_hand_switch,
     ]

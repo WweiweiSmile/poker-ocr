@@ -36,29 +36,44 @@ curl -X POST http://localhost:8000/ocr/table -F "file=@table.jpg"
 
 ## 实时推流识别
 
-OBS 推 SRT → MediaMTX → 本机 RTSP；worker **不节流**：处理完当前帧立刻取
-邮箱里的最新帧，中间帧直接丢弃；用固定 ROI 识别座位、筹码、下注、动作、庄位、
-底池和盲注，输出一行一个状态的 JSONL。
+默认直接读 **OBS 虚拟摄像头**（`--url cam:0`，同一台 Mac 延迟最低）；也可以
+用 `--url rtsp://127.0.0.1:8554/live` 走 OBS ──SRT──▶ MediaMTX ──RTSP。
+worker **不节流**：处理完当前帧立刻取邮箱里的最新帧，中间帧直接丢弃；用固定
+ROI 识别座位、筹码、下注、动作、庄位、底池和盲注，输出一行一个状态的 JSONL。
 
 **完整方案、功能、OBS 参数、标定流程、输出字段与排障见
 [docs/live-stream.md](docs/live-stream.md)。**
 
-### 快速启动
+### 快速启动（虚拟摄像头 + 自动点击）
+
+默认 `--url cam:0`、`--auto-click` 开启。自动点击需要先标定一次按钮位置：
 
 ```bash
-mediamtx config/mediamtx.yml
+# 0) 只做一次：标定桌面客户端的虚拟按钮（默认圆形，按 C 切换方形）
+.venv/bin/python tools/calibrate_clicker.py --list-displays
+.venv/bin/python tools/calibrate_clicker.py --out config/clicker_local.json
 
+# 1) 建议先 dry-run：只打印将点击的随机坐标，不发送真实鼠标事件
 .venv/bin/python -m poker_ocr.live \
-  --url rtsp://127.0.0.1:8554/live \
+  --profile config/table_wpk_live.json \
+  --initial-blinds 1/2 \
+  --out logs/live.states.jsonl \
+  --clicker-dry-run
+
+# 2) 真实运行（默认 cam:0 + 自动点击）
+.venv/bin/python -m poker_ocr.live \
   --profile config/table_wpk_live.json \
   --initial-blinds 1/2 \
   --out logs/live.states.jsonl
 ```
 
-OBS 和 worker 在**同一台 Mac** 时，可以点 OBS 的 **Start Virtual Camera**，
-然后 `--url cam:0` 直接读虚拟摄像头（索引用 `tools/list_cameras.py` 查），
-整段跳过 编码 → SRT → MediaMTX → RTSP → 解码，延迟最低。详见
-[docs/live-stream.md §3.4](docs/live-stream.md#34-降低-obs--python-的传输延迟)。
+- `--url` 默认 `cam:0`（OBS 虚拟摄像头，索引用 `tools/list_cameras.py` 查）；
+  走 MediaMTX 时加 `--url rtsp://127.0.0.1:8554/live`，并先
+  `mediamtx config/mediamtx.yml`。
+- `--auto-click` 默认开启；只要 AI 建议、不要自动点击时加 `--no-auto-click`。
+- 关闭 AI 建议时（`--no-ai-advice`）自动点击会跟着关闭。
+- 没有 `config/clicker_local.json` 时启动会明确报错，先跑第 0 步。
+- 真实点击需要 macOS「辅助功能」权限，见下方自动点击小节。
 
 ### AI 实时建议（默认开启）
 
@@ -80,10 +95,10 @@ bb 说。金额由程序按现场底池/加注算好（含最小加注额与后�
 ```bash
 cp .env.example .env      # 然后编辑 .env，填入 AI_SERVER_API_KEY
 
+# 默认 cam:0；这里 --no-auto-click 表示只看建议、不自动点
 .venv/bin/python -m poker_ocr.live \
-  --url rtsp://127.0.0.1:8554/live \
   --profile config/table_wpk_1080x2400.json \
-  --initial-blinds 1/2 --ai-advice \
+  --initial-blinds 1/2 --ai-advice --no-auto-click \
   --out logs/live.states.jsonl
 ```
 
@@ -126,10 +141,78 @@ JEV 模式下候选动作会被转成一道 `choice` 题（criteria 的 key 就�
 - 只支持 `--recognizer roi`：全图路线读不到每座的本街下注，算不出跟注额。
 - 换手时另外写一条 `hand` 记录，含这一手完整的逐街行动线（对手 + 自己）、
   这一手给过的全部 AI 建议（`advices`），以及摊牌/主动秀牌时读到的对手手牌
-  （`shows`，例如 `{"seat_id":"midL","name":"许文文啊","cards":["Ac","Qh"]}`），
-  可以直接拿去复盘或对照。
+  （`shows`，例如 `{"seat_id":"midL","name":"许文文啊","cards":["Ac","Qh"]}`；
+  河牌只主动秀一张时 `cards` 只有一张）和全下汇总（`all_ins`，含全下金额与
+  界面实时胜率；全下需连续 2 帧确认，避免亮牌牌背的单帧误判），可以直接拿去
+  复盘或对照。
+- 头像上的黄色「All-in」徽章会被识别成 `all_in`；全下摊牌时筹码/下注位的
+  百分比会写入 `equity`。徽章从 All-in 变成其他状态时，按这手结束处理，
+  不必等庄位/牌面变化。
+- 公共牌/hero 手牌过跨帧稳定闸：公共牌只前进（**4→3、5→4 永不回退**），
+  hero 只接受 0/2 张，新读数连续 2 帧一致才替换 last-good；牌背/遮挡/
+  低置信度不参与替换。稳定结果仍不可靠时**跳过这一帧的 AI 建议**，手牌记录
+  里带 `cards_unreliable` / `cards_warnings`，牌面恢复后同一决策点补投。
+  公共牌回退/张数异常/牌背的最近帧会落到 `logs/incidents/`（`--no-incident` 关闭）。
 - 模型超时/报错/返回了不在选项里的答案时，记录标 `source=fallback`：
   面对下注→弃牌，否则→过牌（最保守），并保留 `error` 原因，绝不猜。
+
+### 桌面自动点击（默认开启）
+
+AI 建议返回后，可以在客户端的对应按钮上自动点一下。先把按钮位置标定成
+**虚拟区域**（屏幕逻辑点，默认圆形；按 `C` 可切换成方形），点击时在区域内缩
+一圈的范围里取随机坐标；圆形按钮的随机点取在内切椭圆里，不会落到四角空白：
+
+| 建议 | 点击 |
+|---|---|
+| 弃牌 | `fold`（左侧弃牌） |
+| 跟注 / 过牌 / 跟全下 | `call`（右侧跟注/让牌） |
+| 加注 / 下注 | 先点五个快捷档位之一（底池 1/3、1/2、2/3、1、1.2），再点 `confirm`（蓝色下注/加注确认） |
+
+翻前建议（`open-2.5`、`raise-3x` 等）没有对应的底池档位，按**金额最近**的档位点。
+
+```bash
+# 1) 标定：客户端窗口摆好后，按提示依次拖出按钮外接框
+#    默认画圆形，按 C 切换圆形/方形；--shape rect 可让新按钮默认方形
+.venv/bin/python tools/calibrate_clicker.py --list-displays
+.venv/bin/python tools/calibrate_clicker.py --out config/clicker_local.json
+
+# 2) 先 dry-run：只打印随机坐标，不真的点（--url 默认 cam:0）
+.venv/bin/python -m poker_ocr.live \
+  --profile config/table_wpk_1080x2400.json \
+  --initial-blinds 1/2 --clicker-dry-run
+
+# 3) 确认坐标无误后真实运行（--auto-click 默认开启）
+.venv/bin/python -m poker_ocr.live \
+  --profile config/table_wpk_1080x2400.json \
+  --initial-blinds 1/2
+
+# 不需要自动点击时：
+#   --no-auto-click
+# 走 MediaMTX 而不是虚拟摄像头时：
+#   --url rtsp://127.0.0.1:8554/live
+```
+
+**macOS 权限**：真实点击需要「辅助功能」权限，授予**运行 Python 的终端 /
+iTerm / IDE**（不是 Python 本身），然后完全退出并重开它。也可以先跑
+`tools/calibrate_clicker.py --request-access` 让系统弹授权框。没有权限时启动会
+直接报错，不会静默不点。
+
+**安全闸**：只有当前帧仍然 `hero_turn=true`、`state.ok`、决策点与投递时一致、
+手牌一致、牌面可靠、且这条建议没点过，才会执行；模型超时/回退建议默认不点
+（`clicker_local.json` 里 `allow_fallback: true` 可打开）。退出/换手/断流重连
+的 drain 只落库不点击。每次点击结果写在 `advice` 记录的 `click` 字段里。
+
+**生效确认与重试**：点击后约 0.5s，用下一帧的动作指纹（`hero_turn`、每座动作
+徽章、底池/下注/筹码等）和点击时对比；页面已经变化就不再动，**没变化会再执行
+一次**。重试次数和延迟可在 `config/clicker_local.json` 里改
+（`retry_delay_ms`，默认 500；`retry_count`，默认 1；设 0 关闭）。重试结果写进
+`click_retry` 记录，并计入退出汇总的 `click_retries`。
+
+**注意**：坐标是绝对的，客户端窗口移动/缩放、改分辨率或显示器排列后要重新标定；
+自动点击不会把客户端拉到前台，运行时要让客户端窗口保持最前。客户端建议用
+**窗口模式**（不要 macOS 全屏/独立 Space），否则标定遮罩可能和客户端不在同一个
+Space。真实鼠标事件没有送达回执，请先在模拟桌/非真钱环境验证。配置默认写到
+`config/clicker_local.json`，已被 `.gitignore` 忽略。
 
 ### 抓帧 → 裁剪 → 验证 → 重新标注
 
@@ -651,6 +734,8 @@ tests/
   test_positions.py       # 位置推导单元测试
   test_dealer.py          # 庄位检测单元测试（合成图）
   test_cards.py           # 公共牌 / hero 手牌回归（images/card 的 16 个标注样本）
+  test_stable_cards.py    # 跨帧牌面稳定闸（回退/张数/牌背/2 帧确认/多帧投票）
+  test_card_replay.py     # 真实样张回放：一手牌只落一条记录、牌面只前进
   test_extract.py         # 端到端回归测试
   test_api.py             # HTTP 接口测试
   golden/*.expected.json

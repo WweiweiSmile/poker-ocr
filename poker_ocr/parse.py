@@ -200,6 +200,63 @@ def is_fold_badge(avatar_text: str | None, score: float = 0.0,
     return bool(_FOLD_RE.match(t))
 
 
+# 「All in」徽章画在头像上，黄色字。实测 rec 会读成 `Alin`（score 0.60–0.74），
+# 所以按「去掉空格/连字符后与 allin 足够像」判，而不是要求逐字读对。
+_ALL_IN_RE = re.compile(r"^(?:全下|全押|all[\s_-]*in)", re.IGNORECASE)
+
+
+def is_all_in_badge(avatar_text: str | None, score: float = 0.0,
+                    min_score: float = 0.4) -> bool | None:
+    """头像 ROI 的读数是不是黄色的「All in」徽章。三态：True / False / None。"""
+    t = (avatar_text or "").strip()
+    if not t:
+        return None
+    if score < min_score:
+        return None
+    if _ALL_IN_RE.match(t):
+        return True
+    compact = re.sub(r"[\s_-]+", "", t).lower()
+    if compact.startswith(("allin", "alin", "aiin", "ailn", "a1in", "a11in")):
+        return True
+    # 只对短文本做模糊匹配，避免把头像照片里读出的长句子误判成 All in
+    return len(compact) <= 6 and difflib.SequenceMatcher(
+        None, compact, "allin").ratio() >= 0.72
+
+
+# 只认**整段**就是胜率文本：`30%`、`胜率 69%`。不能 `search`，否则
+# 下注槽里的 HUD 文本（`入池36%`）会被当成全下胜率，把真正的下注乱码放过去。
+_PERCENT_RE = re.compile(r"^\s*(?:胜率\s*)?(\d+(?:\.\d+)?)\s*%\s*$")
+
+
+def parse_percent(text: str | None) -> float | None:
+    """从 `30%` / `胜率 69%` 里取百分比。不是百分数返回 None。"""
+    m = _PERCENT_RE.match(text or "")
+    if not m:
+        return None
+    try:
+        value = float(m.group(1))
+    except ValueError:
+        return None
+    return value if 0.0 <= value <= 100.0 else None
+
+
+def parse_equity(text: str | None, *, allow_bare: bool = False) -> float | None:
+    """胜率读数。`allow_bare=True` 时也接受纯数字（全下胜率槽的 `%` 常被 rec 吞掉）。"""
+    value = parse_percent(text)
+    if value is not None:
+        return value
+    if not allow_bare:
+        return None
+    m = re.fullmatch(r"\s*(\d{1,3}(?:\.\d+)?)\s*", text or "")
+    if not m:
+        return None
+    try:
+        value = float(m.group(1))
+    except ValueError:
+        return None
+    return value if 0.0 <= value <= 100.0 else None
+
+
 def names_similar(a: str | None, b: str | None, threshold: float = 0.6) -> bool:
     """两个名字像不像「同一个人被 OCR 读出了不同版本」。
 

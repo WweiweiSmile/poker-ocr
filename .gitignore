@@ -10,6 +10,11 @@ __pycache__/
 .env.*
 !.env.example
 
+# 自动点击的按钮坐标（因机器/窗口位置而异，由标定工具生成）
+config/clicker_local.json
+config/clicker_*.json
+!config/clicker.example.json
+
 # 实时识别的运行产物
 logs/
 images/

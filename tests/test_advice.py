@@ -25,7 +25,7 @@ from poker_ocr.advice import (  # noqa: E402
     AISettings, AIError, AdviceRunner, OPTION_ORDER, advise,
     build_messages, build_options, build_situation, complete_jev, complete_json,
     is_jev_model, jev_decisions, jev_headers, jev_payload, parse_json_content,
-    render_hand_facts, value_directive,
+    preset_amounts, preset_targets, render_hand_facts, value_directive,
 )
 from poker_ocr.frame_state import FrameState, PlayerState  # noqa: E402
 from poker_ocr.hand_track import LiveHandTracker, street_of_board  # noqa: E402
@@ -325,6 +325,24 @@ def test_tracker_board_drop_needs_two_frames() -> None:
     check(tr.hand.hand_id != first, "连续两帧读空应换手")
 
 
+def test_tracker_ignores_turn_card_flicker() -> None:
+    """转牌某张被遮挡读成 3 张，不能把同一手劈成两半。"""
+    tr = LiveHandTracker(confirm_frames=1)
+    players = (player("hero", position="BTN"), player("a", position="BB"))
+    feed(tr, state(*players, dealer="a"), ["Ah", "Kd"],
+         ["Ks", "7d", "2c"])
+    first = tr.hand.hand_id
+    feed(tr, state(*players, dealer="a"), ["Ah", "Kd"],
+         ["Ks", "7d", "2c", "Qh"])
+    for _ in range(2):
+        feed(tr, state(*players, dealer="a"), ["Ah", "Kd"],
+             ["Ks", "7d", "2c"])
+    check(tr.hand.hand_id == first, "转牌读丢一张不该换手")
+    feed(tr, state(*players, dealer="a"), ["Ah", "Kd"],
+         ["Ks", "7d", "2c", "Qh", "9s"])
+    check(tr.hand.hand_id == first, "河牌仍应属于同一手")
+
+
 def test_tracker_decision_point_confirmed_and_deduped() -> None:
     tr = LiveHandTracker(confirm_frames=2)
     players = (player("hero", position="BTN"),
@@ -408,6 +426,124 @@ def test_hand_record_includes_shown_cards() -> None:
     finished = tr.take_finished()
     check(finished is not None and finished.get("shows"),
           f"上一手仍应保留亮牌：{finished}")
+
+
+def test_hand_record_includes_one_card_show() -> None:
+    """河牌主动只秀一张 K：show 记录里就只写一张。"""
+    tr = LiveHandTracker(confirm_frames=1)
+    st = state(player("hero", position="BTN"),
+               player("a", name="西装暴徒李", position="SB"),
+               pot=3.0, pbs=3.0, dealer="hero")
+    feed(tr, st, ["Js", "Qs"], [])
+    tr.record_shows({"a": ["Kd"]})
+    rec = tr._hand_dict(tr.hand)
+    check(rec.get("shows") == [{
+        "seat_id": "a", "name": "西装暴徒李", "position": "SB",
+        "cards": ["Kd"],
+    }], f"只秀一张应只记一张：{rec.get('shows')}")
+
+
+def test_hand_record_includes_all_ins() -> None:
+    """全下座位、金额和实时胜率写进 hand 记录。"""
+    tr = LiveHandTracker(confirm_frames=1)
+    st = state(player("hero", name="me", position="BTN"),
+               player("a", name="老王", position="BB"),
+               pot=3.0, pbs=3.0, dealer="hero")
+    feed(tr, st, ["Ah", "Kd"], [])
+    hero = st.player("hero")
+    hero.stack = 0.0
+    hero.bet = 60.5
+    hero.all_in = True
+    hero.equity = 30.0
+    tr.record_all_ins(st)
+    check("all_ins" not in tr._hand_dict(tr.hand),
+          "单帧全下不应落库（亮牌/牌背会误判）")
+    tr.record_all_ins(st)
+    rec = tr._hand_dict(tr.hand)
+    check(rec.get("all_ins") == [{
+        "seat_id": "hero", "name": "me", "position": "BTN",
+        "amount": 60.5, "equity": 30.0,
+    }], f"hand 记录应带全下汇总：{rec.get('all_ins')}")
+
+
+def test_all_ins_backfills_amount_and_position() -> None:
+    """全下帧读不到金额/位置时，从这手的行动线和座位缓存回填。"""
+    from poker_ocr.hand_track import ActionRecord
+
+    tr = LiveHandTracker(confirm_frames=1)
+    st = state(player("hero", name="me", position="BB"),
+               player("a", name="老王", position="SB"),
+               pot=3.0, pbs=3.0, dealer="hero")
+    feed(tr, st, ["Js", "Qs"], [])
+    tr.hand.actions.append(ActionRecord(
+        street="preflop", seat_id="hero", name="me", position="BB",
+        action="raise", amount=60.5, all_in=True, is_hero=True))
+    tr.hand.actions.append(ActionRecord(
+        street="preflop", seat_id="a", name="老王", position="SB",
+        action="call", amount=60.5, all_in=True))
+
+    st2 = state(player("hero", name="me", position="BB", stack=0.0),
+                player("a", name="老王", position=None, stack=0.0),
+                pot=127.5, pbs=4.5, dealer="hero")
+    for p in st2.players:
+        p.all_in = True
+    tr.record_all_ins(st2)
+    tr.record_all_ins(st2)
+    rec = {row["seat_id"]: row for row in tr._hand_dict(tr.hand)["all_ins"]}
+    check(rec["hero"]["amount"] == 60.5,
+          f"hero 金额应从 all-in 行动回填：{rec['hero']}")
+    check(rec["a"]["position"] == "SB",
+          f"lowR 位置应从行动线/缓存回填：{rec['a']}")
+    check(rec["a"]["amount"] == 60.5,
+          f"对手金额应从 all-in 行动回填：{rec['a']}")
+
+
+def test_finish_current_waits_for_real_new_hand() -> None:
+    """All-in 徽章消失主动收手后，同一摊牌帧不能立刻开新手。"""
+    tr = LiveHandTracker(confirm_frames=1)
+    st = state(player("hero", name="me", position="BTN"),
+               player("a", name="老王", position="BB"),
+               pot=3.0, pbs=3.0, dealer="hero")
+    feed(tr, st, ["Ah", "Kd"], [])
+    first_id = tr.hand.hand_id
+    tr.finish_current()
+    finished = tr.take_finished()
+    check(finished is not None and finished["hand_id"] == first_id,
+          f"应收走刚结束的手牌：{finished}")
+
+    # 摊牌后的同一帧：牌面/手牌/庄位都没变，应保持等待
+    check(feed(tr, st, ["Ah", "Kd"], []) is None,
+          "收手后的同一帧不该开新手")
+    check(tr.hand is None, "等待期间不该有新手牌")
+
+    # 下一手：庄位变化 + 换牌 → 开始新手
+    st2 = state(player("hero", name="me", position="BTN"),
+                player("a", name="老王", position="BB"),
+                pot=3.0, pbs=3.0, dealer="a")
+    feed(tr, st2, ["2c", "3d"], [])
+    check(tr.hand is not None and tr.hand.hand_id != first_id,
+          f"真正换手后应开新手：{tr.hand}")
+
+
+def test_finish_current_recovers_after_timeout() -> None:
+    """新手信号一直读不到时，等待超过上限也要强制开新手，不能永久卡住。"""
+    from poker_ocr.hand_track import AWAIT_NEW_HAND_MAX_FRAMES
+
+    tr = LiveHandTracker(confirm_frames=1)
+    st = state(player("hero", name="me", position="BTN"),
+               player("a", name="老王", position="BB"),
+               pot=3.0, pbs=3.0, dealer="hero")
+    feed(tr, st, ["Ah", "Kd"], [])
+    first_id = tr.hand.hand_id
+    tr.finish_current()
+    tr.take_finished()
+
+    for _ in range(AWAIT_NEW_HAND_MAX_FRAMES - 1):
+        check(feed(tr, st, ["Ah", "Kd"], []) is None, "等待期间不该开新手")
+        check(tr.hand is None, "等待期间不该有新手牌")
+    feed(tr, st, ["Ah", "Kd"], [])
+    check(tr.hand is not None and tr.hand.hand_id != first_id,
+          f"超时后应强制开新手：{tr.hand}")
 
 
 def test_table_size_uses_seats_not_players_in_hand() -> None:
@@ -795,6 +931,47 @@ def test_options_capped_by_stack() -> None:
     check(by["raise-1"].amount == 20.0,
           f"后手 20BB 时 1 倍池应封顶到 20，实际 {by['raise-1'].amount}")
     check("all-in" in by["raise-1"].note, "封顶的档位应注明等同全下")
+
+
+def test_preset_amounts_match_postflop_options() -> None:
+    """点击器用的档位金额必须和 build_options 给出的完全一致。"""
+    for point in (make_point(), make_point(to_call=4.0, pot=10.0,
+                                           hero_stack=90.0),
+                  make_point(to_call=0.0, pot=100.0, hero_stack=20.0)):
+        options = {o.id: o.amount for o in build_options(point)
+                   if o.kind in ("raise", "bet")}
+        check(options == preset_amounts(point),
+              f"档位金额不一致：{options} != {preset_amounts(point)}")
+        for oid, (amount, note) in preset_targets(point).items():
+            opt = next(o for o in build_options(point) if o.id == oid)
+            check((amount, note) == (opt.amount, opt.note),
+                  f"{oid} 的金额/备注不一致：{(amount, note)} vs "
+                  f"{(opt.amount, opt.note)}")
+
+
+def test_preset_amounts_preflop_follows_pot_fraction() -> None:
+    """翻前没有底池档位建议，但点击器仍要按同一公式算五个档位的目标额。"""
+    point = make_point(street="preflop", board=(), to_call=3.0, pot=4.5,
+                       hero_bet=1.0, hero_stack=97.0, second_bet=3.0,
+                       cbet_spot=False)
+    # 最高下注 4、最小加注到 5；1/3 = 4 + (4.5+3)/3 = 6.5，2/3 = 4 + 5 = 9
+    got = preset_amounts(point)
+    check(got["raise-1/3"] == 6.5, f"翻前 1/3 档应 6.5：{got}")
+    check(got["raise-2/3"] == 9.0, f"翻前 2/3 档应 9.0：{got}")
+    check(got["raise-1.2"] == 13.0, f"翻前 1.2 档应 13.0：{got}")
+
+
+def test_advice_carries_click_metadata() -> None:
+    """Advice 要带决策点身份和档位金额，但不改变 to_dict 的 JSONL 形状。"""
+    sit = build_situation(make_point())
+    result = advise(sit, settings=None)
+    check(result.decision_key == sit.snap.decision_key,
+          f"决策点身份丢失：{result.decision_key}")
+    check(dict(result.preset_amounts) == preset_amounts(sit.snap),
+          f"档位金额丢失：{result.preset_amounts}")
+    data = result.to_dict()
+    check("decision_key" not in data and "preset_amounts" not in data,
+          f"内部字段不该写进 JSONL：{sorted(data)}")
 
 
 def test_covered_stack_has_only_fold_or_all_in() -> None:
@@ -1407,11 +1584,17 @@ def main() -> int:
         test_tracker_does_not_guess_when_pot_does_not_match,
         test_tracker_new_hand_on_dealer_change,
         test_tracker_board_drop_needs_two_frames,
+        test_tracker_ignores_turn_card_flicker,
         test_tracker_decision_point_confirmed_and_deduped,
         test_snapshot_to_call_and_preflop_shape,
         test_snapshot_marks_limped_pot,
         test_table_size_uses_seats_not_players_in_hand,
         test_hand_record_includes_shown_cards,
+        test_hand_record_includes_one_card_show,
+        test_hand_record_includes_all_ins,
+        test_all_ins_backfills_amount_and_position,
+        test_finish_current_waits_for_real_new_hand,
+        test_finish_current_recovers_after_timeout,
         test_skill_library_loads_all_files,
         test_skill_text_matches_call_back_copy,
         test_skill_selection_is_street_scoped,
@@ -1430,6 +1613,9 @@ def main() -> int:
         test_options_facing_bet_uses_pot_after_call,
         test_options_bump_to_min_raise_when_fraction_too_small,
         test_options_capped_by_stack,
+        test_preset_amounts_match_postflop_options,
+        test_preset_amounts_preflop_follows_pot_fraction,
+        test_advice_carries_click_metadata,
         test_covered_stack_has_only_fold_or_all_in,
         test_prompt_marks_inferred_actions,
         test_prompt_contains_full_action_line_and_options,

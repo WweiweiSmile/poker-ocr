@@ -189,6 +189,49 @@ def test_three_eight_use_hole_topology() -> None:
               f"8 应有 2 个闭合孔：{card8.evidence}")
 
 
+def test_show_one_card_sample() -> None:
+    """河牌主动只秀一张：lowR K♦、upR 6♦ 都只记一张；另一张牌背不能凑数。"""
+    profile = Profile.load(SHOW_PROFILE_PATH)
+    img = cv2.imread(str(CARD_DIR / "showOne"))
+    check(img is not None, "读不了 showOne")
+    if img is None:
+        return
+    result = recognize_cards(img, profile)
+    check(result.show_codes.get("midL") == ["Ac", "Qh"],
+          f"midL 应记录两张：{result.show_codes}")
+    check(result.show_codes.get("lowR") == ["Kd"],
+          f"lowR 只秀一张 K♦：{result.show_codes}")
+    check(result.show_codes.get("upR") == ["6d"],
+          f"upR 只秀一张 6♦：{result.show_codes}")
+
+
+def test_card_back_is_classified_explicitly() -> None:
+    """POKER 牌背要被显式分类成 card_back，不能只靠低置信度过滤。
+
+    showOne 的 lowR/upR 都是「一张真牌 + 一张牌背」；牌背有白边，会被
+    检成牌面矩形。这里直接看原始读数：牌背必须带 card_back=True。
+    """
+    profile = Profile.load(SHOW_PROFILE_PATH)
+    img = cv2.imread(str(CARD_DIR / "showOne"))
+    check(img is not None, "读不了 showOne")
+    if img is None:
+        return
+    h, w = img.shape[:2]
+    from poker_ocr.cards import recognize_region
+    for seat_id in ("lowR", "upR"):
+        seat = next(s for s in profile.seats if s.seat_id == seat_id)
+        px = profile.slot_to_px(seat.action_slot, (w, h))
+        raw = recognize_region(img, px, name=seat_id, slot=seat.action_slot,
+                               max_cards=2, split_pairs=True)
+        check(len(raw.cards) == 2, f"{seat_id} 原始读数应有 2 块牌：{raw.codes}")
+        check(any(c.evidence.get("card_back") for c in raw.cards),
+              f"{seat_id} 应显式识别出牌背："
+              f"{[(c.code, c.evidence.get('card_back')) for c in raw.cards]}")
+        check(all(not c.evidence.get("card_back") for c in
+                  recognize_cards(img, profile).shows[seat_id].cards),
+              f"{seat_id} 输出不能包含牌背")
+
+
 def test_all_ranks_have_templates() -> None:
     from poker_ocr.cards import _load_templates
     templates = _load_templates()
@@ -200,6 +243,8 @@ def main() -> int:
     tests = [
         test_all_ranks_have_templates,
         test_shown_cards_from_show_card_sample,
+        test_show_one_card_sample,
+        test_card_back_is_classified_explicitly,
         test_three_eight_use_hole_topology,
         test_all_labeled_samples,
         test_color_and_shape_agree,

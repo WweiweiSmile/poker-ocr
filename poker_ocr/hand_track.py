@@ -57,6 +57,19 @@ AGGRESSIVE = ("bet", "raise")
 # 换手时「在局人数骤变」的阈值。注意这不是桌型座位数（那个用 state.table_seats）
 IN_HAND_JUMP = 2
 
+# 全下要连续几帧确认才写进 all_ins。摊牌亮牌/牌背会让 OCR 单帧误判成
+# All-in；单帧就记会把「只秀一张 K」的玩家写成全下。
+ALL_IN_CONFIRM_FRAMES = 2
+
+# `finish_current()` 之后等新手信号的上限帧数。超过就强制开新手：
+# 牌背/弹窗可能让 hero 手牌和庄位连续读不到，不能无限等下去。
+AWAIT_NEW_HAND_MAX_FRAMES = 20
+
+# 写进 hand 记录时只保留这些关键词命中的牌面异常；动画期间的
+# 「新读数待确认」是正常过程，写进手牌记忆只会变成噪声。
+_CARD_WARNING_KEYS = ("回退", "牌背", "遮挡", "不完整", "合法张数",
+                      "不可靠", "置信度", "没读出", "投票")
+
 # 翻前/翻后共用的行动顺序（各人数下的位置表都是它的子序列）。
 # 街末补漏时用它给同一批跟注排序，避免按物理座位顺序把 CO 排到 BTN 后面。
 ACTION_ORDER = ("SB", "BB", "UTG", "UTG+1", "UTG+2", "LJ", "HJ", "CO", "BTN")
@@ -192,6 +205,12 @@ class _LiveHand:
     baseline: dict[tuple[str, str], float] = field(default_factory=dict)
     # 摊牌/主动秀牌时读到的对手手牌：seat_id → {seat_id, name, position, cards}
     shows: dict[str, dict] = field(default_factory=dict)
+    # 全下汇总：seat_id → {seat_id, name, position, amount, equity}
+    all_ins: dict[str, dict] = field(default_factory=dict)
+    # 这一手遇到过的牌面异常（稳定闸判断牌面不可靠时）。落库用于复盘：
+    # 哪些建议/行动是在牌面异常期间记录的。
+    cards_warnings: list[str] = field(default_factory=list)
+    cards_unreliable: bool = False
 
     def street_actions(self, street: str) -> list[ActionRecord]:
         return [a for a in self.actions if a.street == street]
@@ -236,17 +255,33 @@ class LiveHandTracker:
         # seat_id → 首次看到这组亮牌时的手牌 id。亮牌会在屏幕上停留好几秒，
         # 跨过换手；没有这份映射会把上一手的亮牌也写进下一手。
         self._active_shows: dict[str, str] = {}
+        # `finish_current()` 主动结束当前手后，等真正的新手信号再开新手。
+        # 否则摊牌后的同一帧会被当成新手牌开头，把一手牌劈成两半。
+        self._await_new_hand = False
+        self._await_frames = 0
+        # 等待期间保留一份结束手牌的副本：`take_finished()` 会把 last_finished
+        # 清空，不能再用它判断「下一帧是不是同一手」。
+        self._await_hand: _LiveHand | None = None
+        # seat_id → 连续读到 all_in 的帧数。够 ALL_IN_CONFIRM_FRAMES 才写记录。
+        self._all_in_streak: dict[str, int] = {}
 
     # ─────────────────────────── 主流程 ───────────────────────────
 
     def observe(self, state: FrameState,
                 hero_cards: list[str] | tuple[str, ...],
-                board: list[str] | tuple[str, ...]) -> HandSnapshot | None:
+                board: list[str] | tuple[str, ...], *,
+                cards_reliable: bool = True,
+                cards_warnings: tuple[str, ...] = ()
+                ) -> HandSnapshot | None:
         """喂一帧被接受的状态；返回决策点快照或 None。
 
         调用方只应喂 `state.ok` 的帧 —— 带 errors 的帧里任何字段都可能是猜的。
         对手亮牌走独立的 `record_shows()`：亮牌帧常常因为筹码/底池被顶掉而
         `not ok`，不能等这里。
+
+        `cards_reliable=False` 时**不给决策点**（也不把决策点标成已建议）：
+        牌面张数/点数不稳定时，AI 基于错牌面给的结论比没有结论更糟。等牌面
+        恢复可靠后，同一个决策点还会再尝试一次。
         """
         if not state.ok:
             return None
@@ -260,6 +295,15 @@ class LiveHandTracker:
         board_len = len(board)
         street = street_of_board(board_len)
 
+        if self._await_new_hand:
+            self._await_frames += 1
+            if (not self._looks_like_new_hand(state, cards, board_len)
+                    and self._await_frames < AWAIT_NEW_HAND_MAX_FRAMES):
+                return None
+            self._await_new_hand = False
+            self._await_hand = None
+            self._await_frames = 0
+
         if self._is_new_hand(state, cards, board_len):
             if self.hand is not None:
                 self.last_finished = copy.deepcopy(self.hand)
@@ -271,6 +315,13 @@ class LiveHandTracker:
         # 手牌/位置在遮挡帧里可能读空，只更新有值的
         if cards:
             hand.hero_cards = cards
+        # 这一手遇到过的牌面异常。只留真正值得复盘的原因（回退/牌背/遮挡/
+        # 张数不合法），跳过动画期间每帧的「新读数待确认」，并限 20 条。
+        for warning in cards_warnings:
+            if not any(k in warning for k in _CARD_WARNING_KEYS):
+                continue
+            if warning not in hand.cards_warnings and len(hand.cards_warnings) < 20:
+                hand.cards_warnings.append(warning)
         hero = self._hero(state)
         if hero is not None and hero.position:
             hand.hero_position = hero.position
@@ -303,7 +354,7 @@ class LiveHandTracker:
         self._prev_hero_cards = cards or self._prev_hero_cards
         self._prev_in_hand = state.players_in_hand
 
-        return self._maybe_decision(state, hand)
+        return self._maybe_decision(state, hand, cards_reliable=cards_reliable)
 
     def record_shows(self, shows: dict[str, list[str]] | None) -> None:
         """把本帧读到的亮牌挂到当前（或刚结束的）这手牌上。
@@ -319,17 +370,13 @@ class LiveHandTracker:
                 del self._active_shows[seat_id]
         if not shows:
             return
-        target = self.hand
-        # 当前手牌还是换手后的空壳（没有 hero 手牌/公共牌）时，亮牌更可能
-        # 属于刚结束的上一手。
-        if (target is None or (not target.hero_cards and not target.board)) \
-                and self.last_finished is not None:
-            target = self.last_finished
+        target = self._target_hand()
         if target is None:
             return
         for seat_id, codes in shows.items():
             codes = tuple(codes)
-            if len(codes) != 2:
+            # 摊牌 2 张；河牌主动只秀 1 张。0 张/3 张以上都是误读。
+            if len(codes) not in (1, 2):
                 continue
             # 同一组亮牌从上一手一直停留到这一手时，不要再写进新手牌。
             first_hand = self._active_shows.get(seat_id)
@@ -344,6 +391,105 @@ class LiveHandTracker:
                 "cards": list(codes),
             }
 
+    def record_all_ins(self, state: FrameState | None) -> None:
+        """把本帧的全下座位、金额和实时胜率挂到当前（或刚结束的）手牌上。
+
+        亮牌/摊牌帧经常 `state.ok=False`，所以这个入口也不要求状态有效。
+        金额优先用本街下注 pill（全下时它显示的是全下总额），读不到再退回
+        筹码胶囊；胜率只有界面显示百分比时才有。
+        """
+        if state is None:
+            return
+        target = self._target_hand()
+        if target is None:
+            return
+        current = {p.seat_id for p in state.players if p.in_hand and p.all_in}
+        for seat_id in list(self._all_in_streak):
+            if seat_id not in current:
+                del self._all_in_streak[seat_id]
+        for p in state.players:
+            if not (p.in_hand and p.all_in):
+                continue
+            streak = self._all_in_streak.get(p.seat_id, 0) + 1
+            self._all_in_streak[p.seat_id] = streak
+            if streak < ALL_IN_CONFIRM_FRAMES:
+                continue                 # 单帧误判（亮牌/牌背/遮挡）不落库
+            prev = target.all_ins.get(p.seat_id, {})
+            amount = (p.bet if (p.bet or 0) > 0 else
+                      p.stack if (p.stack or 0) > 0 else None)
+            name, position = p.name, p.position
+            meta_name, meta_position = self._seat_meta.get(p.seat_id,
+                                                          (None, None))
+            name = name or meta_name
+            position = position or meta_position
+            if name is None or position is None or amount is None:
+                # 全下帧常常 state.ok=False，name/position/amount 可能是空的。
+                # 从这手已有的行动线补；比只依赖单帧更稳。
+                for a in reversed(target.actions):
+                    if a.seat_id != p.seat_id:
+                        continue
+                    if name is None and a.name:
+                        name = a.name
+                    if position is None and a.position:
+                        position = a.position
+                    if amount is None and a.all_in and (a.amount or 0) > 0:
+                        amount = a.amount
+            amount = amount if amount is not None else prev.get("amount")
+            equity = p.equity if p.equity is not None else prev.get("equity")
+            target.all_ins[p.seat_id] = {
+                "seat_id": p.seat_id,
+                "name": name,
+                "position": position,
+                "amount": amount,
+                **({"equity": equity} if equity is not None else {}),
+            }
+
+    def _target_hand(self) -> _LiveHand | None:
+        """亮牌/全下信息该挂到哪一手。
+
+        当前手牌还是换手后的空壳（没有 hero 手牌/公共牌）时，信息更可能
+        属于刚结束的上一手。
+        """
+        target = self.hand
+        if (target is None or (not target.hero_cards and not target.board)) \
+                and self.last_finished is not None:
+            target = self.last_finished
+        return target
+
+    def finish_current(self) -> None:
+        """主动结束当前手牌（All-in 徽章消失），等真正的新手信号再开新手。"""
+        if self.hand is None:
+            return
+        hand = copy.deepcopy(self.hand)
+        self.last_finished = hand
+        self._await_hand = hand
+        self.hand = None
+        self._await_new_hand = True
+        self._await_frames = 0
+        self._all_in_streak.clear()
+
+    def _looks_like_new_hand(self, state: FrameState,
+                             cards: tuple[str, ...], board_len: int) -> bool:
+        """`finish_current()` 之后判断当前帧是否真的是下一手。
+
+        不直接用 `_is_new_hand()`：那个函数在 `self.hand is None` 时会立刻
+        返回 True，会把摊牌后的同一帧当成新手牌开头。
+        """
+        hand = self._await_hand or self.last_finished
+        if hand is None:
+            return True
+        if hand.dealer and state.dealer and hand.dealer != state.dealer:
+            return True
+        if (len(cards) == 2 and len(hand.hero_cards) == 2
+                and cards != hand.hero_cards):
+            return True
+        if board_len == 0 and len(hand.board) > 0:
+            return True
+        if (self._prev_in_hand
+                and abs(state.players_in_hand - self._prev_in_hand) >= IN_HAND_JUMP):
+            return True
+        return False
+
     def reset(self) -> None:
         """断流重连：桌面状态全部作废，但已给出的建议不重发。"""
         self.hand = None
@@ -353,6 +499,10 @@ class LiveHandTracker:
         self._drop_frames = 0
         self._seat_meta.clear()
         self._active_shows.clear()
+        self._await_new_hand = False
+        self._await_frames = 0
+        self._await_hand = None
+        self._all_in_streak.clear()
 
     # ─────────────────────────── 换手 ───────────────────────────
 
@@ -363,13 +513,14 @@ class LiveHandTracker:
             return True
         if hand.dealer and state.dealer and hand.dealer != state.dealer:
             return True
-        # 公共牌张数掉回翻前/翻牌，是换手信号。只认 0 和 3：
-        # 5→4、3→2 这类更像是读错了一张，不该把一手牌劈成两半。
-        # 还要连续两帧确认 —— 单帧读空（遮挡/动画）不能当换手
-        # 拿「这手牌见过的最长公共牌」比，而不是上一帧 —— 确认期间手牌状态
-        # 故意不推进，上一帧的 board_len 会提前变成 0，第二帧就丢了信号
+        # 公共牌读空（0 张）连续两帧才是换手。**不把 4→3 当换手**：
+        # 转牌某一张被动画/遮挡读丢时，牌面会从 4 掉到 3；实测这会把同一手
+        # 劈成两半，AI 建议留在前半段、all-in/亮牌落在后半段。
+        # 新手如果从翻牌开始（没有 0 张帧），靠庄位/hero 手牌/在局人数跳变识别。
+        # 确认期间手牌状态故意不推进，上一帧的 board_len 会提前变成 0，
+        # 所以拿「这手牌见过的最长公共牌」比。
         seen = len(hand.board)
-        if (board_len == 0 and seen > 0) or (board_len == 3 and seen >= 4):
+        if board_len == 0 and seen > 0:
             self._drop_frames += 1
             if self._drop_frames >= 2:
                 self._drop_frames = 0
@@ -395,6 +546,7 @@ class LiveHandTracker:
     def _start_hand(self, state: FrameState, cards: tuple[str, ...],
                     board_len: int, board: tuple[str, ...]) -> None:
         self.hand_seq += 1
+        self._all_in_streak.clear()
         street = street_of_board(board_len) or PREFLOP
         hero = self._hero(state)
         hand = _LiveHand(
@@ -702,7 +854,8 @@ class LiveHandTracker:
     # ─────────────────────────── 决策点 ───────────────────────────
 
     def _maybe_decision(self, state: FrameState,
-                        hand: _LiveHand) -> HandSnapshot | None:
+                        hand: _LiveHand, *,
+                        cards_reliable: bool = True) -> HandSnapshot | None:
         """轮到我时给一个决策点。去重靠 decision_key，不靠上升沿。
 
         为什么不是「只在 hero_turn 由假变真的那一帧」：多人池里 hero 过牌后
@@ -721,6 +874,13 @@ class LiveHandTracker:
         if not hand.hero_cards:
             return None
         if hand.street != PREFLOP and len(hand.board) < 3:
+            return None
+        # 牌面还没稳定/出现 ?/低置信度/牌背：不给建议，也不占用 advised 名额。
+        # 这样牌面恢复后同一个决策点还能补投一次。只有真正拦下一次「本来
+        # 会给出的建议」时才标 cards_unreliable，避免把发牌动画的正常等待
+        # 也写进每一手牌。
+        if not cards_reliable:
+            hand.cards_unreliable = True
             return None
 
         snap = self._snapshot(state, hand)
@@ -890,6 +1050,16 @@ class LiveHandTracker:
         if hand.shows:
             out["shows"] = [hand.shows[seat_id]
                             for seat_id in sorted(hand.shows)]
+        # 全下座位、金额与实时胜率。没有全下时连键都不出现。
+        if hand.all_ins:
+            out["all_ins"] = [hand.all_ins[seat_id]
+                              for seat_id in sorted(hand.all_ins)]
+        # 牌面异常只在发生过时出现；cards_unreliable=True 说明这手至少有一帧
+        # 因牌面不可靠跳过了 AI 建议。
+        if hand.cards_warnings:
+            out["cards_warnings"] = list(hand.cards_warnings)
+        if hand.cards_unreliable:
+            out["cards_unreliable"] = True
         return out
 
     def copy_hand(self) -> _LiveHand | None:

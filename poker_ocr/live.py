@@ -1,10 +1,13 @@
 """实时拉流 → 状态 JSONL（M3.1）。
 
     .venv/bin/python -m poker_ocr.live \
-        --url rtsp://127.0.0.1:8554/live \
+        --profile config/table_wpk_live.json \
+        --initial-blinds 1/2 \
         --out logs/live.states.jsonl
 
-链路：OBS ──SRT──▶ MediaMTX ──RTSP──▶ 本进程。
+默认链路：OBS ──虚拟摄像头──▶ 本进程（`--url cam:0`，可用 `tools/list_cameras.py`
+查索引）；也可以用 `--url rtsp://127.0.0.1:8554/live` 走
+OBS ──SRT──▶ MediaMTX ──RTSP──▶ 本进程。
 
 设计要点：
 
@@ -43,6 +46,7 @@ import signal
 import sys
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -52,8 +56,14 @@ import cv2
 import numpy as np
 
 from .advice import AISettings, AdviceRunner, build_situation
-from .cards import CardsResult, recognize_cards
+from .cards import (DEFAULT_CARD_SLOTS, CardsResult, StableCards,
+                    recognize_cards, recognize_shown_cards)
+from .clicker import (DEFAULT_CONFIG_PATH as DEFAULT_CLICKER_CONFIG,
+                      CGEventBackend, Clicker, ClickerConfig,
+                      ClickerConfigError, ClickerUnavailable, ClickResult,
+                      DryRunBackend, list_displays, rect_inside_displays)
 from .env import EnvFileError, load_env
+from .frame_state import action_signature
 from .full_table import (DealerTracker, FullOutcome, FullStateRecorder,
                          FullTableConfig, load_full_config, observe_full)
 from .hand_track import LiveHandTracker
@@ -67,8 +77,11 @@ from .table_dynamics import TableDynamics, load_table_dynamics
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_PROFILE = PROJECT_ROOT / "config" / "table_wpk_1080x2400.json"
-DEFAULT_URL = "rtsp://127.0.0.1:8554/live"
+# 默认直接读 OBS 虚拟摄像头（同一台 Mac、延迟最低）；走 MediaMTX 时显式传
+# `--url rtsp://127.0.0.1:8554/live`。
+DEFAULT_URL = "cam:0"
 DEFAULT_OUT = Path("logs/live.states.jsonl")
+DEFAULT_INCIDENT_DIR = Path("logs/incidents")
 # 默认不节流：处理完当前帧立刻取邮箱里的最新帧，中间帧直接丢弃。
 # `--every` 仍保留给调试/降压用（>0 时按该间隔采样）。
 DEFAULT_EVERY = 0.0
@@ -117,6 +130,20 @@ class FramePacket:
     epoch: int               # 第几次成功连上 RTSP（从 1 开始）
     grab_mono: float         # read() 返回时的 monotonic 时间
     image: np.ndarray        # BGR
+
+
+@dataclass
+class _ClickRetry:
+    """一次已点击动作的「生效确认」。
+
+    0.5s 后拿当前帧和点击时的动作指纹比：变了 = 客户端已接受；没变 = 再点
+    一次（最多 `retry_count` 次）。
+    """
+
+    advice: object
+    signature: tuple
+    next_at: float
+    remaining: int
 
 
 class LatestFrame:
@@ -377,6 +404,12 @@ def build_settle_regions(profile: Profile, size: tuple[int, int], *,
                                 avatar_inset), avatar_mad))
     for key in _SETTLE_GLOBALS:
         slot = profile.global_slots.get(key)
+        if slot is None and key in DEFAULT_CARD_SLOTS:
+            # 牌区必须参与静止判定：翻牌/转牌动画中间帧会让 board 4→3，
+            # 读牌层虽然还有 StableCards 兜底，但能晚 1–2 帧读干净图更好。
+            # 有些 live profile 没标 board/hero_cards，这里用与 recognize_cards
+            # 相同的默认槽位补上，保证所有版式都等牌面落定。
+            slot = DEFAULT_CARD_SLOTS[key]
         if slot is not None:
             regions.append((profile.slot_to_px(slot, size), mad))
     return tuple((r, th) for r, th in regions if r[2] > r[0] and r[3] > r[1])
@@ -531,8 +564,10 @@ def _state_body(record: dict, cards: CardsResult | None, recognizer: str) -> dic
     body["board"] = cards.board_codes if cards is not None else []
     body["hero"] = hero or None
     body.update(rec)                 # 底池 / 盲注 / 庄位 / 轮到我 / 桌型……
-    if cards is not None and cards.warnings:
-        body["cards_warnings"] = cards.warnings
+    if cards is not None:
+        body["cards_reliable"] = bool(getattr(cards, "reliable", True))
+        if cards.warnings:
+            body["cards_warnings"] = cards.warnings
     body["opponents"] = opponents    # 其他对手永远最后
     shows = getattr(cards, "shows", {}) if cards is not None else {}
     if shows:
@@ -708,8 +743,12 @@ class LiveProcessor:
                  dump_dir: Path | None = None, quiet: bool = False,
                  hand_tracker: LiveHandTracker | None = None,
                  advice_runner: AdviceRunner | None = None,
+                 clicker: Clicker | None = None,
                  table_dynamics_loader: Callable[[], TableDynamics] | None = None,
                  table_dynamics_text: str = "",
+                 incident_dir: Path | None = None,
+                 incident_frames: int = 10,
+                 card_confirm_frames: int = 2,
                  clock=time.monotonic, log=_log) -> None:
         if recognizer not in ("roi", "full"):
             raise ValueError(f"未知 recognizer：{recognizer}")
@@ -737,6 +776,16 @@ class LiveProcessor:
         # 也没有 hero_turn，算不出跟注额与选项金额
         self.hand_tracker = hand_tracker
         self.advice_runner = advice_runner
+        # 桌面自动点击：None = 不点击（默认）。点击器自己负责映射与随机坐标，
+        # processor 只负责判断「这条建议是不是当前决策点、现在还能不能点」。
+        self.clicker = clicker
+        self._pending_decision_key: tuple | None = None
+        self._clicked_keys: set[tuple] = set()
+        self.click_count = 0
+        self.click_skip_count = 0
+        self.click_error_count = 0
+        self.click_retry_count = 0
+        self._click_retry: _ClickRetry | None = None
         # 返回 TableDynamics 的可调用对象；None = 不读牌桌动态（单测默认）。
         # 之所以传 loader 而不是一段固定文本：换桌后改 .table_dy 不必重启。
         self.table_dynamics_loader = table_dynamics_loader
@@ -750,6 +799,22 @@ class LiveProcessor:
         self._hand_advice: dict[str, list[dict]] = {}
         self.clock = clock
         self.log = log
+
+        # 跨帧牌面稳定闸：board 只前进、hero 只接受 0/2 张、新读数 2 帧确认。
+        # profile 为 None（单测桩）时不启用，_read_cards 直接返回桩结果。
+        self.card_state = (StableCards(confirm_frames=card_confirm_frames)
+                           if profile is not None else None)
+        # 牌区 ROI 去重：board/hero 像素没变时复用上一次的识别结果，只重读亮牌。
+        self._card_roi_sig: tuple | None = None
+        self._card_roi_reads: CardsResult | None = None
+        # 事故帧环形缓冲：只存引用，不做逐帧编码；异常时才落盘。
+        self.incident_dir = Path(incident_dir) if incident_dir is not None else None
+        self._frame_ring: deque | None = (
+            deque(maxlen=max(1, int(incident_frames)))
+            if self.incident_dir is not None else None)
+        self._last_incident: tuple[str, float] | None = None
+        self._last_cards_skip: tuple[tuple, float] | None = None
+        self.cards_unreliable_skips = 0
 
         self.started_mono = clock()
         self.last_epoch = 0
@@ -779,6 +844,14 @@ class LiveProcessor:
                     self.dealer_tracker.reset()
                 if self.hand_tracker is not None:
                     self.hand_tracker.reset()
+                if self.card_state is not None:
+                    self.card_state.reset()
+                self._card_roi_sig = None
+                self._card_roi_reads = None
+                # 重连后旧决策点/已点击记录全部作废，避免拿断流前的建议误点
+                self._pending_decision_key = None
+                self._clicked_keys.clear()
+                self._click_retry = None
             self.last_epoch = packet.epoch
 
         age = now - packet.grab_mono
@@ -799,16 +872,32 @@ class LiveProcessor:
 
         t = now - self.started_mono
         frame_id = f"live_e{packet.epoch}_{packet.seq:06d}_{t:07.2f}s"
+        # 事故帧环形缓冲只存数组引用，不逐帧编码；异常时才落盘。
+        if self._frame_ring is not None:
+            self._frame_ring.append((packet.seq, round(t, 2), frame_id,
+                                     packet.image))
         t0 = self.clock()
         # 每帧读一次牌。纯 OpenCV，几个毫秒；失败不致命，记一次日志后继续。
         cards = self._read_cards(packet.image)
         cards_sig = self._cards_signature(cards)
         if self.recognizer == "full":
+            self._check_card_incident(packet, t, frame_id, cards)
             return self._handle_full(packet, t, frame_id, age, t0,
                                      cards, cards_sig)
         outcome = self.state_stream.ingest(
             packet.image, frame_id=frame_id, t=t,
             extra_signature=cards_sig)
+        # 换手信号（庄位轮换 / 牌面归零确认 / hero 换牌 / All-in 收手）：
+        # 稳定闸的 last-good 属于上一手，必须清掉并重读这一帧。否则新手会
+        # 带着上一手的 board 开局，下一帧读到 0 又会被手牌追踪判成一次换手。
+        if (getattr(outcome, "new_hand", False)
+                and self.card_state is not None):
+            self.card_state.reset()
+            self._card_roi_sig = None
+            self._card_roi_reads = None
+            cards = self._read_cards(packet.image)
+            cards_sig = self._cards_signature(cards)
+        self._check_card_incident(packet, t, frame_id, cards)
         proc_ms = (self.clock() - t0) * 1000
         self.processed += 1
         self.total_proc_ms += proc_ms
@@ -843,11 +932,13 @@ class LiveProcessor:
     def _track_hand(self, outcome, cards: CardsResult | None) -> None:
         """累积行动线；轮到我时把决策点投给后台建议线程。
 
-        先取结果再投新决策点：上一回合的答案先落库，再排新的。
+        先取结果再投新决策点：上一回合的答案先落库，再排新的。自动点击的
+        drain 放在 `observe()` 之后 —— 这时 hand_id / 决策点已经更新，能识别
+        出「模型返回时这一手已经结束」的过期建议，不会拿旧建议误点。
         """
-        self.drain_advice()
-
         if self.hand_tracker is None:
+            # 没有手牌跟踪就没有 AI 建议；仍然把已完成的结果落库（不点击）。
+            self.drain_advice(state=outcome.state, allow_click=False)
             return
         hero_codes = cards.hero_codes if cards is not None else []
         board = cards.board_codes if cards is not None else []
@@ -857,13 +948,40 @@ class LiveProcessor:
         # cards 为 None 表示这一帧读牌失败，不能据此清空「亮牌已消失」状态。
         if cards is not None:
             self.hand_tracker.record_shows(shows)
+        if outcome.state is not None:
+            self.hand_tracker.record_all_ins(outcome.state)
+
+        # All-in 头像徽章消失 = 这手结束。主动收手后等真正的新手信号再开新手，
+        # 避免把摊牌后的同一帧当新手牌开头。
+        if getattr(outcome, "hand_end", False):
+            self.hand_tracker.finish_current()
+            # 这一手已经结束：结果只落库，绝不点击，也不再确认上一次点击。
+            self._pending_decision_key = None
+            self._click_retry = None
+            self.drain_advice(state=outcome.state, allow_click=False)
 
         if outcome.state is None or not outcome.state.ok:
+            self.drain_advice(state=outcome.state, allow_click=False)
             return
-        point = self.hand_tracker.observe(outcome.state, hero_codes, board)
+        # 上一次动作如果 0.5s 后画面还没变，在这里补点一次。放在 observe 之前：
+        # 用刚识别出的帧判断，不受这一帧是否产生新决策点影响。
+        self._service_click_retry(outcome.state)
+        # 牌面不可靠（稳定结果仍出现 ?/低置信度/牌背/张数异常）时不给建议：
+        # 错误手牌/公共牌上的 AI 结论比没有结论更糟。决策点不会被标记成
+        # 「已建议」，等牌面恢复可靠、同一个决策点还会补投一次。
+        cards_reliable = bool(getattr(cards, "reliable", True))
+        cards_warnings = tuple(getattr(cards, "warnings", ()) or ())
+        point = self.hand_tracker.observe(
+            outcome.state, hero_codes, board,
+            cards_reliable=cards_reliable, cards_warnings=cards_warnings)
+        if (point is None and outcome.state.hero_turn is True
+                and not cards_reliable):
+            self._log_cards_skip(outcome.state, cards_warnings)
         # 换手是在 observe 内部判定的：紧接着再 drain 一次，把上一手的
         # 手牌记忆（行动线 + 建议）在换手这一帧就落库，不必等下一帧。
-        self.drain_advice()
+        # 这里是**唯一允许自动点击**的 drain：state 与 hand_id 都是当前帧的，
+        # 牌面不可靠时也不点（allow_click=False），避免错误手牌上的建议被执行。
+        self.drain_advice(state=outcome.state, allow_click=cards_reliable)
         if point is not None:
             self.advice_count += 1
             if self.advice_runner is not None:
@@ -896,7 +1014,11 @@ class LiveProcessor:
                 except Exception as exc:      # noqa: BLE001
                     self.log(f"  [建议] 局面构建失败：{type(exc).__name__}: {exc}")
                     return
-                self.advice_runner.submit(situation)
+                if self.advice_runner.submit(situation):
+                    # 只认最新投递的决策点；旧结果晚到会被 stale_decision 挡掉。
+                    # 新决策点出现说明牌局已经往前走，上一次点击无需再重试。
+                    self._pending_decision_key = situation.snap.decision_key
+                    self._click_retry = None
                 if not self.quiet:
                     self.log(f"  [建议] 轮到我：{point.street} 手牌 "
                              f"{''.join(point.hero_cards) or '?'} "
@@ -905,6 +1027,20 @@ class LiveProcessor:
             elif not self.quiet:
                 self.log(f"  [建议] 轮到我：{point.street} 需跟 {point.to_call}BB"
                          f"（未开启 AI 建议）")
+
+    def _log_cards_skip(self, state, warnings: tuple[str, ...]) -> None:
+        """牌面不可靠导致跳过建议：按手牌/街节流打印一次，并计数。"""
+        hand = getattr(self.hand_tracker, "hand", None)
+        key = (getattr(hand, "hand_id", None), round(state.pot or 0.0, 2))
+        now = self.clock()
+        if (self._last_cards_skip is not None
+                and self._last_cards_skip[0] == key
+                and now - self._last_cards_skip[1] < 5.0):
+            return
+        self._last_cards_skip = (key, now)
+        self.cards_unreliable_skips += 1
+        reason = "；".join(warnings[:3]) or "牌面未稳定"
+        self.log(f"  [建议] 跳过：牌面不可靠（{reason}）")
 
     @property
     def waiting_for_advice(self) -> bool:
@@ -928,10 +1064,13 @@ class LiveProcessor:
         self._wait_beat_second = second
         self.log(f"  [建议] 生成中… {second}s")
 
-    def drain_advice(self, final: bool = False) -> None:
+    def drain_advice(self, final: bool = False, *,
+                     state=None, allow_click: bool = True) -> None:
         """把已完成的手牌/建议写进 JSONL 并打印。
 
         `final=True` 在退出时调用：最后一手牌等不到「换手」，也要落库。
+        `state` 是当前帧的识别结果；只有 `allow_click=True` 且当前帧仍满足
+        「轮到我 / 决策点未变 / 牌面可靠」时才会执行自动点击。
 
         顺序很重要：**先收建议、再写手牌**。换手那一帧要把这一手最后一条
         建议一起并进 `hand` 记录；反过来会漏掉同一帧刚返回的那条。
@@ -939,9 +1078,16 @@ class LiveProcessor:
         if self.advice_runner is not None:
             for advice in self.advice_runner.poll():
                 data = advice.to_dict()
+                click = self._maybe_click(
+                    advice, state=state,
+                    allow_click=allow_click and not final)
+                if click is not None:
+                    data["click"] = click.to_dict()
                 self._hand_advice.setdefault(data["hand_id"], []).append(data)
                 self.writer.write({"type": "advice", "ts": _iso_now(), **data})
                 self._log_advice(advice)
+                if click is not None:
+                    self._log_click(click)
 
         if self.hand_tracker is None:
             return
@@ -952,6 +1098,137 @@ class LiveProcessor:
             current = self.hand_tracker.take_current()
             if current is not None:
                 self._write_hand(current, partial=True)
+
+    def _maybe_click(self, advice, *, state, allow_click: bool):
+        """执行自动点击；未启用点击器时返回 None（JSONL 不出现 click 键）。"""
+        if self.clicker is None:
+            return None
+        matched = bool(advice.decision_key) \
+            and advice.decision_key == self._pending_decision_key
+        reason = self._click_skip_reason(
+            advice, state=state, allow_click=allow_click)
+        if reason is None:
+            result = self.clicker.run(advice)
+        else:
+            result = ClickResult("skipped", action=advice.option.kind,
+                                 reason=reason)
+        if result.status in ("clicked", "dry_run"):
+            self.click_count += 1
+            if advice.decision_key:
+                self._clicked_keys.add(advice.decision_key)
+            if result.status == "clicked":
+                self._arm_click_retry(advice, state)
+        elif result.status == "error":
+            self.click_error_count += 1
+        else:
+            self.click_skip_count += 1
+        # 只清掉「这条建议对应的决策点」；晚到的旧建议不能把新决策点清掉
+        if matched:
+            self._pending_decision_key = None
+        return result
+
+    def _arm_click_retry(self, advice, state) -> None:
+        """点击成功后挂一个 0.5s 的「动作是否生效」确认。"""
+        if self.clicker is None or self.clicker.dry_run or state is None:
+            return
+        cfg = self.clicker.config
+        if cfg.retry_count <= 0:
+            return
+        self._click_retry = _ClickRetry(
+            advice=advice,
+            signature=action_signature(state),
+            next_at=self.clock() + cfg.retry_delay_ms / 1000.0,
+            remaining=cfg.retry_count,
+        )
+        self.log(f"  [点击] {cfg.retry_delay_ms / 1000:.1f}s 后确认动作是否生效"
+                 f"（未变化最多重试 {cfg.retry_count} 次）")
+
+    def _service_click_retry(self, state) -> None:
+        """到点检查上一次点击：页面变了就收工，没变就再点一次。"""
+        pending = self._click_retry
+        if pending is None or state is None:
+            return
+        now = self.clock()
+        if now < pending.next_at:
+            return
+        if not state.ok:
+            # 这一帧字段不可信，等下一帧再判；deadline 保持不动
+            return
+        if state.hero_turn is not True:
+            self._click_retry = None
+            self.log(f"  [点击] 已不是我的回合（hero_turn={state.hero_turn}），"
+                     "动作已生效，取消重试")
+            return
+        if action_signature(state) != pending.signature:
+            self._click_retry = None
+            self.log("  [点击] 页面已变化，动作已生效，取消重试")
+            return
+
+        cfg = self.clicker.config
+        attempt = cfg.retry_count - pending.remaining + 1
+        self.log(f"  [点击] {cfg.retry_delay_ms / 1000:.1f}s 页面未变化，"
+                 f"重试第 {attempt} 次")
+        result = self.clicker.run(pending.advice)
+        self.click_retry_count += 1
+        self.writer.write({
+            "type": "click_retry",
+            "ts": _iso_now(),
+            "hand_id": pending.advice.hand_id,
+            "decision_key": list(pending.advice.decision_key),
+            "attempt": attempt,
+            "click": result.to_dict(),
+        })
+        self._log_click(result)
+        remaining = pending.remaining - 1
+        if result.status == "clicked" and remaining > 0:
+            self._click_retry = _ClickRetry(
+                advice=pending.advice,
+                signature=pending.signature,
+                next_at=self.clock() + cfg.retry_delay_ms / 1000.0,
+                remaining=remaining,
+            )
+        else:
+            self._click_retry = None
+
+    def _click_skip_reason(self, advice, *, state,
+                           allow_click: bool) -> str | None:
+        """自动点击的安全闸。返回 None 才允许真的点。"""
+        if advice.error:
+            return "advice_error"
+        if advice.source != "model" and not self.clicker.config.allow_fallback:
+            return "fallback_advice"
+        if not allow_click:
+            return "frame_not_clickable"
+        if state is None or not getattr(state, "ok", False):
+            return "state_not_ok"
+        if getattr(state, "hero_turn", None) is not True:
+            return "hero_turn_false"
+        if not advice.decision_key:
+            return "missing_decision_key"
+        if (self._pending_decision_key is None
+                or advice.decision_key != self._pending_decision_key):
+            return "stale_decision"
+        hand = getattr(self.hand_tracker, "hand", None)
+        current_hand_id = getattr(hand, "hand_id", None)
+        if current_hand_id is not None and advice.hand_id != current_hand_id:
+            return "stale_hand"
+        if advice.decision_key in self._clicked_keys:
+            return "already_clicked"
+        return None
+
+    def _log_click(self, result) -> None:
+        if result.status == "skipped":
+            self.log(f"  [点击] 跳过：{result.reason}")
+            return
+        if result.status == "error":
+            self.log(f"  [点击] 失败：{result.error}")
+            return
+        points = " → ".join(
+            f"{s.button}({s.x:.1f},{s.y:.1f})" for s in result.steps)
+        prefix = "dry-run" if result.status == "dry_run" else "已点击"
+        mapping = f" [{result.mapping}]" if result.mapping in ("direct",
+                                                               "nearest") else ""
+        self.log(f"  [点击] {prefix} {result.action}{mapping}：{points}")
 
     def _write_hand(self, hand: dict, *, partial: bool) -> None:
         """写一条手牌记忆：完整行动线 + 这一手给出过的全部建议。"""
@@ -988,20 +1265,123 @@ class LiveProcessor:
         self.log("")
 
     def _read_cards(self, img: np.ndarray) -> CardsResult | None:
-        """每帧读一次公共牌 / hero 手牌。
+        """每帧读一次公共牌 / hero 手牌，再过跨帧稳定闸。
 
         没传 profile（单测）时不读。识别异常不让 worker 挂掉：记一次日志，
         这一帧按「没有牌」处理，后续帧继续尝试。
+
+        性能：board/hero 两块 ROI 的灰度缩略图没变时，复用上一帧的识别结果，
+        只重读亮牌（亮牌发生在别的 action_slot，不能一起复用）。这样动作区
+        静止闸放行但牌面没动时，不再重复跑模板 NCC。
         """
         if self.profile is None:
             return None
         try:
-            return recognize_cards(img, self.profile)
+            raw = self._recognize_cards_cached(img)
+            return self.card_state.update(raw) if self.card_state else raw
         except Exception as exc:  # noqa: BLE001 — 读牌失败不该中断拉流
             if not self._cards_error_logged:
                 self.log(f"[警告] 读牌失败（后续帧继续尝试）：{exc}")
                 self._cards_error_logged = True
             return None
+
+    def _recognize_cards_cached(self, img: np.ndarray) -> CardsResult:
+        """board/hero ROI 去重；没变时只重读亮牌。"""
+        sig = self._card_roi_signature(img)
+        cached = self._card_roi_reads
+        if sig is not None and sig == self._card_roi_sig and cached is not None:
+            shows = recognize_shown_cards(img, self.profile)
+            return CardsResult(
+                size=cached.size, board=cached.board,
+                hero_cards=cached.hero_cards, shows=shows,
+                warnings=list(cached.warnings), reliable=cached.reliable)
+        raw = recognize_cards(img, self.profile)
+        if sig is not None:
+            self._card_roi_sig = sig
+            self._card_roi_reads = raw
+        return raw
+
+    def _card_roi_signature(self, img: np.ndarray) -> tuple | None:
+        """board/hero 两块牌区的灰度缩略图指纹；profile 不完整时返回 None。"""
+        profile = self.profile
+        if (profile is None or not hasattr(profile, "slot_to_px")
+                or not hasattr(profile, "global_slots")):
+            return None
+        h, w = img.shape[:2]
+        size = (w, h)
+        slots = dict(DEFAULT_CARD_SLOTS)
+        for key in ("board", "hero_cards"):
+            slot = profile.global_slots.get(key)
+            if slot is not None:
+                slots[key] = slot
+        out = []
+        for key in ("board", "hero_cards"):
+            x1, y1, x2, y2 = profile.slot_to_px(slots[key], size)
+            x1, y1 = max(0, x1), max(0, y1)
+            x2, y2 = min(w, x2), min(h, y2)
+            if x2 <= x1 or y2 <= y1:
+                return None
+            gray = cv2.cvtColor(img[y1:y2, x1:x2], cv2.COLOR_BGR2GRAY)
+            # 存 bytes 而不是 ndarray：tuple 里放 ndarray 时，`sig == prev`
+            # 会触发 numpy 的「truth value ambiguous」。
+            out.append(cv2.resize(gray, (32, 32),
+                                  interpolation=cv2.INTER_AREA).tobytes())
+        return tuple(out)
+
+    def _check_card_incident(self, packet: FramePacket, t: float,
+                             frame_id: str,
+                             cards: CardsResult | None) -> None:
+        """牌面回退/张数异常/牌背时，把环形缓冲里的最近帧落盘做回归样本。
+
+        同一类异常 5 秒内只存一次，避免动画期间连续几十帧重复写盘。
+        """
+        ring = self._frame_ring
+        if ring is None or self.card_state is None:
+            return
+        anomalies = list(self.card_state.last_anomalies)
+        if not anomalies:
+            return
+        reason = anomalies[0]
+        now = self.clock()
+        if (self._last_incident is not None
+                and self._last_incident[0] == reason
+                and now - self._last_incident[1] < 5.0):
+            return
+        self._last_incident = (reason, now)
+
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        safe = "".join(ch if ch.isalnum() else "_" for ch in reason)[:48]
+        folder = self.incident_dir / f"{stamp}_{safe}"
+        frames = list(ring)
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            meta = {
+                "reason": reason,
+                "anomalies": anomalies,
+                "seq": packet.seq,
+                "epoch": packet.epoch,
+                "t": round(t, 2),
+                "frame_id": frame_id,
+                "cards": {
+                    "board": getattr(cards, "board_codes", None),
+                    "hero_cards": getattr(cards, "hero_codes", None),
+                    "reliable": getattr(cards, "reliable", None),
+                    "warnings": list(getattr(cards, "warnings", []) or []),
+                },
+                "frames": [],
+            }
+            for i, (seq, ft, fid, image) in enumerate(frames):
+                name = f"{i:02d}_e{packet.epoch}_{seq:06d}.jpg"
+                cv2.imwrite(str(folder / name), image,
+                            [cv2.IMWRITE_JPEG_QUALITY, 92])
+                meta["frames"].append({"file": name, "seq": seq,
+                                       "t": ft, "frame_id": fid})
+            (folder / "meta.json").write_text(
+                json.dumps(meta, ensure_ascii=False, indent=2),
+                encoding="utf-8")
+            self.log(f"[事故帧] {reason}；已保存 {len(frames)} 帧 → {folder}")
+        except Exception as exc:  # noqa: BLE001 — 落盘失败不能拖垮主链路
+            self.log(f"[警告] 事故帧保存失败：{exc}")
 
     @staticmethod
     def _cards_signature(cards: CardsResult | None) -> tuple | None:
@@ -1063,9 +1443,18 @@ class LiveProcessor:
         return self.state_stream.accepted  # type: ignore[union-attr]
 
     def summary(self) -> dict:
+        extra = {"cards_unreliable_skips": self.cards_unreliable_skips}
+        if self.clicker is not None:
+            extra.update({
+                "clicks": self.click_count,
+                "click_skips": self.click_skip_count,
+                "click_errors": self.click_error_count,
+                "click_retries": self.click_retry_count,
+            })
         if self.full_recorder is not None:
-            return {**self.full_recorder.summary(), "recognizer": "full"}
-        return {**self.state_stream.summary(), "recognizer": "roi"}  # type: ignore[union-attr]
+            return {**self.full_recorder.summary(), "recognizer": "full", **extra}
+        return {**self.state_stream.summary(), "recognizer": "roi",  # type: ignore[union-attr]
+                **extra}
 
     @property
     def avg_proc_ms(self) -> float:
@@ -1076,11 +1465,11 @@ class LiveProcessor:
 
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
-        description="实时拉 RTSP 流，按间隔识别牌桌状态并写 JSONL")
+        description="实时拉虚拟摄像头/RTSP 流，按间隔识别牌桌状态并写 JSONL")
     ap.add_argument("--url", default=DEFAULT_URL,
-                    help=f"视频源（默认 {DEFAULT_URL}）。本机 OBS 虚拟摄像头可写 "
-                         "cam:0 / cam:1（用 tools/list_cameras.py 查索引），"
-                         "跳过 SRT/MediaMTX，延迟最低")
+                    help=f"视频源（默认 {DEFAULT_URL} = OBS 虚拟摄像头，"
+                         "用 tools/list_cameras.py 查索引）。走 MediaMTX 时写 "
+                         "rtsp://127.0.0.1:8554/live")
     ap.add_argument("--rotate", type=int, choices=(0, 90, 180, 270), default=0,
                     help="把视频源顺时针旋转多少度再识别（默认 0）。OBS 虚拟摄像头"
                          "固定 1920x1080，把 OBS 画布改成横屏、手机源转 90° 后，"
@@ -1111,6 +1500,16 @@ def build_parser() -> argparse.ArgumentParser:
                          "--no-append 每次启动清空")
     ap.add_argument("--stable-frames", type=int, default=1,
                     help="新状态连续出现几帧才记录（默认 1 = 不做多帧确认）")
+    ap.add_argument("--card-confirm-frames", type=int, default=2,
+                    help="公共牌/hero 手牌新读数连续几帧一致才替换 last-good"
+                         "（默认 2；牌面 4→3 回退永远不会被采用）")
+    ap.add_argument("--incident-dir", type=Path, default=DEFAULT_INCIDENT_DIR,
+                    help="牌面回退/张数异常/牌背时，把最近几帧存到这里做回归样本"
+                         f"（默认 {DEFAULT_INCIDENT_DIR}）")
+    ap.add_argument("--no-incident", action="store_true",
+                    help="关闭事故帧留存（不占内存、不落盘）")
+    ap.add_argument("--incident-frames", type=int, default=10,
+                    help="事故帧环形缓冲保留多少帧（默认 10）")
     ap.add_argument("--max-vanish", type=int, default=3,
                     help="在场玩家整座空白连续几帧才认定离开（默认 3）")
     ap.add_argument("--name-confirm", type=int, default=3,
@@ -1125,7 +1524,8 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--max-frames", type=int, default=0,
                     help="最多处理多少帧（调试用，0=不限）")
     ap.add_argument("--no-dedup", action="store_true", help="关掉 ROI 去重")
-    ap.add_argument("--no-fold", action="store_true", help="不读头像（省 9 块 ROI）")
+    ap.add_argument("--no-fold", action="store_true",
+                    help="不读头像（弃牌 / All-in 徽章一起关，省 9 块 ROI）")
     ap.add_argument("--roi-threads", type=int, default=DEFAULT_ROI_THREADS,
                     help="帧内 ROI OCR 并行线程数（默认 "
                          f"{DEFAULT_ROI_THREADS}；1=串行）。"
@@ -1143,6 +1543,15 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--ai-confirm", type=int, default=1,
                     help="轮到我需要连续几帧确认（默认 1 = 第一帧就触发，"
                          "配合蓝色下注按钮；按钮会闪断的旧 UI 可调回 2）")
+    ap.add_argument("--auto-click", action=argparse.BooleanOptionalAction,
+                    default=True,
+                    help="AI 建议返回后自动点击桌面客户端的对应按钮"
+                         "（默认开启；需要先跑 tools/calibrate_clicker.py。"
+                         "用 --no-auto-click 关闭）")
+    ap.add_argument("--clicker-config", type=Path, default=None,
+                    help="自动点击的按钮坐标 JSON（默认 config/clicker_local.json）")
+    ap.add_argument("--clicker-dry-run", action="store_true",
+                    help="只打印将要点到的随机坐标，不发送真实鼠标事件")
     ap.add_argument("--quiet", action="store_true", help="只打状态行和最终汇总")
     return ap
 
@@ -1158,6 +1567,10 @@ def _validate_args(ap: argparse.ArgumentParser, args) -> None:
         ap.error("--max-frame-age 必须大于 0")
     if args.stable_frames < 1:
         ap.error("--stable-frames 至少为 1")
+    if args.card_confirm_frames < 1:
+        ap.error("--card-confirm-frames 至少为 1")
+    if args.incident_frames < 1:
+        ap.error("--incident-frames 至少为 1")
     if args.max_vanish < 0:
         ap.error("--max-vanish 不能为负")
     if args.name_confirm < 1:
@@ -1172,6 +1585,13 @@ def _validate_args(ap: argparse.ArgumentParser, args) -> None:
         ap.error("--ai-timeout 必须大于 0")
     if args.ai_confirm < 1:
         ap.error("--ai-confirm 至少为 1")
+    if not args.ai_advice:
+        # 没有 AI 建议就没有可执行的行动，自动点击跟着关闭
+        args.auto_click = False
+    if args.clicker_dry_run and not args.auto_click:
+        ap.error("--clicker-dry-run 需要配合 --auto-click 使用")
+    if args.clicker_config is not None and not args.auto_click:
+        ap.error("--clicker-config 需要配合 --auto-click 使用")
     if args.roi_threads < 1:
         ap.error("--roi-threads 至少为 1（1 = 串行）")
 
@@ -1259,6 +1679,7 @@ def main(argv: list[str] | None = None) -> int:
 
     advice_runner = None
     hand_tracker = None
+    clicker = None
     table_dynamics_text = ""
     if args.ai_advice:
         if not env_load.found:
@@ -1314,6 +1735,45 @@ def main(argv: list[str] | None = None) -> int:
              + ("，".join(sampling) if sampling else "采样参数用服务端默认")
              + "）")
 
+    if args.auto_click:
+        cfg_path = args.clicker_config or DEFAULT_CLICKER_CONFIG
+        try:
+            clicker_cfg = ClickerConfig.load(cfg_path)
+            clicker_cfg.validate()
+        except ClickerConfigError as exc:
+            ap.error(str(exc))
+        displays = list_displays()
+        outside = [name for name, rect in clicker_cfg.buttons.items()
+                   if not rect_inside_displays(rect, displays)]
+        if outside:
+            ap.error("点击配置里这些按钮不在当前显示器内："
+                     + "、".join(outside)
+                     + "。移动窗口 / 改分辨率或显示器排列后请重新运行 "
+                       "tools/calibrate_clicker.py")
+        if args.clicker_dry_run:
+            backend = DryRunBackend()
+        else:
+            if sys.platform != "darwin":
+                ap.error("--auto-click 目前只支持 macOS；"
+                         "可先用 --clicker-dry-run 验证坐标")
+            try:
+                backend = CGEventBackend()
+            except ClickerUnavailable as exc:
+                ap.error(str(exc))
+            if not backend.preflight():
+                ap.error(
+                    "--auto-click 没有「辅助功能」权限，鼠标事件会被系统丢弃。\n"
+                    "去 系统设置 → 隐私与安全性 → 辅助功能，勾上运行 Python 的"
+                    "终端 / iTerm / IDE，然后完全退出并重开它。\n"
+                    "只想先验证坐标可加 --clicker-dry-run")
+        clicker = Clicker(clicker_cfg, backend,
+                          dry_run=args.clicker_dry_run, log=_log)
+        _log(f"[点击] 已启用自动点击：{cfg_path}"
+             f"（{len(clicker_cfg.buttons)} 个按钮，"
+             + ("dry-run，不发送真实事件" if args.clicker_dry_run else "真实点击")
+             + f"；{clicker_cfg.retry_delay_ms / 1000:.1f}s 未变化重试 "
+             f"{clicker_cfg.retry_count} 次）")
+
     writer = JsonlWriter(args.out, append=args.append)
     writer.write({
         "type": "session_start",
@@ -1324,6 +1784,10 @@ def main(argv: list[str] | None = None) -> int:
         "full_config": str(args.full_config) if args.full_config else None,
         "every": args.every,
         "ai_advice": bool(args.ai_advice),
+        "auto_click": bool(args.auto_click),
+        **({"clicker_config": str(args.clicker_config or DEFAULT_CLICKER_CONFIG),
+            "clicker_dry_run": bool(args.clicker_dry_run)}
+           if args.auto_click else {}),
         "resolution": None,
         # 本会话生效的牌桌动态原文。没有就不写这个键，保持旧记录形状。
         **({"table_dynamics": table_dynamics_text} if table_dynamics_text else {}),
@@ -1339,8 +1803,12 @@ def main(argv: list[str] | None = None) -> int:
         every=args.every, max_frame_age=args.max_frame_age,
         dump_dir=args.dump_frames, quiet=args.quiet,
         hand_tracker=hand_tracker, advice_runner=advice_runner,
+        clicker=clicker,
         table_dynamics_loader=load_table_dynamics if args.ai_advice else None,
-        table_dynamics_text=table_dynamics_text)
+        table_dynamics_text=table_dynamics_text,
+        incident_dir=(None if args.no_incident else args.incident_dir),
+        incident_frames=args.incident_frames,
+        card_confirm_frames=args.card_confirm_frames)
 
     # 动作区静止闸只用于 roi 路线：它的区域来自固定槽位；full 路线没有布局。
     settle_gate = (SettleGate(profile, settle=args.settle,

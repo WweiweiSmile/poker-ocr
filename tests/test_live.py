@@ -23,6 +23,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 import poker_ocr.live as live  # noqa: E402
+from poker_ocr.clicker import ClickResult, ClickStep  # noqa: E402
 from poker_ocr.full_table import (  # noqa: E402
     FullTableConfig, FullTableResult, SeatObservation,
 )
@@ -49,6 +50,8 @@ def test_defaults_are_no_throttle_and_instant_turn() -> None:
     check(args.ai_confirm == 1,
           f"默认应第一帧就认定轮到我，实际 {args.ai_confirm}")
     check(args.ai_advice is True, "AI 建议默认应开启")
+    check(args.auto_click is True, "自动点击默认应开启")
+    check(args.url == "cam:0", f"默认应读虚拟摄像头，实际 {args.url}")
     check(args.settle == live.DEFAULT_SETTLE,
           f"动作合并默认应开启（{live.DEFAULT_SETTLE}s），实际 {args.settle}")
     check(args.settle_max == live.DEFAULT_SETTLE_MAX,
@@ -64,6 +67,37 @@ def test_defaults_are_no_throttle_and_instant_turn() -> None:
 def check(cond: bool, msg: str) -> None:
     if not cond:
         FAILS.append(msg)
+
+
+def test_auto_click_defaults_on_and_follows_advice() -> None:
+    ap = live.build_parser()
+    args = ap.parse_args([])
+    check(args.auto_click is True, "自动点击默认应开启")
+    args.ai_timeout = 20.0                 # main() 会先解析 env 默认值
+    live._validate_args(ap, args)
+
+    args = ap.parse_args(["--no-auto-click"])
+    check(args.auto_click is False, "--no-auto-click 应能关闭")
+    args.ai_timeout = 20.0
+    live._validate_args(ap, args)
+
+    args = ap.parse_args(["--clicker-dry-run"])
+    check(args.auto_click and args.clicker_dry_run, "默认即可用 dry-run")
+    args.ai_timeout = 20.0
+    live._validate_args(ap, args)
+
+    noai = ap.parse_args(["--no-ai-advice"])
+    noai.ai_timeout = 20.0
+    live._validate_args(ap, noai)
+    check(noai.auto_click is False, "关闭 AI 建议时自动点击应跟着关闭")
+
+    bad = ap.parse_args(["--clicker-dry-run", "--no-auto-click"])
+    bad.ai_timeout = 20.0
+    try:
+        live._validate_args(ap, bad)
+    except SystemExit:
+        return
+    FAILS.append("--clicker-dry-run 搭配 --no-auto-click 应拒绝启动")
 
 
 def packet(seq: int, epoch: int = 1, grab: float | None = None) -> FramePacket:
@@ -247,6 +281,156 @@ def test_settle_gate_ignores_blind_clock_and_avatar_ring() -> None:
     img = img.copy()
     img[45:55, 18:25] = 200
     check(not gate.should_process(img, 0.65), "头像中心变化应触发合并")
+
+
+def test_settle_gate_waits_for_card_rois() -> None:
+    """profile 没标 board/hero_cards 时，静止闸也必须等默认牌区像素落定。"""
+    gate = SettleGate(_GateProfile(), settle=0.2, max_wait=0.5)
+    base = _gate_image()
+    check(gate.should_process(base, 0.0), "首帧应立即放行")
+
+    # 默认 board ROI：x 0.21–0.79, y 0.448–0.528（100x100 上约 x21–79/y44–52）
+    check(not gate.should_process(
+        _gate_image(((50, 46, 55, 50), 200)), 0.1),
+        "公共牌区变化应触发静止等待")
+    check(gate.should_process(
+        _gate_image(((50, 46, 55, 50), 200)), 0.35),
+        "牌区静止满 settle 后应放行")
+
+    # 默认 hero_cards ROI：x 0.38–0.62, y 0.862–0.94
+    check(not gate.should_process(
+        _gate_image(((45, 88, 55, 92), 200)), 0.4),
+        "hero 手牌区变化应触发静止等待")
+    check(gate.should_process(
+        _gate_image(((45, 88, 55, 92), 200)), 0.65),
+        "hero 牌区静止满 settle 后应放行")
+
+
+class _FlopStream:
+    """轮到我、翻牌 3 张的固定状态。"""
+
+    def ingest(self, img, frame_id: str, t: float, *,
+               extra_signature: tuple | None = None) -> FrameOutcome:
+        st = FrameState(
+            frame_id=frame_id, table_seats=2, players_in_hand=2,
+            players=[
+                PlayerState("hero", name="me", position="BTN", stack=100.0,
+                            bet=0.0, in_hand=True),
+                PlayerState("a", name="A", position="BB", stack=99.0,
+                            bet=2.0, in_hand=True),
+            ],
+            blinds=live.parse_blinds("1/2"), dealer="hero",
+            hero_seat_id="hero", hero_turn=True, pot=7.5,
+            pot_before_street=1.5)
+        return FrameOutcome("no_change", st, [], None, 0, 0)
+
+    def reset(self) -> None:      # pragma: no cover
+        pass
+
+
+def test_unreliable_cards_skip_advice_until_recovered() -> None:
+    """牌面不可靠时不给建议，也不占用决策点；恢复后同一决策点补投一次。"""
+    class FakeRunner:
+        busy = False
+
+        def __init__(self) -> None:
+            self.count = 0
+
+        def submit(self, sit) -> bool:
+            self.count += 1
+            return True
+
+        def poll(self):
+            return []
+
+    runner = FakeRunner()
+    tracker = LiveHandTracker(confirm_frames=1)
+    writer = StubWriter()
+    bad = SimpleNamespace(
+        hero_codes=["Ah", "Kd"], board_codes=["Ks", "7d", "2c"],
+        warnings=["board: 张数 4→3 回退，不采用"], reliable=False)
+    good = SimpleNamespace(
+        hero_codes=["Ah", "Kd"], board_codes=["Ks", "7d", "2c"],
+        warnings=[], reliable=True)
+    logs: list[str] = []
+
+    with patch.object(live, "recognize_cards", lambda img, profile: bad):
+        proc = LiveProcessor(_FlopStream(), writer, quiet=False,
+                             profile=SimpleNamespace(), hand_tracker=tracker,
+                             advice_runner=runner, log=logs.append)
+        proc.handle(packet(1))
+        check(runner.count == 0,
+              f"牌面不可靠时不该投建议，实际 {runner.count}")
+        check(any("跳过" in line for line in logs),
+              f"跳过建议应打印原因：{logs}")
+        check(tracker.hand is not None and tracker.hand.cards_unreliable,
+              "手牌应标记 cards_unreliable")
+
+        with patch.object(live, "recognize_cards", lambda img, profile: good):
+            proc.handle(packet(2))
+        check(runner.count == 1,
+              f"牌面恢复后同一决策点应补投，实际 {runner.count}")
+
+    hand = tracker.take_current()
+    check(hand is not None and hand.get("cards_unreliable") is True,
+          f"手牌记录应带 cards_unreliable：{hand}")
+    check(hand is not None and hand.get("cards_warnings"),
+          f"手牌记录应带 cards_warnings：{hand}")
+
+
+def test_card_regression_dumps_incident_frames() -> None:
+    """公共牌 4→3 回退时，把环形缓冲里的最近几帧落盘做回归样本。"""
+    from poker_ocr.cards import Card, CardsResult, CardSlotRead
+
+    def card(code: str) -> Card:
+        return Card(rank=code[:-1], suit=code[-1], confidence=0.9,
+                    rank_score=0.9, rect=(0, 0, 10, 10),
+                    evidence={"card_back": False, "occluded": False,
+                              "ink_pixels": 900})
+
+    def cards4() -> CardsResult:
+        return CardsResult(
+            size=(100, 100),
+            board=CardSlotRead(name="board", slot=(0, 0, 1, 1),
+                               rect=(0, 0, 10, 10),
+                               cards=[card("Ad"), card("7c"),
+                                      card("2s"), card("9h")]),
+            hero_cards=CardSlotRead(name="hero_cards", slot=(0, 0, 1, 1),
+                                    rect=(0, 0, 10, 10),
+                                    cards=[card("Kh"), card("Qs")]))
+
+    def cards3() -> CardsResult:
+        out = cards4()
+        out.board.cards = out.board.cards[:3]
+        return out
+
+    with tempfile.TemporaryDirectory() as tmp:
+        incident = Path(tmp) / "incidents"
+        writer = StubWriter()
+        results = [cards4(), cards4(), cards3()]
+        logs: list[str] = []
+        with patch.object(live, "recognize_cards",
+                          lambda img, profile: results.pop(0)):
+            proc = LiveProcessor(StubStateStream(), writer, quiet=True,
+                                 profile=SimpleNamespace(),
+                                 incident_dir=incident, incident_frames=3,
+                                 log=logs.append)
+            for seq in range(1, 4):
+                img = np.zeros((100, 100, 3), np.uint8)
+                img[:, :, 0] = seq * 30      # 每帧不同，避免 ROI 去重
+                proc.handle(packet(seq))
+        folders = [p for p in incident.iterdir() if p.is_dir()]
+        check(len(folders) == 1,
+              f"应只落一个事故目录，实际 {folders}")
+        if folders:
+            meta = json.loads((folders[0] / "meta.json").read_text("utf-8"))
+            check("回退" in meta["reason"], f"事故原因应写回退：{meta}")
+            check(len(meta["frames"]) == 3,
+                  f"环形缓冲应保存 3 帧：{meta['frames']}")
+            check(len(list(folders[0].glob("*.jpg"))) == 3,
+                  f"应写出 3 张 JPEG：{list(folders[0].iterdir())}")
+        check(any("事故帧" in line for line in logs),
+              f"落盘应打印提示：{logs}")
 
 
 def test_epoch_change_resets_state_machine() -> None:
@@ -546,6 +730,72 @@ def test_ai_advice_submits_on_hero_turn_once() -> None:
           f"同一个决策点不应重复投：{runner.situations}")
 
 
+def test_auto_click_after_observe_on_next_frame() -> None:
+    """完整链路：第一帧投递建议，第二帧拿到结果并在 observe 之后点击。
+
+    这条用例专门覆盖 `_track_hand` 的 drain 时机：必须在 hand_tracker 更新后
+    才点，才能用当前 hand_id / 决策点判断建议是否过期。
+    """
+    from poker_ocr.advice import Advice, Option, preset_amounts
+
+    class TurnStream(StubStateStream):
+        def ingest(self, img, frame_id: str, t: float, *,
+                   extra_signature: tuple | None = None) -> FrameOutcome:
+            st = FrameState(
+                frame_id=frame_id, table_seats=2, players_in_hand=2,
+                players=[
+                    PlayerState("hero", name="me", position="BTN", stack=100.0,
+                                bet=0.0, in_hand=True),
+                    PlayerState("a", name="A", position="BB", stack=99.0,
+                                bet=1.0, in_hand=True),
+                ],
+                blinds=live.parse_blinds("1/2"), dealer="hero",
+                hero_seat_id="hero", hero_turn=True, pot=1.5,
+                pot_before_street=0.0)
+            return FrameOutcome("no_change", st, [], None, 0, 0)
+
+    class Runner:
+        def __init__(self) -> None:
+            self.snap = None
+            self._done = []
+
+        def submit(self, sit) -> bool:
+            self.snap = sit.snap
+            return True
+
+        def poll(self):
+            if self.snap is None or self._done:
+                return []
+            snap = self.snap
+            self._done.append(Advice(
+                snap.hand_id, snap.street,
+                Option("call", "Check", "check"), "check it", "model",
+                decision_key=snap.decision_key,
+                preset_amounts=tuple(preset_amounts(snap).items())))
+            return list(self._done)
+
+    clicker = FakeClicker()
+    tracker = LiveHandTracker(confirm_frames=1)
+    writer = StubWriter()
+    cards = SimpleNamespace(hero_codes=["Ah", "Kd"], board_codes=[],
+                            warnings=[])
+    with patch.object(live, "recognize_cards", lambda img, profile: cards):
+        proc = LiveProcessor(TurnStream(), writer, quiet=True,
+                             profile=SimpleNamespace(), hand_tracker=tracker,
+                             advice_runner=Runner(), clicker=clicker,
+                             log=lambda *_: None)
+        proc.handle(packet(1))
+        check(clicker.calls == [], "建议还没返回时不该点")
+        proc.handle(packet(2))
+
+    check(len(clicker.calls) == 1,
+          f"建议返回后的正常帧应点击一次：{clicker.calls}")
+    advice_rows = [r for r in writer.rows if r["type"] == "advice"]
+    check(len(advice_rows) == 1
+          and advice_rows[0]["click"]["status"] == "clicked",
+          f"advice 记录应带 clicked：{advice_rows}")
+
+
 def test_ai_advice_waits_for_hero_cards() -> None:
     """读不到手牌时不给建议（宁可晚一帧，也不给一个不知道手牌的答案）。"""
     class TurnStream(StubStateStream):
@@ -718,6 +968,290 @@ def test_hand_memory_flushes_on_switch_frame() -> None:
           f"换手那一帧就应落库上一手：{hands}")
 
 
+# ─────────────────────────── 自动点击 ───────────────────────────
+
+def _click_advice(*, kind: str = "fold", option_id: str | None = None,
+                  amount: float | None = None, source: str = "model",
+                  error: str | None = None, hand_id: str = "h1",
+                  key: tuple | None = None):
+    from poker_ocr.advice import Advice, Option
+    oid = option_id or kind
+    opt = Option(oid, kind.title(), kind, amount)
+    return Advice(hand_id, "flop", opt, "reason", source, error=error,
+                  decision_key=key or (hand_id, "flop", 0, 6.0, 0.0,
+                                       ("Ah", "Kd")))
+
+
+class FakeClicker:
+    """记录 run() 调用；config 只需要点击器用到的字段。"""
+
+    def __init__(self, *, allow_fallback: bool = False,
+                 status: str = "clicked", retry_count: int = 1,
+                 retry_delay_ms: int = 500, dry_run: bool = False) -> None:
+        self.config = SimpleNamespace(
+            allow_fallback=allow_fallback,
+            retry_count=retry_count,
+            retry_delay_ms=retry_delay_ms)
+        self.status = status
+        self.dry_run = dry_run
+        self.calls = []
+
+    def run(self, advice):
+        self.calls.append(advice)
+        return ClickResult(self.status, action=advice.option.kind,
+                           steps=(ClickStep("fold", 1.0, 2.0),))
+
+
+def click_state(**overrides):
+    """动作指纹用的一帧状态。"""
+    base = dict(
+        ok=True, hero_turn=True, dealer="hero", pot=2.5,
+        pot_before_street=0.0, players_in_hand=2,
+        players=[
+            SimpleNamespace(seat_id="hero", action=None, fold=None,
+                            in_hand=True, stack=100.0, bet=0.0,
+                            all_in=False, equity=None),
+            SimpleNamespace(seat_id="a", action=None, fold=False,
+                            in_hand=True, stack=99.0, bet=1.0,
+                            all_in=False, equity=None),
+        ])
+    base.update(overrides)
+    return SimpleNamespace(**base)
+
+
+class OneShotRunner:
+    def __init__(self, advices) -> None:
+        self._advices = list(advices)
+
+    def poll(self):
+        out, self._advices = self._advices, []
+        return out
+
+    def submit(self, sit) -> bool:      # pragma: no cover
+        return True
+
+
+def _drain_click(advice, *, clicker, state=None, allow_click: bool = True,
+                 pending: bool = True, current_hand: str = "h1",
+                 clock=None):
+    writer = StubWriter()
+    tracker = SimpleNamespace(
+        hand=SimpleNamespace(hand_id=current_hand),
+        take_finished=lambda: None, take_current=lambda: None)
+    kwargs = {"clock": clock} if clock is not None else {}
+    proc = LiveProcessor(StubStateStream(), writer, quiet=True,
+                         hand_tracker=tracker, clicker=clicker,
+                         advice_runner=OneShotRunner([advice]),
+                         log=lambda *_: None, **kwargs)
+    if pending:
+        proc._pending_decision_key = advice.decision_key
+    if state is None:
+        state = click_state()
+    proc.drain_advice(state=state, allow_click=allow_click)
+    return proc, writer.rows
+
+
+def test_auto_click_current_decision() -> None:
+    clicker = FakeClicker()
+    advice = _click_advice()
+    proc, rows = _drain_click(advice, clicker=clicker)
+    check(len(clicker.calls) == 1, f"当前决策点应点击：{clicker.calls}")
+    check(proc.click_count == 1 and proc.click_skip_count == 0,
+          f"点击计数错误：clicks={proc.click_count} "
+          f"skips={proc.click_skip_count}")
+    row = rows[0]
+    check(row["type"] == "advice" and row["click"]["status"] == "clicked",
+          f"建议记录应带 click：{row}")
+    check(proc._pending_decision_key is None, "点击后应清掉待点击决策点")
+
+
+def test_auto_click_skips_when_not_hero_turn() -> None:
+    clicker = FakeClicker()
+    proc, rows = _drain_click(
+        _click_advice(), clicker=clicker,
+        state=SimpleNamespace(ok=True, hero_turn=False))
+    check(clicker.calls == [], "不是轮到我时绝不能点")
+    check(rows[0]["click"]["reason"] == "hero_turn_false",
+          f"应记录跳过原因：{rows[0]}")
+    check(proc.click_skip_count == 1, "跳过计数应 +1")
+
+
+def test_auto_click_skips_stale_decision() -> None:
+    clicker = FakeClicker()
+    advice = _click_advice()
+    writer = StubWriter()
+    tracker = SimpleNamespace(
+        hand=SimpleNamespace(hand_id="h1"),
+        take_finished=lambda: None, take_current=lambda: None)
+    proc = LiveProcessor(StubStateStream(), writer, quiet=True,
+                         hand_tracker=tracker, clicker=clicker,
+                         advice_runner=OneShotRunner([advice]),
+                         log=lambda *_: None)
+    proc._pending_decision_key = ("h1", "flop", 9, 99.0, 0.0, ())
+    proc.drain_advice(state=SimpleNamespace(ok=True, hero_turn=True))
+    check(clicker.calls == [], "旧决策点的建议不应点击")
+    check(writer.rows[0]["click"]["reason"] == "stale_decision",
+          f"应记录 stale_decision：{writer.rows[0]}")
+    check(proc._pending_decision_key is not None,
+          "旧建议不能清掉新决策点")
+
+
+def test_auto_click_skips_fallback_and_error() -> None:
+    for advice, want in (
+        (_click_advice(source="fallback"), "fallback_advice"),
+        (_click_advice(error="timeout"), "advice_error"),
+    ):
+        clicker = FakeClicker()
+        proc, rows = _drain_click(advice, clicker=clicker)
+        check(clicker.calls == [], f"{want} 不应点击")
+        check(rows[0]["click"]["reason"] == want,
+              f"应记录 {want}：{rows[0]}")
+
+
+def test_auto_click_allows_fallback_when_configured() -> None:
+    clicker = FakeClicker(allow_fallback=True)
+    proc, rows = _drain_click(_click_advice(source="fallback"),
+                              clicker=clicker)
+    check(len(clicker.calls) == 1, "配置允许时 fallback 也可点击")
+    check(rows[0]["click"]["status"] == "clicked", f"应点击：{rows[0]}")
+
+
+def test_auto_click_skips_duplicate_and_stale_hand() -> None:
+    advice = _click_advice()
+    clicker = FakeClicker()
+    writer = StubWriter()
+    tracker = SimpleNamespace(
+        hand=SimpleNamespace(hand_id="h1"),
+        take_finished=lambda: None, take_current=lambda: None)
+    proc = LiveProcessor(StubStateStream(), writer, quiet=True,
+                         hand_tracker=tracker, clicker=clicker,
+                         advice_runner=OneShotRunner([advice]),
+                         log=lambda *_: None)
+    proc._pending_decision_key = advice.decision_key
+    proc._clicked_keys.add(advice.decision_key)
+    proc.drain_advice(state=SimpleNamespace(ok=True, hero_turn=True))
+    check(clicker.calls == [], "同一个决策点不能点两次")
+    check(writer.rows[0]["click"]["reason"] == "already_clicked",
+          f"应记录 already_clicked：{writer.rows[0]}")
+
+    clicker2 = FakeClicker()
+    proc2, rows2 = _drain_click(_click_advice(), clicker=clicker2,
+                                current_hand="h2")
+    check(clicker2.calls == [], "上一手的建议不能在新手牌里点")
+    check(rows2[0]["click"]["reason"] == "stale_hand",
+          f"应记录 stale_hand：{rows2[0]}")
+
+
+def test_auto_click_skips_unreliable_frame() -> None:
+    clicker = FakeClicker()
+    proc, rows = _drain_click(_click_advice(), clicker=clicker,
+                              allow_click=False)
+    check(clicker.calls == [], "牌面不可靠/换手帧不应点击")
+    check(rows[0]["click"]["reason"] == "frame_not_clickable",
+          f"应记录 frame_not_clickable：{rows[0]}")
+
+
+def test_auto_click_off_preserves_advice_shape() -> None:
+    advice = _click_advice()
+    writer = StubWriter()
+    tracker = SimpleNamespace(
+        hand=SimpleNamespace(hand_id="h1"),
+        take_finished=lambda: None, take_current=lambda: None)
+    proc = LiveProcessor(StubStateStream(), writer, quiet=True,
+                         hand_tracker=tracker,
+                         advice_runner=OneShotRunner([advice]),
+                         log=lambda *_: None)
+    proc.drain_advice(state=SimpleNamespace(ok=True, hero_turn=True))
+    check("click" not in writer.rows[0],
+          f"未启用自动点击时不该多出 click 键：{writer.rows[0]}")
+
+
+def test_auto_click_counts_errors() -> None:
+    clicker = FakeClicker(status="error")
+    proc, rows = _drain_click(_click_advice(), clicker=clicker)
+    check(proc.click_error_count == 1,
+          f"错误计数错误：{proc.click_error_count}")
+    check(rows[0]["click"]["status"] == "error", f"应记录 error：{rows[0]}")
+
+
+def test_auto_click_retries_after_half_second_if_unchanged() -> None:
+    """点完 0.5s 页面没变化 → 再点一次；有变化则不重试。"""
+    now = [100.0]
+    clicker = FakeClicker(retry_count=1, retry_delay_ms=500)
+    state = click_state()
+    proc, rows = _drain_click(_click_advice(), clicker=clicker,
+                              state=state, clock=lambda: now[0])
+    check(len(clicker.calls) == 1, "首次动作应点击")
+    check(proc._click_retry is not None, "点击后应挂起重试确认")
+
+    now[0] += 0.4
+    proc._service_click_retry(state)
+    check(len(clicker.calls) == 1, "不足 0.5s 不应重试")
+
+    now[0] += 0.2
+    proc._service_click_retry(state)
+    check(len(clicker.calls) == 2, "0.5s 未变化应重试一次")
+    check(proc.click_retry_count == 1, "重试计数应 +1")
+    retry_rows = [r for r in proc.writer.rows if r["type"] == "click_retry"]
+    check(len(retry_rows) == 1 and retry_rows[0]["attempt"] == 1,
+          f"应写一条 click_retry：{retry_rows}")
+    check(proc._click_retry is None, "重试次数用完后应清空")
+
+
+def test_auto_click_retry_cancelled_when_page_changes() -> None:
+    now = [100.0]
+    clicker = FakeClicker(retry_count=1, retry_delay_ms=500)
+    state = click_state()
+    proc, _rows = _drain_click(_click_advice(), clicker=clicker,
+                               state=state, clock=lambda: now[0])
+    now[0] += 0.6
+
+    changed = click_state(pot=5.0)
+    proc._service_click_retry(changed)
+    check(len(clicker.calls) == 1, "页面已变化不应重试")
+    check(proc._click_retry is None, "页面变化后应清空重试")
+
+    # hero_turn 变成 false 同样视为动作已生效
+    clicker2 = FakeClicker(retry_count=1, retry_delay_ms=500)
+    proc2, _ = _drain_click(_click_advice(), clicker=clicker2,
+                            state=click_state(), clock=lambda: now[0])
+    now[0] += 0.6
+    proc2._service_click_retry(click_state(hero_turn=False))
+    check(len(clicker2.calls) == 1, "回合结束不应重试")
+    check(proc2._click_retry is None, "回合结束后应清空重试")
+
+
+def test_auto_click_retry_respects_count_and_dry_run() -> None:
+    now = [100.0]
+
+    # retry_count=2：连续两次未变化 → 共点 3 次
+    clicker = FakeClicker(retry_count=2, retry_delay_ms=500)
+    state = click_state()
+    proc, _ = _drain_click(_click_advice(), clicker=clicker,
+                           state=state, clock=lambda: now[0])
+    now[0] += 0.6
+    proc._service_click_retry(state)
+    check(len(clicker.calls) == 2, "第一次重试应点击")
+    check(proc._click_retry is not None, "还有剩余次数应继续挂起")
+    now[0] += 0.6
+    proc._service_click_retry(state)
+    check(len(clicker.calls) == 3, "第二次重试应点击")
+    check(proc.click_retry_count == 2, "重试计数应为 2")
+    check(proc._click_retry is None, "次数用完后应清空")
+
+    # dry-run 不挂重试（没有真实点击，页面永远不会变）
+    dry = FakeClicker(status="dry_run", dry_run=True, retry_count=2)
+    proc2, _ = _drain_click(_click_advice(), clicker=dry,
+                            state=click_state(), clock=lambda: now[0])
+    check(proc2._click_retry is None, "dry-run 不应挂重试")
+
+    # retry_count=0 关闭重试
+    off = FakeClicker(retry_count=0)
+    proc3, _ = _drain_click(_click_advice(), clicker=off,
+                            state=click_state(), clock=lambda: now[0])
+    check(proc3._click_retry is None, "retry_count=0 不应挂重试")
+
+
 def test_processor_pauses_while_advice_is_generating() -> None:
     """模型返回前 waiting_for_advice=True，主循环据此跳过识别。"""
     class BusyRunner:
@@ -860,6 +1394,7 @@ def test_advice_bar_colors_by_action() -> None:
 def main() -> int:
     tests = [
         test_defaults_are_no_throttle_and_instant_turn,
+        test_auto_click_defaults_on_and_follows_advice,
         test_mailbox_keeps_only_latest,
         test_wait_newer_wakes_up,
         test_slow_consumer_drops_frames_but_ends_at_latest,
@@ -867,6 +1402,8 @@ def main() -> int:
         test_settle_gate_coalesces_action_burst,
         test_settle_gate_max_wait_limits_starvation,
         test_settle_gate_ignores_blind_clock_and_avatar_ring,
+        test_settle_gate_waits_for_card_rois,
+        test_card_regression_dumps_incident_frames,
         test_epoch_change_resets_state_machine,
         test_stale_frame_is_skipped,
         test_crop_left_uses_training_aspect_and_left_anchor,
@@ -885,9 +1422,23 @@ def main() -> int:
         test_jsonl_appends_by_default,
         test_jsonl_append_repairs_partial_last_line,
         test_ai_advice_submits_on_hero_turn_once,
+        test_auto_click_after_observe_on_next_frame,
         test_ai_advice_waits_for_hero_cards,
+        test_unreliable_cards_skip_advice_until_recovered,
         test_hand_memory_keeps_action_line_and_advices,
         test_hand_memory_flushes_on_switch_frame,
+        test_auto_click_current_decision,
+        test_auto_click_skips_when_not_hero_turn,
+        test_auto_click_skips_stale_decision,
+        test_auto_click_skips_fallback_and_error,
+        test_auto_click_allows_fallback_when_configured,
+        test_auto_click_skips_duplicate_and_stale_hand,
+        test_auto_click_skips_unreliable_frame,
+        test_auto_click_off_preserves_advice_shape,
+        test_auto_click_counts_errors,
+        test_auto_click_retries_after_half_second_if_unchanged,
+        test_auto_click_retry_cancelled_when_page_changes,
+        test_auto_click_retry_respects_count_and_dry_run,
         test_processor_pauses_while_advice_is_generating,
         test_advice_wait_logs_heartbeat_each_second,
         test_advice_bar_colors_by_action,

@@ -22,7 +22,9 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from poker_ocr.dealer import DealerResult  # noqa: E402
-from poker_ocr.frame_state import build_state, signature  # noqa: E402
+from poker_ocr.frame_state import (  # noqa: E402
+    action_signature, build_state, signature,
+)
 from poker_ocr.parse import Blinds, NameTracker  # noqa: E402
 from poker_ocr.profile import Profile  # noqa: E402
 from poker_ocr.roi_reader import RoiFrame, RoiRead, SeatRoi  # noqa: E402
@@ -153,6 +155,44 @@ def test_all_in_carried_after_bet_pill_disappears() -> None:
     check(s.players_in_hand == 9, f"人数应保持 9，实际 {s.players_in_hand}")
 
 
+def test_all_in_badge_and_equity() -> None:
+    """头像黄色 All-in 徽章 + 筹码位的 `30%`：全下且带实时胜率，不算坏帧。"""
+    rows = {k: dict(v) for k, v in BASE.items()}
+    rows["hero"] = {"name": "gggamel", "chip": "", "bet": "30%"}
+    s = build_state(make_frame(rows), PROFILE,
+                    avatar_reads={"hero": ("Alin", 0.74)})
+    p = s.player("hero")
+    check(p.all_in, f"头像 Alin 应判全下：{p.to_debug()}")
+    check(p.equity == 30.0, f"应解析出 30% 胜率：{p.to_debug()}")
+    check(p.bet is None and p.stack is None,
+          f"胜率不是下注/筹码：{p.to_debug()}")
+    check("bet:hero" not in s.errors and "stack:hero" not in s.errors,
+          f"全下玩家允许缺 bet/stack：{s.errors}")
+
+
+def test_equity_slot_marks_all_in() -> None:
+    """筹码胶囊下方读到 `69%`：该座应判全下并带胜率，不要求头像徽章也读到。"""
+    rows = {k: dict(v) for k, v in BASE.items()}
+    rows["midL"] = {"name": "许文文啊", "chip": "15.5BB", "bet": ""}
+    s = build_state(make_frame(rows), PROFILE,
+                    avatar_reads={"midL": ("2", 0.07)},  # 徽章被亮牌盖住
+                    equity_reads={"midL": ("69%", 0.79)})
+    p = s.player("midL")
+    check(p.all_in, f"有胜率显示应判全下：{p.to_debug()}")
+    check(p.equity == 69.0, f"应解析出 69% 胜率：{p.to_debug()}")
+
+
+def test_bare_equity_slot_number_is_not_all_in() -> None:
+    """胜率槽只认带 % 的读数；裸 1 很可能是牌背/筹码，不能判全下。"""
+    rows = {k: dict(v) for k, v in BASE.items()}
+    rows["lowR"] = {"name": "西装暴徒李", "chip": "159.5BB", "bet": ""}
+    s = build_state(make_frame(rows), PROFILE,
+                    equity_reads={"lowR": ("1", 0.8)})
+    p = s.player("lowR")
+    check(not p.all_in, f"裸 1 不该判全下：{p.to_debug()}")
+    check(p.equity is None, f"裸 1 不该当胜率：{p.to_debug()}")
+
+
 def test_buying_in_by_avatar() -> None:
     rows = {k: dict(v) for k, v in BASE.items()}
     rows["lowR"] = {"name": "Dragon333", "chip": "0", "bet": ""}
@@ -262,6 +302,27 @@ def test_signature_detects_real_facts() -> None:
           "人数变化必须进指纹")
 
 
+def test_action_signature_detects_turn_and_action_changes() -> None:
+    """自动点击重试用：hero_turn / 动作徽章的变化必须能看出来。"""
+    base = state()
+    check(action_signature(base) != action_signature(
+        dc_replace(base, hero_turn=True)), "hero_turn 变化必须进动作指纹")
+
+    players = [dc_replace(p, action="check") if p.seat_id == "hero" else p
+               for p in base.players]
+    check(action_signature(base) != action_signature(
+        dc_replace(base, players=players)), "动作徽章变化必须进动作指纹")
+
+    fold_players = [dc_replace(p, fold=True) if p.seat_id == "hero" else p
+                    for p in base.players]
+    check(action_signature(base) != action_signature(
+        dc_replace(base, players=fold_players)), "弃牌检测变化必须进动作指纹")
+
+    # 动作指纹仍应包含真实的牌局事实
+    check(action_signature(base) != action_signature(
+        dc_replace(base, pot=(base.pot or 0) + 1)), "底池变化必须进动作指纹")
+
+
 def main() -> int:
     tests = [
         test_full_state,
@@ -269,6 +330,9 @@ def main() -> int:
         test_idle_zero_player_is_not_in_hand,
         test_all_in_carried_after_bet_pill_disappears,
         test_lenient_chip_parse,
+        test_all_in_badge_and_equity,
+        test_equity_slot_marks_all_in,
+        test_bare_equity_slot_number_is_not_all_in,
         test_buying_in_by_avatar,
         test_name_tracker_used_when_given,
         test_missing_dealer,
@@ -282,6 +346,7 @@ def main() -> int:
         test_pbs_equal_pot_with_bets_is_an_error,
         test_signature_ignores_advisory_fields,
         test_signature_detects_real_facts,
+        test_action_signature_detects_turn_and_action_changes,
     ]
     for t in tests:
         before = len(FAILS)
