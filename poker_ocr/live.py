@@ -91,6 +91,14 @@ INCIDENT_MIN_SECONDS = 1.0
 INCIDENT_EPISODE_GAP = 10.0
 # 单次会话最多落盘多少个疑惑帧目录，防止整场持续异常把磁盘写满。
 DEFAULT_INCIDENT_MAX = 20
+# ── 质量闸丢帧的可观测性 ──
+# 只在退出汇总里报丢弃原因太晚：启动后如果画面不是牌桌（大厅、结算弹窗、
+# 比例不对），一帧都过不了闸，终端上却只有 [状态] 行。这里在丢帧时按
+# 「原因组合」节流打印，并落一帧样本，让「为什么没输出」当场可见。
+GATE_LOG_SECONDS = 5.0       # 同一类原因最多多久打一行
+GATE_DUMP_LIMIT = 3          # 单次会话最多为几类丢帧原因存样本
+GATE_DUMP_MIN_GAP = 10.0     # 两次落盘至少间隔多久（秒）
+ZERO_ACCEPT_WARN_AFTER = 20  # 处理这么多帧仍 0 接受就告警
 # 默认不节流：处理完当前帧立刻取邮箱里的最新帧，中间帧直接丢弃。
 # `--every` 仍保留给调试/降压用（>0 时按该间隔采样）。
 DEFAULT_EVERY = 0.0
@@ -906,6 +914,16 @@ class LiveProcessor:
         self._board_anomaly_hinted = False
         self.cards_unreliable_skips = 0
 
+        # 质量闸丢帧的观测状态：同一类原因节流打印，每类最多存一帧样本。
+        self._gate_sig: tuple[str, ...] | None = None
+        self._gate_logged_at = 0.0
+        self._gate_seen: set[tuple[str, ...]] = set()
+        self._gate_dumped: set[tuple[str, ...]] = set()
+        self._last_gate_dump = 0.0
+        self.gate_dumps = 0
+        self.last_gate_dump: str | None = None
+        self._zero_accept_warned = False
+
         self.started_mono = clock()
         self.last_epoch = 0
         self.processed = 0
@@ -988,6 +1006,8 @@ class LiveProcessor:
             cards = self._read_cards(packet.image)
             cards_sig = self._cards_signature(cards)
         self._check_card_incident(packet, t, frame_id, cards)
+        if outcome.kind == "discard":
+            self._note_gate_discard(packet, outcome, t)
         proc_ms = (self.clock() - t0) * 1000
         self.processed += 1
         self.total_proc_ms += proc_ms
@@ -1018,6 +1038,67 @@ class LiveProcessor:
         # hero_turn，只吃 record 会漏掉大部分行动线。
         self._track_hand(outcome, cards)
         return outcome.kind
+
+    # ── 质量闸丢帧的现场 ─────────────────────────────────
+
+    def _note_gate_discard(self, packet: FramePacket, outcome,
+                           t: float) -> None:
+        """一帧被质量闸丢掉：节流打印原因，必要时落一帧样本。
+
+        只把原因留到退出汇总，会让「启动后只看到 [状态] 行」变成黑盒：
+        用户不知道是哪几个字段没读出来。这里在丢帧当场说清楚，并把
+        第一帧同类样本存进 `logs/incidents/…_gate_…`，方便直接看画面。
+        """
+        errors = list(outcome.errors or ())
+        cats = (tuple(sorted({e.split(":", 1)[0] for e in errors}))
+                or ("unknown",))
+        now = self.clock()
+        if (cats == self._gate_sig
+                and now - self._gate_logged_at < GATE_LOG_SECONDS):
+            return
+        new_kind = cats not in self._gate_seen
+        self._gate_seen.add(cats)
+        self._gate_sig = cats
+        self._gate_logged_at = now
+        # 正常打牌时同类丢帧只报一次（状态行还是会提示）；一帧都没接受时
+        # 每 5s 提醒一次，避免又回到「只剩 [状态] 行」的黑盒。
+        if not self.quiet and (new_kind or self.accepted == 0):
+            detail = "/".join(errors[:6]) if errors else "未知原因"
+            if len(errors) > 6:
+                detail += f" …另 {len(errors) - 6} 个"
+            self.log(f"[丢弃] {detail}（累计 {self.sampled - self.accepted}"
+                     f"/{self.sampled} 帧被丢）")
+        if (cats not in self._gate_dumped
+                and self.gate_dumps < GATE_DUMP_LIMIT
+                and now - self._last_gate_dump >= GATE_DUMP_MIN_GAP):
+            self._dump_gate_frame(packet, outcome, cats, t)
+
+    def _dump_gate_frame(self, packet: FramePacket, outcome,
+                         cats: tuple[str, ...], t: float) -> None:
+        """把被质量闸丢掉的帧原样存下来：画面就是最直接的证据。"""
+        if self.incident_dir is None:
+            return
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        folder = self.incident_dir / f"{stamp}_gate_{'-'.join(cats)[:48]}"
+        state = outcome.state
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            cv2.imwrite(str(folder / "frame.jpg"), packet.image,
+                        [cv2.IMWRITE_JPEG_QUALITY, 92])
+            (folder / "meta.json").write_text(json.dumps({
+                "t": round(t, 2),
+                "errors": list(outcome.errors or ()),
+                "sampled": self.sampled,
+                "accepted": self.accepted,
+                "state": state.to_debug() if state is not None else None,
+            }, ensure_ascii=False, indent=2), encoding="utf-8")
+        except OSError as exc:          # 落盘失败不能拖垮识别
+            self.log(f"[警告] 质量闸样本落盘失败：{exc}")
+            return
+        self._gate_dumped.add(cats)
+        self._last_gate_dump = self.clock()
+        self.gate_dumps += 1
+        self.last_gate_dump = str(folder)
 
     def _track_hand(self, outcome, cards: CardsResult | None) -> None:
         """累积行动线；轮到我时把决策点投给后台建议线程。
@@ -1579,6 +1660,19 @@ class LiveProcessor:
             return self.full_recorder.accepted
         return self.state_stream.accepted  # type: ignore[union-attr]
 
+    @property
+    def records(self) -> int:
+        if self.full_recorder is not None:
+            return self.full_recorder.records
+        return self.state_stream.records  # type: ignore[union-attr]
+
+    @property
+    def discard_reasons(self) -> dict[str, int]:
+        """累计丢弃原因（按字段计数，一帧可能有多个原因）。"""
+        if self.full_recorder is not None:
+            return dict(self.full_recorder.discarded)
+        return dict(self.state_stream.discarded)  # type: ignore[union-attr]
+
     def summary(self) -> dict:
         extra = {"cards_unreliable_skips": self.cards_unreliable_skips}
         if self.clicker is not None:
@@ -1979,6 +2073,7 @@ def main(argv: list[str] | None = None) -> int:
     last_seq = -1
     last_start = 0.0
     last_status = time.monotonic()
+    status_base: dict[str, int] = {}
     last_shape: tuple[int, int] | None = None
     plan: CropPlan | None = None
     fit: AspectFit | None = None
@@ -2001,7 +2096,8 @@ def main(argv: list[str] | None = None) -> int:
                          f"（重连 {reader.reconnects} 次）")
                     last_warn = now
                 if now - last_status >= 10.0:
-                    _log_status(processor, reader, started_mono)
+                    status_base = _log_status(processor, reader, started_mono,
+                                              status_base)
                     last_status = now
                 continue
 
@@ -2111,7 +2207,8 @@ def main(argv: list[str] | None = None) -> int:
             if args.max_frames and processor.processed >= args.max_frames:
                 break
             if time.monotonic() - last_status >= 10.0:
-                _log_status(processor, reader, started_mono)
+                status_base = _log_status(processor, reader, started_mono,
+                                          status_base)
                 last_status = time.monotonic()
     finally:
         stop.set()
@@ -2143,6 +2240,7 @@ def main(argv: list[str] | None = None) -> int:
             state_stream.close()
 
         _log(f"\n会话结束：读帧 {reader.grabbed}，处理 {processor.processed}，"
+             f"接受 {summary['accepted_frames']}，"
              f"记录 {summary['record_count']} 条，重连 {reader.reconnects} 次；"
              f"平均 {summary['avg_proc_ms']:.0f}ms/帧，"
              f"有效 {summary['eff_hz']:.2f}Hz")
@@ -2155,14 +2253,52 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
+def _format_reasons(reasons: dict[str, int], limit: int = 8) -> str:
+    """把 `{原因: 次数}` 排成一行：次数多的在前，超出的只报类数。"""
+    top = sorted(reasons.items(), key=lambda kv: (-kv[1], kv[0]))[:limit]
+    text = "  ".join(f"{k}={v}" for k, v in top)
+    if len(reasons) > limit:
+        text += f"  …另 {len(reasons) - limit} 类"
+    return text
+
+
 def _log_status(processor: LiveProcessor, reader: RtspReader,
-                started_mono: float) -> None:
+                started_mono: float,
+                since: dict[str, int] | None = None) -> dict[str, int]:
+    """打一行状态 + 本段丢弃原因；返回累计原因，供下次算增量。
+
+    `接受=0` 是排查的关键信号：采样/处理都在涨、接受一直是 0，说明画面
+    根本没有通过质量闸 —— 这时状态行必须同时给出「哪里没读出来」，
+    否则终端看起来就只剩一串 [状态]。
+    """
     elapsed = time.monotonic() - started_mono
     eff = processor.processed / elapsed if elapsed else 0.0
+    reasons = processor.discard_reasons
     _log(f"[状态] 采样={processor.sampled} 处理={processor.processed} "
+         f"接受={processor.accepted} 记录={processor.records} "
          f"读帧={reader.grabbed} 丢弃帧={processor.sampled - processor.accepted} "
          f"平均={processor.avg_proc_ms:.0f}ms 有效={eff:.2f}Hz "
          f"重连={reader.reconnects}")
+    since = since or {}
+    delta = {k: v - since.get(k, 0) for k, v in reasons.items()
+             if v > since.get(k, 0)}
+    # 正常打牌时每 10s 重复一遍原因太吵：只在出现新原因时提示；一帧都没
+    # 接受时则每次都提示（这正是需要盯着的状态）。
+    new_keys = {k for k in delta if k not in since}
+    if delta and (new_keys or processor.accepted == 0):
+        tail = (f"｜累计 {_format_reasons(reasons)}"
+                if len(reasons) > len(delta) else "")
+        _log(f"[丢弃] 本段 {_format_reasons(delta)}{tail}")
+    if (processor.accepted == 0
+            and processor.processed >= ZERO_ACCEPT_WARN_AFTER
+            and not processor._zero_accept_warned):
+        processor._zero_accept_warned = True
+        sample = (f"；样本已存 {processor.last_gate_dump}"
+                  if processor.last_gate_dump else "")
+        _log(f"[警告] 已处理 {processor.processed} 帧、接受 0 帧：画面里读不到"
+             f"底池/庄位/筹码。先确认视频源是牌桌画面（大厅、结算弹窗、"
+             f"比例不对都会让整帧丢弃）{sample}")
+    return reasons
 
 
 if __name__ == "__main__":

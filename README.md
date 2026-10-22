@@ -778,11 +778,13 @@ tests/
   test_cards.py           # 公共牌 / hero 手牌回归（images/card 的 16 个标注样本）
   test_stable_cards.py    # 跨帧牌面稳定闸（回退/张数/牌背/2 帧确认/多帧投票）
   test_doubt_window.py    # 疑惑帧时间窗仲裁（低置信度/牌背/无多数/提前解除）
+  test_export_live_hands.py  # 从 live.states.jsonl 导出完整手牌
   test_card_replay.py     # 真实样张回放：一手牌只落一条记录、牌面只前进
   test_extract.py         # 端到端回归测试
   test_api.py             # HTTP 接口测试
   golden/*.expected.json
 tools/
+  export_live_hands.py    # 从 live.states.jsonl 筛出完整手牌 → hands.json
   build_card_templates.py # 从标注样本重建点数模板图集
   card_probe.py           # 单图读牌 CLI
 scan.py                   # 旧的第 0 步验证脚本，已冻结

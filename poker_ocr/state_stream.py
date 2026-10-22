@@ -28,6 +28,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from .card_icon import read_card_icons
 from .dealer import DealerResult, build_detector
 from .frame_state import FrameState, NameTracker, build_state, signature
 from .parse import Blinds, is_all_in_badge, parse_action, parse_blinds
@@ -49,6 +50,9 @@ DEFAULT_ROI_THREADS = max(1, min(4, (os.cpu_count() or 2) // 2))
 DEALER_RECHECK_SECONDS = 2.0     # 定期复核庄位，兜住漏掉的换手信号
 DEALER_CONFIRM_FRAMES = 2        # 换手后多detect几帧，等轮转动画落位
 NAME_PIN_MIN_SCORE = 0.8         # 低于这个分数不钉，等下帧重读到可信名字
+# 手牌图标消失要连续几帧才判弃牌：单帧漏检（压缩/动画/遮挡）不该把人判出局。
+# 6Hz 采样下 2 帧≈0.3s，弃牌动画结束后足够确认。
+CARD_ICON_ABSENT_FRAMES = 2
 # 爆炸底池横幅在开局出现，而换手信号（庄位落位 / hero 换牌）可能晚 1–2 帧。
 # 横幅刚出现过就遇到换手时保留标记，否则新手开局会把刚读到的炸弹池清掉。
 BOMB_BANNER_GRACE_SAMPLES = 3
@@ -128,6 +132,8 @@ class StateStream:
         # 徽章消失（连续 2 帧可读的非 All-in 文本）是换手的额外信号。
         self.prev_all_in_badges: set[str] = set()
         self._all_in_gone: dict[str, int] = {}
+        # 头像底角手牌图标「连续没看到」的帧数：够 2 帧才判弃牌。
+        self._icon_absent: dict[str, int] = {}
         self.prev_dealer: str | None = None
         self.vanish: dict[str, int] = defaultdict(int)
         # 本手是否见过爆炸底池横幅。横幅只在开局出现 ~2s，之后的帧很可能
@@ -189,6 +195,8 @@ class StateStream:
         )
         frame = self.stream.read(img, frame_id=frame_id,
                                  detect_dealer=detect_dealer)
+        shown = self._shown_seats(extra_signature)
+        icons = self._read_icons(img)
         # 先钉这一帧读到的名字/盲注；如果下面查出庄位轮转（换手），
         # _restart_sticky() 会立刻把它们解钉，下一帧重新识别。
         if sticky:
@@ -287,6 +295,9 @@ class StateStream:
             self.prev_all_in_badges = set()
             self._all_in_gone.clear()
 
+        # 亮牌座位的弃牌判定只能沿用上一份状态；换手后不继承上一手。
+        prev_fold = (None if new_hand or self.prev is None
+                     else {p.seat_id: p.fold for p in self.prev.players})
         state = build_state(
             frame, self.profile,
             prev_blinds=(self.prev.blinds if self.prev is not None
@@ -296,6 +307,9 @@ class StateStream:
             name_tracker=self.names,
             prev_all_in=self.prev_all_in,
             lenient_chips=self.lenient_chips,
+            card_icons=icons,
+            shown_seats=shown,
+            prev_fold=prev_fold,
         )
         # 横幅是瞬时信号（开局 ~2s），但「这手是爆炸底池」要一直有效：
         # 看到就钉住，本手内所有状态都带 bomb_pot=True；换手时
@@ -362,6 +376,44 @@ class StateStream:
 
     # ─────────────────────────── 辅助 ───────────────────────────
 
+    @staticmethod
+    def _shown_seats(extra_signature: tuple | None) -> set[str]:
+        """`extra_signature` 第 3 位里的亮牌座位（live 牌面读数的 shows）。"""
+        if extra_signature is None or len(extra_signature) <= 2:
+            return set()
+        out: set[str] = set()
+        for item in extra_signature[2] or ():
+            try:
+                sid, codes = item
+            except (TypeError, ValueError):
+                continue
+            if sid and codes:
+                out.add(sid)
+        return out
+
+    def _read_icons(self, img) -> dict[str, bool | None]:
+        """头像底角手牌图标 → 三态，并按「连续 2 帧没看到」确认弃牌。
+
+        亮牌座位不在这里处理：摊牌时头像被两张明牌顶掉、图标本来就不在，
+        弃没弃由 `build_state` 沿用上一帧的判定（见 `shown_seats`）。
+        """
+        if not self.detect_fold:
+            return {}
+        icons = read_card_icons(img, self.profile)
+        confirmed: dict[str, bool | None] = {}
+        for sid, present in icons.items():
+            if present is True:
+                self._icon_absent.pop(sid, None)
+                confirmed[sid] = True
+            elif present is None:
+                self._icon_absent.pop(sid, None)
+                confirmed[sid] = None
+            else:
+                n = self._icon_absent.get(sid, 0) + 1
+                self._icon_absent[sid] = n
+                confirmed[sid] = False if n >= CARD_ICON_ABSENT_FRAMES else None
+        return confirmed
+
     def _hand_changed(self, extra_signature: tuple | None) -> bool:
         """用 hero 手牌 / 公共牌判断是不是换了一手。
 
@@ -402,6 +454,7 @@ class StateStream:
         self.prev_all_in = set()
         self.prev_all_in_badges = set()
         self._all_in_gone.clear()
+        self._icon_absent.clear()
         # 换手信号可能比横幅晚一两帧；刚看到过的横幅属于新手，别清掉。
         if self.sampled - self._bomb_seen_sample > BOMB_BANNER_GRACE_SAMPLES:
             self.bomb_pot_seen = False
@@ -442,6 +495,7 @@ class StateStream:
         self.prev_all_in = set()
         self.prev_all_in_badges = set()
         self._all_in_gone.clear()
+        self._icon_absent.clear()
         self.prev_dealer = None
         self.vanish.clear()
         self.bomb_pot_seen = False

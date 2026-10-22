@@ -19,6 +19,7 @@ config/clicker_*.json
 logs/
 images/
 *.states.jsonl
+hands.json
 shots/
 frames/
 
@@ -27,3 +28,4 @@ auto.crt
 auto.key
 server.crt
 server.key
+/:memory:.ses

@@ -600,6 +600,72 @@ def test_aspect_fit_handles_landscape_capture() -> None:
     check(abs(fit.scale[0] - fit.scale[1]) < 1e-9, "两个轴应使用同一缩放")
 
 
+def test_gate_discard_reasons_are_visible_and_dumped() -> None:
+    """一帧都过不了质量闸时：状态行必须给出原因，并落一帧样本。
+
+    用户只看到一串 [状态] 行就是这种情况（采样/处理在涨、接受=0）。
+    没有原因和样本，排查只能靠猜。
+    """
+    from collections import Counter
+
+    class DiscardStream:
+        def __init__(self) -> None:
+            self.sampled = 0
+            self.accepted = 0
+            self.records = 0
+            self.discarded = Counter()
+
+        def ingest(self, img, frame_id: str, t: float, *,
+                   extra_signature: tuple | None = None) -> FrameOutcome:
+            self.sampled += 1
+            self.discarded["dealer"] += 1
+            self.discarded["pot"] += 1
+            st = FrameState(frame_id=frame_id, table_seats=9,
+                            players_in_hand=0, players=[],
+                            errors=["dealer", "pot"])
+            return FrameOutcome("discard", st, ["dealer", "pot"], None, 0, 0)
+
+        def reset(self) -> None:      # pragma: no cover
+            pass
+
+    with tempfile.TemporaryDirectory() as tmp:
+        incident = Path(tmp) / "incidents"
+        logs: list[str] = []
+        printed: list[str] = []
+        stream = DiscardStream()
+        with patch.object(live, "_log", printed.append):
+            proc = LiveProcessor(stream, StubWriter(), quiet=False,
+                                 incident_dir=incident, log=logs.append)
+            for i in range(25):
+                proc.handle(packet(i))
+            reader = SimpleNamespace(grabbed=999, reconnects=0)
+            base = live._log_status(proc, reader, time.monotonic() - 12.0, {})
+            # 原因没有新增时不再重复打「本段」
+            printed_before = len(printed)
+            live._log_status(proc, reader, time.monotonic() - 12.0, base)
+            check(not any("[丢弃] 本段" in line
+                          for line in printed[printed_before:]),
+                  f"原因没新增时不该重复打印：{printed[printed_before:]}")
+
+        check(any("[丢弃]" in line and "dealer" in line for line in logs),
+              f"丢帧当场应打印原因：{logs[:3]}")
+        status = "\n".join(printed)
+        check("接受=0" in status, f"状态行应带接受数：{status}")
+        check("dealer=25" in status, f"状态行应带丢弃原因：{status}")
+        check("接受 0 帧" in status, f"0 接受应告警：{status}")
+        dumps = list(incident.glob("*_gate_*"))
+        check(len(dumps) == 1,
+              f"同一类原因应只存一帧样本，实际 {len(dumps)}")
+        if dumps:
+            check((dumps[0] / "frame.jpg").exists()
+                  and (dumps[0] / "meta.json").exists(),
+                  f"样本应含帧图和 meta：{list(dumps[0].iterdir())}")
+            meta = json.loads((dumps[0] / "meta.json").read_text("utf-8"))
+            check(meta["errors"] == ["dealer", "pot"]
+                  and meta["accepted"] == 0,
+                  f"meta 应记录原因与计数：{meta}")
+
+
 def test_full_recognizer_writes_state() -> None:
     res = FullTableResult(
         size=(1280, 720), table_center=(0.5, 0.45),
@@ -1490,6 +1556,7 @@ def main() -> int:
         test_aspect_fit_noop_when_ratio_already_matches,
         test_aspect_fit_restores_reference_ratio,
         test_aspect_fit_handles_landscape_capture,
+        test_gate_discard_reasons_are_visible_and_dumped,
         test_full_recognizer_writes_state,
         test_state_payload_orders_hero_board_opponents,
         test_jsonl_is_one_complete_object_per_line,

@@ -328,6 +328,46 @@ def test_bomb_banner_latches_across_frames() -> None:
         check(not nxt.state.bomb_pot, "换手后应清空爆炸标记")
 
 
+def test_card_icon_fold_needs_two_absent_frames() -> None:
+    """图标消失要连续 2 帧才判弃牌；亮牌座位没有图标也算在池。"""
+    with stub_env():
+        s = new_stream(detect_fold=True)
+        img = np.zeros((4, 4, 3), np.uint8)
+        with patch.object(ss, "read_card_icons",
+                          lambda _img, _p: {"topR": False, "lowL": True}):
+            first = s._read_icons(img)
+            second = s._read_icons(img)
+            check(first["topR"] is None, "第一帧没图标只能算未知")
+            check(second["topR"] is False, "连续两帧没图标才判弃牌")
+            check(first["lowL"] is True, "看到图标直接为 True")
+        with patch.object(ss, "read_card_icons",
+                          lambda _img, _p: {"topR": True}):
+            back = s._read_icons(img)
+            check(back["topR"] is True, "图标回来后立即恢复在池")
+        shown_seats = s._shown_seats(((), (), (("topR", ("Ah", "Kd")),)))
+        check(shown_seats == {"topR"}, f"应解析出亮牌座位：{shown_seats}")
+
+
+def test_show_after_fold_keeps_fold() -> None:
+    """河底才亮牌的人：之前已经判过弃牌，show 牌不能把它洗回「在池」。"""
+    with stub_env():
+        s = new_stream(detect_fold=True)
+        s.stream.frames.extend([make_frame(), make_frame(), make_frame()])
+        img = np.zeros((4, 4, 3), np.uint8)
+        with patch.object(ss, "read_card_icons",
+                          lambda _img, _p: {"lowL": False}):
+            s.ingest(img, "f1", 0.0, extra_signature=((), ()))
+            out2 = s.ingest(img, "f2", 0.2, extra_signature=((), ()))
+        check(out2.state.player("lowL").fold is True,
+              f"连续两帧没图标应判弃牌：{out2.state.player('lowL').to_debug()}")
+        with patch.object(ss, "read_card_icons",
+                          lambda _img, _p: {"lowL": None}):
+            out3 = s.ingest(img, "f3", 0.4,
+                            extra_signature=((), (), (("lowL", ("Ah", "Kd")),)))
+        check(out3.state.player("lowL").fold is True,
+              f"亮牌不该洗掉之前的弃牌：{out3.state.player('lowL').to_debug()}")
+
+
 def main() -> int:
     tests = [
         test_first_frame_is_baseline,
@@ -345,6 +385,8 @@ def main() -> int:
         test_hand_boundaries_from_cards_and_board,
         test_slow_fields_pinned_until_hand_switch,
         test_bomb_banner_latches_across_frames,
+        test_card_icon_fold_needs_two_absent_frames,
+        test_show_after_fold_keeps_fold,
     ]
     for t in tests:
         before = len(FAILS)

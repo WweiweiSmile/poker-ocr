@@ -173,18 +173,33 @@ def build_state(frame: RoiFrame, profile: Profile,
                 equity_reads: dict[str, tuple[str, float]] | None = None,
                 name_tracker: "NameTracker | None" = None,
                 prev_all_in: set[str] | None = None,
-                lenient_chips: bool = False) -> FrameState:
+                lenient_chips: bool = False,
+                card_icons: dict[str, bool | None] | None = None,
+                shown_seats: set[str] | None = None,
+                prev_fold: dict[str, bool | None] | None = None) -> FrameState:
     """一帧 RoiFrame → FrameState（含解析错误清单）。
 
     `prev_names` 是**上一份被接受的状态**里的名字（名称粘性用）；
     `prev_blinds` 用于盲注横幅被盖住时继承；`avatar_reads` 是头像 ROI 的
     `{seat_id: (text, score)}`（弃牌 / All-in 徽章，可选）；`equity_reads`
-    是筹码胶囊下方胜率槽的 `{seat_id: (text, score)}`（全下摊牌时可选）。
+    是筹码胶囊下方胜率槽的 `{seat_id: (text, score)}`（全下摊牌时可选）；
+    `card_icons` 是头像底角「POKER」手牌图标的三态检测结果
+    （True=还在池里 / False=没图标 / None=判断不了，见 `card_icon.py`）。
+    图标比「弃牌」二字的 OCR 可靠得多，能覆盖 rec 把弃牌读成别的字的帧。
+    `shown_seats` 是这一帧亮牌的座位（摊牌时头像被牌顶掉，没有图标）。
+    `prev_fold` 是上一份被接受状态里各座位的弃牌判定：亮牌的人弃没弃，
+    只能沿用之前动作得出的结论（亮牌本身不代表没弃牌）。
     """
     prev_names = prev_names or {}
     avatar_reads = avatar_reads or {}
     equity_reads = equity_reads or {}
     prev_all_in = prev_all_in or set()
+    shown = set(shown_seats or ())
+    # 整帧都判断不了（4x4 单测桩、整桌摊牌亮牌）时当作「没有这项信息」；
+    # 只要有一座位给出了明确结果（有/没有图标），就按座位各自判断。
+    icons = dict(card_icons or {})
+    if not any(v is not None for v in icons.values()):
+        icons = {}
 
     # ── 全局 ──────────────────────────────────────────────
     blinds = parse_blinds(frame.text("blinds"))
@@ -215,11 +230,25 @@ def build_state(frame: RoiFrame, profile: Profile,
 
         # 动作徽章会盖住名字：先认徽章，再决定这块文本是不是名字
         action = parse_action(name_raw)
+        icon = icons.get(sid)
+        shown_here = sid in shown
         fold = None
-        if sid in avatar_reads:
+        # 亮牌时头像被两张明牌顶掉：头像区的 rec（读到的是牌面）和图标都
+        # 不可信，不能拿它们判弃牌。
+        if sid in avatar_reads and not shown_here:
             fold = is_fold_badge(*avatar_reads[sid])
         if action == "fold":
             fold = True
+        # 头像底角的手牌图标是最硬的「还在池里」证据：看到就是没弃牌，
+        # 即使 rec 把「弃牌」读成了别的字也不能反过来判。（没图标 → 弃牌
+        # 要等筹码/在场都定下来再判，见下面 in_hand 之后。）
+        if icon is True:
+            fold = False
+        if shown_here:
+            # 河底亮牌不代表没弃牌：早已弃牌的人也可能 show 牌。亮牌时头像
+            # 被牌顶掉、图标也没有，只能沿用**前面动作**得出的弃牌判定
+            # （上一帧被接受的状态）；没有历史就保持未知。
+            fold = True if action == "fold" else (prev_fold or {}).get(sid)
 
         # 名字粘性只在**这一座还有读数**时生效。整座空白（人走了 / 被面板盖住）
         # 必须能被看见：否则旧名字会把这个座位永远钉在「在场」，人走了也清不掉。
@@ -282,18 +311,56 @@ def build_state(frame: RoiFrame, profile: Profile,
         was_all_in = sid in prev_all_in
         zero_idle = (stack == 0.0 and (bet or 0) == 0 and not action
                      and sid != frame.hero_seat_id and not was_all_in
-                     and all_in_badge is not True and equity is None)
-        sitting_out = zero_idle and not buying_in
+                     and all_in_badge is not True and equity is None
+                     and not shown_here and icon is not True)
 
-        in_hand = ((name is not None or stack is not None or bet is not None
+        # ── 这个位置到底有没有人 ──────────────────────────────
+        # 「没有手牌」= 明确没看到头像底角的 POKER 图标、也没亮牌。
+        # （icon=None 是「判断不了」，不能当没有。）
+        no_cards = (icon is False and not shown_here
+                    and all_in_badge is not True and equity is None
+                    and not was_all_in)
+        # 1) 虚线「+」占位：名字/筹码/下注/动作全空，也没有手牌 → 这个位置没人。
+        #    + 本来就不渲染文字，所以这些槽位天然为空；用图标再确认一次，
+        #    避免 rec 的噪声把空座当成玩家。
+        empty_slot = (no_cards and sid != frame.hero_seat_id
+                      and name is None and stack is None
+                      and (bet or 0) == 0 and action is None)
+        # 2) 筹码 0 且没有手牌/亮牌/All-in → 人不在这一手。
+        #    有名字的是「坐出/带入中」，连名字都没有就是空位。
+        empty_zero = (no_cards and stack == 0.0 and (bet or 0) == 0
+                      and sid != frame.hero_seat_id)
+        no_player = empty_slot or (empty_zero and name is None)
+        sitting_out = (zero_idle or (empty_zero and not no_player)) \
+            and not buying_in
+
+        # 空座位（牌桌没坐满时那个虚线「+」）三块槽位都是空文本：名字 None、
+        # 筹码 None、bet 空文本被记成 0.0。**bet=0 不能当在场证据** —— 否则空座
+        # 会以「有下注字段、但没有筹码」进入质量闸，报 stack:<空座>，整场 100%
+        # 丢帧。只有 bet>0 才说明这座真的往池里放过钱；动作/弃牌徽章同理是
+        # 在场证据（名字和筹码都被挡住时仍要能报出 stack 错误，而不是悄悄少人）。
+        in_hand = ((name is not None or stack is not None or (bet or 0) > 0
+                    or action is not None or fold is True
+                    or icon is True or shown_here
                     or all_in_badge is True or equity is not None)
-                   and not buying_in and not sitting_out)
+                   and not buying_in and not sitting_out and not no_player)
         # 头像黄色 All-in 徽章是最直接的证据；胜率显示也只在全下后出现。
         # 旧的结构化判据（筹码 0 + 有下注/曾经全下）保留给徽章读不到时兜底。
         all_in = bool(in_hand and (
             all_in_badge is True or equity is not None
             or (stack == 0.0 and ((bet or 0) > 0 or was_all_in))))
+        # 明确没看到图标 + 这一座确实坐着人（有名字/筹码）+ 不是 hero/全下
+        # → 判定已弃牌。hero 的头像从不挂这张图标，不能用「没图标」推；
+        # 亮牌时图标被牌顶掉，也不能用「没图标」推。
+        if (icon is False and not shown_here and in_hand and not all_in
+                and sid != frame.hero_seat_id):
+            fold = True
+        if all_in:
+            fold = False
+        if no_player:
+            fold = None
         status = ("buying_in" if buying_in else
+                  "away" if no_player else
                   "sitting_out" if sitting_out else
                   "away" if not in_hand else
                   "folded" if fold else "playing")

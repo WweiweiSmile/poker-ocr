@@ -132,6 +132,145 @@ def test_idle_zero_player_is_not_in_hand() -> None:
     check(s.player("lowR").name == "Dragon333", "人还坐在桌上，名字要留着")
 
 
+def test_empty_seat_is_not_in_hand() -> None:
+    """没坐满时那个虚线「+」空座不能被当成在场玩家。
+
+    空座三块槽位都是空文本：名字 None、筹码 None、bet 空文本被记成 0.0。
+    以前把 `bet is not None` 当在场证据，空座于是带着「有下注字段、但没有
+    筹码」进质量闸，报 `stack:<空座>`，整场 100% 丢帧（2026-10-22 实盘）。
+    """
+    rows = {k: dict(v) for k, v in BASE.items()}
+    rows["topR"] = {"name": "", "chip": "", "bet": ""}
+    s = state(rows)
+    top = s.player("topR")
+    check(not top.in_hand and top.status == "away",
+          f"空座应判 away，实际 {top.to_debug()}")
+    check(s.players_in_hand == 8, f"在场人数应为 8，实际 {s.players_in_hand}")
+    check(not s.errors, f"空座不该触发质量闸：{s.errors}")
+
+
+def test_card_icon_decides_fold_without_ocr() -> None:
+    """头像底角的手牌图标：有=还在池里，没有=弃牌。
+
+    弃牌后头像被「弃牌」遮罩盖住，rec 经常读成「奔牌/水/风/O」；
+    图标是颜色+几何判断，不受 OCR 抖动影响。
+    """
+    rows = {k: dict(v) for k, v in BASE.items()}
+    rows["topR"] = {"name": "雷霆战吉", "chip": "176BB"}
+    s = build_state(make_frame(rows), PROFILE,
+                    card_icons={"topR": False, "hero": False})
+    check(s.player("topR").fold is True
+          and s.player("topR").status == "folded",
+          f"没图标应判弃牌：{s.player('topR').to_debug()}")
+    check(s.player("hero").fold is not True,
+          "hero 头像从不挂图标，不能据此判 hero 弃牌")
+    check(s.player("lowL").fold is None,
+          "没给图标的座位应保持未知")
+
+
+def test_card_icon_overrides_fold_text() -> None:
+    """看到图标就不能判弃牌：rec 把「跟注」误读成弃牌时以此兜底。"""
+    rows = {k: dict(v) for k, v in BASE.items()}
+    s = build_state(make_frame(rows), PROFILE,
+                    avatar_reads={"lowL": ("弃牌", 0.9)},
+                    card_icons={"lowL": True})
+    check(s.player("lowL").fold is False,
+          f"有图标应判未弃牌：{s.player('lowL').to_debug()}")
+
+
+def test_show_cards_do_not_clear_fold() -> None:
+    """河底亮牌不代表没弃牌：弃牌判定沿用前面动作得出的结论。"""
+    rows = {k: dict(v) for k, v in BASE.items()}
+    frame = make_frame(rows)
+    # 头像区被两张明牌顶掉，rec 读到的是牌面（不是「弃牌」）
+    reads = {"lowL": ("A♣ Q♥", 0.9)}
+    folded = build_state(frame, PROFILE, avatar_reads=reads,
+                         shown_seats={"lowL"}, prev_fold={"lowL": True})
+    check(folded.player("lowL").fold is True,
+          f"已弃牌的人亮牌后仍应判弃牌：{folded.player('lowL').to_debug()}")
+    playing = build_state(frame, PROFILE, avatar_reads=reads,
+                          shown_seats={"lowL"}, prev_fold={"lowL": False})
+    check(playing.player("lowL").fold is False,
+          f"未弃牌的人亮牌应保持未弃牌：{playing.player('lowL').to_debug()}")
+    unknown = build_state(frame, PROFILE, avatar_reads=reads,
+                          shown_seats={"lowL"})
+    check(unknown.player("lowL").fold is None,
+          f"没有历史时亮牌只算未知：{unknown.player('lowL').to_debug()}")
+    check(unknown.player("lowL").in_hand,
+          "亮牌座位仍然算在座/在池")
+
+
+def test_empty_plus_seat_is_away() -> None:
+    """虚线「+」空位：三块槽位全空 + 没有手牌图标 → 这个位置没人。
+
+    即使 rec 在空位上读出了「弃牌」之类噪声，也不能把它当成玩家。
+    """
+    rows = {k: dict(v) for k, v in BASE.items()}
+    rows["topR"] = {"name": "", "chip": "", "bet": ""}
+    s = build_state(make_frame(rows), PROFILE,
+                    avatar_reads={"topR": ("弃牌", 0.9)},
+                    card_icons={"topR": False})
+    top = s.player("topR")
+    check(not top.in_hand and top.status == "away",
+          f"空位应判 away：{top.to_debug()}")
+    check(top.fold is None, f"空位不该带弃牌标记：{top.to_debug()}")
+    check(not s.errors, f"空位不该触发质量闸：{s.errors}")
+
+
+def test_zero_stack_without_cards_is_not_in_hand() -> None:
+    """筹码 0 + 没有手牌/亮牌/All-in → 人不在这一手。"""
+    rows = {k: dict(v) for k, v in BASE.items()}
+    rows["lowR"] = {"name": "Dragon333", "chip": "0", "bet": ""}
+    s = build_state(make_frame(rows), PROFILE, card_icons={"lowR": False})
+    lowr = s.player("lowR")
+    check(not lowr.in_hand and lowr.status == "sitting_out",
+          f"0 筹码无手牌应判坐出：{lowr.to_debug()}")
+
+    # 亮牌 / All-in 是「人还在」的反证：不能被 0 筹码判成空位
+    shown = build_state(make_frame(rows), PROFILE,
+                        card_icons={"lowR": False}, shown_seats={"lowR"})
+    check(shown.player("lowR").in_hand,
+          f"亮牌的 0 筹码玩家仍应在池：{shown.player('lowR').to_debug()}")
+    allin = build_state(make_frame(rows), PROFILE,
+                        avatar_reads={"lowR": ("All in", 0.9)},
+                        card_icons={"lowR": False})
+    check(allin.player("lowR").in_hand and allin.player("lowR").all_in,
+          f"All-in 的 0 筹码玩家仍应在池：{allin.player('lowR').to_debug()}")
+
+
+def test_card_icons_on_real_samples() -> None:
+    """真实样张回归：no_fold 全在池；fold 样张只有 4 家没弃牌。"""
+    import cv2
+
+    from poker_ocr.card_icon import read_card_icons
+
+    cases = [
+        (ROOT / "images" / "status" / "no_fold",
+         {"lowL", "midL", "upL", "topL", "topR", "upR", "midR", "lowR"}),
+        (ROOT / "images" / "position" / "fold",
+         {"lowL", "midL", "upR", "midR"}),
+    ]
+    for path, expected in cases:
+        if not path.exists():
+            continue
+        img = cv2.imread(str(path))
+        if img is None:
+            continue
+        img = cv2.resize(img, PROFILE.reference_size)
+        icons = read_card_icons(img, PROFILE)
+        got = {sid for sid, ok in icons.items() if ok is True}
+        check(got == expected, f"{path.name} 图标识别不对：{got} != {expected}")
+
+    shown = ROOT / "images" / "card" / "show_card.jpg"
+    if shown.exists():
+        img = cv2.imread(str(shown))
+        if img is not None:
+            img = cv2.resize(img, PROFILE.reference_size)
+            icons = read_card_icons(img, PROFILE)
+            check(icons.get("midL") is None,
+                  f"摊牌亮牌的头像应返回未知，实际 {icons.get('midL')}")
+
+
 def test_lenient_chip_parse() -> None:
     rows = {k: dict(v) for k, v in BASE.items()}
     rows["lowL"]["chip"] = "460.538"       # BB 被读成 38
@@ -365,6 +504,13 @@ def main() -> int:
         test_full_state,
         test_action_badge_keeps_sticky_name,
         test_idle_zero_player_is_not_in_hand,
+        test_empty_seat_is_not_in_hand,
+        test_card_icon_decides_fold_without_ocr,
+        test_card_icon_overrides_fold_text,
+        test_show_cards_do_not_clear_fold,
+        test_empty_plus_seat_is_away,
+        test_zero_stack_without_cards_is_not_in_hand,
+        test_card_icons_on_real_samples,
         test_all_in_carried_after_bet_pill_disappears,
         test_lenient_chip_parse,
         test_all_in_badge_and_equity,

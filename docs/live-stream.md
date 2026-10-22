@@ -120,6 +120,14 @@ ROI 路线只裁固定槽位、只跑 rec，不跑全图检测，是实时链路
 - **座位**：9 人桌（ROI profile）或 2–9 人（全图路线）
 - **每个玩家**：名字、后手筹码（BB）、本街下注、动作
   （`check/call/bet/raise/fold`）、是否弃牌、是否在池、是否全下
+- **弃牌判定**：以头像底角的红色「POKER」手牌图标为主证据 —— 有图标 = 还在池里；
+  连续 2 帧没有图标 = 弃牌。图标是纯颜色/几何判断（`poker_ocr/card_icon.py`），
+  不受「弃牌」二字 OCR 抖动影响。**亮牌不代表没弃牌**：河底 show 牌的人可能早就
+  弃了，亮牌时头像被明牌顶掉、图标和头像 OCR 都不可用，弃牌状态沿用前面动作
+  得出的上一份判定（`prev_fold`），有 `弃牌` 动作徽章时按弃牌算
+- **空位判定**：虚线「+」占位（名字/筹码/下注/动作全空 + 没有手牌图标）→ `away`；
+  筹码 0 且没有手牌图标 / 亮牌 / All-in → 不在这一手（有名字的算 `sitting_out`，
+  连名字都没有的算 `away`）。有图标、亮牌、All-in 徽章、胜率任一成立就不算空位
 - **位置**：BTN / SB / BB / UTG / …（由庄位和在场人数推导）
 - **庄位**：白底圆形「D」检测，归给最近头像
 - **全局**：盲注级别、底池、上一街底池、本街下注总额、爆炸底池横幅
@@ -232,6 +240,7 @@ ROI 路线只裁固定槽位、只跑 rec，不跑全图检测，是实时链路
 | `tools/calibrate_live.py` | 从实时流跑一次全图识别，直接生成 runtime profile |
 | `tools/calibrate_clicker.py` | 全屏拖框标定自动点击按钮，生成 `config/clicker_local.json` |
 | `tools/video_to_states.py` | 离线视频 → 状态 JSON（不经过 OBS/RTSP） |
+| `tools/export_live_hands.py` | 从 `live.states.jsonl` 筛出完整手牌 → `hands.json` |
 
 ---
 
@@ -667,7 +676,7 @@ cd ~/codes/poker-ocr
 | `players[].stack` | 后手筹码（BB），不是带入 |
 | `players[].bet` | 本街已下注（BB） |
 | `players[].action` | `check/call/bet/raise/fold` |
-| `players[].fold` | 弃牌检测，三态：`true/false/null` |
+| `players[].fold` | 弃牌检测，三态：`true/false/null`。主证据是头像底角的红色「POKER」手牌图标：有图标=还在池里，连续 2 帧没有=弃牌；「弃牌」二字 OCR 只作辅助。亮牌座位按上一份状态/前面的弃牌动作沿用，不因 show 牌改判 |
 | `players[].all_in` | 是否全下：头像黄色 All-in 徽章 / 胜率显示 / 筹码 0 + 有下注或曾经全下 |
 | `players[].equity` | 全下摊牌时界面显示的实时胜率（0–100，可选） |
 | `players[].status` | `playing/folded/buying_in/sitting_out/away` |
@@ -784,6 +793,18 @@ All-in 文本）会立即收掉当前手牌，不依赖牌面/庄位变化。
 `advices` 只在**这一手确实给过建议**时出现，按给出顺序排列；没有 AI 建议时连键都不出现。
 其余 `advice` 记录仍会照常单独写一份，方便实时流式查看；复盘用 `hand.advices` 即可，不必再按 `hand_id` join。
 
+日志是追加写的，`hand_id` 每次启动都从 `h1` 重新计数，跨会话会重复。要按手牌
+批量分析时，用 `tools/export_live_hands.py` 导出 `hands.json`：
+
+```bash
+.venv/bin/python tools/export_live_hands.py
+```
+
+默认只保留「从翻前开始、且不是退出时截断」的完整手牌，并给每条记录追加
+`session`（第几个 `session_start`）和 `uid`（如 `s24-h10`）用于跨会话区分。
+`--mid-hand` / `--include-partial` 可放宽口径，`--require-hero-cards` /
+`--require-actions` 可进一步筛掉没读到手牌或没有行动记录的手。
+
 ### 6.7 丢弃语义
 
 `state` 记录只在**所有字段都可精准识别**时产生。以下情况整帧丢弃：
@@ -797,6 +818,14 @@ All-in 文本）会立即收掉当前手牌，不依赖牌面/庄位变化。
 | `vanished:<seat>` | 整座空白超过 `--max-vanish` 帧 |
 
 消费端可以只读 `state` 记录；`discard` 不会写入输出。
+
+**运行时可观测性**：每 10s 的 `[状态]` 行带 `接受=` / `记录=`。出现**新的**
+丢弃原因（或一帧都没接受）时，下一行给出本段原因
+（`[丢弃] 本段 dealer=12  stack:lowR=9`）。如果处理了 20 帧仍 `接受=0`，
+会额外打一行警告并提示确认视频源。每类原因**首次出现**时还会把那一帧存到
+`logs/incidents/<时间>_gate_<原因>/`（`frame.jpg` + `meta.json`，单次会话
+最多 3 份）——画面本身就是排查「为什么一帧都没通过」最直接的证据。
+`--no-incident` 可关闭落盘。
 
 ---
 
