@@ -5,8 +5,9 @@
         --initial-blinds 1/2 \
         --out logs/live.states.jsonl
 
-默认链路：OBS ──虚拟摄像头──▶ 本进程（`--url cam:0`，可用 `tools/list_cameras.py`
-查索引）；也可以用 `--url rtsp://127.0.0.1:8554/live` 走
+默认链路：OBS ──虚拟摄像头──▶ 本进程（`--url cam:auto` 自动选 OBS 虚拟摄像头；
+也可用 `cam:1` 手动指定，`tools/list_cameras.py` 查索引）；也可以用
+`--url rtsp://127.0.0.1:8554/live` 走
 OBS ──SRT──▶ MediaMTX ──RTSP──▶ 本进程。
 
 设计要点：
@@ -43,6 +44,7 @@ import argparse
 import json
 import os
 import signal
+import subprocess
 import sys
 import threading
 import time
@@ -79,9 +81,16 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_PROFILE = PROJECT_ROOT / "config" / "table_wpk_1080x2400.json"
 # 默认直接读 OBS 虚拟摄像头（同一台 Mac、延迟最低）；走 MediaMTX 时显式传
 # `--url rtsp://127.0.0.1:8554/live`。
-DEFAULT_URL = "cam:0"
+DEFAULT_URL = "cam:auto"
 DEFAULT_OUT = Path("logs/live.states.jsonl")
 DEFAULT_INCIDENT_DIR = Path("logs/incidents")
+# 异常要持续这么久才落盘：发牌/翻牌动画里的单帧误读（1 张公共牌、hero 只读到
+# 1 张）属于正常现象，稳定闸会吸收掉，不值得为每一帧存 10 张图。
+INCIDENT_MIN_SECONDS = 1.0
+# 同一类异常连续这么久没再出现，才算本次「事故」结束；否则整段持续异常只存一次。
+INCIDENT_EPISODE_GAP = 10.0
+# 单次会话最多落盘多少个事故目录，防止整场持续异常把磁盘写满。
+DEFAULT_INCIDENT_MAX = 20
 # 默认不节流：处理完当前帧立刻取邮箱里的最新帧，中间帧直接丢弃。
 # `--every` 仍保留给调试/降压用（>0 时按该间隔采样）。
 DEFAULT_EVERY = 0.0
@@ -603,6 +612,28 @@ def _state_line(t: float, body: dict, tail: str = "") -> str:
             f"对手: {opponents}")
 
 
+def _incident_category(reason: str) -> str:
+    """把具体异常文本归成稳定的类别，用于「一段持续异常只存一次」。
+
+    原始文本里常带具体牌（Kh 是牌背 / 8h 是牌背），逐帧变化会让去重失效；
+    归成 board:back、hero_cards:count 这类类别后才能把整段异常合成一份。
+    """
+    slot, _, detail = reason.partition(":")
+    if "回退" in detail:
+        kind = "regress"
+    elif "牌背" in detail:
+        kind = "back"
+    elif "遮挡" in detail:
+        kind = "occluded"
+    elif "读数不可靠" in detail:
+        kind = "unreliable"
+    elif "张数" in detail or "本帧" in detail:
+        kind = "count"
+    else:
+        kind = "other"
+    return f"{slot.strip()}:{kind}"
+
+
 class RtspReader(threading.Thread):
     """持续读 RTSP，把最新帧丢进邮箱；断了就 1s 后重连。
 
@@ -680,36 +711,82 @@ def rotate_frame(img: np.ndarray, degrees: int) -> np.ndarray:
     return img if code is None else cv2.rotate(img, code)
 
 
+def _camera_names() -> list[str]:
+    """macOS 摄像头名称（按系统枚举顺序）。
+
+    用 `system_profiler` 而不是猜索引：本机常见顺序是 FaceTime(0)、OBS
+    虚拟摄像头(1)，但接外置摄像头后会变。名称里带 OBS / Virtual 的优先。
+    """
+    if sys.platform != "darwin":
+        return []
+    try:
+        proc = subprocess.run(
+            ["/usr/sbin/system_profiler", "SPCameraDataType", "-json"],
+            capture_output=True, text=True, timeout=5)
+        if proc.returncode != 0:
+            return []
+        raw = json.loads(proc.stdout)
+        entries = raw.get("SPCameraDataType") or []
+        return [str(e.get("_name") or "") for e in entries if isinstance(e, dict)]
+    except (OSError, subprocess.SubprocessError, ValueError, TypeError):
+        return []
+
+
+def _camera_candidates() -> list[int]:
+    """`cam:auto` 的候选索引：OBS 虚拟摄像头优先，其次 0..9。"""
+    names = _camera_names()
+    preferred = [
+        i for i, name in enumerate(names)
+        if "obs" in name.lower() or "virtual" in name.lower()
+    ]
+    return preferred + [i for i in range(10) if i not in preferred]
+
+
+def _open_camera_index(index: int):
+    """按索引打开摄像头：先 AVFoundation（虚拟摄像头只在这个后端暴露），
+    失败再让 OpenCV 自选后端。"""
+    cap = cv2.VideoCapture(index, cv2.CAP_AVFOUNDATION)
+    if not cap.isOpened():
+        cap.release()
+        cap = cv2.VideoCapture(index)
+    if not cap.isOpened():
+        cap.release()
+        return None
+    # 摄像头后端大多忽略这个设置；读循环本身也只保留最新帧
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    return cap
+
+
 def _open_capture(url: str):
     """打开视频源。
 
-    两种写法：
+    三种写法：
 
       · `rtsp://...` —— 走 FFmpeg 解 RTSP（OBS → SRT → MediaMTX 路线）。
-      · `cam:0` / `cam:1` —— 直接打开本机摄像头。OBS 在**同一台机器**上时，
-        用 OBS 虚拟摄像头（Start Virtual Camera）把画面直接喂给 Python，
-        可以整段跳过 编码 → SRT → MediaMTX → RTSP → 解码（约 0.3–0.8s）。
-        索引用 `tools/list_cameras.py` 查。
+      · `cam:auto` —— 自动选摄像头：名称带 OBS / Virtual 的优先，其次 0..9。
+        这是默认值。
+      · `cam:0` / `cam:1` —— 手动指定索引，用 `tools/list_cameras.py` 查。
 
     `cam:` 优先 AVFoundation（macOS 虚拟摄像头只在这个后端暴露）；失败再让
     OpenCV 自选后端。
     """
     if url.startswith(("cam:", "camera:")):
         _, _, raw = url.partition(":")
+        if raw.strip().lower() in ("", "auto"):
+            for index in _camera_candidates():
+                cap = _open_camera_index(index)
+                if cap is not None:
+                    names = _camera_names()
+                    name = names[index] if index < len(names) else "?"
+                    _log(f"[启动] cam:auto 选中摄像头 index={index}"
+                         f"（{name or '未知名称'}）")
+                    return cap
+            return None
         try:
             index = int(raw)
         except ValueError:
             return None
-        cap = cv2.VideoCapture(index, cv2.CAP_AVFOUNDATION)
-        if not cap.isOpened():
-            cap.release()
-            cap = cv2.VideoCapture(index)
-        if not cap.isOpened():
-            cap.release()
-            return None
-        # 摄像头后端大多忽略这个设置；读循环本身也只保留最新帧
-        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        return cap
+        return _open_camera_index(index)
 
     cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
     if not cap.isOpened():
@@ -748,6 +825,7 @@ class LiveProcessor:
                  table_dynamics_text: str = "",
                  incident_dir: Path | None = None,
                  incident_frames: int = 10,
+                 incident_max: int = DEFAULT_INCIDENT_MAX,
                  card_confirm_frames: int = 2,
                  clock=time.monotonic, log=_log) -> None:
         if recognizer not in ("roi", "full"):
@@ -812,8 +890,16 @@ class LiveProcessor:
         self._frame_ring: deque | None = (
             deque(maxlen=max(1, int(incident_frames)))
             if self.incident_dir is not None else None)
-        self._last_incident: tuple[str, float] | None = None
+        # 事故节流：按类别记录「本次异常从什么时候开始」以及是否已经落过盘。
+        # 持续几分钟的同一个异常只存一次，而不是每 5 秒重复存 10 帧。
+        self.incident_max = max(0, int(incident_max))
+        self.incident_count = 0
+        self._incident_first_seen: dict[str, float] = {}
+        self._incident_last_seen: dict[str, float] = {}
+        self._incident_active: set[str] = set()
+        self._incident_capped_logged = False
         self._last_cards_skip: tuple[tuple, float] | None = None
+        self._board_anomaly_hinted = False
         self.cards_unreliable_skips = 0
 
         self.started_mono = clock()
@@ -1333,21 +1419,43 @@ class LiveProcessor:
                              cards: CardsResult | None) -> None:
         """牌面回退/张数异常/牌背时，把环形缓冲里的最近帧落盘做回归样本。
 
-        同一类异常 5 秒内只存一次，避免动画期间连续几十帧重复写盘。
+        只存「持续」的异常，且同一段持续异常只存一次：
+          · 异常类别（board 张数 / board 读数不可靠 / hero …）要连续出现
+            `INCIDENT_MIN_SECONDS` 才落盘 —— 发牌动画里的单帧误读不存；
+          · 同类异常间隔超过 `INCIDENT_EPISODE_GAP` 才算新的一次，不再每 5 秒
+            重复存一份；
+          · 整个会话最多存 `incident_max` 份（0 = 不限制）。
         """
         ring = self._frame_ring
         if ring is None or self.card_state is None:
             return
+        now = self.clock()
+        # 先结束已经消失足够久的异常段，允许下一次真正复发时再存一份
+        for cat, last in list(self._incident_last_seen.items()):
+            if now - last >= INCIDENT_EPISODE_GAP:
+                self._incident_last_seen.pop(cat, None)
+                self._incident_first_seen.pop(cat, None)
+                self._incident_active.discard(cat)
+
         anomalies = list(self.card_state.last_anomalies)
         if not anomalies:
             return
         reason = anomalies[0]
-        now = self.clock()
-        if (self._last_incident is not None
-                and self._last_incident[0] == reason
-                and now - self._last_incident[1] < 5.0):
+        cat = _incident_category(reason)
+        first = self._incident_first_seen.setdefault(cat, now)
+        self._incident_last_seen[cat] = now
+        if cat in self._incident_active:
             return
-        self._last_incident = (reason, now)
+        if now - first < INCIDENT_MIN_SECONDS:
+            return
+        if self.incident_max and self.incident_count >= self.incident_max:
+            if not self._incident_capped_logged:
+                self._incident_capped_logged = True
+                self.log(f"[事故帧] 本次会话已保存 {self.incident_max} 份，"
+                         "后续异常不再落盘（--incident-max 调整）")
+            return
+        self._incident_active.add(cat)
+        self.incident_count += 1
 
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         safe = "".join(ch if ch.isalnum() else "_" for ch in reason)[:48]
@@ -1380,6 +1488,11 @@ class LiveProcessor:
                 json.dumps(meta, ensure_ascii=False, indent=2),
                 encoding="utf-8")
             self.log(f"[事故帧] {reason}；已保存 {len(frames)} 帧 → {folder}")
+            if "board" in reason and not self._board_anomaly_hinted:
+                self._board_anomaly_hinted = True
+                self.log("  [提示] 连续出现牌面张数异常时，先确认输入画面确实是"
+                         "牌桌：tools/list_cameras.py 的预览图不能是摄像头/桌面；"
+                         "OBS 虚拟摄像头还要检查旋转（--rotate 90）和宽高比。")
         except Exception as exc:  # noqa: BLE001 — 落盘失败不能拖垮主链路
             self.log(f"[警告] 事故帧保存失败：{exc}")
 
@@ -1467,9 +1580,9 @@ def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
         description="实时拉虚拟摄像头/RTSP 流，按间隔识别牌桌状态并写 JSONL")
     ap.add_argument("--url", default=DEFAULT_URL,
-                    help=f"视频源（默认 {DEFAULT_URL} = OBS 虚拟摄像头，"
-                         "用 tools/list_cameras.py 查索引）。走 MediaMTX 时写 "
-                         "rtsp://127.0.0.1:8554/live")
+                    help=f"视频源（默认 {DEFAULT_URL} = 自动选择 OBS 虚拟摄像头；"
+                         "也可写 cam:1 指定索引，索引用 tools/list_cameras.py 查）。"
+                         "走 MediaMTX 时写 rtsp://127.0.0.1:8554/live")
     ap.add_argument("--rotate", type=int, choices=(0, 90, 180, 270), default=0,
                     help="把视频源顺时针旋转多少度再识别（默认 0）。OBS 虚拟摄像头"
                          "固定 1920x1080，把 OBS 画布改成横屏、手机源转 90° 后，"
@@ -1510,6 +1623,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help="关闭事故帧留存（不占内存、不落盘）")
     ap.add_argument("--incident-frames", type=int, default=10,
                     help="事故帧环形缓冲保留多少帧（默认 10）")
+    ap.add_argument("--incident-max", type=int, default=DEFAULT_INCIDENT_MAX,
+                    help="单次会话最多落盘多少份事故帧（默认 "
+                         f"{DEFAULT_INCIDENT_MAX}；0 = 不限制）")
     ap.add_argument("--max-vanish", type=int, default=3,
                     help="在场玩家整座空白连续几帧才认定离开（默认 3）")
     ap.add_argument("--name-confirm", type=int, default=3,
@@ -1571,6 +1687,8 @@ def _validate_args(ap: argparse.ArgumentParser, args) -> None:
         ap.error("--card-confirm-frames 至少为 1")
     if args.incident_frames < 1:
         ap.error("--incident-frames 至少为 1")
+    if args.incident_max < 0:
+        ap.error("--incident-max 不能为负（0 = 不限制）")
     if args.max_vanish < 0:
         ap.error("--max-vanish 不能为负")
     if args.name_confirm < 1:
@@ -1808,6 +1926,7 @@ def main(argv: list[str] | None = None) -> int:
         table_dynamics_text=table_dynamics_text,
         incident_dir=(None if args.no_incident else args.incident_dir),
         incident_frames=args.incident_frames,
+        incident_max=args.incident_max,
         card_confirm_frames=args.card_confirm_frames)
 
     # 动作区静止闸只用于 roi 路线：它的区域来自固定槽位；full 路线没有布局。
@@ -1898,18 +2017,29 @@ def main(argv: list[str] | None = None) -> int:
                          f"（参考 {fit.reference_aspect:.4f}，"
                          f"缩放 {fit.scale[0]:.4f}/{fit.scale[1]:.4f}）")
                     if fit.deviation > 0.02:
+                        hint = ""
+                        if args.url.startswith(("cam:", "camera:")):
+                            hint = ("。虚拟摄像头固定输出 1920x1080：若 OBS 里手机源"
+                                    "旋转了 90°，加 --rotate 90；否则请把 OBS 画布"
+                                    "调成与 profile 同比例（"
+                                    f"{profile.reference_size[0]}:"
+                                    f"{profile.reference_size[1]}）")
                         _log(f"[警告] 画面宽高比与 profile 参考 "
                              f"{profile.reference_size[0]}x{profile.reference_size[1]} "
                              f"偏差 {fit.deviation * 100:.1f}%；已按参考比例重采样。"
-                             f"若画面被 OBS 横向拉伸，请改回等比缩放")
+                             f"若画面被 OBS 横向拉伸，请改回等比缩放{hint}")
                     low = min(fit.scale)
                     if low < 0.5:
+                        hint = ("；虚拟摄像头请改用 RTSP 或让 OBS 画布与 profile "
+                                "同比例" if args.url.startswith(("cam:", "camera:"))
+                                else "")
                         _log(f"[警告] ROI 分辨率只有参考图的 {low * 100:.0f}%"
                              f"（{fit.out_size[0]}x{fit.out_size[1]} vs "
                              f"{profile.reference_size[0]}x{profile.reference_size[1]}）。"
                              f"筹码数字/庄位 D 会小到读不出，"
                              f"请把 OBS 输出分辨率提到 "
-                             f"{profile.reference_size[0]}x{profile.reference_size[1]}")
+                             f"{profile.reference_size[0]}x{profile.reference_size[1]}"
+                             f"{hint}")
 
             img = plan.apply(packet.image)
             if fit is not None:

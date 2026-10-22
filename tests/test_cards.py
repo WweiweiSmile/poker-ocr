@@ -19,14 +19,18 @@ from __future__ import annotations
 import hashlib
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 import cv2
+import numpy as np
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+import poker_ocr.cards as cards_mod  # noqa: E402
 from poker_ocr.cards import (  # noqa: E402
-    RANKS, recognize_cards, recognize_cards_of_file,
+    RANKS, _classify_suit, _suit_from_shape, recognize_cards,
+    recognize_cards_of_file,
 )
 from poker_ocr.profile import Profile  # noqa: E402
 
@@ -124,6 +128,29 @@ def test_color_and_shape_agree() -> None:
                 check(card.evidence.get("shape_agrees") is True,
                       f"{key} {slot_name} {card.code}: 颜色/形状不一致 "
                       f"{card.evidence.get('shape_suit')}")
+
+
+def test_suit_shape_thresholds() -> None:
+    """形状判定边界：K♣/Q♣/J♣ 的 solidity 会落在 0.860 附近，不能翻成黑桃。"""
+    check(_suit_from_shape(0.8604, 0.02) == "c",
+          "solidity 0.8604 应判梅花（K♣/Q♣/J♣ 的实测边界）")
+    check(_suit_from_shape(0.866, 0.03) == "s",
+          "solidity 0.866 应判黑桃（黑桃实测下界）")
+    check(_suit_from_shape(0.925, -0.10) == "h", "质心偏上应判红桃")
+    check(_suit_from_shape(0.97, 0.01) == "d", "高实心度且对称应判方块")
+
+
+def test_shape_disagreement_does_not_reject_color() -> None:
+    """颜色是硬判据：形状只在近似校验，不能把明确的花色打到稳定闸以下。"""
+    with patch.object(cards_mod, "_suit_color",
+                      return_value=("c", 0.96, {})), \
+         patch.object(cards_mod, "_suit_shape",
+                      return_value=("s", {})):
+        suit, conf, ev = _classify_suit(np.zeros((10, 10, 3), np.uint8))
+    check(suit == "c", f"形状不一致时应保留颜色判据，实际 {suit}")
+    check(conf >= 0.65,
+          f"形状不一致不应把置信度打到稳定闸以下，实际 {conf:.3f}")
+    check(ev.get("shape_agrees") is False, "应保留 shape_agrees=False 供复核")
 
 
 def test_default_profile_falls_back_to_wpk_slots() -> None:
@@ -248,6 +275,8 @@ def main() -> int:
         test_three_eight_use_hole_topology,
         test_all_labeled_samples,
         test_color_and_shape_agree,
+        test_suit_shape_thresholds,
+        test_shape_disagreement_does_not_reject_color,
         test_default_profile_falls_back_to_wpk_slots,
         test_preflop_has_no_false_positive,
     ]

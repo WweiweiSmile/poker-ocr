@@ -116,6 +116,10 @@ _MIN_SUIT_INK = 200
 # 稳定闸用的「这张牌本身可不可信」门槛。标注样本里最低 confidence/rank_score
 # 都是 0.795，0.65 留足余量；真正的牌背实测 confidence≈0.50、rank_score≈0.64。
 _MIN_STABLE_CONFIDENCE = 0.65
+# 连续这么多帧读到完全相同的一组牌、且问题只是置信度略低时，兜底采用。
+# 不兜底的话，一张恒定低置信度的牌（例如旧版梅花 0.48）会让稳定闸永远
+# 停在上一手：换手信号依赖稳定输出，于是新牌永远进不来，程序看起来停摆。
+_WEAK_ACCEPT_FRAMES = 10
 
 # 牌背分类：POKER 牌背的白色边框仍会被检出成牌面矩形，但内部是大面积高饱和
 # 图案（实测 S 中位数≈150、高饱和像素占 82%–85%，V 中位数≈170）；真牌是白底，
@@ -328,6 +332,22 @@ def _suit_color(card: np.ndarray) -> tuple[str, float, dict[str, Any]]:
 
 # ─────────────────────────── 花色：形状 ───────────────────────────
 
+def _suit_from_shape(solidity: float, centroid_rel: float) -> str:
+    """花色符号形状 → 花色。单独抽出来是为了能直接测阈值边界。
+
+    实测：梅花 solidity 0.815–0.854、黑桃 0.866–0.903；K♣/Q♣/J♣ 在低分辨率
+    下会被重采样到 0.8604 左右，所以梅花上界取 0.865，避免边界抖动翻成黑桃。
+    菱形实心度最高且上下对称；红桃质心明显偏上。
+    """
+    if solidity >= 0.94 and abs(centroid_rel) < 0.05:
+        return "d"
+    if centroid_rel <= -0.05:
+        return "h"
+    if solidity <= 0.865:
+        return "c"
+    return "s"
+
+
 def _suit_shape(card: np.ndarray) -> tuple[str | None, dict[str, Any]]:
     """独立于颜色，按花色符号的轮廓形状判一次。
 
@@ -369,15 +389,7 @@ def _suit_shape(card: np.ndarray) -> tuple[str | None, dict[str, Any]]:
         "shape_centroid_rel": round(rel, 3),
     }
 
-    # 四条规则按「最不可能误判」的顺序排：
-    # 菱形实心度高且上下对称；红桃质心明显偏上；梅花实心度低；剩下的是黑桃
-    if solidity >= 0.94 and abs(rel) < 0.05:
-        return "d", evidence
-    if rel <= -0.05:
-        return "h", evidence
-    if solidity < 0.86:
-        return "c", evidence
-    return "s", evidence
+    return _suit_from_shape(solidity, rel), evidence
 
 
 def _classify_suit(card: np.ndarray) -> tuple[str, float, dict[str, Any]]:
@@ -389,12 +401,20 @@ def _classify_suit(card: np.ndarray) -> tuple[str, float, dict[str, Any]]:
     if shape_suit is None:
         # 形状没抽到符号：颜色仍然可用，但要标出来，别让下游以为是双证据
         evidence["shape_agrees"] = None
+        evidence["color_confidence"] = round(color_conf, 4)
+        evidence["suit_confidence"] = round(color_conf * 0.8, 4)
         return color_suit, color_conf * 0.8, evidence
 
     evidence["shape_agrees"] = shape_suit == color_suit
+    evidence["color_confidence"] = round(color_conf, 4)
     if shape_suit != color_suit:
-        # 颜色是用户给定的硬判据，形状只做校验。不一致时降置信度，让调用方能复核
-        return color_suit, color_conf * 0.5, evidence
+        # 颜色是用户给定的硬判据，形状只做近似校验。这里只轻降置信度、保留
+        # shape_agrees=False 让调用方复核 —— 不能因为形状阈值在边界上抖一下
+        # 就把一张颜色明确的 K♣/Q♣/J♣ 打到 0.48 而被稳定闸丢掉。
+        confidence = color_conf * 0.8
+        evidence["suit_confidence"] = round(confidence, 4)
+        return color_suit, confidence, evidence
+    evidence["suit_confidence"] = round(color_conf, 4)
     return color_suit, color_conf, evidence
 
 
@@ -741,7 +761,21 @@ def _reading_issues(read: CardSlotRead) -> list[str]:
         elif c.rank_score < _MIN_RANK_SCORE:
             issues.append(f"{c.code} 点数分低 {c.rank_score:.2f}")
         elif c.confidence < _MIN_STABLE_CONFIDENCE:
-            issues.append(f"{c.code} 置信度低 {c.confidence:.2f}")
+            # 把花色/点数拆开，别让「K♣ 置信度 0.48」看起来像点数识别失败
+            parts = []
+            suit_conf = c.evidence.get("suit_confidence")
+            color_conf = c.evidence.get("color_confidence")
+            shape_suit = c.evidence.get("shape_suit")
+            if suit_conf is not None:
+                part = f"花色 {suit_conf:.2f}"
+                if color_conf is not None:
+                    part += f"/颜色 {color_conf:.2f}"
+                if shape_suit is not None:
+                    part += f"，形状判 {shape_suit}"
+                parts.append(part)
+            parts.append(f"点数 {c.rank_score:.2f}")
+            issues.append(f"{c.code} 置信度低 {c.confidence:.2f}"
+                          f"（{'；'.join(parts)}）")
     return issues
 
 
@@ -757,6 +791,13 @@ class _StableSlot:
     # 最近几帧的合法读数。连续两帧不一致时用它们做 top-1 多数投票，
     # 兜住 3/8、6/8 这类 NCC 只差 0.01、逐帧在两个字之间跳的情况。
     recent: list[CardSlotRead] = dc_field(default_factory=list)
+    # 连续多帧读数完全一致、只是置信度略低时的计数。用于兜底采用，
+    # 避免某张牌一直卡在门槛下导致稳定闸永远停在上一手。
+    weak_codes: tuple[str, ...] = ()
+    weak_n: int = 0
+    # 当前 last-good 是通过「连续一致的弱读数」兜底采用的：可靠性检查不再
+    # 因为同一张牌的置信度低而反复判不可靠，否则接受后仍然出不了建议。
+    weak_accepted: bool = False
 
 
 class StableCards:
@@ -795,10 +836,13 @@ class StableCards:
     VOTE_MIN_AGREE = 2
 
     def __init__(self, confirm_frames: int = 2,
-                 vote_frames: int = VOTE_FRAMES) -> None:
+                 vote_frames: int = VOTE_FRAMES,
+                 weak_accept_frames: int = _WEAK_ACCEPT_FRAMES) -> None:
         self.confirm_frames = max(1, int(confirm_frames))
         # 0 = 关闭投票，只认连续 confirm_frames 帧一致
         self.vote_frames = max(0, int(vote_frames))
+        # 0 = 关闭「连续一致的弱读数」兜底
+        self.weak_accept_frames = max(0, int(weak_accept_frames))
         self.last_anomalies: list[str] = []
         self.reliable = True
         self._reset_tracks()
@@ -806,12 +850,38 @@ class StableCards:
     def _reset_tracks(self) -> None:
         self._board = _StableSlot()
         self._hero = _StableSlot()
+        # hero 换组检测（用 raw 读数，不看置信度）的待确认状态
+        self._raw_hero_codes: tuple[str, ...] = ()
+        self._raw_hero_n = 0
 
     def reset(self) -> None:
         """断流重连 / 换桌：跨帧 last-good 全部作废。"""
         self._reset_tracks()
         self.last_anomalies = []
         self.reliable = True
+
+    def _note_raw_hero_change(self, raw: CardSlotRead) -> bool:
+        """raw hero 连续 confirm_frames 帧变成另一组 2 张 → 判定换手。
+
+        只看张数和牌面，不看置信度：新一手的牌即使一直被稳定闸拒收，
+        也要能发出换手信号，否则 last-good 会永远停在上一手。
+        """
+        codes = tuple(raw.codes)
+        previous = self._hero.read
+        if not (len(codes) == 2 and self._hero.established
+                and previous is not None and len(previous.cards) == 2
+                and codes != tuple(previous.codes)):
+            self._raw_hero_codes, self._raw_hero_n = (), 0
+            return False
+        if codes == self._raw_hero_codes:
+            self._raw_hero_n += 1
+        else:
+            self._raw_hero_codes, self._raw_hero_n = codes, 1
+        # 至少 2 帧：单帧误读（3/8 跳字）不能清空整手牌面
+        if self._raw_hero_n >= max(2, self.confirm_frames):
+            self._raw_hero_codes, self._raw_hero_n = (), 0
+            return True
+        return False
 
     def update(self, result: CardsResult | Any) -> CardsResult | Any:
         if not isinstance(result, CardsResult):
@@ -820,12 +890,21 @@ class StableCards:
         anomalies: list[str] = []
         warnings: list[str] = list(result.warnings)
 
+        # 换手信号用 **raw** hero 读数，而不是等稳定闸接受新读数：
+        # 如果新一手的两张牌一直因置信度/牌背被拒，稳定输出会永远停在上一手，
+        # 而下游的换手判断又只看稳定输出 —— 两边互锁，程序就停摆了。
+        # raw 读数连续 confirm_frames 帧都是另一组 2 张，就先清空上一手牌面。
+        if self._note_raw_hero_change(result.hero_cards):
+            self._reset_tracks()
+            warnings.append("hero_cards: 换了一组手牌，已清空上一手牌面")
+
         board, board_reset, _ = self._update_slot(
             result.board, self._board, "board", self.BOARD_COUNTS,
             anomalies, warnings, board=True)
         if board_reset:
             # 新一手：hero 的上一手牌不能继续沿用。
             self._hero = _StableSlot()
+            self._raw_hero_codes, self._raw_hero_n = (), 0
 
         hero, _, hero_changed = self._update_slot(
             result.hero_cards, self._hero, "hero_cards", self.HERO_COUNTS,
@@ -872,6 +951,38 @@ class StableCards:
             msg = f"{name}: 读数不可靠（{'；'.join(issues)}）"
             anomalies.append(msg)
             warnings.append(f"{msg}；沿用上一帧")
+            # 连续多帧读到**完全相同**的一组牌、且问题只是置信度略低时兜底
+            # 采用。否则一张恒定低置信度的牌会把 last-good 永久锁在上一手，
+            # 新牌、换手信号、AI 建议全部停摆（实测：梅花 0.48）。
+            if (self.weak_accept_frames
+                    and all("置信度低" in i for i in issues)):
+                if codes == track.weak_codes:
+                    track.weak_n += 1
+                else:
+                    track.weak_codes, track.weak_n = codes, 1
+                regressed = (board and track.established
+                             and track.read is not None
+                             and n < len(track.read.cards) and n != 0)
+                if not regressed and track.weak_n >= self.weak_accept_frames:
+                    previous = track.read
+                    changed = (not board and previous is not None
+                               and len(previous.cards) == 2
+                               and len(raw.cards) == 2
+                               and tuple(previous.codes) != codes)
+                    track.read = raw
+                    track.established = True
+                    track.pending = None
+                    track.pending_read = None
+                    track.pending_n = 0
+                    track.recent.clear()
+                    track.weak_codes, track.weak_n = (), 0
+                    track.weak_accepted = True
+                    warnings.append(
+                        f"{name}: 连续 {self.weak_accept_frames} 帧读数一致但"
+                        "置信度偏低，采用")
+                    return raw, board and n == 0, changed
+            else:
+                track.weak_codes, track.weak_n = (), 0
             return self._current(track, raw), False, False
 
         # 公共牌回退：4→3、5→4 一律不接受，哪怕连续多帧。0 是新一手信号，
@@ -889,6 +1000,7 @@ class StableCards:
             track.pending_read = None
             track.pending_n = 0
             track.recent.clear()
+            track.weak_codes, track.weak_n = (), 0
             return track.read, False, False
 
         # 首次就是空读数：没有牌不是误读，直接建立基线，不白等两帧。
@@ -929,6 +1041,8 @@ class StableCards:
             track.pending_read = None
             track.pending_n = 0
             track.recent.clear()
+            track.weak_codes, track.weak_n = (), 0
+            track.weak_accepted = False
             return accepted, board and n == 0, changed
 
         # 连续两帧不一致时，用最近 3 帧的 top-1 读数投票。3/8、6/8 的
@@ -948,6 +1062,8 @@ class StableCards:
                 track.pending_read = None
                 track.pending_n = 0
                 track.recent.clear()
+                track.weak_codes, track.weak_n = (), 0
+                track.weak_accepted = False
                 warnings.append(
                     f"{name}: {self.vote_frames} 帧投票采用 "
                     f"{'/'.join(voted.codes)}")
@@ -1005,7 +1121,12 @@ class StableCards:
             return False                    # 还没稳定读过，不能给 AI 用
         if len(track.read.cards) not in valid_counts:
             return False
-        return not _reading_issues(track.read)
+        issues = _reading_issues(track.read)
+        if track.weak_accepted:
+            # 这组牌已连续多帧一致、只是置信度偏低并明确告警过，按可用处理；
+            # 否则弱读数兜底采用后仍会被判不可靠，建议/点击继续停摆。
+            issues = [i for i in issues if "置信度低" not in i]
+        return not issues
 
 
 def _dedup(items: list[str]) -> list[str]:

@@ -36,7 +36,7 @@ curl -X POST http://localhost:8000/ocr/table -F "file=@table.jpg"
 
 ## 实时推流识别
 
-默认直接读 **OBS 虚拟摄像头**（`--url cam:0`，同一台 Mac 延迟最低）；也可以
+默认直接读 **OBS 虚拟摄像头**（`--url cam:auto`，同一台 Mac 延迟最低）；也可以
 用 `--url rtsp://127.0.0.1:8554/live` 走 OBS ──SRT──▶ MediaMTX ──RTSP。
 worker **不节流**：处理完当前帧立刻取邮箱里的最新帧，中间帧直接丢弃；用固定
 ROI 识别座位、筹码、下注、动作、庄位、底池和盲注，输出一行一个状态的 JSONL。
@@ -46,7 +46,7 @@ ROI 识别座位、筹码、下注、动作、庄位、底池和盲注，输出�
 
 ### 快速启动（虚拟摄像头 + 自动点击）
 
-默认 `--url cam:0`、`--auto-click` 开启。自动点击需要先标定一次按钮位置：
+默认 `--url cam:auto`、`--auto-click` 开启。自动点击需要先标定一次按钮位置：
 
 ```bash
 # 0) 只做一次：标定桌面客户端的虚拟按钮（默认圆形，按 C 切换方形）
@@ -60,20 +60,37 @@ ROI 识别座位、筹码、下注、动作、庄位、底池和盲注，输出�
   --out logs/live.states.jsonl \
   --clicker-dry-run
 
-# 2) 真实运行（默认 cam:0 + 自动点击）
+# 2) 真实运行（默认 cam:auto + 自动点击）
 .venv/bin/python -m poker_ocr.live \
   --profile config/table_wpk_live.json \
   --initial-blinds 1/2 \
   --out logs/live.states.jsonl
 ```
 
-- `--url` 默认 `cam:0`（OBS 虚拟摄像头，索引用 `tools/list_cameras.py` 查）；
+- `--url` 默认 `cam:auto`（自动选择 OBS 虚拟摄像头，索引用 `tools/list_cameras.py` 查）；
   走 MediaMTX 时加 `--url rtsp://127.0.0.1:8554/live`，并先
   `mediamtx config/mediamtx.yml`。
 - `--auto-click` 默认开启；只要 AI 建议、不要自动点击时加 `--no-auto-click`。
 - 关闭 AI 建议时（`--no-ai-advice`）自动点击会跟着关闭。
 - 没有 `config/clicker_local.json` 时启动会明确报错，先跑第 0 步。
 - 真实点击需要 macOS「辅助功能」权限，见下方自动点击小节。
+
+**虚拟摄像头读不到 / 解析不出状态时**：
+
+```bash
+# 1) 确认选中的是 OBS，而不是内置/FaceTime 摄像头
+.venv/bin/python tools/list_cameras.py
+# 看 /tmp/poker_cameras/camN.jpg，必须是牌桌画面；不是就改 OBS 场景/来源
+
+# 2) OBS 虚拟摄像头固定输出 1920x1080。若手机源在 OBS 里旋转 90° 铺满，
+#    worker 必须加 --rotate 90；否则 ROI 会被横向压扁，OCR 读不出筹码/名字
+.venv/bin/python -m poker_ocr.live --rotate 90 ...
+```
+
+启动日志里的 `[比例]` 会打印实际 ROI 尺寸；出现
+`ROI 分辨率只有参考图的 49%` 或宽高比偏差警告时，OCR 基本读不出状态，
+应改 OBS 画布比例、加 `--rotate`，或改用 RTSP 路线
+（`--url rtsp://127.0.0.1:8554/live`）。
 
 ### AI 实时建议（默认开启）
 
@@ -95,7 +112,7 @@ bb 说。金额由程序按现场底池/加注算好（含最小加注额与后�
 ```bash
 cp .env.example .env      # 然后编辑 .env，填入 AI_SERVER_API_KEY
 
-# 默认 cam:0；这里 --no-auto-click 表示只看建议、不自动点
+# 默认 cam:auto；这里 --no-auto-click 表示只看建议、不自动点
 .venv/bin/python -m poker_ocr.live \
   --profile config/table_wpk_1080x2400.json \
   --initial-blinds 1/2 --ai-advice --no-auto-click \
@@ -152,7 +169,9 @@ JEV 模式下候选动作会被转成一道 `choice` 题（criteria 的 key 就�
   hero 只接受 0/2 张，新读数连续 2 帧一致才替换 last-good；牌背/遮挡/
   低置信度不参与替换。稳定结果仍不可靠时**跳过这一帧的 AI 建议**，手牌记录
   里带 `cards_unreliable` / `cards_warnings`，牌面恢复后同一决策点补投。
-  公共牌回退/张数异常/牌背的最近帧会落到 `logs/incidents/`（`--no-incident` 关闭）。
+  公共牌回退/张数异常/牌背**持续 1 秒以上**时，最近帧才落到
+  `logs/incidents/`（同类持续异常只存一份，单次会话默认最多 20 份；
+  `--no-incident` 关闭）。
 - 模型超时/报错/返回了不在选项里的答案时，记录标 `source=fallback`：
   面对下注→弃牌，否则→过牌（最保守），并保留 `error` 原因，绝不猜。
 
@@ -166,7 +185,7 @@ AI 建议返回后，可以在客户端的对应按钮上自动点一下。先�
 |---|---|
 | 弃牌 | `fold`（左侧弃牌） |
 | 跟注 / 过牌 / 跟全下 | `call`（右侧跟注/让牌） |
-| 加注 / 下注 | 先点五个快捷档位之一（底池 1/3、1/2、2/3、1、1.2），再点 `confirm`（蓝色下注/加注确认） |
+| 加注 / 下注 | 点五个快捷档位之一（底池 1/3、1/2、2/3、1、1.2）；点档位即完成下注/加注，不再点蓝色确认按钮 |
 
 翻前建议（`open-2.5`、`raise-3x` 等）没有对应的底池档位，按**金额最近**的档位点。
 
@@ -176,7 +195,7 @@ AI 建议返回后，可以在客户端的对应按钮上自动点一下。先�
 .venv/bin/python tools/calibrate_clicker.py --list-displays
 .venv/bin/python tools/calibrate_clicker.py --out config/clicker_local.json
 
-# 2) 先 dry-run：只打印随机坐标，不真的点（--url 默认 cam:0）
+# 2) 先 dry-run：只打印随机坐标，不真的点（--url 默认 cam:auto）
 .venv/bin/python -m poker_ocr.live \
   --profile config/table_wpk_1080x2400.json \
   --initial-blinds 1/2 --clicker-dry-run
@@ -389,6 +408,9 @@ OCR 没读错。
 响应里还包含 `board`（公共牌）与 `hero_cards`（我的手牌），每张带
 `code` / `rank` / `suit` / `suit_name` / `confidence`，均按画面从左到右。
 读牌逻辑见 `poker_ocr/cards.py`（颜色 + 形状判花色，字形模板判点数）。
+`confidence` 取「花色置信度」和「点数模板分」里较低的那个；花色以颜色为硬判据，
+形状只做校验，形状不一致时只轻降置信度并标记 `shape_agrees=false`，不会因为
+轮廓阈值在边界抖动就把 K♣/Q♣/J♣ 这类牌判成不可用。
 
 ### `POST /ocr/cards`
 

@@ -35,8 +35,7 @@ def check(cond: bool, msg: str) -> None:
 def cfg_all(rect: Rect | None = None,
             **overrides) -> ClickerConfig:
     rect = rect or Rect(0, 0, 100, 50)
-    buttons = {name: rect for name in
-               ("fold", "call", "confirm", *PRESET_IDS)}
+    buttons = {name: rect for name in ("fold", "call", *PRESET_IDS)}
     buttons.update(overrides.pop("buttons", {}))
     return ClickerConfig(buttons=buttons, **overrides)
 
@@ -160,8 +159,8 @@ def test_config_validates_retry_bounds() -> None:
         FAILS.append(f"非法重试参数应校验失败：{kwargs}")
 
 
-def test_config_requires_fold_call_confirm() -> None:
-    for missing in ("fold", "call", "confirm"):
+def test_config_requires_fold_call() -> None:
+    for missing in ("fold", "call"):
         cfg = cfg_all()
         cfg.buttons.pop(missing)
         try:
@@ -169,6 +168,11 @@ def test_config_requires_fold_call_confirm() -> None:
         except ClickerConfigError:
             continue
         FAILS.append(f"缺 {missing} 时应校验失败")
+
+    # confirm 已不再参与自动点击，旧配置里有/没有都可以
+    cfg = cfg_all()
+    cfg.buttons.pop("confirm", None)
+    cfg.validate()
 
 
 def test_config_rejects_bad_rect() -> None:
@@ -193,7 +197,7 @@ def test_config_rejects_bad_shape() -> None:
 def test_config_accepts_list_coordinates() -> None:
     raw = {"version": 1, "buttons": {
         "fold": [1, 2, 30, 40], "call": {"x": 5, "y": 6, "w": 7, "h": 8},
-        "confirm": [9, 10, 11, 12]}}
+        "raise-1/2": [9, 10, 11, 12]}}
     cfg = ClickerConfig.from_dict(raw)
     check(cfg.buttons["fold"] == Rect(1, 2, 30, 40), "列表坐标应支持")
     check(cfg.buttons["call"] == Rect(5, 6, 7, 8), "对象坐标应支持")
@@ -250,15 +254,15 @@ def test_plan_fold_call_check() -> None:
               f"{kind} 应点右侧按钮：{plan}")
 
 
-def test_plan_raise_is_preset_then_confirm() -> None:
+def test_plan_raise_is_preset_only() -> None:
+    """点快捷档位即完成加注，不再点蓝色确认按钮。"""
     cfg = cfg_all()
     plan = plan_clicks(adv(Option("raise-1/2", "Raise", "raise", 2.25),
                            PRESETS), cfg, random.Random(1))
-    check([s.button for s in plan.steps] == ["raise-1/2", "confirm"],
-          f"加注应两步点击：{plan}")
+    check([s.button for s in plan.steps] == ["raise-1/2"],
+          f"加注应只点快捷档位：{plan}")
     check(plan.mapping == "direct" and plan.preset == "raise-1/2",
           f"映射信息错误：{plan}")
-    check(plan.steps[0].x != plan.steps[1].x, "两步应取不同随机点")
 
 
 def test_plan_missing_preset_skips() -> None:
@@ -288,11 +292,10 @@ def test_clicker_executes_move_down_up() -> None:
     result = clicker.run(adv(Option("raise-1/2", "Raise", "raise", 2.25),
                              PRESETS))
     check(result.status == "clicked", f"应点击成功：{result}")
-    check([e[0] for e in backend.events]
-          == ["move", "down", "up", "move", "down", "up"],
-          f"事件顺序错误：{backend.events}")
-    check(len(sleeps) == 3 and all(s > 0 for s in sleeps),
-          f"应有 3 次正延时（按下保持 ×2 + 档位→确认）：{sleeps}")
+    check([e[0] for e in backend.events] == ["move", "down", "up"],
+          f"加注只应点一次快捷档位：{backend.events}")
+    check(len(sleeps) == 1 and sleeps[0] > 0,
+          f"应只有按下保持的延时：{sleeps}")
 
 
 def test_clicker_dry_run_sends_no_events() -> None:
@@ -346,7 +349,7 @@ def main() -> int:
         test_plan_uses_circle_region,
         test_config_roundtrip,
         test_config_validates_retry_bounds,
-        test_config_requires_fold_call_confirm,
+        test_config_requires_fold_call,
         test_config_rejects_bad_rect,
         test_config_rejects_bad_shape,
         test_config_accepts_list_coordinates,
@@ -356,7 +359,7 @@ def main() -> int:
         test_choose_preset_tie_breaks_by_order,
         test_choose_preset_missing_amount,
         test_plan_fold_call_check,
-        test_plan_raise_is_preset_then_confirm,
+        test_plan_raise_is_preset_only,
         test_plan_missing_preset_skips,
         test_plan_unknown_amount_skips,
         test_clicker_executes_move_down_up,

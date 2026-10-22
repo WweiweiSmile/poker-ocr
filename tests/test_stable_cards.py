@@ -186,7 +186,7 @@ def test_low_confidence_first_read_is_unreliable() -> None:
 
 
 def test_hero_change_resets_board() -> None:
-    """hero 从一组两张换成另一组 = 新一手，公共牌不能沿用上一手。"""
+    """hero 从一组两张换成另一组 = 新一手，公共牌和 hero 都先清空再重读。"""
     s = StableCards()
     flop = [card("Ad"), card("7c"), card("2s")]
     first_hero = [card("Kh"), card("Qs")]
@@ -195,17 +195,64 @@ def test_hero_change_resets_board() -> None:
     second_hero = [card("9d"), card("9c")]
     out = s.update(frame(flop, second_hero))
     check(out.hero_codes == codes(first_hero),
-          f"新手牌第一帧先沿用/等待：{out.hero_codes}")
+          f"新手牌第一帧先等待确认：{out.hero_codes}")
+    out = s.update(frame(flop, second_hero))
+    check(out.hero_codes == [] and out.board_codes == [],
+          f"确认换手后应清空上一手牌面：hero={out.hero_codes} "
+          f"board={out.board_codes}")
+    # 换手确认后重新累计 hero / 公共牌确认
     out = s.update(frame(flop, second_hero))
     check(out.hero_codes == codes(second_hero),
-          f"连续两帧后应采用新 hero：{out.hero_codes}")
-    check(out.board_codes == [], f"hero 换牌后公共牌应重置：{out.board_codes}")
-    # 下一帧重新累计公共牌确认
-    out = s.update(frame(flop, second_hero))
-    check(out.board_codes == [], f"公共牌重置后第一帧继续等：{out.board_codes}")
+          f"公共牌/hero 应重新确认：{out.hero_codes}")
     out = s.update(frame(flop, second_hero))
     check(out.board_codes == codes(flop),
           f"公共牌应重新确认：{out.board_codes}")
+
+
+def test_unreliable_new_hero_still_breaks_deadlock() -> None:
+    """新一手 hero 一直低置信度时也必须清掉上一手，不能把程序卡死。
+
+    回归场景：旧版梅花置信度恒为 0.48，稳定闸永远不接受新牌；而换手判断
+    又依赖稳定输出，于是 last-good 永远停在上一手，识别/建议/点击全部停摆。
+    """
+    s = StableCards(weak_accept_frames=0)
+    flop = [card("Ad"), card("7c"), card("2s")]
+    for _ in range(2):
+        s.update(frame(flop, [card("Kh"), card("Qs")]))
+    weak_hero = [card("8c", confidence=0.48), card("9c", confidence=0.48)]
+    s.update(frame([], weak_hero))
+    out = s.update(frame([], weak_hero))
+    check(out.hero_codes == [],
+          f"新 hero 不可靠时也不能沿用上一手：{out.hero_codes}")
+    check(out.board_codes == [], f"上一手公共牌必须清空：{out.board_codes}")
+    check(out.reliable is False,
+          f"新牌未稳定时应标 unreliable：{out.warnings}")
+
+
+def test_persistently_weak_reading_is_eventually_accepted() -> None:
+    """读数连续多帧完全一致、只是置信度略低：兜底采用，避免永久卡住。"""
+    s = StableCards(weak_accept_frames=3)
+    weak = [card("Ad", confidence=0.60), card("7c")]
+    for i in range(2):
+        out = s.update(frame([], weak))
+        check(out.hero_codes == [],
+              f"前 {i + 1} 帧仍应等待：{out.hero_codes}")
+    out = s.update(frame([], weak))
+    check(out.hero_codes == ["Ad", "7c"],
+          f"连续 3 帧一致后应兜底采用：{out.hero_codes}")
+    check(any("置信度偏低" in w for w in out.warnings),
+          f"兜底采用应写 warning：{out.warnings}")
+    check(out.reliable, f"采用后应恢复可靠：{out.warnings}")
+
+
+def test_card_back_is_not_rescued_by_weak_accept() -> None:
+    """牌背属于硬问题，不能靠「连续多帧」兜底采用。"""
+    s = StableCards(weak_accept_frames=2)
+    back = [card("8h", confidence=0.5, back=True), card("7c")]
+    for _ in range(4):
+        out = s.update(frame([], back))
+        check(out.hero_codes == [],
+              f"牌背不能被弱读数兜底采用：{out.hero_codes}")
 
 
 def test_three_frame_vote_resolves_rank_flicker() -> None:
@@ -255,6 +302,9 @@ def main() -> int:
         test_card_back_is_never_accepted,
         test_low_confidence_first_read_is_unreliable,
         test_hero_change_resets_board,
+        test_unreliable_new_hero_still_breaks_deadlock,
+        test_persistently_weak_reading_is_eventually_accepted,
+        test_card_back_is_not_rescued_by_weak_accept,
         test_three_frame_vote_resolves_rank_flicker,
         test_vote_requires_majority,
         test_shows_pass_through,

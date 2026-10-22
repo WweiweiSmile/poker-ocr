@@ -8,7 +8,8 @@
   1. 在 OBS 里点 **Start Virtual Camera**；
   2. 跑这个脚本：帧率等于 OBS 视频 FPS（通常是 15）的那一项就是虚拟摄像头，
      每个摄像头还会存一张预览图到 `/tmp/poker_cameras/camN.jpg`；
-  3. 用它的索引启动 worker：`--url cam:1`。
+  3. 用它的索引启动 worker：`--url cam:1`；或者直接用默认的
+     `--url cam:auto`（会优先选名称带 OBS / Virtual 的摄像头）。
 
 ⚠️ macOS 的 OBS 虚拟摄像头固定按 **1920x1080** 输出（OBS 32 仍然如此）。
 1080x2400 的竖屏画布会被缩放/裁剪进 16:9，实际内容可能只剩 ~486x1080，

@@ -51,7 +51,8 @@ def test_defaults_are_no_throttle_and_instant_turn() -> None:
           f"默认应第一帧就认定轮到我，实际 {args.ai_confirm}")
     check(args.ai_advice is True, "AI 建议默认应开启")
     check(args.auto_click is True, "自动点击默认应开启")
-    check(args.url == "cam:0", f"默认应读虚拟摄像头，实际 {args.url}")
+    check(args.url == "cam:auto",
+          f"默认应自动选择虚拟摄像头，实际 {args.url}")
     check(args.settle == live.DEFAULT_SETTLE,
           f"动作合并默认应开启（{live.DEFAULT_SETTLE}s），实际 {args.settle}")
     check(args.settle_max == live.DEFAULT_SETTLE_MAX,
@@ -378,8 +379,15 @@ def test_unreliable_cards_skip_advice_until_recovered() -> None:
           f"手牌记录应带 cards_warnings：{hand}")
 
 
+def _incident_proc(incident: Path, logs: list[str], now: list[float]):
+    return live.LiveProcessor(
+        StubStateStream(), StubWriter(), quiet=True,
+        profile=SimpleNamespace(), incident_dir=incident,
+        incident_frames=3, clock=lambda: now[0], log=logs.append)
+
+
 def test_card_regression_dumps_incident_frames() -> None:
-    """公共牌 4→3 回退时，把环形缓冲里的最近几帧落盘做回归样本。"""
+    """公共牌 4→3 回退持续超过 1 秒时，才把最近几帧落盘做回归样本。"""
     from poker_ocr.cards import Card, CardsResult, CardSlotRead
 
     def card(code: str) -> Card:
@@ -406,22 +414,21 @@ def test_card_regression_dumps_incident_frames() -> None:
 
     with tempfile.TemporaryDirectory() as tmp:
         incident = Path(tmp) / "incidents"
-        writer = StubWriter()
-        results = [cards4(), cards4(), cards3()]
+        # 4→3 回退连续出现 18 帧（约 7s），跨越旧的 5 秒去重窗口，仍只落一份
+        results = [cards4(), cards4()] + [cards3()] * 18
         logs: list[str] = []
+        now = [time.monotonic()]
         with patch.object(live, "recognize_cards",
                           lambda img, profile: results.pop(0)):
-            proc = LiveProcessor(StubStateStream(), writer, quiet=True,
-                                 profile=SimpleNamespace(),
-                                 incident_dir=incident, incident_frames=3,
-                                 log=logs.append)
-            for seq in range(1, 4):
+            proc = _incident_proc(incident, logs, now)
+            for seq in range(1, 21):
+                now[0] += 0.4
                 img = np.zeros((100, 100, 3), np.uint8)
-                img[:, :, 0] = seq * 30      # 每帧不同，避免 ROI 去重
-                proc.handle(packet(seq))
+                img[:, :, 0] = (seq * 30) % 256   # 每帧不同，避免 ROI 去重
+                proc.handle(packet(seq, grab=now[0]))
         folders = [p for p in incident.iterdir() if p.is_dir()]
         check(len(folders) == 1,
-              f"应只落一个事故目录，实际 {folders}")
+              f"持续异常应只落一个事故目录，实际 {folders}")
         if folders:
             meta = json.loads((folders[0] / "meta.json").read_text("utf-8"))
             check("回退" in meta["reason"], f"事故原因应写回退：{meta}")
@@ -431,6 +438,45 @@ def test_card_regression_dumps_incident_frames() -> None:
                   f"应写出 3 张 JPEG：{list(folders[0].iterdir())}")
         check(any("事故帧" in line for line in logs),
               f"落盘应打印提示：{logs}")
+
+
+def test_transient_anomaly_is_not_dumped() -> None:
+    """发牌/翻牌动画里的单帧回退不该落盘。"""
+    from poker_ocr.cards import Card, CardsResult, CardSlotRead
+
+    def card(code: str) -> Card:
+        return Card(rank=code[:-1], suit=code[-1], confidence=0.9,
+                    rank_score=0.9, rect=(0, 0, 10, 10),
+                    evidence={"card_back": False, "occluded": False,
+                              "ink_pixels": 900})
+
+    def cards(n: int) -> CardsResult:
+        codes = ["Ad", "7c", "2s", "9h"][:n]
+        return CardsResult(
+            size=(100, 100),
+            board=CardSlotRead(name="board", slot=(0, 0, 1, 1),
+                               rect=(0, 0, 10, 10),
+                               cards=[card(c) for c in codes]),
+            hero_cards=CardSlotRead(name="hero_cards", slot=(0, 0, 1, 1),
+                                    rect=(0, 0, 10, 10),
+                                    cards=[card("Kh"), card("Qs")]))
+
+    with tempfile.TemporaryDirectory() as tmp:
+        incident = Path(tmp) / "incidents"
+        results = [cards(4), cards(4), cards(3), cards(4), cards(4)]
+        logs: list[str] = []
+        now = [time.monotonic()]
+        with patch.object(live, "recognize_cards",
+                          lambda img, profile: results.pop(0)):
+            proc = _incident_proc(incident, logs, now)
+            for seq in range(1, 6):
+                now[0] += 0.4
+                img = np.zeros((100, 100, 3), np.uint8)
+                img[:, :, 0] = seq * 30
+                proc.handle(packet(seq, grab=now[0]))
+        folders = ([p for p in incident.iterdir() if p.is_dir()]
+                   if incident.exists() else [])
+        check(folders == [], f"单帧动画不该落盘事故帧：{folders}")
 
 
 def test_epoch_change_resets_state_machine() -> None:
@@ -1334,6 +1380,19 @@ def test_open_capture_supports_virtual_camera_index() -> None:
     check(calls == [(9, live.cv2.CAP_AVFOUNDATION), (9, None)],
           f"cam:9 应依次试 AVFoundation 和默认后端：{calls}")
 
+    # cam:auto：优先 OBS 候选索引；打不开就继续下一个
+    calls.clear()
+    with patch.object(live, "_camera_candidates", lambda: [2, 0, 1]), \
+         patch.object(live, "_camera_names",
+                      lambda: ["FaceTime", "OBS Virtual Camera", "Other"]), \
+         patch.object(live.cv2, "VideoCapture", side_effect=factory):
+        cap = live._open_capture("cam:auto")
+    check(cap is not None and cap.src == 1,
+          f"cam:auto 应跳过打不开的候选，选中可用的 1：{calls}")
+    check(calls[:3] == [(2, live.cv2.CAP_AVFOUNDATION), (2, None),
+                        (0, live.cv2.CAP_AVFOUNDATION)],
+          f"cam:auto 候选顺序不对：{calls}")
+
 
 def test_advice_wait_logs_heartbeat_each_second() -> None:
     """等待模型时每秒一行心跳；同一秒不重复，结束后重置。"""
@@ -1404,6 +1463,7 @@ def main() -> int:
         test_settle_gate_ignores_blind_clock_and_avatar_ring,
         test_settle_gate_waits_for_card_rois,
         test_card_regression_dumps_incident_frames,
+        test_transient_anomaly_is_not_dumped,
         test_epoch_change_resets_state_machine,
         test_stale_frame_is_skipped,
         test_crop_left_uses_training_aspect_and_left_anchor,

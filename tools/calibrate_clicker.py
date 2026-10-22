@@ -73,7 +73,11 @@ class Calibrator:
         self.base = base
         self.inset_ratio = inset_ratio
         self.default_shape = default_shape
-        self.rects: dict[str, Rect] = dict(initial or {})
+        # 旧配置里的 confirm 等已废弃按钮不再参与标定/保存
+        self.rects: dict[str, Rect] = {
+            bid: rect for bid, rect in (initial or {}).items()
+            if bid in BUTTON_IDS
+        }
         # 每个按钮画成圆还是方。旧配置的 shape 保留；没有的用 --shape 默认值。
         self.shapes: dict[str, str] = {
             bid: self.rects[bid].shape if bid in self.rects else default_shape
@@ -240,8 +244,7 @@ class Calibrator:
             rect = self.rects.get(bid)
             if rect is None:
                 text = f"{BUTTON_LABELS[bid]}：未标定"
-                color = "#ff6b6b" if bid in ("fold", "call", "confirm") \
-                    else "#adb5bd"
+                color = "#ff6b6b" if bid in ("fold", "call") else "#adb5bd"
             else:
                 shape = "圆形" if self.shapes.get(bid) == "circle" else "方形"
                 text = (f"{BUTTON_LABELS[bid]}："
@@ -251,8 +254,7 @@ class Calibrator:
             c.create_text(36, y, anchor="nw", fill=color,
                           font=("Helvetica", 14), text=text)
             y += 28
-        missing = [b for b in ("fold", "call", "confirm")
-                   if b not in self.rects]
+        missing = [b for b in ("fold", "call") if b not in self.rects]
         if missing:
             c.create_text(
                 36, y + 12, anchor="nw", fill="#ff6b6b",
@@ -353,8 +355,7 @@ class Calibrator:
         self.root.destroy()
 
     def _save(self) -> None:
-        missing = [b for b in ("fold", "call", "confirm")
-                   if b not in self.rects]
+        missing = [b for b in ("fold", "call") if b not in self.rects]
         if missing:
             self._flash("缺少必需按钮，Backspace 返回补标")
             return

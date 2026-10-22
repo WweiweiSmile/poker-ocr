@@ -5,8 +5,8 @@
 
   · 弃牌  → 点 `fold`
   · 跟注 / 过牌 / 跟全下 → 点 `call`（同一个右侧按钮）
-  · 下注 / 加注 → 先点五个底池档位之一（`raise-1/3` … `raise-1.2`），
-    再点 `confirm`（蓝色「下注/加注」按钮）
+  · 下注 / 加注 → 直接点五个底池档位之一（`raise-1/3` … `raise-1.2`）；
+    客户端在点档位时就完成了下注，不再点蓝色「下注/加注」确认按钮
 
 每次点击都在矩形内缩一圈的范围里取**随机点**，并给按下时长和两步之间的间隔
 加一点抖动，避免永远点同一个像素。翻前建议（`open-2.5` / `raise-3x`）没有
@@ -36,8 +36,8 @@ DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config" / "clicker_local.json"
 
 # 与 advice.OPTION_ORDER / RAISE_FRACTIONS 的档位名字一致
 PRESET_IDS = ("raise-1/3", "raise-1/2", "raise-2/3", "raise-1", "raise-1.2")
-BUTTON_IDS = ("fold", "call", *PRESET_IDS, "confirm")
-REQUIRED_BUTTONS = ("fold", "call", "confirm")
+BUTTON_IDS = ("fold", "call", *PRESET_IDS)
+REQUIRED_BUTTONS = ("fold", "call")
 BUTTON_LABELS = {
     "fold": "弃牌（左）",
     "call": "跟注 / 让牌（右）",
@@ -46,7 +46,6 @@ BUTTON_LABELS = {
     "raise-2/3": "快捷加注：底池 2/3",
     "raise-1": "快捷加注：底池 1",
     "raise-1.2": "快捷加注：底池 1.2",
-    "confirm": "下注 / 加注确认（蓝色主按钮）",
 }
 PRESET_ORDER = {pid: i for i, pid in enumerate(PRESET_IDS)}
 
@@ -398,7 +397,7 @@ def _step(button: str, config: ClickerConfig,
 
 def plan_clicks(advice: "Advice", config: ClickerConfig,
                 rng: random.Random | None = None) -> ClickPlan:
-    """把一条建议映射成 0–2 步点击。纯函数，不碰鼠标。"""
+    """把一条建议映射成 0–1 步点击。纯函数，不碰鼠标。"""
     rng = rng or random.Random()
     option = advice.option
     kind = option.kind
@@ -431,15 +430,10 @@ def plan_clicks(advice: "Advice", config: ClickerConfig,
         return ClickPlan(kind, skip_reason=f"missing_preset:{preset_id}",
                          preset=preset_id, mapping=mapping,
                          target_bb=target_bb)
-    if "confirm" not in config.buttons:
-        return ClickPlan(kind, skip_reason="missing_button:confirm",
-                         preset=preset_id, mapping=mapping,
-                         target_bb=target_bb)
-
     preset_step = _step(preset_id, config, rng)
-    confirm_step = _step("confirm", config, rng)
-    assert preset_step is not None and confirm_step is not None
-    return ClickPlan(kind, (preset_step, confirm_step), preset=preset_id,
+    assert preset_step is not None
+    # 客户端点快捷档位即完成下注/加注，不再点蓝色「下注/加注」确认按钮
+    return ClickPlan(kind, (preset_step,), preset=preset_id,
                      mapping=mapping, target_bb=target_bb)
 
 

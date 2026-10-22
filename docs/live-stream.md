@@ -56,7 +56,11 @@ ROI 路线只裁固定槽位、只跑 rec，不跑全图检测，是实时链路
   1 张只走主动亮牌路径。新读数要连续 `--card-confirm-frames` 帧（默认 2）
   一致才替换 last-good；连续两帧不一致时，用最近 3 帧的 top-1 点数/花色做
   多数投票（同一位置至少 2 帧一致才采用），兜住 3/8、6/8 逐帧跳字。
-  牌背/遮挡/`?`/低置信度即使连续多帧一致也不采用。
+  牌背/遮挡/`?`/低置信度即使连续多帧一致也不采用；但如果一组牌连续
+  `_WEAK_ACCEPT_FRAMES`（10）帧完全一致、只是置信度略低，会兜底采用并写
+  warning，避免一张恒定低置信度的牌把 last-good 永久锁死。
+  换手判断用 **raw** hero 读数：连续 2 帧变成另一组 2 张就清空上一手牌面，
+  不依赖新读数是否已被稳定闸接受（否则新牌一直被拒时两边互锁，识别停摆）。
   确认公共牌归零（新一手）会清空 hero last-good；hero 换了一组两张牌会同步
   重置公共牌，兜住「从翻牌开始接管」。异常期间输出上一帧的稳定牌面，
   原因写进 `cards_warnings`。
@@ -68,9 +72,10 @@ ROI 路线只裁固定槽位、只跑 rec，不跑全图检测，是实时链路
 - **牌区 ROI 去重**：board / hero_cards 的灰度缩略图没变时复用上一帧读数，
   只重读亮牌区域（亮牌在别的 `action_slot`，不能一起复用）。
 - **事故帧留存**：内存环形缓冲最近 `--incident-frames` 帧（默认 10，只存引用
-  不逐帧编码）。遇到公共牌回退、张数异常、牌背/遮挡时，把最近帧 + `meta.json`
-  落到 `--incident-dir`（默认 `logs/incidents`），同类异常 5 秒内只存一次；
-  `--no-incident` 关闭。
+  不逐帧编码）。公共牌回退、张数异常、牌背/遮挡**持续 1 秒以上**才把最近帧 +
+  `meta.json` 落到 `--incident-dir`（默认 `logs/incidents`）；发牌/翻牌动画里的
+  单帧误读不落盘。同一段持续异常只存一份（类别消失 10 秒后才算结束），整个
+  会话最多 `--incident-max` 份（默认 20，`0` 不限制）；`--no-incident` 关闭。
 - **帧间串行、帧内并行**：reader 只解码，`StateStream.ingest()` 仍只在一个
   处理线程里调用；同一帧里未命中缓存的 ROI rec 由线程池并行（`--roi-threads`，
   默认 4，`1`=串行）。共享同一个 OcrEngine/ONNX session，实测并发结果与串行
@@ -168,9 +173,10 @@ ROI 路线只裁固定槽位、只跑 rec，不跑全图检测，是实时链路
   本次耗时，慢在模型还是识别一眼可见。失败时回退到最保守动作并记录原因。
 - **自动点击（`--auto-click`，默认关闭）**：先用
   `tools/calibrate_clicker.py` 在客户端上方拖出按钮外接框，标定
-  `fold / call / confirm` 和五个快捷档位；默认按圆形采样（内切椭圆，按 `C`
+  `fold / call` 和五个快捷档位；默认按圆形采样（内切椭圆，按 `C`
   可切换方形），建议返回后在区域内缩一圈的范围里取**随机坐标**点击。
-  弃牌点左侧、跟注/过牌/跟全下点右侧；加注先点档位再点蓝色确认按钮。
+  弃牌点左侧、跟注/过牌/跟全下点右侧；加注直接点快捷档位（客户端点档位
+  即完成下注，不再点蓝色确认按钮）。
   翻前 `open-* / raise-3x` 按金额选最近的底池档位。
   只有当前帧仍 `hero_turn=true`、`state.ok`、决策点/手牌一致、牌面可靠且未
   点过时才执行；`source=fallback` 默认不点（配置 `allow_fallback: true` 可开）。
@@ -380,7 +386,7 @@ cd ~/codes/poker-ocr
 .venv/bin/python -m poker_ocr.live --max-frames 10 --no-ai-advice
 
 # 正式运行（Ctrl-C 结束，自动写 session_end）
-# 默认 --url cam:0（OBS 虚拟摄像头）、--auto-click 开启
+# 默认 --url cam:auto（自动选 OBS 虚拟摄像头）、--auto-click 开启
 .venv/bin/python -m poker_ocr.live \
   --profile config/table_wpk_1080x2400.json \
   --every 0.5 \
@@ -486,7 +492,7 @@ cd ~/codes/poker-ocr
 ### 实时 ROI（推荐）
 
 ```bash
-# 默认 cam:0 + 自动点击；自动点击需先标定 config/clicker_local.json
+# 默认 cam:auto + 自动点击；自动点击需先标定 config/clicker_local.json
 .venv/bin/python -m poker_ocr.live \
   --profile config/table_wpk_live.json \
   --initial-blinds 1/2 \
@@ -575,7 +581,7 @@ cd ~/codes/poker-ocr
 
 ```json
 {"type":"session_start","started_at":"2026-10-19T21:30:53.441+08:00",
- "url":"cam:0","profile":"table_wpk_live.json",
+ "url":"cam:auto","profile":"table_wpk_live.json",
  "recognizer":"roi","full_config":null,"every":0.5,"resolution":null}
 ```
 
@@ -672,9 +678,8 @@ cd ~/codes/poker-ocr
  "duration_ms":1840,
  "click":{"status":"clicked","action":"raise","preset":"raise-1/2",
           "mapping":"direct",
-          "steps":[{"button":"raise-1/2","x":812.4,"y":703.1},
-                   {"button":"confirm","x":901.2,"y":650.4}],
-          "elapsed_ms":168}}
+          "steps":[{"button":"raise-1/2","x":812.4,"y":703.1}],
+          "elapsed_ms":92}}
 ```
 
 `click` 只在启用 `--auto-click` 时出现；未启用 / 不需要点击时保持旧记录形状。
@@ -689,9 +694,8 @@ cd ~/codes/poker-ocr
  "decision_key":["h7","flop",6,19.5,8.0,["Ah","Kd"]],
  "attempt":1,
  "click":{"status":"clicked","action":"raise","preset":"raise-1/2",
-          "steps":[{"button":"raise-1/2","x":810.1,"y":701.7},
-                   {"button":"confirm","x":899.8,"y":651.2}],
-          "elapsed_ms":171}}
+          "steps":[{"button":"raise-1/2","x":810.1,"y":701.7}],
+          "elapsed_ms":95}}
 ```
 
 | 字段 | 含义 |
@@ -777,7 +781,7 @@ All-in 文本）会立即收掉当前手牌，不依赖牌面/庄位变化。
 
 | 参数 | 默认 | 说明 |
 |---|---|---|
-| `--url` | `cam:0` | 视频源。默认 OBS 虚拟摄像头；走 MediaMTX 时写 `rtsp://127.0.0.1:8554/live` |
+| `--url` | `cam:auto` | 视频源。自动选择 OBS 虚拟摄像头；走 MediaMTX 时写 `rtsp://127.0.0.1:8554/live` |
 | `--profile` | `config/table_wpk_1080x2400.json` | ROI 布局配置 |
 | `--recognizer` | `roi` | `roi`=固定槽位；`full`=全图 OCR + 座位聚类 |
 | `--full-config` | 无 | full 模式参数 JSON |
@@ -792,6 +796,7 @@ All-in 文本）会立即收掉当前手牌，不依赖牌面/庄位变化。
 | `--card-confirm-frames` | `2` | 公共牌/hero 新读数连续几帧一致才替换 last-good；4→3、5→4 回退永不采用 |
 | `--incident-dir` | `logs/incidents` | 事故帧落盘目录（公共牌回退/张数异常/牌背） |
 | `--incident-frames` | `10` | 事故帧环形缓冲保留多少帧 |
+| `--incident-max` | `20` | 单次会话最多落盘多少份事故帧（`0` = 不限制） |
 | `--no-incident` | 关 | 关闭事故帧留存（不占内存、不落盘） |
 | `--max-vanish` | `3` | 整座空白连续几帧才认定离开 |
 | `--name-confirm` | `3` | 名字连续确认几帧才更换 |
