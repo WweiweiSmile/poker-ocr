@@ -1108,8 +1108,13 @@ class LiveProcessor:
                 if not self.quiet:
                     pot_tag = ""
                     if situation.explosive_pot:
-                        pot_tag = (f"｜爆炸底池 "
-                                   f"{situation.pot_per_player:.2f}BB/人")
+                        if situation.pot_per_player is not None:
+                            pot_tag = (f"｜爆炸底池 "
+                                       f"{situation.pot_per_player:.2f}BB/人")
+                        else:
+                            pot_tag = "｜爆炸底池（横幅）"
+                        if point.bomb_pot:
+                            pot_tag += "｜BOMB POT 横幅"
                     self.log(f"  [建议] 轮到我：{point.street} 手牌 "
                              f"{''.join(point.hero_cards) or '?'} "
                              f"牌面 {''.join(point.board) or '-'} "

@@ -49,6 +49,9 @@ DEFAULT_ROI_THREADS = max(1, min(4, (os.cpu_count() or 2) // 2))
 DEALER_RECHECK_SECONDS = 2.0     # 定期复核庄位，兜住漏掉的换手信号
 DEALER_CONFIRM_FRAMES = 2        # 换手后多detect几帧，等轮转动画落位
 NAME_PIN_MIN_SCORE = 0.8         # 低于这个分数不钉，等下帧重读到可信名字
+# 爆炸底池横幅在开局出现，而换手信号（庄位落位 / hero 换牌）可能晚 1–2 帧。
+# 横幅刚出现过就遇到换手时保留标记，否则新手开局会把刚读到的炸弹池清掉。
+BOMB_BANNER_GRACE_SAMPLES = 3
 
 
 def _equity_slot(chip: tuple[float, float, float, float]) -> tuple[float, float, float, float]:
@@ -127,6 +130,10 @@ class StateStream:
         self._all_in_gone: dict[str, int] = {}
         self.prev_dealer: str | None = None
         self.vanish: dict[str, int] = defaultdict(int)
+        # 本手是否见过爆炸底池横幅。横幅只在开局出现 ~2s，之后的帧很可能
+        # 已经消失或被质量闸丢弃；一旦看到就钉住，换手时清空。
+        self.bomb_pot_seen = False
+        self._bomb_seen_sample = -10**9
 
         # 一手牌内的慢变量缓存：庄位结果 + 上一帧的牌面/手牌指纹（判断换手）
         self._dealer_result: DealerResult | None = None
@@ -290,6 +297,15 @@ class StateStream:
             prev_all_in=self.prev_all_in,
             lenient_chips=self.lenient_chips,
         )
+        # 横幅是瞬时信号（开局 ~2s），但「这手是爆炸底池」要一直有效：
+        # 看到就钉住，本手内所有状态都带 bomb_pot=True；换手时
+        # _restart_sticky() 清空。被质量闸丢弃的帧也照常读横幅 ——
+        # 开局发底池/下注动画期间恰恰最容易整帧丢弃。
+        if state.bomb_pot:
+            self.bomb_pot_seen = True
+            self._bomb_seen_sample = self.sampled
+        else:
+            state.bomb_pot = self.bomb_pot_seen
         if dealer_now:
             self.prev_dealer = dealer_now
         self.prev_all_in |= {p.seat_id for p in state.players
@@ -378,7 +394,7 @@ class StateStream:
         return new_hand
 
     def _restart_sticky(self) -> None:
-        """换手：名字/盲注解钉，庄位结果作废，上一手的全下状态清空。"""
+        """换手：名字/盲注解钉，庄位结果作废，上一手的全下/爆炸底池清空。"""
         cache = self.stream.cache
         if cache is not None:
             cache.unpin_all()
@@ -386,6 +402,9 @@ class StateStream:
         self.prev_all_in = set()
         self.prev_all_in_badges = set()
         self._all_in_gone.clear()
+        # 换手信号可能比横幅晚一两帧；刚看到过的横幅属于新手，别清掉。
+        if self.sampled - self._bomb_seen_sample > BOMB_BANNER_GRACE_SAMPLES:
+            self.bomb_pot_seen = False
 
     def _pin_slow_fields(self, frame) -> None:
         """把这一帧读到的可信名字 / 盲注钉住，之后同手内不再 OCR。
@@ -425,6 +444,8 @@ class StateStream:
         self._all_in_gone.clear()
         self.prev_dealer = None
         self.vanish.clear()
+        self.bomb_pot_seen = False
+        self._bomb_seen_sample = -10**9
         self.names = NameTracker(confirm=self.name_confirm)
         self.last_sig = None
         self.cand_sig = None

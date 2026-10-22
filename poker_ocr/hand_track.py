@@ -161,6 +161,12 @@ class HandSnapshot:
     cbet_spot: bool
     decision_key: tuple
     warnings: tuple[str, ...] = ()
+    # 屏幕中央出现过「幸运暴击 / BOMB POT」横幅 = 这手是爆炸底池。
+    # 与按底池/人数推算的 explosive_pot 互相独立，见 advice.is_explosive_pot。
+    bomb_pot: bool = False
+    # 这手实际参与的人数（含本街已弃牌，不含空座/离桌）。
+    # 炸弹池按每人固定 5BB 收前注，推算人均时要用它，不能拿 seats 当分母。
+    players_dealt: int = 0
 
     @property
     def opponents_in_hand(self) -> int:
@@ -211,6 +217,8 @@ class _LiveHand:
     # 哪些建议/行动是在牌面异常期间记录的。
     cards_warnings: list[str] = field(default_factory=list)
     cards_unreliable: bool = False
+    # 本手看到过爆炸底池横幅。开局出现一次，之后一直保留到换手。
+    bomb_pot: bool = False
 
     def street_actions(self, street: str) -> list[ActionRecord]:
         return [a for a in self.actions if a.street == street]
@@ -330,6 +338,8 @@ class LiveHandTracker:
         # 桌型 = 座位数。不能再拿 players_in_hand：弃牌会让 9 人桌越打越小，
         # 提示词里就会写成「2-handed」，误导模型。
         hand.table_size = state.table_seats
+        if state.bomb_pot:
+            hand.bomb_pot = True
         hand.dealer = state.dealer or hand.dealer
         hand.blinds = state.blinds or hand.blinds
         hand.pot = state.pot
@@ -562,6 +572,7 @@ class LiveHandTracker:
             street=street,
             pot=state.pot,
             pot_before_street=state.pot_before_street,
+            bomb_pot=state.bomb_pot,
         )
         hand.pot_start[street] = state.pot_before_street
         # 基线：接管链路时桌上可能已经有下注/加注，先把它当当前水位
@@ -909,6 +920,11 @@ class LiveHandTracker:
             if p.seat_id != hero_seat and (p.in_hand or p.status == "folded")
         )
 
+        # 炸弹池前注是每个参与者在翻前交的；本街弃牌的人也算。
+        # 空座（status=away / buying_in）不算，所以不能用 table_seats。
+        players_dealt = sum(
+            1 for p in state.players if p.in_hand or p.status == "folded")
+
         invested = None
         if hand.start_stack is not None and hero is not None and hero.stack is not None:
             invested = max(hand.start_stack - hero.stack, 0.0)
@@ -954,6 +970,8 @@ class LiveHandTracker:
             cbet_spot=cbet,
             decision_key=key,
             warnings=tuple(warnings),
+            bomb_pot=hand.bomb_pot,
+            players_dealt=players_dealt,
         )
 
     def _preflop_shapes(self, hand: _LiveHand, max_bet: float,
@@ -1060,6 +1078,9 @@ class LiveHandTracker:
             out["cards_warnings"] = list(hand.cards_warnings)
         if hand.cards_unreliable:
             out["cards_unreliable"] = True
+        # 只在是爆炸底池时写键，普通手牌的落库内容保持原样
+        if hand.bomb_pot:
+            out["bomb_pot"] = True
         return out
 
     def copy_hand(self) -> _LiveHand | None:

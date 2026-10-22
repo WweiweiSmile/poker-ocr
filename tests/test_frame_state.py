@@ -23,7 +23,7 @@ sys.path.insert(0, str(ROOT))
 
 from poker_ocr.dealer import DealerResult  # noqa: E402
 from poker_ocr.frame_state import (  # noqa: E402
-    action_signature, build_state, signature,
+    action_signature, build_state, is_bomb_banner, signature,
 )
 from poker_ocr.parse import Blinds, NameTracker  # noqa: E402
 from poker_ocr.profile import Profile  # noqa: E402
@@ -61,7 +61,8 @@ BASE = {
 
 def make_frame(rows: dict | None = None, blinds: str = "1/2(1)52122200:39:20",
                pot: str = "38BB", pbs: str = "4.5BB", dealer: str | None = "topL",
-               hero_turn: bool | None = False) -> RoiFrame:
+               hero_turn: bool | None = False,
+               bomb_cn: str = "", bomb_en: str = "") -> RoiFrame:
     rows = BASE if rows is None else rows
     seats = []
     for ring_index, seat in enumerate(PROFILE.seats_in_ring_order):
@@ -72,7 +73,8 @@ def make_frame(rows: dict | None = None, blinds: str = "1/2(1)52122200:39:20",
             "bet": read(r.get("bet", "")),
         }))
     globals_ = {"blinds": read(blinds), "pot": read(pot),
-                "pot_before_street": read(pbs)}
+                "pot_before_street": read(pbs),
+                "bomb_cn": read(bomb_cn), "bomb_en": read(bomb_en)}
     dealer_res = (DealerResult(dealer, "found", "blob") if dealer
                   else DealerResult(None, "not_found", "blob"))
     return RoiFrame(frame_id="t", size=(100, 100), hero_seat_id="hero",
@@ -323,6 +325,41 @@ def test_action_signature_detects_turn_and_action_changes() -> None:
         dc_replace(base, pot=(base.pot or 0) + 1)), "底池变化必须进动作指纹")
 
 
+# ─────────────────────────── 爆炸底池横幅 ───────────────────────────
+
+def test_bomb_banner_detection() -> None:
+    """英文为主、中文兜底；动画里的半个词/低分不能误触发。"""
+    # 实测 bomm.mp4：英文 0.86–0.95，OCR 偶尔多一个字母（BOMBPOTV）
+    check(is_bomb_banner("", 0.0, "BOMB POT", 0.92), "BOMB POT 应命中")
+    check(is_bomb_banner("", 0.0, "BOMBPOTV", 0.87), "多一个字母仍应命中")
+    check(is_bomb_banner("", 0.0, "BOMBPOT", 0.6), "刚好到分数门槛应命中")
+    check(not is_bomb_banner("", 0.0, "BOMBPOT", 0.59), "分数不足不该命中")
+    # frame 005 的动画中间态：BOMBTON / 老记暴击都只是形近，必须拒绝
+    check(not is_bomb_banner("老记暴击", 0.61, "BOMBTON", 0.82),
+          "动画中间态不能误报")
+    # 中文四个字读到三个（实测「幸起暴击」）
+    check(is_bomb_banner("幸运暴击", 0.91, "", 0.0), "完整中文应命中")
+    check(is_bomb_banner("幸起暴击", 0.7, "", 0.0), "四字命中三个应兜底")
+    check(not is_bomb_banner("暴击", 0.95, "", 0.0), "两字不该命中")
+    check(not is_bomb_banner("", 0.0, "", 0.0), "空读数不该命中")
+
+
+def test_bomb_banner_in_state_and_signature() -> None:
+    """横幅要写进 FrameState，并作为牌局事实进入变化指纹。"""
+    normal = state()
+    check(not normal.bomb_pot, "普通帧不该带爆炸标记")
+
+    bomb = state(bomb_en="BOMB POT")
+    check(bomb.bomb_pot, "读到 BOMB POT 应带爆炸标记")
+    check("bomb_pot" in bomb.to_debug(), "to_debug 应输出 bomb_pot")
+
+    bomb_cn = state(bomb_cn="幸运暴击")
+    check(bomb_cn.bomb_pot, "中文横幅也应能确认")
+
+    check(signature(bomb) != signature(normal),
+          "爆炸底池横幅出现应触发一条状态记录")
+
+
 def main() -> int:
     tests = [
         test_full_state,
@@ -344,6 +381,8 @@ def main() -> int:
         test_ante_inherited_when_parenthesis_lost,
         test_pbs_gt_pot_is_an_error,
         test_pbs_equal_pot_with_bets_is_an_error,
+        test_bomb_banner_detection,
+        test_bomb_banner_in_state_and_signature,
         test_signature_ignores_advisory_fields,
         test_signature_detects_real_facts,
         test_action_signature_detects_turn_and_action_changes,

@@ -63,7 +63,11 @@ SEAT_FIELDS: tuple[str, ...] = ("name", "chip", "bet")
 #   hero_action_zone —— 配置里明说别用它判「轮到我」：那对「让或弃 / N BB 跟注」
 #                       在 hero 不是回合时也会渲染出来（灰色）；
 #   bet_size_presets —— 改用视觉判据（measure_hero_turn），读文本实测是垃圾。
-GLOBAL_FIELDS: tuple[str, ...] = ("pot", "pot_before_street", "blinds")
+# 爆炸底池横幅拆成两块紧条：上面四个黄色汉字、下面一行英文。两块都只跑
+# rec（槽位本身就是文字紧框），谁先读清都能独立确认（见 frame_state.is_bomb_banner）。
+GLOBAL_FIELDS: tuple[str, ...] = (
+    "pot", "pot_before_street", "blinds", "bomb_cn", "bomb_en",
+)
 
 # 裁剪时按槽位尺寸向外扩的比例。留白不是为了「多框点字」，是因为
 # 槽位当初是按某一帧量的，换帧会有小幅位移 —— 纯 rec 没有检测来兜底。

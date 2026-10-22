@@ -83,6 +83,9 @@ class FrameState:
     pot: float | None = None
     pot_before_street: float | None = None
     street_bet_total: float | None = None
+    # 屏幕中央的爆炸底池横幅（「幸运暴击 / BOMB POT」）。这是**本帧**是否
+    # 看到横幅；跨帧保持由 StateStream / LiveHandTracker 负责。
+    bomb_pot: bool = False
     errors: list[str] = dc_field(default_factory=list)
 
     @property
@@ -108,6 +111,7 @@ class FrameState:
             "pot": self.pot,
             "pot_before_street": self.pot_before_street,
             "street_bet_total": self.street_bet_total,
+            **({"bomb_pot": True} if self.bomb_pot else {}),
             "players": [p.to_debug() for p in self.players],
             **({"errors": self.errors} if self.errors else {}),
         }
@@ -115,6 +119,51 @@ class FrameState:
 
 def _r(v: float | None, nd: int = 2) -> float | None:
     return None if v is None else round(v, nd)
+
+
+# ── 爆炸底池横幅 ──────────────────────────────────────────────
+# WPK 的爆炸底池在屏幕中央弹「幸运暴击 / BOMB POT」：上面四个黄色大字，
+# 下面一行英文。两块都是紧条 ROI，纯 rec 就能读干净；不用 det 是因为
+# 整块中心区域里还有座位名、底池数字，det 会把它们一起框进来。
+#
+# `BOMB POT` 比中文稳：实测 11 帧里英文稳定命中 7 帧（分数 0.86–0.95），
+# 中文 4 字有 1 帧读成「幸起暴击」。所以英文为主，中文做兜底（4 字里
+# 至少命中 3 个不同字，才不会被动画里的「暴击」二字误触发）。
+BOMB_EN_TEXT = "BOMBPOT"
+BOMB_CN_TEXT = "幸运暴击"
+BOMB_EN_MIN_SCORE = 0.6
+BOMB_CN_MIN_SCORE = 0.7
+BOMB_CN_MIN_CHARS = 3
+
+
+def _bomb_compact(text: str) -> str:
+    """只留字母/数字/汉字，去掉 OCR 爱插的空格和标点。"""
+    return "".join(ch for ch in text.upper() if ch.isalnum())
+
+
+def is_bomb_banner(cn_text: str, cn_score: float,
+                   en_text: str, en_score: float) -> bool:
+    """两块横幅文本里是否有一块能确认是爆炸底池。
+
+    英文命中要求包含 `BOMBPOT`（去掉空格后）且分数达标；中文命中要求
+    「幸运暴击」四个字里至少出现 3 个不同字。任一命中即可 —— 横幅动画
+    里两块不一定同时读得清。
+    """
+    if (en_score >= BOMB_EN_MIN_SCORE
+            and BOMB_EN_TEXT in _bomb_compact(en_text)):
+        return True
+    if cn_score < BOMB_CN_MIN_SCORE:
+        return False
+    hits = {ch for ch in _bomb_compact(cn_text) if ch in BOMB_CN_TEXT}
+    return len(hits) >= BOMB_CN_MIN_CHARS
+
+
+def _bomb_banner(frame: RoiFrame) -> bool:
+    cn = frame.globals.get("bomb_cn")
+    en = frame.globals.get("bomb_en")
+    return is_bomb_banner(
+        cn.text if cn is not None else "", cn.score if cn is not None else 0.0,
+        en.text if en is not None else "", en.score if en is not None else 0.0)
 
 
 def build_state(frame: RoiFrame, profile: Profile,
@@ -319,6 +368,7 @@ def build_state(frame: RoiFrame, profile: Profile,
         pot=pot,
         pot_before_street=pbs,
         street_bet_total=street_total,
+        bomb_pot=_bomb_banner(frame),
         errors=errors,
     )
 
@@ -327,7 +377,8 @@ def signature(state: FrameState) -> tuple:
     """状态指纹：两份指纹相同 = 没有需要记录的变化。
 
     用户定的触发口径是「筹码 / 下注等没有变化就不记录」，所以指纹只收**牌局事实**：
-    盲注、庄位、底池、在场人数、每座的 {位置, 名字, 后手, 下注, 在场, 全下}。
+    盲注、庄位、底池、在场人数、爆炸底池横幅、每座的
+    {位置, 名字, 后手, 下注, 在场, 全下}。
 
     刻意**不含**（它们仍写进输出，只是不触发记录）：
 
@@ -347,6 +398,7 @@ def signature(state: FrameState) -> tuple:
         state.dealer,
         _r(state.pot),
         state.players_in_hand,
+        state.bomb_pot,
         tuple(
             (p.seat_id, p.position, p.name, _r(p.stack), _r(p.bet), p.in_hand,
              p.all_in, _r(p.equity) if p.equity is not None else None)

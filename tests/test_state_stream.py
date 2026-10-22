@@ -308,6 +308,26 @@ def test_slow_fields_pinned_until_hand_switch() -> None:
         check(not s.stream.cache.pinned, "换手应解钉全部慢变量")
 
 
+def test_bomb_banner_latches_across_frames() -> None:
+    """横幅只在开局闪一下：即使横幅帧被丢弃，本手后续状态也要带标记。"""
+    with stub_env():
+        s = new_stream()
+        feed(s, make_frame())
+        # 开局下注动画帧：底池读不出 → 整帧丢弃，但横幅本身读到了
+        bad = feed(s, make_frame(pot="", bomb_en="BOMB POT"), t=0.5)
+        check(bad.kind == "discard", f"这帧应因底池丢弃，实际 {bad.kind}")
+        check(bad.state.bomb_pot, "丢弃帧也要保留本帧的横幅读数")
+        # 横幅已经消失，但同一手后面的状态仍应带标记
+        out = feed(s, make_frame(), t=1.0)
+        check(out.state.bomb_pot, "同一手内应一直保留爆炸标记")
+
+        # 过几帧后正常换手（庄位轮换）→ 清空，不带到下一手
+        for i in range(4):
+            feed(s, make_frame(), t=1.5 + 0.5 * i)
+        nxt = feed(s, make_frame(dealer="topR"), t=4.0)
+        check(not nxt.state.bomb_pot, "换手后应清空爆炸标记")
+
+
 def main() -> int:
     tests = [
         test_first_frame_is_baseline,
@@ -324,6 +344,7 @@ def main() -> int:
         test_all_in_badge_end_waits_for_river,
         test_hand_boundaries_from_cards_and_board,
         test_slow_fields_pinned_until_hand_switch,
+        test_bomb_banner_latches_across_frames,
     ]
     for t in tests:
         before = len(FAILS)

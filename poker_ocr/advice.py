@@ -326,7 +326,7 @@ class Situation:
     equity_pct: float | None = None
     # 人工维护的牌桌动态（根目录 .table_dy）。空/None = 按「未知对手」标准线。
     table_dynamics: str | None = None
-    # 爆炸底池：上一街底池 ÷ 桌面人数（BB/人）及其是否达到 5BB 门槛。
+    # 爆炸底池：上一街底池 ÷ 实际参与人数（BB/人）及其是否刚好 5BB。
     # 见 previous_street_pot() / is_explosive_pot()。
     pot_per_player: float | None = None
     explosive_pot: bool = False
@@ -394,8 +394,7 @@ def build_situation(snap: HandSnapshot,
         equity_pct=read.equity_pct if read else None,
         table_dynamics=(table_dynamics or "").strip() or None,
         pot_per_player=per_player,
-        explosive_pot=(per_player is not None
-                       and per_player >= EXPLOSIVE_POT_BB_PER_PLAYER),
+        explosive_pot=is_explosive_pot(snap),
     )
 
 
@@ -466,11 +465,14 @@ def _passive_value_line(sit: Situation) -> bool:
 
 # ─────────────────────────── 爆炸底池 ───────────────────────────
 
-# 爆炸底池：翻后「上一街结束时底池 ÷ 桌面人数 ≥ 5BB」。
-# 换算成每个人的平均投入，5BB 意味着翻前已经有人加注、而且几乎全桌都跟了
-# （松弱局常见「溜入 + 加注 + 一堆跟注」）。所有人都进了池，翻后会有大量
-# 歪中的两对/三条；顶对只是中等牌，松弱玩家在这个池里主动打出来的牌也不会小。
+# 爆炸底池的前注是固定金额：每个参与者在翻前正好交 5BB（8 人局 40BB、
+# 9 人局 45BB）。所以判据是「上一街底池 ÷ 实际参与人数 ≈ 5BB」——刚好
+# 整除，而不是 ≥5BB：普通大池的人均可以超过 5BB，但只有炸弹池的总额
+# 严格等于 5BB × 人数。命中后全桌都进池，翻后会有大量歪中的两对/三条，
+# 顶对只是中等牌，松弱玩家主动打出来的牌也不会小。
 EXPLOSIVE_POT_BB_PER_PLAYER = 5.0
+# 底池按 0.01BB 显示、人数是整数，理论上能整除；留一分钱误差吸收浮点。
+EXPLOSIVE_POT_TOLERANCE = 0.01
 
 
 def previous_street_pot(snap: HandSnapshot) -> float | None:
@@ -503,17 +505,50 @@ def previous_street_pot(snap: HandSnapshot) -> float | None:
 
 
 def pot_per_player(snap: HandSnapshot) -> float | None:
-    """上一街底池 ÷ 桌面人数（BB/人）。翻前 / 人数未知 / 底池未知 → None。"""
+    """上一街底池 ÷ 实际参与人数（BB/人）。翻前 / 人数未知 / 底池未知 → None。
+
+    参与人数含本街已弃牌的人（炸弹池前注是翻前交的），不含空座/离桌。
+    `table_size` 是座位数，9 人桌固定为 9；桌上有空座时用它除会低估人均
+    （8 人交前注的 40BB 池，40 ÷ 9 = 4.44，而不是 40 ÷ 8 = 5）。
+    `players_dealt` 缺失时退回座位数。
+    """
     pot = previous_street_pot(snap)
-    if pot is None or snap.table_size <= 0:
+    count = snap.players_dealt or snap.table_size
+    if pot is None or count <= 0:
         return None
-    return pot / snap.table_size
+    return pot / count
 
 
 def is_explosive_pot(snap: HandSnapshot) -> bool:
-    """翻后上一街底池 ÷ 桌面人数是否达到爆炸底池门槛（≥5BB/人）。"""
+    """这手是不是爆炸底池。
+
+    两个来源，任一成立即可：
+
+      · **屏幕横幅**（`snap.bomb_pot`）：开局中央弹出「幸运暴击 / BOMB POT」，
+        这是客户端自己宣布的爆炸底池，最权威。人数或底池读数有偏差时，
+        横幅仍然能确认。
+      · **底池推算**：翻后「上一街底池 ÷ 实际参与人数」刚好等于 5BB/人。
+        炸弹池前注固定 5BB/人，所以总额能被人数整除（40BB ÷ 8 人 = 5BB）；
+        普通大池人均可能更高，但不会刚好整除。用于横幅没抓到的手牌
+        （中途接管、横幅动画被遮挡/丢弃）。
+    """
+    if snap.bomb_pot:
+        return True
     ratio = pot_per_player(snap)
-    return ratio is not None and ratio >= EXPLOSIVE_POT_BB_PER_PLAYER
+    if ratio is None:
+        return False
+    return abs(ratio - EXPLOSIVE_POT_BB_PER_PLAYER) <= EXPLOSIVE_POT_TOLERANCE
+
+
+def _explosive_reason(sit: Situation) -> str:
+    """爆炸底池的事实来源，用于给模型解释「为什么」而不是只给标签。
+
+    横幅触发时直接说是炸弹池的前注；只有底池推算命中时才说人均 5BB，
+    避免模型把横幅和精确数字混为一谈。
+    """
+    if sit.snap.bomb_pot:
+        return "this is a bomb pot: everyone posted a forced ante"
+    return "the pot entering this street is exactly 5BB per player (the bomb ante)"
 
 
 def value_directive(sit: Situation) -> str | None:
@@ -565,21 +600,21 @@ def value_directive(sit: Situation) -> str | None:
     if tier in (OVERPAIR, TPTK):
         if sit.explosive_pot:
             if facing_raise:
-                return ("EXPLOSIVE POT: the pot entering this street is 5BB+ per table "
-                        "player, so everyone is in and a raise is rarely a bluff or a "
-                        "small sizing. Top pair/overpair is only a MEDIUM hand here — "
-                        "FOLD. Do not stack off with one pair.")
+                return (f"EXPLOSIVE POT: {_explosive_reason(sit)}, so everyone is in "
+                        "and a raise is rarely a bluff or a small sizing. Top "
+                        "pair/overpair is only a MEDIUM hand here — FOLD. Do not stack "
+                        "off with one pair.")
             if facing:
-                return ("EXPLOSIVE POT: the pot entering this street is 5BB+ per table "
-                        "player, so the field is wide and full of random two pair/trips. "
-                        "Top pair/overpair is only a MEDIUM hand — do NOT raise. Call one "
-                        "small bet only (up to about 1/2 pot); fold to a larger bet or to "
-                        "any turn/river barrel.")
-            return ("EXPLOSIVE POT: the pot entering this street is 5BB+ per table "
-                    "player, so everyone is in and random two pair/trips are common. Top "
-                    "pair/overpair is only a MEDIUM hand — bet small for value/protection "
-                    "(1/3–1/2 pot) and pot-control; do not build a huge pot. Fold to a "
-                    "raise or to multi-street aggression.")
+                return (f"EXPLOSIVE POT: {_explosive_reason(sit)}, so the field is "
+                        "wide and full of random two pair/trips. Top pair/overpair is "
+                        "only a MEDIUM hand — do NOT raise. Call one small bet only "
+                        "(up to about 1/2 pot); fold to a larger bet or to any "
+                        "turn/river barrel.")
+            return (f"EXPLOSIVE POT: {_explosive_reason(sit)}, so everyone is in and "
+                    "random two pair/trips are common. Top pair/overpair is only a "
+                    "MEDIUM hand — bet small for value/protection (1/3–1/2 pot) and "
+                    "pot-control; do not build a huge pot. Fold to a raise or to "
+                    "multi-street aggression.")
         if facing_raise:
             return ("ONE PAIR vs AGGRESSION: overpair/top pair facing a raise or all-in — "
                     "FOLD unless you have a set, two pair, or a strong draw. One pair is "
@@ -787,13 +822,19 @@ def render_hand_facts(sit: Situation) -> str:
                      f"Draw: {'yes' if sit.has_draw else 'no'}｜"
                      f"Plays the board (best five all from board): "
                      f"{'yes' if sit.plays_board else 'no'}")
+        if snap.bomb_pot:
+            lines.append("Bomb pot banner: YES (幸运暴击 / BOMB POT shown on screen)")
         prev_pot = previous_street_pot(snap)
         if sit.pot_per_player is not None and prev_pot is not None:
+            dealer_count = snap.players_dealt or snap.table_size
+            why = ("bomb-pot banner on screen" if snap.bomb_pot else
+                   f"threshold exactly {EXPLOSIVE_POT_BB_PER_PLAYER:g}BB/player")
             lines.append(
-                f"Pot per table player entering this street: "
-                f"{sit.pot_per_player:.2f}BB ({prev_pot:g}BB ÷ {snap.table_size})｜"
-                f"Explosive pot: {'YES' if sit.explosive_pot else 'no'} "
-                f"(threshold {EXPLOSIVE_POT_BB_PER_PLAYER:g}BB/player)")
+                f"Pot per player entering this street: "
+                f"{sit.pot_per_player:.2f}BB ({prev_pot:g}BB ÷ {dealer_count})｜"
+                f"Explosive pot: {'YES' if sit.explosive_pot else 'no'} ({why})")
+        elif snap.bomb_pot:
+            lines.append("Explosive pot: YES (bomb-pot banner on screen)")
         if sit.opponent_strength_en:
             o = sit.opponent_strength_en
             lines.append(f"Opponent strength from actions: {o['label']} ({o['reason']})")
@@ -908,9 +949,13 @@ def build_messages(sit: Situation) -> tuple[str, str]:
         "board, call for showdown instead of raising — a raise only gets called by better.",
         "",
         "## Explosive pot (multiway / big preflop pot)",
-        "«Explosive pot: YES» in the user facts means the pot entering this street is "
-        "at least 5BB per player at the table (previous-street pot ÷ table players ≥ "
-        "5BB). Everyone was in the pot, so the field is wide and full of «weird» two "
+        "«Explosive pot: YES» in the user facts has two triggers: (a) the client "
+        "displayed the «幸运暴击 / BOMB POT» banner at the start of the hand — a "
+        "forced-ante bomb pot where the whole table sees the flop; or (b) the pot "
+        "entering this street is exactly 5BB per player (previous-street pot ÷ "
+        "players dealt = 5BB — the fixed bomb ante; ordinary big pots do not divide "
+        "out exactly). In both cases everyone is in the pot, so the field is "
+        "wide and full of «weird» two "
         "pair / trips from hands that would normally fold. Loose-passive players do not "
         "put chips in this pot with nothing, and their bet/raise sizes here will not be "
         "small. Be especially careful:",
@@ -943,7 +988,8 @@ def build_messages(sit: Situation) -> tuple[str, str]:
         "bluffing wars;",
         "- tight-aggressive / solid: play straightforwardly, avoid fancy plays, and give "
         "credit to aggression.",
-        "- in an explosive pot (≥5BB per table player, everyone in), these tendencies "
+        "- in an explosive pot (bomb pot or exactly 5BB per player, everyone in), "
+        "these tendencies "
         "amplify: a loose-passive player's bet or raise is value and will not be small, "
         "top pair is only medium, and bluffing a field this wide is burning money;",
         "Example: on 55 2 T 8, hero has JJ (two pair) and a loose-passive opponent bets "

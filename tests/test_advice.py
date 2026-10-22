@@ -60,14 +60,15 @@ def state(*players: PlayerState, pot: float = 3.0, pbs: float = 3.0,
           dealer: str = "a", hero_turn: bool | None = False,
           hero_seat: str = "hero", errors: list[str] | None = None,
           table_seats: int | None = None,
-          in_hand: int | None = None) -> FrameState:
+          in_hand: int | None = None,
+          bomb_pot: bool = False) -> FrameState:
     return FrameState(
         frame_id="f",
         table_seats=len(players) if table_seats is None else table_seats,
         players_in_hand=len(players) if in_hand is None else in_hand,
         players=list(players), blinds=BLINDS, dealer=dealer,
         hero_seat_id=hero_seat, hero_turn=hero_turn, pot=pot,
-        pot_before_street=pbs, errors=errors or [])
+        pot_before_street=pbs, bomb_pot=bomb_pot, errors=errors or [])
 
 
 def feed(tracker: LiveHandTracker, st: FrameState,
@@ -565,8 +566,30 @@ def test_table_size_uses_seats_not_players_in_hand() -> None:
           f"桌型应按座位数 9，实际 {point.table_size}")
     check(tr._hand_dict(tr.hand)["table_size"] == 9,
           "落库的手牌记录也应保存座位数")
+    check(point.players_dealt == 2,
+          f"参与人数应按实际在局者 2，实际 {point.players_dealt}")
     user = render_hand_facts(build_situation(point))
     check("Table: 9-handed" in user, f"提示词桌型不对：\n{user}")
+
+
+def test_bomb_pot_per_player_uses_players_dealt_not_seats() -> None:
+    """9 个座位只坐 8 人：40BB 前注 ÷ 8 = 5BB，不能被空座稀释成 4.44。"""
+    tr = LiveHandTracker(confirm_frames=1)
+    players = (player("hero", position="BTN"),
+               *(player(f"p{i}", position="BB", name=f"p{i}") for i in range(7)))
+    feed(tr, state(*players, pot=3.0, pbs=3.0, table_seats=9, in_hand=8),
+         ["Ah", "Kd"], [])
+    point = feed(tr, state(*players, pot=40.0, pbs=40.0, table_seats=9,
+                           in_hand=8, hero_turn=True), ["Ah", "Kd"],
+                 ["Ks", "7d", "2c"])
+    check(point is not None, "轮到我时应给决策点")
+    check(point.table_size == 9 and point.players_dealt == 8,
+          f"座位/参与人数应为 9/8：{point.table_size}/{point.players_dealt}")
+    check(pot_per_player(point) == 5.0,
+          f"40BB ÷ 8 人应为 5BB：{pot_per_player(point)}")
+    check(is_explosive_pot(point), "5BB/人应判炸弹池")
+    user = render_hand_facts(build_situation(point))
+    check("40BB ÷ 8" in user, f"事实里的算式应按参与人数：\n{user}")
 
 
 # ─────────────────────────── 技能路由 ───────────────────────────
@@ -694,6 +717,8 @@ def make_point(**kw):
         decision_key=("h1", "flop", 0, 6.0, 0.0, ("Ah", "Kd")),
     )
     base.update(kw)
+    # 大多数用例不关心空座：默认按全桌参与来算人均。
+    base.setdefault("players_dealt", base["table_size"])
     return HandSnapshot(**base)
 
 
@@ -1574,7 +1599,7 @@ def test_advice_runner_reports_busy_while_waiting() -> None:
 # ─────────────────────────── 爆炸底池 ───────────────────────────
 
 def test_explosive_pot_detection() -> None:
-    """翻后上一街底池 ÷ 桌面人数 ≥ 5BB 才算爆炸底池。"""
+    """翻后上一街底池 ÷ 参与人数刚好 5BB 才算炸弹池（前注固定 5BB/人）。"""
     # 默认 fixture：上一街 6BB / 6 人 = 1BB，不是爆炸池
     normal = make_point(pot=6.0, pot_before_street=6.0)
     check(previous_street_pot(normal) == 6.0,
@@ -1583,21 +1608,32 @@ def test_explosive_pot_detection() -> None:
           f"人均应为 1BB：{pot_per_player(normal)}")
     check(not is_explosive_pot(normal), "1BB/人不该是爆炸底池")
 
-    # 刚好 5BB/人（30BB / 6 人）→ 命中门槛
+    # 刚好 5BB/人（30BB / 6 人）→ 命中
     edge = make_point(street="flop", pot=30.0, pot_before_street=30.0,
                       table_size=6)
     check(pot_per_player(edge) == EXPLOSIVE_POT_BB_PER_PLAYER,
           f"刚好 5BB/人：{pot_per_player(edge)}")
     check(is_explosive_pot(edge), "5BB/人应算爆炸底池")
 
-    # 低于门槛不算
+    # 低于 5BB 不是炸弹池
     below = make_point(street="turn", pot=29.0, pot_before_street=29.0,
                        table_size=6)
     check(not is_explosive_pot(below), "4.83BB/人不该是爆炸底池")
 
-    # 同样底池，桌子人数越多，人均越低
+    # 高于 5BB 也不是：炸弹池前注固定 5BB/人，普通大池可能更高
+    above = make_point(pot=36.0, pot_before_street=36.0, table_size=6)
+    check(not is_explosive_pot(above), "6BB/人是普通大池，不是炸弹池")
+
+    # 同样底池，参与人数越多，人均越低
     wide = make_point(pot=30.0, pot_before_street=30.0, table_size=9)
     check(not is_explosive_pot(wide), "30BB / 9 人不足 5BB/人")
+
+    # 视频里的真实场景：9 个座位、1 个空座，8 人各交 5BB = 40BB
+    video = make_point(pot=40.0, pot_before_street=40.0,
+                       table_size=9, players_dealt=8)
+    check(pot_per_player(video) == 5.0,
+          f"应按参与人数 8 除：{pot_per_player(video)}")
+    check(is_explosive_pot(video), "40BB ÷ 8 人 = 5BB 应判炸弹池")
 
     # 翻前不判定
     pre = make_point(street="preflop", pot=30.0, pot_before_street=30.0)
@@ -1628,6 +1664,55 @@ def test_explosive_pot_pbs_misread_falls_back_to_pot_minus_bets() -> None:
           f"应反推出上一街底池 10BB：{previous_street_pot(snap)}")
     check(not is_explosive_pot(snap),
           "10BB / 6 人 = 1.67BB/人，不该误报爆炸底池")
+
+
+def test_explosive_pot_from_screen_banner() -> None:
+    """横幅是权威信号：人数/底池读数让推算值偏离 5BB 时也要判爆炸池。"""
+    # 40BB 按 9 人除 = 4.44（例如把空座算进了分母），单靠推算会漏
+    snap = make_point(pot=40.0, pot_before_street=40.0, table_size=9,
+                      bomb_pot=True)
+    check(pot_per_player(snap) is not None
+          and abs(pot_per_player(snap) - EXPLOSIVE_POT_BB_PER_PLAYER) > 0.01,
+          f"构造的人均应偏离 5BB：{pot_per_player(snap)}")
+    check(is_explosive_pot(snap), "看到 BOMB POT 横幅就该判爆炸底池")
+
+    sit = build_situation(snap)
+    check(sit.explosive_pot, "Situation 应带爆炸标记")
+    user = render_hand_facts(sit)
+    check("Bomb pot banner: YES" in user, f"事实里应写横幅证据：\n{user}")
+    check("Explosive pot: YES" in user, f"事实里应标爆炸底池：\n{user}")
+    check("bomb-pot banner on screen" in user,
+          f"应说明是横幅确认、推算值不可靠：\n{user}")
+
+    d = value_directive(sit)
+    check("EXPLOSIVE POT" in (d or "") and "bomb pot" in (d or "")
+          and "forced ante" in (d or ""),
+          f"触发原因应写成炸弹池强制前注，而不是人均 5BB：{d}")
+
+    system, _ = build_messages(sit)
+    check("幸运暴击 / BOMB POT" in system,
+          "系统提示词应说明横幅也是爆炸底池的来源")
+
+
+def test_tracker_latches_bomb_pot_across_frames() -> None:
+    """横幅只在开局闪一下：手牌级标记要保留到换手。"""
+    tr = LiveHandTracker(confirm_frames=1)
+    players = (player("hero", position="BTN"),
+               player("a", position="BB", name="老王"))
+    feed(tr, state(*players, bomb_pot=True), ["Ah", "Kd"], [])
+    check(tr.hand is not None and tr.hand.bomb_pot, "看到横幅后手牌应带标记")
+
+    # 下一帧横幅已消失，但同一手仍应保留
+    feed(tr, state(*players), ["Ah", "Kd"], [])
+    check(tr.hand.bomb_pot, "同一手内横幅消失后标记应保留")
+    hand = tr._hand_dict(tr.hand)
+    check(hand.get("bomb_pot") is True, f"落库应写 bomb_pot：{hand}")
+
+    # 换手后清空（庄位轮换）
+    feed(tr, state(player("hero", position="CO"),
+                   player("a", position="BTN", name="老王"),
+                   dealer="b"), ["7c", "7s"], [])
+    check(not tr.hand.bomb_pot, "换手后不该继承上一手的爆炸标记")
 
 
 def test_explosive_pot_prompt_and_directive() -> None:
@@ -1689,6 +1774,7 @@ def main() -> int:
         test_snapshot_to_call_and_preflop_shape,
         test_snapshot_marks_limped_pot,
         test_table_size_uses_seats_not_players_in_hand,
+        test_bomb_pot_per_player_uses_players_dealt_not_seats,
         test_hand_record_includes_shown_cards,
         test_hand_record_includes_one_card_show,
         test_hand_record_includes_all_ins,
@@ -1726,6 +1812,8 @@ def main() -> int:
         test_value_directive_table_dynamics_override,
         test_explosive_pot_detection,
         test_explosive_pot_pbs_misread_falls_back_to_pot_minus_bets,
+        test_explosive_pot_from_screen_banner,
+        test_tracker_latches_bomb_pot_across_frames,
         test_explosive_pot_prompt_and_directive,
         test_advise_uses_model_choice,
         test_advise_rejects_unknown_option,
