@@ -58,8 +58,8 @@ import cv2
 import numpy as np
 
 from .advice import AISettings, AdviceRunner, build_situation
-from .cards import (DEFAULT_CARD_SLOTS, CardsResult, StableCards,
-                    recognize_cards, recognize_shown_cards)
+from .cards import (DEFAULT_CARD_SLOTS, DEFAULT_DOUBT_WINDOW, CardsResult,
+                    StableCards, recognize_cards, recognize_shown_cards)
 from .clicker import (DEFAULT_CONFIG_PATH as DEFAULT_CLICKER_CONFIG,
                       CGEventBackend, Clicker, ClickerConfig,
                       ClickerConfigError, ClickerUnavailable, ClickResult,
@@ -87,9 +87,9 @@ DEFAULT_INCIDENT_DIR = Path("logs/incidents")
 # 异常要持续这么久才落盘：发牌/翻牌动画里的单帧误读（1 张公共牌、hero 只读到
 # 1 张）属于正常现象，稳定闸会吸收掉，不值得为每一帧存 10 张图。
 INCIDENT_MIN_SECONDS = 1.0
-# 同一类异常连续这么久没再出现，才算本次「事故」结束；否则整段持续异常只存一次。
+# 同一类异常连续这么久没再出现，才算本次「疑惑」结束；否则整段持续异常只存一次。
 INCIDENT_EPISODE_GAP = 10.0
-# 单次会话最多落盘多少个事故目录，防止整场持续异常把磁盘写满。
+# 单次会话最多落盘多少个疑惑帧目录，防止整场持续异常把磁盘写满。
 DEFAULT_INCIDENT_MAX = 20
 # 默认不节流：处理完当前帧立刻取邮箱里的最新帧，中间帧直接丢弃。
 # `--every` 仍保留给调试/降压用（>0 时按该间隔采样）。
@@ -827,6 +827,7 @@ class LiveProcessor:
                  incident_frames: int = 10,
                  incident_max: int = DEFAULT_INCIDENT_MAX,
                  card_confirm_frames: int = 2,
+                 card_doubt_window: float = DEFAULT_DOUBT_WINDOW,
                  clock=time.monotonic, log=_log) -> None:
         if recognizer not in ("roi", "full"):
             raise ValueError(f"未知 recognizer：{recognizer}")
@@ -879,18 +880,21 @@ class LiveProcessor:
         self.log = log
 
         # 跨帧牌面稳定闸：board 只前进、hero 只接受 0/2 张、新读数 2 帧确认。
+        # doubt_window > 0 时，带疑点的读数改走「疑惑帧」时间窗仲裁。
         # profile 为 None（单测桩）时不启用，_read_cards 直接返回桩结果。
-        self.card_state = (StableCards(confirm_frames=card_confirm_frames)
-                           if profile is not None else None)
+        self.card_state = (StableCards(
+            confirm_frames=card_confirm_frames,
+            doubt_window=card_doubt_window)
+            if profile is not None else None)
         # 牌区 ROI 去重：board/hero 像素没变时复用上一次的识别结果，只重读亮牌。
         self._card_roi_sig: tuple | None = None
         self._card_roi_reads: CardsResult | None = None
-        # 事故帧环形缓冲：只存引用，不做逐帧编码；异常时才落盘。
+        # 疑惑帧环形缓冲：只存引用，不做逐帧编码；异常时才落盘。
         self.incident_dir = Path(incident_dir) if incident_dir is not None else None
         self._frame_ring: deque | None = (
             deque(maxlen=max(1, int(incident_frames)))
             if self.incident_dir is not None else None)
-        # 事故节流：按类别记录「本次异常从什么时候开始」以及是否已经落过盘。
+        # 疑惑节流：按类别记录「本次异常从什么时候开始」以及是否已经落过盘。
         # 持续几分钟的同一个异常只存一次，而不是每 5 秒重复存 10 帧。
         self.incident_max = max(0, int(incident_max))
         self.incident_count = 0
@@ -958,7 +962,7 @@ class LiveProcessor:
 
         t = now - self.started_mono
         frame_id = f"live_e{packet.epoch}_{packet.seq:06d}_{t:07.2f}s"
-        # 事故帧环形缓冲只存数组引用，不逐帧编码；异常时才落盘。
+        # 疑惑帧环形缓冲只存数组引用，不逐帧编码；异常时才落盘。
         if self._frame_ring is not None:
             self._frame_ring.append((packet.seq, round(t, 2), frame_id,
                                      packet.image))
@@ -1373,7 +1377,9 @@ class LiveProcessor:
             return None
         try:
             raw = self._recognize_cards_cached(img)
-            return self.card_state.update(raw) if self.card_state else raw
+            # 仲裁窗口按真实时间走：读取慢/掉帧时窗口仍在正确的时间轴上。
+            return (self.card_state.update(raw, now=self.clock())
+                    if self.card_state else raw)
         except Exception as exc:  # noqa: BLE001 — 读牌失败不该中断拉流
             if not self._cards_error_logged:
                 self.log(f"[警告] 读牌失败（后续帧继续尝试）：{exc}")
@@ -1433,6 +1439,7 @@ class LiveProcessor:
             `INCIDENT_MIN_SECONDS` 才落盘 —— 发牌动画里的单帧误读不存；
           · 同类异常间隔超过 `INCIDENT_EPISODE_GAP` 才算新的一次，不再每 5 秒
             重复存一份；
+          · 落盘后逐帧写进日志并清空环形缓冲，下一段异常不会重复存同一批帧；
           · 整个会话最多存 `incident_max` 份（0 = 不限制）。
         """
         ring = self._frame_ring
@@ -1460,7 +1467,7 @@ class LiveProcessor:
         if self.incident_max and self.incident_count >= self.incident_max:
             if not self._incident_capped_logged:
                 self._incident_capped_logged = True
-                self.log(f"[事故帧] 本次会话已保存 {self.incident_max} 份，"
+                self.log(f"[疑惑帧] 本次会话已保存 {self.incident_max} 份，"
                          "后续异常不再落盘（--incident-max 调整）")
             return
         self._incident_active.add(cat)
@@ -1496,14 +1503,22 @@ class LiveProcessor:
             (folder / "meta.json").write_text(
                 json.dumps(meta, ensure_ascii=False, indent=2),
                 encoding="utf-8")
-            self.log(f"[事故帧] {reason}；已保存 {len(frames)} 帧 → {folder}")
+            self.log(f"[疑惑帧] {reason}；已保存 {len(frames)} 帧 → {folder}")
+            # 逐帧写进日志，方便只翻日志就能定位是哪几帧出的问题。
+            for i, item in enumerate(meta["frames"]):
+                self.log(f"[疑惑帧]   {i:02d} seq={item['seq']} "
+                         f"t={item['t']:.2f}s {item['frame_id']} "
+                         f"→ {item['file']}")
+            # 这批帧已经落盘并记进日志：清空环形缓冲，下一段异常不会再把这
+            # 批帧重复存一遍，同时及时释放它们占着的图像内存。
+            ring.clear()
             if "board" in reason and not self._board_anomaly_hinted:
                 self._board_anomaly_hinted = True
                 self.log("  [提示] 连续出现牌面张数异常时，先确认输入画面确实是"
                          "牌桌：tools/list_cameras.py 的预览图不能是摄像头/桌面；"
                          "OBS 虚拟摄像头还要检查旋转（--rotate 90）和宽高比。")
         except Exception as exc:  # noqa: BLE001 — 落盘失败不能拖垮主链路
-            self.log(f"[警告] 事故帧保存失败：{exc}")
+            self.log(f"[警告] 疑惑帧保存失败：{exc}")
 
     @staticmethod
     def _cards_signature(cards: CardsResult | None) -> tuple | None:
@@ -1625,15 +1640,20 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--card-confirm-frames", type=int, default=2,
                     help="公共牌/hero 手牌新读数连续几帧一致才替换 last-good"
                          "（默认 2；牌面 4→3 回退永远不会被采用）")
+    ap.add_argument("--card-doubt-window", type=float,
+                    default=DEFAULT_DOUBT_WINDOW,
+                    help="牌面读数带疑点（低置信度/遮挡等）又和 last-good 不同时，"
+                         "开多少秒的疑惑帧仲裁窗口做多帧投票（默认 0.5；"
+                         "0 = 关闭，退回 2 帧确认 + 10 帧弱读数兜底）")
     ap.add_argument("--incident-dir", type=Path, default=DEFAULT_INCIDENT_DIR,
                     help="牌面回退/张数异常/牌背时，把最近几帧存到这里做回归样本"
                          f"（默认 {DEFAULT_INCIDENT_DIR}）")
     ap.add_argument("--no-incident", action="store_true",
-                    help="关闭事故帧留存（不占内存、不落盘）")
+                    help="关闭疑惑帧留存（不占内存、不落盘）")
     ap.add_argument("--incident-frames", type=int, default=10,
-                    help="事故帧环形缓冲保留多少帧（默认 10）")
+                    help="疑惑帧环形缓冲保留多少帧（默认 10）")
     ap.add_argument("--incident-max", type=int, default=DEFAULT_INCIDENT_MAX,
-                    help="单次会话最多落盘多少份事故帧（默认 "
+                    help="单次会话最多落盘多少份疑惑帧（默认 "
                          f"{DEFAULT_INCIDENT_MAX}；0 = 不限制）")
     ap.add_argument("--max-vanish", type=int, default=3,
                     help="在场玩家整座空白连续几帧才认定离开（默认 3）")
@@ -1694,6 +1714,8 @@ def _validate_args(ap: argparse.ArgumentParser, args) -> None:
         ap.error("--stable-frames 至少为 1")
     if args.card_confirm_frames < 1:
         ap.error("--card-confirm-frames 至少为 1")
+    if args.card_doubt_window < 0:
+        ap.error("--card-doubt-window 不能为负（0 = 关闭仲裁）")
     if args.incident_frames < 1:
         ap.error("--incident-frames 至少为 1")
     if args.incident_max < 0:
@@ -1936,7 +1958,8 @@ def main(argv: list[str] | None = None) -> int:
         incident_dir=(None if args.no_incident else args.incident_dir),
         incident_frames=args.incident_frames,
         incident_max=args.incident_max,
-        card_confirm_frames=args.card_confirm_frames)
+        card_confirm_frames=args.card_confirm_frames,
+        card_doubt_window=args.card_doubt_window)
 
     # 动作区静止闸只用于 roi 路线：它的区域来自固定槽位；full 路线没有布局。
     settle_gate = (SettleGate(profile, settle=args.settle,

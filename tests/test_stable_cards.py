@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """StableCards 跨帧牌面状态机的单测。
 
-不读图片、不跑 OCR：手工拼 CardsResult。重点覆盖实测事故：
+不读图片、不跑 OCR：手工拼 CardsResult。重点覆盖实测异常案例：
   · 翻牌动画把 4 张读成 3 张，不能把一手牌劈成两半；
   · hero 只读到 1 张（另一张是牌背）不能写进 hero_cards；
   · 新读数要连续 2 帧一致才替换 last-good；

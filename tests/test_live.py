@@ -421,23 +421,37 @@ def test_card_regression_dumps_incident_frames() -> None:
         with patch.object(live, "recognize_cards",
                           lambda img, profile: results.pop(0)):
             proc = _incident_proc(incident, logs, now)
+            dumped = False
             for seq in range(1, 21):
                 now[0] += 0.4
                 img = np.zeros((100, 100, 3), np.uint8)
                 img[:, :, 0] = (seq * 30) % 256   # 每帧不同，避免 ROI 去重
+                before = len(logs)
                 proc.handle(packet(seq, grab=now[0]))
+                if not dumped and any("已保存" in line
+                                      for line in logs[before:]):
+                    dumped = True
+                    check(len(proc._frame_ring) == 0,
+                          "疑惑帧落盘并记录后应清空环形缓冲")
         folders = [p for p in incident.iterdir() if p.is_dir()]
         check(len(folders) == 1,
-              f"持续异常应只落一个事故目录，实际 {folders}")
+              f"持续异常应只落一个疑惑帧目录，实际 {folders}")
         if folders:
             meta = json.loads((folders[0] / "meta.json").read_text("utf-8"))
-            check("回退" in meta["reason"], f"事故原因应写回退：{meta}")
+            check("回退" in meta["reason"], f"疑惑帧原因应写回退：{meta}")
             check(len(meta["frames"]) == 3,
                   f"环形缓冲应保存 3 帧：{meta['frames']}")
             check(len(list(folders[0].glob("*.jpg"))) == 3,
                   f"应写出 3 张 JPEG：{list(folders[0].iterdir())}")
-        check(any("事故帧" in line for line in logs),
+        check(any("疑惑帧" in line for line in logs),
               f"落盘应打印提示：{logs}")
+        # 1 条汇总 + 3 条逐帧日志；每帧的 frame_id 都要能在日志里找到
+        check(sum("疑惑帧" in line for line in logs) >= 4,
+              f"应逐帧记录疑惑帧：{logs}")
+        if folders:
+            for item in meta["frames"]:
+                check(any(item["frame_id"] in line for line in logs),
+                      f"日志里应能查到 {item['frame_id']}：{logs}")
 
 
 def test_transient_anomaly_is_not_dumped() -> None:
@@ -476,7 +490,7 @@ def test_transient_anomaly_is_not_dumped() -> None:
                 proc.handle(packet(seq, grab=now[0]))
         folders = ([p for p in incident.iterdir() if p.is_dir()]
                    if incident.exists() else [])
-        check(folders == [], f"单帧动画不该落盘事故帧：{folders}")
+        check(folders == [], f"单帧动画不该落盘疑惑帧：{folders}")
 
 
 def test_epoch_change_resets_state_machine() -> None:

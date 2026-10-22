@@ -20,6 +20,7 @@
     test_full_table 全图 OCR/座位聚类/D 庄位/位置（需要 table-8p.jpg）
     test_runtime_profile 全图标定 → runtime profile → ROI 回读（需要 table-8p.jpg）
     test_stable_cards 跨帧牌面稳定闸（纯逻辑，不读图）
+    test_doubt_window 疑惑帧时间窗仲裁（纯逻辑，不读图）
     test_cards      公共牌 / hero 手牌识别（需要 images/card 标注样本）
     test_card_replay 真实样张回放：一手牌只落一条记录、牌面只前进
     test_extract    端到端提取（需要 table.jpg）
@@ -39,7 +40,8 @@ SUITES = ["test_positions.py", "test_env.py", "test_coach.py", "test_advice.py",
           "test_ai_advice_replay.py", "test_dealer.py", "test_roi_reader.py",
           "test_roi_dedup.py", "test_parse.py", "test_frame_state.py",
           "test_state_stream.py", "test_live.py", "test_full_table.py",
-          "test_runtime_profile.py", "test_stable_cards.py", "test_cards.py",
+          "test_runtime_profile.py", "test_stable_cards.py",
+          "test_doubt_window.py", "test_cards.py",
           "test_card_replay.py", "test_extract.py", "test_api.py"]
 
 

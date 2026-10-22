@@ -36,6 +36,7 @@ from collections import Counter
 from dataclasses import dataclass, field as dc_field
 from functools import lru_cache
 from pathlib import Path
+import time
 from typing import Any
 
 import cv2
@@ -120,6 +121,16 @@ _MIN_STABLE_CONFIDENCE = 0.65
 # 不兜底的话，一张恒定低置信度的牌（例如旧版梅花 0.48）会让稳定闸永远
 # 停在上一手：换手信号依赖稳定输出，于是新牌永远进不来，程序看起来停摆。
 _WEAK_ACCEPT_FRAMES = 10
+
+# 疑惑帧仲裁窗口（秒）。读数带质量疑点、又和 last-good 不同时先不丢弃：在窗口内
+# 继续采样，窗口结束按多数决定「采用挑战者」还是「保留 last-good」。
+# 关键是用**时间**而不是帧数：发牌/翻牌动画约 200–500ms，连续 5 帧可能全落在
+# 动画里，帧数投票会把错误读数扶正。0 = 关闭，退回 2 帧确认 + 10 帧弱读数兜底。
+DEFAULT_DOUBT_WINDOW = 0.5
+# 挑战者至少要这么多帧（必须是 hard-clean）支持，且占「挑战者 + last-good」
+# 的份额不低于 _DOUBT_WIN_SHARE，才允许替换 last-good。
+_DOUBT_MIN_VOTES = 2
+_DOUBT_WIN_SHARE = 0.6
 
 # 牌背分类：POKER 牌背的白色边框仍会被检出成牌面矩形，但内部是大面积高饱和
 # 图案（实测 S 中位数≈150、高饱和像素占 82%–85%，V 中位数≈170）；真牌是白底，
@@ -748,8 +759,12 @@ def recognize_shown_cards(img: np.ndarray, profile: Profile | None, *,
 
 # ─────────────────────────── 跨帧稳定闸 ───────────────────────────
 
-def _reading_issues(read: CardSlotRead) -> list[str]:
-    """一张牌区读数自身的问题（不看张数）。用于稳定闸拒绝替换 last-good。"""
+def _hard_issues(read: CardSlotRead) -> list[str]:
+    """结构性疑点：牌背 / 遮挡 / 点数没读出。
+
+    这类读数即使连续多帧一致、票数再多也不能采用（典型是 POKER 牌背被读成
+    8h）。疑惑帧仲裁只允许在**没有**结构性疑点的读数之间投票。
+    """
     issues: list[str] = []
     for c in read.cards:
         if c.evidence.get("card_back"):
@@ -758,7 +773,21 @@ def _reading_issues(read: CardSlotRead) -> list[str]:
             issues.append(f"{c.code} 被遮挡/不完整")
         elif c.rank == "?":
             issues.append("有点数没读出")
-        elif c.rank_score < _MIN_RANK_SCORE:
+    return issues
+
+
+def _reading_issues(read: CardSlotRead) -> list[str]:
+    """一张牌区读数自身的问题（不看张数）。用于稳定闸拒绝替换 last-good。
+
+    前半段是结构性疑点（牌背/遮挡/?），后半段是置信度类软疑点。软疑点可以
+    靠多帧投票转正，结构性疑点不行。
+    """
+    issues: list[str] = _hard_issues(read)
+    for c in read.cards:
+        if (c.evidence.get("card_back") or c.evidence.get("occluded")
+                or c.rank == "?"):
+            continue
+        if c.rank_score < _MIN_RANK_SCORE:
             issues.append(f"{c.code} 点数分低 {c.rank_score:.2f}")
         elif c.confidence < _MIN_STABLE_CONFIDENCE:
             # 把花色/点数拆开，别让「K♣ 置信度 0.48」看起来像点数识别失败
@@ -798,6 +827,15 @@ class _StableSlot:
     # 当前 last-good 是通过「连续一致的弱读数」兜底采用的：可靠性检查不再
     # 因为同一张牌的置信度低而反复判不可靠，否则接受后仍然出不了建议。
     weak_accepted: bool = False
+    # 疑惑帧仲裁：读数带疑点、又和 last-good 不同时开窗，窗口内逐帧采样。
+    # samples = [(codes, hard_clean, clean, read)]：hard_clean 才允许给挑战者
+    # 投票；clean（完全没有疑点）连续两帧才允许提前定案。
+    doubt_open: bool = False
+    doubt_started: float = 0.0
+    doubt_samples: list[tuple[tuple[str, ...], bool, bool, CardSlotRead]] = \
+        dc_field(default_factory=list)
+    # 仲裁没有多数：继续输出 last-good，但标为不可靠，等下一帧恢复或再开窗。
+    unresolved: bool = False
 
 
 class StableCards:
@@ -816,9 +854,18 @@ class StableCards:
         last-good，并把原因写进 `warnings`。
       · **牌背 / 遮挡 / ? / 低置信度不参与替换**：这些读数即使连续两帧一致
         也不可信（典型的 POKER 牌背），只记异常。
+      · **疑惑帧仲裁**：带疑点、又和 last-good 不同的读数不立刻丢弃，而是开一个
+        `doubt_window` 秒的窗口继续采样。窗口内连续两帧干净一致 → 提前采用；
+        窗口结束按逐帧多数决定（挑战者要 ≥2 票、占挑战者+last-good ≥60%）。
+        结构性疑点（牌背/遮挡/?）永远不能靠投票转正；没有多数时保留 last-good
+        显示，但标为不可靠，避免拿旧牌继续给建议/点击。
       · 公共牌确认归零（新一手）时清空 hero last-good，避免拿上一手的手牌
         给这一手出建议；hero 从 2 张换成另一组 2 张时也清空公共牌，
         兜住「从翻牌开始接管」的新手。
+      · **当前帧有疑点就不算可靠**：稳定输出可能是上一帧的 last-good，但这一帧
+        的原始读数已经异常时 `reliable=False`，决策点不会被误导。
+        （干净的换街/换手读数在 2 帧确认期间不算异常：此时旧牌仍是可用的
+        last-good，确认完成后立刻切换。）
 
     用法：
 
@@ -837,12 +884,15 @@ class StableCards:
 
     def __init__(self, confirm_frames: int = 2,
                  vote_frames: int = VOTE_FRAMES,
-                 weak_accept_frames: int = _WEAK_ACCEPT_FRAMES) -> None:
+                 weak_accept_frames: int = _WEAK_ACCEPT_FRAMES,
+                 doubt_window: float = DEFAULT_DOUBT_WINDOW) -> None:
         self.confirm_frames = max(1, int(confirm_frames))
         # 0 = 关闭投票，只认连续 confirm_frames 帧一致
         self.vote_frames = max(0, int(vote_frames))
         # 0 = 关闭「连续一致的弱读数」兜底
         self.weak_accept_frames = max(0, int(weak_accept_frames))
+        # 0 = 关闭疑惑帧仲裁，退回原来的 2 帧确认 + 弱读数兜底
+        self.doubt_window = max(0.0, float(doubt_window))
         self.last_anomalies: list[str] = []
         self.reliable = True
         self._reset_tracks()
@@ -883,9 +933,13 @@ class StableCards:
             return True
         return False
 
-    def update(self, result: CardsResult | Any) -> CardsResult | Any:
+    def update(self, result: CardsResult | Any, *,
+               now: float | None = None) -> CardsResult | Any:
+        """喂一帧识别结果。`now` 是单调时钟（秒），单测可显式传入时间轴。"""
         if not isinstance(result, CardsResult):
             return result
+        if now is None:
+            now = time.monotonic()
 
         anomalies: list[str] = []
         warnings: list[str] = list(result.warnings)
@@ -898,17 +952,17 @@ class StableCards:
             self._reset_tracks()
             warnings.append("hero_cards: 换了一组手牌，已清空上一手牌面")
 
-        board, board_reset, _ = self._update_slot(
+        board, board_reset, _, board_stale = self._update_slot(
             result.board, self._board, "board", self.BOARD_COUNTS,
-            anomalies, warnings, board=True)
+            anomalies, warnings, board=True, now=now)
         if board_reset:
             # 新一手：hero 的上一手牌不能继续沿用。
             self._hero = _StableSlot()
             self._raw_hero_codes, self._raw_hero_n = (), 0
 
-        hero, _, hero_changed = self._update_slot(
+        hero, _, hero_changed, hero_stale = self._update_slot(
             result.hero_cards, self._hero, "hero_cards", self.HERO_COUNTS,
-            anomalies, warnings, board=False,
+            anomalies, warnings, board=False, now=now,
             # 公共牌刚归零的这一帧，hero 槽里可能还停留着摊牌亮出的旧牌，
             # 不能让它开始累计确认。
             skip_accept=board_reset)
@@ -918,11 +972,15 @@ class StableCards:
             self._board = _StableSlot()
             board = CardSlotRead(name=board.name, slot=board.slot,
                                  rect=board.rect)
-            # 这是正常换手，不是事故帧；只写 warning，不触发事故落盘。
+            # 这是正常换手，不是疑惑帧；只写 warning，不触发落盘。
             warnings.append("hero_cards: 换了一组手牌，公共牌等待重新确认")
 
+        # 当前帧本身有疑点（张数非法/牌背/低置信度/回退）时，即使对外还能
+        # 输出上一帧的 last-good，也不能算可靠 —— 否则会拿旧牌面给建议甚至
+        # 自动点击。等这一帧恢复干净（或仲裁出结果）后 reliable 自然回真。
         reliable = (self._slot_reliable(self._board, self.BOARD_COUNTS)
-                    and self._slot_reliable(self._hero, self.HERO_COUNTS))
+                    and self._slot_reliable(self._hero, self.HERO_COUNTS)
+                    and not board_stale and not hero_stale)
         self.last_anomalies = anomalies
         self.reliable = reliable
         warnings = _dedup(warnings)
@@ -932,25 +990,55 @@ class StableCards:
 
     def _update_slot(self, raw: CardSlotRead, track: _StableSlot, name: str,
                      valid_counts: tuple[int, ...], anomalies: list[str],
-                     warnings: list[str], *, board: bool,
+                     warnings: list[str], *, board: bool, now: float,
                      skip_accept: bool = False
-                     ) -> tuple[CardSlotRead, bool, bool]:
-        """返回 (对外读数, 是否确认归零, 是否确认换了一组 2 张 hero)。"""
+                     ) -> tuple[CardSlotRead, bool, bool, bool]:
+        """返回 (对外读数, 是否确认归零, 是否确认换了 2 张 hero, 本帧是否可疑)。"""
         codes = tuple(raw.codes)
         n = len(codes)
+
+        # 疑惑帧窗口打开期间，所有合法读数都进窗口。干净帧是强证据：
+        # 连续两帧干净一致就提前采用 / 提前解除，不必等满整个窗口。
+        if track.doubt_open:
+            if n == 0:
+                # 公共牌归零/hero 清空是新一手信号，仲裁立即作废，走正常确认。
+                self._close_doubt(track)
+                track.unresolved = False
+            elif n in valid_counts:
+                issues = _reading_issues(raw)
+                if issues:
+                    msg = f"{name}: 读数不可靠（{'；'.join(issues)}）"
+                    anomalies.append(msg)
+                    warnings.append(f"{msg}；疑惑帧仲裁中")
+                return self._update_doubt(raw, track, name, warnings,
+                                          board=board, now=now)
+            else:
+                # 窗口内出现非法张数：本轮仲裁作废，按「仍不确定」处理，
+                # 避免窗口永远挂着。
+                self._close_doubt(track)
+                track.unresolved = True
 
         if n not in valid_counts:
             msg = (f"{name}: 本帧 {n} 张，合法张数是 "
                    f"{'/'.join(str(v) for v in valid_counts)}")
             anomalies.append(msg)
             warnings.append(f"{msg}；沿用上一帧")
-            return self._current(track, raw), False, False
+            return self._current(track, raw), False, False, True
 
         issues = _reading_issues(raw)
         if issues:
             msg = f"{name}: 读数不可靠（{'；'.join(issues)}）"
             anomalies.append(msg)
             warnings.append(f"{msg}；沿用上一帧")
+            # 带疑点、又和 last-good 不同：开窗仲裁，而不是直接丢给 10 帧兜底。
+            # 同码数的低置信度重读不开窗（没有第二个候选，投票没有意义）。
+            if (self.doubt_window > 0 and track.established
+                    and track.read is not None and n != 0
+                    and codes != tuple(track.read.codes)):
+                self._open_doubt(track, now, raw, codes)
+                warnings.append(
+                    f"{name}: 疑惑帧开窗仲裁（{self.doubt_window:g}s）")
+                return self._current(track, raw), False, False, True
             # 连续多帧读到**完全相同**的一组牌、且问题只是置信度略低时兜底
             # 采用。否则一张恒定低置信度的牌会把 last-good 永久锁在上一手，
             # 新牌、换手信号、AI 建议全部停摆（实测：梅花 0.48）。
@@ -977,13 +1065,14 @@ class StableCards:
                     track.recent.clear()
                     track.weak_codes, track.weak_n = (), 0
                     track.weak_accepted = True
+                    track.unresolved = False
                     warnings.append(
                         f"{name}: 连续 {self.weak_accept_frames} 帧读数一致但"
                         "置信度偏低，采用")
-                    return raw, board and n == 0, changed
+                    return raw, board and n == 0, changed, False
             else:
                 track.weak_codes, track.weak_n = (), 0
-            return self._current(track, raw), False, False
+            return self._current(track, raw), False, False, True
 
         # 公共牌回退：4→3、5→4 一律不接受，哪怕连续多帧。0 是新一手信号，
         # 走下面的 2 帧确认；否则 4 张短暂读成 3 张会把一手牌劈成两半。
@@ -993,7 +1082,7 @@ class StableCards:
                 msg = f"{name}: 张数 {last_n}→{n} 回退，不采用"
                 anomalies.append(msg)
                 warnings.append(f"{msg}；沿用上一帧")
-                return track.read, False, False
+                return track.read, False, False, True
 
         if track.read is not None and codes == tuple(track.read.codes):
             track.pending = None
@@ -1001,18 +1090,20 @@ class StableCards:
             track.pending_n = 0
             track.recent.clear()
             track.weak_codes, track.weak_n = (), 0
-            return track.read, False, False
+            # 当前帧又回到了 last-good：之前的仲裁悬案可以解除。
+            track.unresolved = False
+            return track.read, False, False, False
 
         # 首次就是空读数：没有牌不是误读，直接建立基线，不白等两帧。
         # 这不是「公共牌归零」的换手事件，不能触发 hero 清空。
         if not track.established and n == 0:
             track.read = raw
             track.established = True
-            return raw, False, False
+            return raw, False, False, False
 
         if skip_accept:
             warnings.append(f"{name}: 新手牌开始，等牌面稳定后再确认")
-            return self._current(track, raw), False, False
+            return self._current(track, raw), False, False, False
 
         # 合法且与 last-good 不同的读数进入投票窗口（最多保留最近 3 帧）。
         if self.vote_frames:
@@ -1043,7 +1134,8 @@ class StableCards:
             track.recent.clear()
             track.weak_codes, track.weak_n = (), 0
             track.weak_accepted = False
-            return accepted, board and n == 0, changed
+            track.unresolved = False
+            return accepted, board and n == 0, changed, False
 
         # 连续两帧不一致时，用最近 3 帧的 top-1 读数投票。3/8、6/8 的
         # NCC 只差 0.01 时会逐帧跳字；同一位置 3 帧里 2 帧一致就采用，
@@ -1064,14 +1156,132 @@ class StableCards:
                 track.recent.clear()
                 track.weak_codes, track.weak_n = (), 0
                 track.weak_accepted = False
+                track.unresolved = False
                 warnings.append(
                     f"{name}: {self.vote_frames} 帧投票采用 "
                     f"{'/'.join(voted.codes)}")
-                return voted, board and n == 0, changed
+                return voted, board and n == 0, changed, False
 
         warnings.append(
             f"{name}: 新读数待确认（{track.pending_n}/{self.confirm_frames} 帧）")
-        return self._current(track, raw), False, False
+        return self._current(track, raw), False, False, False
+
+    # ─────────────────── 疑惑帧仲裁 ───────────────────
+
+    def _open_doubt(self, track: _StableSlot, now: float,
+                    raw: CardSlotRead, codes: tuple[str, ...]) -> None:
+        """开一个仲裁窗口，把触发这一帧当作第一个样本。"""
+        track.doubt_open = True
+        track.doubt_started = now
+        issues = _reading_issues(raw)
+        track.doubt_samples = [
+            (codes, not _hard_issues(raw), not issues, raw)]
+
+    @staticmethod
+    def _close_doubt(track: _StableSlot) -> None:
+        track.doubt_open = False
+        track.doubt_started = 0.0
+        track.doubt_samples = []
+
+    def _update_doubt(self, raw: CardSlotRead, track: _StableSlot, name: str,
+                      warnings: list[str], *, board: bool,
+                      now: float) -> tuple[CardSlotRead, bool, bool, bool]:
+        """窗口内继续采样；两帧干净一致就提前定案，否则等窗口结束投票。"""
+        codes = tuple(raw.codes)
+        issues = _reading_issues(raw)
+        track.doubt_samples.append(
+            (codes, not _hard_issues(raw), not issues, raw))
+
+        last = tuple(track.read.codes) if track.read is not None else ()
+        recent = track.doubt_samples[-2:]
+        if (len(recent) == 2
+                and recent[0][0] == recent[1][0]
+                and recent[0][2] and recent[1][2]):
+            # 连续两帧都**完全没有疑点**且一致 = 普通的两帧确认，提前定案。
+            # 只是置信度偏低但连续两帧一致的读数不算，仍要等窗口投票。
+            if recent[-1][0] == last:
+                self._close_doubt(track)
+                track.unresolved = False
+                warnings.append(f"{name}: 疑惑帧已消失，继续沿用上一帧")
+                return track.read, False, False, False
+            warnings.append(
+                f"{name}: 疑惑帧仲裁采用 {'/'.join(recent[-1][0])}"
+                "（连续 2 帧干净）")
+            return self._accept_doubt(track, recent[-1][3], board=board)
+
+        elapsed = now - track.doubt_started
+        if elapsed < self.doubt_window:
+            warnings.append(
+                f"{name}: 疑惑帧仲裁中 {elapsed:.2f}s"
+                f"/{self.doubt_window:g}s（{len(track.doubt_samples)} 帧）")
+            return self._current(track, raw), False, False, True
+
+        return self._decide_doubt(track, name, warnings, board=board)
+
+    def _decide_doubt(self, track: _StableSlot, name: str,
+                      warnings: list[str], *, board: bool
+                      ) -> tuple[CardSlotRead, bool, bool, bool]:
+        """窗口结束：采用挑战者 / 保留 last-good / 无多数时标不可靠。"""
+        samples = track.doubt_samples
+        last = tuple(track.read.codes) if track.read is not None else ()
+        last_votes = sum(1 for c, _hard, _clean, _read in samples if c == last)
+
+        # 只有结构性干净的样本才能给挑战者投票：牌背/遮挡/? 再多票也不能转正。
+        by_codes: dict[tuple[str, ...], list[CardSlotRead]] = {}
+        for c, hard_clean, _clean, read in samples:
+            if hard_clean and c != last:
+                by_codes.setdefault(c, []).append(read)
+        top = max(by_codes.items(), key=lambda kv: len(kv[1]), default=None)
+        cand_votes = 0
+        if top is not None:
+            cand_codes, cand_reads = top
+            cand_votes = len(cand_reads)
+            hyp = cand_votes + last_votes
+            share = cand_votes / hyp if hyp else 0.0
+            if (cand_votes >= _DOUBT_MIN_VOTES and cand_votes > last_votes
+                    and share >= _DOUBT_WIN_SHARE):
+                warnings.append(
+                    f"{name}: 疑惑帧仲裁采用 {'/'.join(cand_codes)}"
+                    f"（{cand_votes}/{hyp} 票，{len(samples)} 帧采样）")
+                return self._accept_doubt(track, cand_reads[-1], board=board)
+
+        hyp = cand_votes + last_votes
+        if (hyp and last_votes >= _DOUBT_MIN_VOTES and last_votes > cand_votes
+                and last_votes / hyp >= _DOUBT_WIN_SHARE):
+            self._close_doubt(track)
+            track.unresolved = False
+            warnings.append(
+                f"{name}: 疑惑帧仲裁保留上一帧（{last_votes}/{hyp} 票）")
+            return track.read, False, False, False
+
+        # 没有多数：继续显示 last-good，但标不可靠，等下一帧/下一窗口。
+        self._close_doubt(track)
+        track.unresolved = True
+        warnings.append(
+            f"{name}: 疑惑帧仲裁无多数（挑战者 {cand_votes} 票 / "
+            f"上一帧 {last_votes} 票，共 {len(samples)} 帧），暂标不可靠")
+        return track.read, False, False, True
+
+    def _accept_doubt(self, track: _StableSlot, read: CardSlotRead, *,
+                      board: bool) -> tuple[CardSlotRead, bool, bool, bool]:
+        """采用挑战者读数。"""
+        previous = track.read
+        changed = (not board and previous is not None
+                   and len(previous.cards) == 2 and len(read.cards) == 2
+                   and tuple(previous.codes) != tuple(read.codes))
+        track.read = read
+        track.established = True
+        track.pending = None
+        track.pending_read = None
+        track.pending_n = 0
+        track.recent.clear()
+        track.weak_codes, track.weak_n = (), 0
+        # 仲裁采用的读数可能只是置信度偏低：按「弱读数已接受」处理，
+        # 否则 _slot_reliable 会继续判它不可靠，建议/点击仍然停摆。
+        track.weak_accepted = bool(_reading_issues(read))
+        track.unresolved = False
+        self._close_doubt(track)
+        return read, board and len(read.cards) == 0, changed, False
 
     def _vote(self, recent: list[CardSlotRead],
               n_cards: int) -> CardSlotRead | None:
@@ -1119,6 +1329,8 @@ class StableCards:
                        valid_counts: tuple[int, ...]) -> bool:
         if not track.established or track.read is None:
             return False                    # 还没稳定读过，不能给 AI 用
+        if track.doubt_open or track.unresolved:
+            return False                    # 仲裁未定/上轮无多数，不能当可靠
         if len(track.read.cards) not in valid_counts:
             return False
         issues = _reading_issues(track.read)
@@ -1209,6 +1421,7 @@ __all__ = [
     "CardSlotRead",
     "CardsResult",
     "DEFAULT_CARD_SLOTS",
+    "DEFAULT_DOUBT_WINDOW",
     "RANKS",
     "SUIT_NAMES",
     "StableCards",

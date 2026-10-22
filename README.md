@@ -184,8 +184,11 @@ JEV 模式下候选动作会被转成一道 `choice` 题（criteria 的 key 就�
   不必等庄位/牌面变化。
 - 公共牌/hero 手牌过跨帧稳定闸：公共牌只前进（**4→3、5→4 永不回退**），
   hero 只接受 0/2 张，新读数连续 2 帧一致才替换 last-good；牌背/遮挡/
-  低置信度不参与替换。稳定结果仍不可靠时**跳过这一帧的 AI 建议**，手牌记录
-  里带 `cards_unreliable` / `cards_warnings`，牌面恢复后同一决策点补投。
+  低置信度不参与替换。带疑点的读数会开 `--card-doubt-window`（默认 0.5s）
+  的**疑惑帧**窗口做多帧仲裁：窗口结束时挑战者票数占优（≥2 票且 ≥60%）才
+  替换 last-good，否则保留旧牌；牌背/遮挡/`?` 永远不能靠票数转正。
+  当前帧有疑点时 `reliable=False`，稳定结果不可靠就**跳过这一帧的 AI 建议**，
+  手牌记录里带 `cards_unreliable` / `cards_warnings`，牌面恢复后同一决策点补投。
   公共牌回退/张数异常/牌背**持续 1 秒以上**时，最近帧才落到
   `logs/incidents/`（同类持续异常只存一份，单次会话默认最多 20 份；
   `--no-incident` 关闭）。
@@ -774,6 +777,7 @@ tests/
   test_dealer.py          # 庄位检测单元测试（合成图）
   test_cards.py           # 公共牌 / hero 手牌回归（images/card 的 16 个标注样本）
   test_stable_cards.py    # 跨帧牌面稳定闸（回退/张数/牌背/2 帧确认/多帧投票）
+  test_doubt_window.py    # 疑惑帧时间窗仲裁（低置信度/牌背/无多数/提前解除）
   test_card_replay.py     # 真实样张回放：一手牌只落一条记录、牌面只前进
   test_extract.py         # 端到端回归测试
   test_api.py             # HTTP 接口测试
