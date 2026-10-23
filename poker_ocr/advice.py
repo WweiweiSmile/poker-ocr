@@ -918,9 +918,17 @@ best five, nut status, every hand class that beats you, board flush/straight pos
 draws. It is the only source for these; never contradict or recompute it.
 - "No made flush possible (at most 2 of any suit)" → no flush exists yet; do not call
   the board a flush board.
-- "NUTS" → no opponent holding beats you; facing a bet, RAISE. Never invent a higher hand.
+- "NUTS" (made hand) → no opponent holding beats you; facing a bet, RAISE. Never
+  invent a higher hand.
 - "Beaten by" is exact: only those classes beat you.
 - A non-nut straight or flush is still strong, but call — do not raise as if unbeatable.
+- The rank's "equity" is vs ONE opponent. For multiway decisions use the
+  "Multiway: with N opponents, X% chance at least one is ahead" line, not that equity.
+- If this is a DRAW (Strong draw / Weak draw), the made-hand rank/NUT/"Beaten by" lines
+  describe the CURRENT unmade hand only — they must NOT veto the draw directive.
+  Heads-up with no bet in front, a semi-bluff is the baseline; against a station that
+  never folds you may check, but the reason must be NO FOLD EQUITY — never "I am not
+  the nuts". With 3+ opponents, check. Judge a draw by its outs and pot odds.
 """
 
 _STREET_EN = {"preflop": "Preflop", "flop": "Flop", "turn": "Turn", "river": "River"}
@@ -1084,8 +1092,11 @@ def render_hand_facts(sit: Situation) -> str:
         if sit.ground_truth is not None:
             # 成手牌、最好五张、精确排名、坚果校验、听牌、牌面结构。
             # 这一段是模型唯一允许引用的牌力事实；不要再在别处重复。
-            lines.append(sit.ground_truth.render())
-            if sit.hand_tier in (STRONG_DRAW, WEAK_DRAW):
+            # 纯听牌走 draw_focus：不渲染 NUT STATUS/Beaten by，避免模型
+            # 用「当前未成牌不是坚果」否决 SEMI-BLUFF DEFAULT。
+            is_draw = sit.hand_tier in (STRONG_DRAW, WEAK_DRAW)
+            lines.append(sit.ground_truth.render(draw_focus=is_draw))
+            if is_draw:
                 # 听牌时排名只反映「还没成牌」（坚果同花听牌此刻可能只是 A 高）。
                 lines.append(
                     "Note: the rank above is for the CURRENT unmade hand. This does "

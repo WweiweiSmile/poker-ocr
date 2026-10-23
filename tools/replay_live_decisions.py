@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """按已导出的手牌，把当时的每个决策点用**当前代码**重新跑一遍，和日志里当时的建议对比。
 
+默认注入项目根目录的 `.table_dy`（和实时链路一致）；`--no-table-dynamics` 关闭，
+`--table-dynamics PATH` 指定别的文件。
+
     # 只看事实层（不调模型、不花钱）：新的牌型排名 / 价值指令 vs 当时的选择
     .venv/bin/python tools/replay_live_decisions.py
 
@@ -53,6 +56,7 @@ from poker_ocr.hand_track import (  # noqa: E402
     ActionRecord, HandSnapshot, OpponentSnapshot, StreetRecord,
 )
 from poker_ocr.parse import Blinds  # noqa: E402
+from poker_ocr.table_dynamics import load_table_dynamics  # noqa: E402
 
 STATE_PER_STREET = {0: "preflop", 3: "flop", 4: "turn", 5: "river"}
 BOARD_LEN = {"preflop": 0, "flop": 3, "turn": 4, "river": 5}
@@ -236,7 +240,20 @@ def main(argv: list[str] | None = None) -> int:
                     help="把每个决策点的事实与新旧建议写成 JSON")
     ap.add_argument("--model-name", default=None,
                     help="覆盖 AI_SERVER_MODEL（例如 deepseek-v4-pro），用来对比模型")
+    ap.add_argument("--table-dynamics", type=Path, default=None,
+                    help="牌桌动态文件；默认读项目根目录 .table_dy")
+    ap.add_argument("--no-table-dynamics", action="store_true",
+                    help="不注入 .table_dy（默认注入，和实时链路一致）")
     args = ap.parse_args(argv)
+
+    dynamics_text = ""
+    if not args.no_table_dynamics:
+        dyn = load_table_dynamics(args.table_dynamics)
+        if dyn.error:
+            print(f"牌桌动态读取失败：{dyn.error}", file=sys.stderr)
+        elif dyn.found:
+            dynamics_text = dyn.text
+            print(f"牌桌动态：{dyn.path}（{len(dynamics_text)} 字符）")
 
     records = load(args.log)
     states = [r for r in records if r.get("type") == "state" and r.get("hero")]
@@ -280,7 +297,7 @@ def main(argv: list[str] | None = None) -> int:
                      or (snap.pot or 0) > 12 * bb)):
             stale += 1
             continue
-        sit = build_situation(snap)
+        sit = build_situation(snap, table_dynamics=dynamics_text)
         d_new = value_directive(sit) or ""
         row = {
             "hand": snap.hand_id, "street": adv["street"],

@@ -208,3 +208,54 @@ gt = compute_ground_truth("AsTh", "Jc8dKdQc", opponents=3)
 - 河牌仍是 `call` 而不是实际 `fold`：按赔率（需 28.6%，随机牌权益 89.4%）call 合理；
   对手是松弱、河牌下注偏价值，fold 也不算离谱。这一条属于边界判断，不是事实层错误。
 - 8 个决策点：一致 4、尺度差 2、动作不同 2；新建议硬违规 0；延迟 p50 874ms / max 1189ms。
+
+---
+
+## 6. 2026-10-23 补丁：听牌不被 NUT STATUS 压住 + 多人 at-least-one
+
+### 6.1 听牌 `draw_focus`
+
+`GroundTruth.render(draw_focus=True)`：
+
+- 纯听牌 **不渲染** `NUT STATUS` / `Beaten by`；
+- 改成 `DRAW STATUS (action basis)` + `DRAW RULE`；
+- `DRAW RULE` 明确：单挑无下注时半诈唬是基线；对永不弃牌的跟注站可以过牌，但理由必须是
+  `NO FOLD EQUITY`，不能是「我不是坚果」；3 家以上听牌默认过牌。
+- `advice.render_hand_facts` 在 `hand_tier in (STRONG_DRAW, WEAK_DRAW)` 时传
+  `draw_focus=True`；system prompt 的 `_GROUND_TRUTH_RULES` 同步补了 DRAW 例外。
+
+对应测试：
+
+- `test_draw_focus_hides_made_hand_nut_status`（h104 坚果花听：draw_focus 文本里没有
+  `NUT STATUS` / `Beaten by`，有 `DRAW STATUS` / `NO FOLD EQUITY`）；
+- `test_draws_are_not_judged_by_made_hand_rank`（回放 `render_hand_facts`）。
+
+### 6.2 `_rank_text`：单对手 equity + 多人 at-least-one
+
+`_rank_text` 现在固定写：
+
+```
+beaten by X% of hands PER OPPONENT; ties Y% per opponent;
+equity Z% vs ONE opponent.
+Multiway: with N opponents, W% chance at least one is ahead.
+```
+
+之前只写 `beaten by X%; equity Z%`，模型会把单对手权益误读成「N 家同时我领先」。
+对应测试：`test_rank_text_labels_equity_per_opponent_and_multiway`。
+
+### 6.3 复跑工具注入 `.table_dy`
+
+`tools/replay_live_decisions.py`、`tools/compare_review_hands.py` 默认读取项目根目录
+`.table_dy`，`--no-table-dynamics` 关闭，`--table-dynamics PATH` 指定别的文件。
+这样复盘复跑和 `poker_ocr/live.py` 的实时链路使用同一份桌风。
+
+### 6.4 补丁后全量复跑
+
+见 `docs/复跑-事实注入-补丁与桌风-2026-10-23.md`：
+
+- 线上 101 点：旧 14 硬违规 → **0**；GT+桌风 20 个动作变化；
+- dev 库 85 点：实际 9 硬违规 → **0**；GT+桌风 33 个动作变化；
+- 990010 转牌 `raise 108` 3/3 稳定；
+- h104 在桌风下回到 `bet 1/2`（真实听牌半诈唬）；
+- 990030 / 990034 在多人 at-least-one 明示后仍 `bet 2/3`（你的桌风价值线）；
+- 990050 25BB 进 362BB：GT+桌风 `fold`（桌风「不付钱」），纯赔率 `call`，属于策略取舍。

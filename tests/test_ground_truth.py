@@ -247,6 +247,33 @@ def test_draws_are_not_judged_by_made_hand_rank() -> None:
     assert sit.ground_truth.draws.nut_flush_draw
 
 
+def test_rank_text_labels_equity_per_opponent_and_multiway() -> None:
+    """equity 是**单对手**口径；多人要单独的 at-least-one 数字。"""
+    gt = compute_ground_truth("Js3s", "Jd4d5s", opponents=5)
+    assert gt is not None
+    text = gt.render()
+    assert "PER OPPONENT" in text
+    assert "vs ONE opponent" in text
+    assert "Multiway: with 5 opponents" in text
+    assert "chance at least one is ahead" in text
+    expected = f"{gt.rank.beat_at_least_pct * 100:.1f}%"
+    assert expected in text, f"缺少多人 at-least-one 数字 {expected}"
+
+
+def test_draw_focus_hides_made_hand_nut_status() -> None:
+    """纯听牌不能渲染会压过 SEMI-BLUFF 的 NUT STATUS / Beaten by。"""
+    gt = compute_ground_truth("AsKd", "Ts8s9s")
+    assert gt is not None and gt.draws.nut_flush_draw
+    text = gt.render(draw_focus=True)
+    assert "NUT STATUS" not in text
+    assert "Beaten by:" not in text
+    assert "DRAW STATUS (action basis" in text
+    assert "semi-bluff is the baseline" in text
+    assert "NO FOLD EQUITY" in text
+    # 默认渲染仍保留成手牌口径，供非听牌场景使用。
+    assert "NUT STATUS" in gt.render()
+
+
 if __name__ == "__main__":
     import pytest
     raise SystemExit(pytest.main([__file__, "-q"]))

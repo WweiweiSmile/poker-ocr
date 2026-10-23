@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """用**当前** AI 建议重跑 dev 库导出的复盘手牌，和库里的实际动作逐决策点对比。
 
+默认注入项目根目录的 `.table_dy`（和实时链路一致）；`--no-table-dynamics` 关闭，
+`--table-dynamics PATH` 指定别的文件。
+
 这是 `ai_advice_dev_hands.py` 的升级版：
 
 - 覆盖**翻前 + 翻后**（原脚本只评翻后）；
@@ -73,6 +76,7 @@ from poker_ocr.parse import Blinds  # noqa: E402
 from poker_ocr.preflop_ranges import (  # noqa: E402
     hand_key, range_verdict, sb_completable,
 )
+from poker_ocr.table_dynamics import load_table_dynamics  # noqa: E402
 
 POSTFLOP = ("flop", "turn", "river")
 STREETS = ("preflop",) + POSTFLOP
@@ -386,7 +390,20 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--no-model", action="store_true", help="只跑事实层，不调模型")
     ap.add_argument("--no-dedupe", action="store_true", help="不按内容指纹去重")
     ap.add_argument("--verbose", action="store_true", help="动作不同的逐条打印建议原文")
+    ap.add_argument("--table-dynamics", type=Path, default=None,
+                    help="牌桌动态文件；默认读项目根目录 .table_dy")
+    ap.add_argument("--no-table-dynamics", action="store_true",
+                    help="不注入 .table_dy（默认注入，和实时链路一致）")
     args = ap.parse_args(argv)
+
+    dynamics_text = ""
+    if not args.no_table_dynamics:
+        dyn = load_table_dynamics(args.table_dynamics)
+        if dyn.error:
+            print(f"牌桌动态读取失败：{dyn.error}", file=sys.stderr)
+        elif dyn.found:
+            dynamics_text = dyn.text
+            print(f"牌桌动态：{dyn.path}（{len(dynamics_text)} 字符）")
 
     hands = load_hands(args.input)
     print(f"读到 {len(hands)} 条复盘手牌")
@@ -426,7 +443,7 @@ def main(argv: list[str] | None = None) -> int:
                 break
             snap = d["snap"]
             try:
-                sit = build_situation(snap)
+                sit = build_situation(snap, table_dynamics=dynamics_text)
             except Exception as exc:                # noqa: BLE001
                 print(f"  跳过 {snap.hand_id} {snap.street}：{type(exc).__name__}: {exc}")
                 continue

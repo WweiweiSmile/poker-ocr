@@ -266,9 +266,13 @@ class GroundTruth:
         return (
             f"Made-hand rank (exact enumeration over all {r.total} opponent "
             f"holdings, {n} opponent{'s' if n != 1 else ''}): beaten by "
-            f"{r.beat_pct * 100:.1f}% of hands; ties {r.tie_pct * 100:.1f}%; "
-            f"equity {r.equity_pct * 100:.1f}%. Random hands are a LOWER bound — "
-            f"a calling/raising range is stronger than random."
+            f"{r.beat_pct * 100:.1f}% of hands PER OPPONENT; ties "
+            f"{r.tie_pct * 100:.1f}% per opponent; equity "
+            f"{r.equity_pct * 100:.1f}% vs ONE opponent. "
+            f"Multiway: with {n} opponent{'s' if n != 1 else ''}, "
+            f"{r.beat_at_least_pct * 100:.1f}% chance at least one is ahead. "
+            f"Random hands are a LOWER bound — a calling/raising range is "
+            f"stronger than random."
         )
 
     def _nuts_text(self) -> str:
@@ -299,9 +303,32 @@ class GroundTruth:
         return (f"Draws: {' + '.join(parts)}; total {d.total_outs} outs "
                 f"(rule of 4/2 equity {d.equity_pct:.0f}%).")
 
-    def render(self) -> str:
-        """固定格式的事实块。提示词里的模型只允许引用，不允许改写。"""
+    def _draw_status_text(self) -> str:
+        """听牌专用的事实头：它是行动依据，压过「当前未成牌」的排名。"""
+        d = self.draws
+        parts = []
+        if d.flush_draw:
+            parts.append(f"{'nut ' if d.nut_flush_draw else ''}flush draw "
+                         f"in {d.flush_suit} ({d.flush_outs} outs)")
+        if d.straight_draw:
+            kind = "open-ended/double-gutshot" if d.oesd else "gutshot"
+            parts.append(f"{kind} straight draw ({d.straight_outs} outs)")
+        return (f"DRAW STATUS (action basis — this is an unmade hand): "
+                f"{' + '.join(parts)}; total {d.total_outs} outs "
+                f"(rule of 4/2 equity {d.equity_pct:.0f}%). Use this and the "
+                f"draw directive; do NOT use the made-hand rank below to veto "
+                f"a semi-bluff.")
+
+    def render(self, draw_focus: bool = False) -> str:
+        """固定格式的事实块。提示词里的模型只允许引用，不允许改写。
+
+        `draw_focus=True` 用于纯听牌：不渲染 `NUT STATUS` / `Beaten by`，
+        避免模型把「当前未成牌的 A 高」当成「不能下注」。桌面动态仍然可以
+        让模型过牌——但理由必须是「没有弃牌率」，不能是「我不是坚果」。
+        """
         m = self.made
+        is_draw = bool(self.draws.flush_draw or self.draws.straight_draw)
+        draw_focus = bool(draw_focus and is_draw)
         lines = [
             "GROUND TRUTH (deterministic evaluator; authoritative — never "
             "recompute, never contradict)",
@@ -310,16 +337,38 @@ class GroundTruth:
             f"Made hand: {m.name.upper()} ({m.detail})｜best five: "
             f"{cards_text(m.best_five)}｜hole cards used: "
             f"{cards_text(m.hero_cards_used) if m.hero_cards_used else 'NONE (playing the board)'}",
-            self._rank_text(),
-            self._nuts_text(),
-            ("Beaten by: " + ", ".join(f"{b.name} (e.g. {cards_text(b.example)})"
-                                       for b in self.rank.beaten_by)
-             if self.rank.beaten_by else "Beaten by: nothing."),
-            self._draw_text(),
         ]
+        if draw_focus:
+            lines.append(self._draw_status_text())
+            lines.append(
+                "DRAW RULE: heads-up with no bet in front, a semi-bluff is the "
+                "baseline; against a station that never folds you may check, but "
+                "the reason must be NO FOLD EQUITY — never «I am not the nuts». "
+                "With 3+ opponents, check.")
+            lines.append("Context only — CURRENT unmade hand (not the action basis):")
+            lines.append(self._rank_text())
+        else:
+            lines.extend([
+                self._rank_text(),
+                self._nuts_text(),
+                ("Beaten by: " + ", ".join(f"{b.name} (e.g. {cards_text(b.example)})"
+                                           for b in self.rank.beaten_by)
+                 if self.rank.beaten_by else "Beaten by: nothing."),
+                self._draw_text(),
+            ])
         if self.warnings:
-            lines.append("Warnings:")
-            lines.extend(f"- {w}" for w in self.warnings)
+            warnings = self.warnings
+            if draw_focus:
+                # 这几条描述的是「当前未成牌」，对听牌的行动选择没有指导意义；
+                # 保留「只是花听 / 听牌不是成牌 / 公对面花听」等有用警告。
+                warnings = tuple(
+                    w.replace("the rank/NUT STATUS above", "the context rank above")
+                    for w in warnings if not w.startswith(
+                        ("You are NOT the nuts", "A flush is ALREADY possible",
+                         "An opponent can complete a straight")))
+            if warnings:
+                lines.append("Warnings:")
+                lines.extend(f"- {w}" for w in warnings)
         return "\n".join(lines)
 
 
