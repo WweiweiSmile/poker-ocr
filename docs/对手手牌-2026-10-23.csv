@@ -1,0 +1,96 @@
+来源,手牌ID,uid,时间,对手,位置,底牌,牌型,翻后是否激进,翻前动作,翻后动作,公共牌,英雄底牌
+实时,h4,s01-h4,2026-10-23T03:08:07.632+08:00,陈7程,BTN,KdAd,One pair,否,call 7.5,call 6.5; call 16.5,7c7h10d8c6h,AhJs
+实时,h49,s01-h49,2026-10-23T03:21:48.258+08:00,伯克利丁真,SB,Qc9c,One pair,否,call 6.0,call 11.5,8d7c5hKcQd,Ac2d
+实时,h53,s01-h53,2026-10-23T03:23:19.681+08:00,伯克利丁真,CO,QcQs,Quads,否,call 9.0,,Qh4hQd6s,10c5d
+实时,h53,s01-h53,2026-10-23T03:23:19.681+08:00,老谭不偷鸡,BB,AcAh,Two pair,否,raise 78.0,,Qh4hQd6s,10c5d
+实时,h55,s01-h55,2026-10-23T03:24:47.393+08:00,伯克利丁真,HJ,JdJs,Full house,是,call 5.0,call 12.0; raise 60.5,Qh4d6cJc4h,4cQs
+实时,h55,s01-h55,2026-10-23T03:24:47.393+08:00,不服就干不,UTG,KcKh,Two pair,否,raise 5.0,call 12.0; call 20.0,Qh4d6cJc4h,4cQs
+实时,h55,s01-h55,2026-10-23T03:24:47.393+08:00,陈7程,SB,9h9d,Two pair,否,call 5.0,,Qh4d6cJc4h,4cQs
+实时,h65,s01-h65,2026-10-23T03:28:06.106+08:00,伯克利丁真,BTN,Ks10c,One pair,是,call 8.5,call 11.5; raise 93.5,Kc6d9c8d4d,Kh6c
+实时,h65,s01-h65,2026-10-23T03:28:06.106+08:00,八六上青山,UTG+1,10d10h,One pair,是,raise 8.5,bet 11.5; bet 46.5,Kc6d9c8d4d,Kh6c
+实时,h67,s01-h67,2026-10-23T03:28:53.291+08:00,陈7程,BB,2d10s,Two pair,否,,,4s9d2c10cAs,8d9h
+实时,h67,s01-h67,2026-10-23T03:28:53.291+08:00,阿坝干嘛,SB,QhQd,One pair,是,raise 23.0,bet 34.0; bet 59.5,4s9d2c10cAs,8d9h
+实时,h67,s01-h67,2026-10-23T03:28:53.291+08:00,八六上青山,UTG,7s7h,One pair,否,raise 8.5; call 23.0,call 34.0,4s9d2c10cAs,8d9h
+实时,h71,s01-h71,2026-10-23T03:29:51.987+08:00,伯克利丁真,LJ,5h5c,Two pair,否,call 5.0; call 25.5,,3h2c7s4d3s,JdJc
+实时,h71,s01-h71,2026-10-23T03:29:51.987+08:00,八六上青山,SB,QsKs,One pair,否,call 25.5,,3h2c7s4d3s,JdJc
+实时,h73,s01-h73,2026-10-23T03:30:57.124+08:00,阿坝干嘛,HJ,10s5s,Two pair,是,call 1.0,bet 9.5; raise 266.0,5h9s10hQhAs,7c3h
+实时,h73,s01-h73,2026-10-23T03:30:57.124+08:00,八六上青山,BTN,10c9d,Two pair,是,call 1.0,raise 76.5,5h9s10hQhAs,7c3h
+实时,h80,s01-h80,2026-10-23T03:33:46.488+08:00,伯克利丁真,CO,5h6h,High card,是,call 1.0,raise 24.5; bet 46.5; raise 346.0,3h4dQd9h,4h2c
+实时,h92,s01-h92,2026-10-23T03:37:15.913+08:00,陈7程,UTG+1,7d5s,Two pair,是,call 1.0,bet 7.5; bet 15.0,9d5hKc9s6s,3c8c
+实时,h92,s01-h92,2026-10-23T03:37:15.913+08:00,阿坝干嘛,UTG,JdQc,One pair,否,call 1.0,call 15.0,9d5hKc9s6s,3c8c
+实时,h96,s01-h96,2026-10-23T03:38:16.560+08:00,阿坝干嘛,SB,7dAd,Two pair,否,call 8.5,call 15.0,10hQcKh10sAc,6cAs
+实时,h100,s01-h100,2026-10-23T03:39:49.638+08:00,阿坝干嘛,CO,8cQc,Two pair,否,call 5.0,call 12.0,QsJs2s6d6c,4d4c
+实时,h109,s01-h109,2026-10-23T03:42:56.508+08:00,许文文啊,HJ,10dKc,Two pair,是,call 1.0,bet 2.5; bet 8.0,2hKh2c9dQh,7h10s
+实时,h109,s01-h109,2026-10-23T03:42:56.508+08:00,阿坝干嘛,BB,10h4h,Flush,否,,call 2.5; call 8.0,2hKh2c9dQh,7h10s
+实时,h119,s01-h119,2026-10-23T03:45:40.187+08:00,阿坝干嘛,LJ,8s8h,Trips,否,raise 5.0; call 19.5,call 14.5,2c8cQsJs7d,QhAd
+实时,h3,s01-h3,2026-10-23T18:16:10.987+08:00,越call越幸,BTN,Ah3h,Full house,否,call 11.0,,3s3dKh6d6h,8hAd
+实时,h3,s01-h3,2026-10-23T18:16:10.987+08:00,芒果与西米,BB,QdKc,Two pair,是,call 11.0,bet 20.0,3s3dKh6d6h,8hAd
+实时,h11,s01-h11,2026-10-23T18:18:28.675+08:00,伯克利丁真,BB,3c2c,Two pair,否,call 9.0,call 11.0,8d2sJc7c7s,9d4h
+实时,h11,s01-h11,2026-10-23T18:18:28.675+08:00,芒果与西米,HJ,5d6d,One pair,是,raise 9.0,bet 11.0,8d2sJc7c7s,9d4h
+实时,h13,s01-h13,2026-10-23T18:19:24.397+08:00,11mg,UTG+2,8h8d,Full house,否,call 1.0,,10s9d10d8c4c,4h4s
+实时,h13,s01-h13,2026-10-23T18:19:24.397+08:00,澈9,CO,As10c,Trips,是,call 1.0,call 7.0; raise 21.5,10s9d10d8c4c,4h4s
+实时,h13,s01-h13,2026-10-23T18:19:24.397+08:00,芒果与西米,LJ,Qd7d,One pair,是,call 1.0,bet 7.0; bet 8.0; call 21.5,10s9d10d8c4c,4h4s
+实时,h27,s01-h27,2026-10-23T18:23:16.383+08:00,蛊惑房,LJ,3c2s,Two pair,否,call 1.0,,3d10c2dQc,8s2c
+实时,h29,s01-h29,2026-10-23T18:24:01.203+08:00,蛊惑房,UTG+2,AcJc,Trips,否,call 1.0; raise 25.0,,4h6cKdJsJh,Ah4d
+实时,h29,s01-h29,2026-10-23T18:24:01.203+08:00,挤,SB,KhQd,Two pair,否,raise 11.0,,4h6cKdJsJh,Ah4d
+实时,h40,s01-h40,2026-10-23T18:27:05.224+08:00,蛊惑房,SB,8d10s,High card,是,call 10.0,bet 27.5; call 0.0,9d2h7c3c5d,2s6c
+实时,h40,s01-h40,2026-10-23T18:27:05.224+08:00,清风拂山岗,CO,KsKh,One pair,是,raise 10.0,raise 47.5,9d2h7c3c5d,2s6c
+实时,h45,s01-h45,2026-10-23T18:29:25.738+08:00,蛊惑房,HJ,QcJh,One pair,是,raise 8.0,bet 21.0,Jc5s7hAd4h,2h3c
+实时,h45,s01-h45,2026-10-23T18:29:25.738+08:00,11mg,SB,Js5d,Two pair,否,,,Jc5s7hAd4h,2h3c
+实时,h45,s01-h45,2026-10-23T18:29:25.738+08:00,伯克利丁真,LJ,5h6d,One pair,是,call 1.0; call 8.0,raise 46.0,Jc5s7hAd4h,2h3c
+实时,h47,s01-h47,2026-10-23T18:30:09.461+08:00,蛊惑房,LJ,8d8h,One pair,是,raise 11.0,bet 27.0,Js3cAh,Jh6d
+实时,h49,s01-h49,2026-10-23T18:31:11.530+08:00,蛊惑房,UTG+2,AhQd,One pair,是,raise 9.0,bet 15.5,8cAs9h4sJc,Qs9c
+实时,h49,s01-h49,2026-10-23T18:31:11.530+08:00,挤,SB,AdKd,One pair,是,call 9.0,raise 52.0,8cAs9h4sJc,Qs9c
+实时,h69,s01-h69,2026-10-23T18:36:12.663+08:00,11mg,CO,4hAc,Two pair,否,,,Ah4d3hJd9h,Jh8s
+实时,h69,s01-h69,2026-10-23T18:36:12.663+08:00,伯克利丁真,UTG+1,8hQh,Flush,是,,bet 6.5,Ah4d3hJd9h,Jh8s
+实时,h79,s01-h79,2026-10-23T18:39:07.816+08:00,AA绝杀死,BTN,7d4d,Flush,是,call 1.0,call 9.5; bet 14.0,Kh3d10d8c9d,Jc5d
+实时,h95,s01-h95,2026-10-23T18:42:27.420+08:00,挤,CO,AhKc,?,否,raise 9.0,,,7c4s
+实时,h104,s01-h104,2026-10-23T18:44:31.661+08:00,挤,UTG+1,2h2s,Two pair,否,call 5.0,,7c9s10d10h3s,5hAc
+实时,h104,s01-h104,2026-10-23T18:44:31.661+08:00,芒果与西米,UTG,KdAh,One pair,是,raise 5.0,bet 14.0,7c9s10d10h3s,5hAc
+实时,h1,s02-h1,2026-10-23T18:45:37.344+08:00,挤,BB,2s2c,Two pair,否,,,9h7s6h6s10h,3c8h
+实时,h1,s02-h1,2026-10-23T18:45:37.344+08:00,澈9,UTG,4d4h,Two pair,是,,bet 11.5,9h7s6h6s10h,3c8h
+实时,h5,s02-h5,2026-10-23T18:46:42.100+08:00,清风拂山岗,BB,JcAs,Two pair,是,raise 6.0,bet 8.5,Qs7d10cJh10d,3d7h
+实时,h4,s04-h4,2026-10-23T21:06:38.343+08:00,陈7程,UTG+1,6h6c,Straight,是,call 11.0,raise 41.5,2c3s5sJc4h,5d10d
+实时,h4,s04-h4,2026-10-23T21:06:38.343+08:00,葡萄牙h,CO,QcQd,One pair,是,raise 11.0,bet 19.0; raise 116.0,2c3s5sJc4h,5d10d
+实时,h5,s04-h5,2026-10-23T21:07:06.817+08:00,反季节a,SB,AdJs,Two pair,否,call 9.0,,QhQcJhAh4h,10h7s
+实时,h5,s04-h5,2026-10-23T21:07:06.817+08:00,爽歪的麻雀,UTG+1,4c5c,Two pair,否,raise 97.5,,QhQcJhAh4h,10h7s
+实时,h13,s04-h13,2026-10-23T21:10:09.495+08:00,爽歪的麻雀,BTN,Ad6d,One pair,是,call 1.0,bet 5.0; bet 9.0,2d8dAs4hQc,Kd4c
+实时,h13,s04-h13,2026-10-23T21:10:09.495+08:00,FatherTM,CO,7s2s,One pair,否,call 1.0,,2d8dAs4hQc,Kd4c
+实时,h26,s04-h26,2026-10-23T21:13:09.444+08:00,伯克利丁真,BB,5c2c,Two pair,否,call 6.0,call 7.0,9d9c5sAh6d,10sAs
+实时,h26,s04-h26,2026-10-23T21:13:09.444+08:00,芒果与西米,CO,KdKs,Two pair,是,raise 6.0,bet 7.0,9d9c5sAh6d,10sAs
+实时,h27,s04-h27,2026-10-23T21:13:46.007+08:00,陈7程,BB,Jc7d,Two pair,否,,,QsJd7s5d,QdKd
+实时,h14,s05-h14,2026-10-23T21:20:48.076+08:00,陌路奇人,UTG+1,4h5c,Two pair,否,,,10c7s4sKd5s,JhAh
+实时,h27,s05-h27,2026-10-23T21:24:15.158+08:00,伯克利丁真,SB,JcJh,One pair,是,raise 11.5,bet 21.0; bet 56.0,7s5c2d6h9h,Qc8d
+实时,h27,s05-h27,2026-10-23T21:24:15.158+08:00,爽歪的麻雀,UTG+1,5h5s,Trips,是,call 1.0; call 11.5,raise 209.0,7s5c2d6h9h,Qc8d
+实时,h27,s05-h27,2026-10-23T21:24:15.158+08:00,FatherTM,UTG,2h6c,Two pair,否,,,7s5c2d6h9h,Qc8d
+实时,h30,s05-h30,2026-10-23T21:25:48.058+08:00,陌路奇人,LJ,QhJc,Trips,否,raise 8.5,call 14.0,7h9cJdJh3c,Ah8c
+实时,h30,s05-h30,2026-10-23T21:25:48.058+08:00,葡萄牙h,BB,3d2d,Two pair,是,,bet 14.0; bet 32.5,7h9cJdJh3c,Ah8c
+实时,h51,s05-h51,2026-10-23T21:34:26.431+08:00,陌路奇人,SB,Jc9s,High card,是,call 1.0,raise 18.5,10c7s3cQd2c,4h6h
+实时,h51,s05-h51,2026-10-23T21:34:26.431+08:00,陈7程,UTG+1,AcJh,High card,是,call 1.0,bet 6.0,10c7s3cQd2c,4h6h
+实时,h57,s05-h57,2026-10-23T21:36:56.981+08:00,许文文啊,BTN,7hQs,Two pair,是,call 1.0,bet 5.5,7s3cJd5sJh,6dKc
+实时,h57,s05-h57,2026-10-23T21:36:56.981+08:00,FatherTM,BB,6h5h,Two pair,否,,call 5.5,7s3cJd5sJh,6dKc
+实时,h66,s05-h66,2026-10-23T21:40:23.698+08:00,芒果与西米,BTN,Kh10s,Two pair,是,raise 9.0,bet 13.0,Kc6sQd10d3d,QhJh
+实时,h66,s05-h66,2026-10-23T21:40:23.698+08:00,FatherTM,LJ,10hJs,One pair,是,call 1.0; call 9.0,call 13.0; bet 33.0,Kc6sQd10d3d,QhJh
+实时,h68,s05-h68,2026-10-23T21:41:02.641+08:00,陌路奇人,BTN,6c6d,Two pair,否,,,2c4s4dJd,6hQh
+实时,h3,s06-h3,2026-10-23T21:43:49.235+08:00,Linsonsea,SB,AhQd,Two pair,是,call 1.0,bet 4.5; bet 10.5,Ad8sQc5s6d,5hKc
+实时,h5,s06-h5,2026-10-23T21:44:35.332+08:00,芒果与西米,UTG,QdQh,One pair,否,raise 5.0; call 9.5,,7s3c4s10h6d,Js3d
+实时,h5,s06-h5,2026-10-23T21:44:35.332+08:00,葡萄牙h,BB,8d8h,One pair,否,raise 42.0,,7s3c4s10h6d,Js3d
+实时,h8,s06-h8,2026-10-23T21:46:23.552+08:00,好运常在ok,SB,10cKs,Two pair,否,call 5.0,call 9.5,AdAsQcKc8d,JhQd
+实时,h10,s06-h10,2026-10-23T21:47:17.675+08:00,Linsonsea,LJ,AdAs,Full house,否,call 1.0; raise 100.0,,5hAc3s5s3h,KdAh
+实时,h29,s06-h29,2026-10-23T21:54:27.425+08:00,三重刘德华,LJ,AcKh,One pair,否,raise 5.5; raise 83.0,,5dAs10s3d,5s8c
+实时,h29,s06-h29,2026-10-23T21:54:27.425+08:00,SKYsong,HJ,AdJd,One pair,否,raise 25.5; raise 115.0,,5dAs10s3d,5s8c
+DB复盘,990013,db-990013,2026-10-09 21:40:52.296000,你好呀,HJ,KsKh,翻前,否,raise 7; allin 100,,,AsAh
+DB复盘,990052,db-990052,2026-10-04 12:49:42.503000,陈7程,HJ,Ad9d,One pair,否,call; call,check; call; check; check,Qd2s3dQsKh,Ah4h
+DB复盘,990050,db-990050,2026-10-03 18:30:01.441000,紧紧呀,LJ,AsKh,Trips,是,raise 23.5; call,check; allin 114,KsKd3d,QdQc
+DB复盘,990049,db-990049,2026-10-02 18:40:27.405000,包赢22,SB,AhKd,翻前,否,raise 33.5; call,,,JdJh
+DB复盘,990048,db-990048,2026-10-02 12:26:01.892000,亚当斯蜜,UTG+1,Ks9h,One pair,否,call,check; call; check; call,Jd4cQc9d2d,Jc6c
+DB复盘,990048,db-990048,2026-10-02 12:26:01.892000,我一个是小,LJ,Kc3c,High card,是,call,check; call; bet 16.5,Jd4cQc9d2d,Jc6c
+DB复盘,990047,db-990047,2026-10-02 12:14:10.513000,热心网友势,SB,9dQh,Straight,是,call; call,check; raise 53; allin 95,Jc8dTs3h,Ac9c
+DB复盘,990042,db-990042,2026-09-28 20:38:33.851000,菜菜子31,SB,KcTd,Two pair,是,,bet 45; call,3cTcKh,QcJc
+DB复盘,990042,db-990042,2026-09-28 20:38:33.851000,八六上青山,HJ,Ks9d,One pair,是,,allin 91,3cTcKh,QcJc
+DB复盘,990041,db-990041,2026-09-28 00:16:17.784000,悍将v1,UTG,JsJc,One pair,是,bet 9,check; allin 257.5,7h6s5d,ThTs
+DB复盘,990041,db-990041,2026-09-28 00:16:17.784000,遛马总冠军,LJ,8d9d,Straight,是,call,allin 48,7h6s5d,ThTs
+DB复盘,990040,db-990040,2026-09-27 23:58:17.282000,伯克利丁真,BB,2sTh,Trips,是,,check; check; allin 70,Ks5s2h2c,5dJc
+DB复盘,990039,db-990039,2026-09-27 23:26:08.582000,dddct,UTG,QhJh,Two pair,否,call; call,check; check; call; check,3dJdThTc5h,AhTd
+DB复盘,990038,db-990038,2026-09-27 23:19:09.964000,羽弦澜兰子,UTG+1,4h6d,Trips,是,,bet 26; call,6s9s6h,As2s
+DB复盘,990038,db-990038,2026-09-27 23:19:09.964000,老爷保佑无,BTN,Jh4s,One pair,是,,raise 110,6s9s6h,As2s
