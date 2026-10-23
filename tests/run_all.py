@@ -8,6 +8,7 @@
     test_env        .env 解析与加载（纯逻辑）
     test_coach      翻后建议引擎（纯逻辑，不需要图）
     test_advice     实时 AI 建议：行动线/技能路由/选项/模型协议（纯逻辑）
+    test_opponent_profile 对手画像：弃牌补全/统计/分类/pin/建议集成（纯逻辑）
     test_clicker    桌面自动点击：坐标/配置/档位映射/安全闸（纯逻辑，不点鼠标）
     test_ai_advice_replay 复盘手牌 → 决策点快照的重建（纯逻辑，不连库不调模型）
     test_dealer     庄位检测（合成图，不依赖照片）
@@ -38,7 +39,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 
 SUITES = ["test_positions.py", "test_env.py", "test_coach.py", "test_advice.py",
-          "test_clicker.py",
+          "test_opponent_profile.py", "test_clicker.py",
           "test_ai_advice_replay.py", "test_dealer.py", "test_roi_reader.py",
           "test_roi_dedup.py", "test_parse.py", "test_frame_state.py",
           "test_state_stream.py", "test_live.py", "test_full_table.py",

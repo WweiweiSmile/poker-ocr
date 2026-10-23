@@ -32,6 +32,7 @@ import urllib.parse
 import urllib.request
 from collections import Counter
 from dataclasses import dataclass, field
+from typing import Iterable
 
 from . import skills
 from .coach import (
@@ -40,6 +41,8 @@ from .coach import (
 )
 from .ground_truth import GroundTruth, compute_ground_truth
 from .hand_track import ActionRecord, FLOP, HandSnapshot, PREFLOP, RIVER, TURN
+from .opponent_profile import (AGGRESSIVE_ARCHETYPES, PASSIVE_ARCHETYPES,
+                               OpponentRead)
 from .preflop_ranges import chart_text, range_verdict
 from .table_dynamics import (is_aggressive_table, is_loose_table,
                              value_heavy_aggression)
@@ -419,6 +422,9 @@ class Situation:
     # 当前改良 outs（coach.Read.outs）。用于区分「成牌+弱听」和「成牌+强听」：
     # 4 张卡顺不该豁免「被统治」判定，8+ 张 combo draw 才该按半诈唬处理。
     outs: int | None = None
+    # 本手在局对手的画像（按 seat_id 对回具体的人）。空 = 没有画像，
+    # 行为退回 `.table_dy` / aggressive_table 的旧口径。
+    opponent_reads: tuple[OpponentRead, ...] = ()
 
     @property
     def street(self) -> str:
@@ -462,13 +468,19 @@ def _precise_texture_en(gt: GroundTruth | None, texture: str | None) -> str | No
 
 
 def build_situation(snap: HandSnapshot,
-                    table_dynamics: str | None = None) -> Situation:
+                    table_dynamics: str | None = None,
+                    opponent_reads: Iterable[OpponentRead] | None = None
+                    ) -> Situation:
     """把快照整理成一次决策的事实。
 
     `table_dynamics` 是根目录 `.table_dy` 的解析文本（见 table_dynamics.py）。
     由调用方显式传入，而不是在这里读文件：单测和离线重放不会因为仓库里恰好
     有一份动态文件而改变结果。
+
+    `opponent_reads` 是 ProfileStore.read_for() 的结果（按本手 seat_id）。
+    没有画像时 `aggressive_table` 仍是 fallback，行为不会退化。
     """
+    reads = tuple(opponent_reads or ())
     read = _read(snap)
     warnings: list[str] = list(snap.warnings)
     n_opp = sum(1 for o in snap.opponents if not o.folded)
@@ -550,6 +562,7 @@ def build_situation(snap: HandSnapshot,
         ground_truth=gt,
         aggressive_table=is_aggressive_table(table_dynamics),
         outs=read.outs if read else None,
+        opponent_reads=reads,
     )
 
 
@@ -613,20 +626,94 @@ def _facing_raise(snap: HandSnapshot) -> bool:
                for a in snap.actions_of(snap.street))
 
 
-def _is_two_pair(sit: Situation) -> bool:
-    label = f"{sit.hand_label_en or ''} {sit.hand_label or ''}".lower()
-    return "two pair" in label or "两对" in label
+# 对手画像改硬指令的门槛：pin 直接信；自动画像要达到 read/stable 门控。
+_READ_CONFIDENCE = 0.65
+
+
+def last_aggressor_seat(snap: HandSnapshot) -> str | None:
+    """本街最后一个 bet/raise 的座位。跟注决策看这个人，不看整桌平均。"""
+    for action in reversed(snap.actions_of(snap.street)):
+        if action.action in ("bet", "raise"):
+            return action.seat_id
+    return None
+
+
+def _reliable_reads(sit: Situation) -> list[OpponentRead]:
+    """本手在局、且可信到能改硬指令的画像。
+
+    · 已弃牌的对手不参与；
+    · unknown 不参与；
+    · tentative（样本 8–14 或置信度不够）只展示，不改硬指令；
+    · 人工 pin 置信度恒为 1，直接参与。
+    """
+    folded = {o.seat_id for o in sit.snap.opponents if o.folded}
+    out: list[OpponentRead] = []
+    for read in sit.opponent_reads:
+        if not read.seat_id or read.seat_id in folded:
+            continue
+        if read.archetype == "unknown":
+            continue
+        if read.source == "pin":
+            out.append(read)
+        elif read.gate in ("read", "stable") and read.confidence >= _READ_CONFIDENCE:
+            out.append(read)
+    return out
+
+
+def decision_read(sit: Situation) -> OpponentRead | None:
+    """这一决策真正该看的那个对手。
+
+    · 面对下注：看本街最后一个下注/加注的人；
+    · 无人下注：只要本手有可信的 LAG/maniac，就看他们 —— 薄价值下注会被
+      他们加注；全是 station/nit 时才按价值分支处理。
+    """
+    reads = _reliable_reads(sit)
+    if not reads:
+        return None
+    if (sit.snap.to_call or 0.0) > 0:
+        seat = last_aggressor_seat(sit.snap)
+        for read in reads:
+            if read.seat_id == seat:
+                return read
+        # 下注的人没有画像：不要拿别的对手的标签替它做决定，留给桌风 fallback。
+        return None
+    # 无人下注时，价值下注的风险来自「还在后面、可能加注的人」。只要本手
+    # 有可信的 LAG/maniac，就不能按薄价值下注（h8 的 BTN 就是这种人）。
+    # 全是 station/nit 时才走价值分支。
+    aggressive = [r for r in reads if r.archetype in AGGRESSIVE_ARCHETYPES]
+    if aggressive:
+        return max(aggressive, key=lambda r: (r.confidence, r.n))
+    return max(reads, key=lambda r: (r.confidence, r.n))
+
+
+def _aggressive_context(sit: Situation) -> bool:
+    """本决策是否按「松浪/松凶在局」处理。画像优先，桌风 fallback。"""
+    read = decision_read(sit)
+    if read is not None:
+        return read.archetype in AGGRESSIVE_ARCHETYPES
+    return sit.aggressive_table
 
 
 def _passive_value_line(sit: Situation) -> bool:
-    """桌风是否把对手本街的多街 aggression 读成价值线。
+    """本街的多街 aggression 是否该读成价值线。
 
+    画像优先：本街下注者若是可信的 station/nit，他的大注/连续下注是价值；
+    若是 LAG/maniac，则不是。没有可用画像时才退回 `.table_dy` 的文本判据。
     只在转牌/河牌、面对下注时触发；翻牌的单条街下注不在此列——那时的价格
     通常还够用，过早弃掉 JJ 这类牌会变成另一种漏洞。
     """
-    return (sit.street in (TURN, RIVER)
-            and (sit.snap.to_call or 0.0) > 0
-            and value_heavy_aggression(sit.table_dynamics))
+    if not (sit.street in (TURN, RIVER)
+            and (sit.snap.to_call or 0.0) > 0):
+        return False
+    read = decision_read(sit)
+    if read is not None:
+        return read.archetype in PASSIVE_ARCHETYPES
+    return value_heavy_aggression(sit.table_dynamics)
+
+
+def _is_two_pair(sit: Situation) -> bool:
+    label = f"{sit.hand_label_en or ''} {sit.hand_label or ''}".lower()
+    return "two pair" in label or "两对" in label
 
 
 def _heads_up_flop_overpair(sit: Situation) -> bool:
@@ -786,6 +873,10 @@ def value_directive(sit: Situation) -> str | None:
     tier = sit.hand_tier
     facing = (sit.snap.to_call or 0.0) > 0
     facing_raise = facing and _facing_raise(sit.snap)
+    aggressive = _aggressive_context(sit)
+    read = decision_read(sit)
+    read_tag = (f" [{read.display_name or read.key} = {read.archetype.upper()}, "
+                f"conf {read.confidence:.2f}]" if read is not None else "")
 
     # **牌型排名优先于牌型名字。** 下面这条必须在所有按分档写的指令之前：
     # 一个「两对」如果枚举下来四分之一的随机牌都比它大，它就不是价值牌，
@@ -797,7 +888,7 @@ def value_directive(sit: Situation) -> str | None:
     # 松浪桌不走这条、交给下面的 aggressive 分支：动作同样是 check，但会补
     # 「让对手先开枪 / 抓诈」的后续计划。
     if (not facing
-            and not sit.aggressive_table
+            and not aggressive
             and sit.hand_tier in (STRONG_MADE, OVERPAIR, TPTK, TP_WEAK, MID_BOTTOM)
             and not (sit.has_draw and (sit.outs or 0) >= 8)
             and (sit.beat_pct or 0.0) >= DOMINATED_BEAT_PCT):
@@ -838,7 +929,7 @@ def value_directive(sit: Situation) -> str | None:
     # 松浪/松凶桌：中等成牌默认不是薄价值牌。对手的范围更宽、更爱加注，
     # OOP 主动下注只会让更差的牌弃掉、更好的牌跟/加。混合桌也走这条：
     # 只要桌上有一个 LAG，就不该把全桌默认成跟注站。
-    if sit.aggressive_table:
+    if aggressive:
         medium = (sit.category == TWO_PAIR
                   or tier in (TPTK, TP_WEAK, MID_BOTTOM))
         if medium and not facing and not (
@@ -847,12 +938,12 @@ def value_directive(sit: Situation) -> str | None:
                     "hand. This medium made hand (two pair / one pair) is a CHECK, "
                     "not a small value bet: a bet folds out the hands you beat and "
                     "gets called or raised by better. Check, let them barrel, and "
-                    "call one bet as a bluff-catcher. Do not bet-fold.")
+                    "call one bet as a bluff-catcher. Do not bet-fold." + read_tag)
         if medium and facing and not facing_raise:
             return ("AGGRESSIVE TABLE — BLUFF-CATCH: a maniac/LAG's single bet is "
                     "not automatically value. CALL one bet with this medium made "
                     "hand; do not fold to a single barrel. Fold only to a raise, "
-                    "an overbet, or a multi-street barrel.")
+                    "an overbet, or a multi-street barrel." + read_tag)
 
     if tier == STRONG_MADE:
         # 精确坚果：枚举结果说「没有任何对手持牌能打败我」。这时模型最常见的
@@ -1105,6 +1196,36 @@ def _is_set_mine_pair(cards: tuple[str, ...] | list[str]) -> bool:
     return ra == rb and ra in "23456789"
 
 
+def render_opponent_reads(sit: Situation) -> list[str]:
+    """把本手在局对手的画像写进事实块。unknown 不输出，tentative 标注。"""
+    active = {o.seat_id: o for o in sit.snap.opponents if not o.folded}
+    rows: list[tuple[str, OpponentRead]] = []
+    for read in sit.opponent_reads:
+        if read.archetype == "unknown" or read.seat_id not in active:
+            continue
+        position = active[read.seat_id].position or read.seat_id
+        rows.append((position, read))
+    if not rows:
+        return []
+    rows.sort(key=lambda item: item[0])
+    lines = ["Opponent reads (per-seat, from local hand history — use these before "
+             "any table-wide label):"]
+    for position, read in rows:
+        name = read.display_name or read.key
+        gate = " [tentative]" if read.gate == "tentative" else ""
+        source = ""
+        if read.source == "pin":
+            source = ", manual pin"
+        elif read.source == "prior":
+            source = ", .table_dy prior"
+        af = f", AF {read.af:g}" if read.af else ""
+        lines.append(
+            f"- {position} {name}: {read.archetype.upper()} "
+            f"(n={read.n}, VPIP {read.vpip:g}%, PFR {read.pfr:g}%{af}, "
+            f"conf {read.confidence:.2f}{source}){gate}")
+    return lines
+
+
 def render_hand_facts(sit: Situation) -> str:
     """把当前局面写成紧凑的手牌历史式文本 —— 模型对这套写法先验最强。"""
     snap = sit.snap
@@ -1200,6 +1321,7 @@ def render_hand_facts(sit: Situation) -> str:
                 f"Implied odds (pocket pair): effective stack / call = "
                 f"{effective / to_call:.0f}:1; flopping a set is 11.8% (1 in 8.5), "
                 f"so 15:1 or better makes set-mining profitable (10:1 with antes).")
+        lines.extend(render_opponent_reads(sit))
     else:
         tier_en = _TIER_EN.get(sit.hand_tier, sit.hand_tier or "unknown")
         lines.append(f"My hand strength: {sit.hand_label_en or 'unreadable'}"
@@ -1255,13 +1377,15 @@ def render_hand_facts(sit: Situation) -> str:
                 f"Explosive pot: {'YES' if sit.explosive_pot else 'no'} ({why})")
         elif snap.bomb_pot:
             lines.append("Explosive pot: YES (bomb-pot banner on screen)")
+        aggressive = _aggressive_context(sit)
         if sit.opponent_strength_en:
             o = sit.opponent_strength_en
             suffix = (" — on this LAG/maniac table, aggression is not automatically "
-                      "value." if sit.aggressive_table else "")
+                      "value." if aggressive else "")
             lines.append(f"Opponent strength from actions: {o['label']} ({o['reason']})"
                          f"{suffix}")
-        if sit.aggressive_table:
+        lines.extend(render_opponent_reads(sit))
+        if aggressive:
             lines.append(
                 "Table read: value-light aggression (LAG/maniac present) — their bets "
                 "and raises are NOT automatically value. Do not thin-value a medium "
@@ -1483,8 +1607,9 @@ their bet is NOT automatically value → do not thin-value OOP; check-call, let 
 do not bet-fold; bluff-catch more.
 - passive preflop + aggressive postflop: preflop calls are wide, postflop bets are not \
 automatically value → treat as a bluff-catching spot, not a value spot.
-When the notes are silent, treat the opponent as unknown — not as a station. Bluffing \
-is dead money only against a station.
+- «Opponent reads» are per-seat: use that opponent's read before table notes; \
+«tentative» is a hint.
+With no notes, treat the opponent as unknown, not a station.
 
 ## The question that decides every bet
 Ask two questions, in order:
@@ -2133,8 +2258,17 @@ class Advice:
     # 「翻前建议 → 最近底池档位」映射；不写进 JSONL，保持输出形状稳定。
     decision_key: tuple = ()
     preset_amounts: tuple[tuple[str, float], ...] = ()
+    # 出这条建议时用到的对手画像快照（seat/type/conf/n/source）。空 = 没有画像。
+    opponent_reads: tuple[OpponentRead, ...] = ()
 
     def to_dict(self) -> dict:
+        reads = [
+            {"seat_id": r.seat_id, "key": r.key,
+             "display_name": r.display_name, "archetype": r.archetype,
+             "confidence": r.confidence, "n": r.n, "source": r.source,
+             "gate": r.gate}
+            for r in self.opponent_reads
+        ]
         return {
             "hand_id": self.hand_id,
             "street": self.street,
@@ -2149,6 +2283,8 @@ class Advice:
             "skill_codes": list(self.skill_codes),
             "duration_ms": self.duration_ms,
             **({"error": self.error} if self.error else {}),
+            # 复盘时能回答「当时用了哪个对手的什么类型/置信度/样本数」。
+            **({"opponent_reads": reads} if reads else {}),
         }
 
 
@@ -2172,7 +2308,8 @@ def advise(sit: Situation, settings: AISettings | None,
                       error, snap.pot, snap.to_call,
                       snap.hero_cards, snap.board,
                       decision_key=snap.decision_key,
-                      preset_amounts=tuple(preset_amounts(snap).items()))
+                      preset_amounts=tuple(preset_amounts(snap).items()),
+                      opponent_reads=tuple(sit.opponent_reads))
 
     if settings is None:
         return make(by_id[fallback_option(sit)],

@@ -149,6 +149,42 @@ cp .env.example .env      # 然后编辑 .env，填入 AI_SERVER_API_KEY
 不用重启；文件不存在时按原来的「未知对手」标准线，不影响启动。`TABLE_DY_FILE`
 可以显式指定路径；启动日志和 JSONL 的 `session_start` 会记录本次生效的动态。
 
+**对手类型画像（默认开启）**：每手结束后，用这一手的行动线 + 摊牌记录更新
+每个对手的本地统计（VPIP / PFR / 3bet / AF / 翻后激进 / open 与下注中位数 /
+摊牌牌型），再用规则评分分成 `station`（松弱/跟注站）、`lag`（松凶）、
+`maniac`（松浪）、`nit`（紧弱）、`tag`（紧凶）。决策时按**本手在局对手**
+取画像：面对下注看最后一个下注的人，无人下注时看还在后面、可能加注的
+LAG/maniac；样本不足的 `unknown` 不改变建议。画像存在
+`data/opponents/profiles.json`（本地、gitignore、原子写），不调用模型。
+
+```bash
+# 默认开启；--no-opponent-profile 回退到 .table_dy
+.venv/bin/python -m poker_ocr.live --ai-advice \
+  --opponent-db data/opponents/profiles.json
+
+# 启动时清空当前池画像
+.venv/bin/python -m poker_ocr.live --ai-advice --reset-opponents
+```
+
+优先级：**人工 pin > 高置信自动画像（n≥15 且 conf≥0.65）> `.table_dy` 按名字 >
+`.table_dy` 整桌 > unknown 基线**。`n<8` 一律 unknown；8–14 只标 `tentative`，
+只软提示、不改硬指令。手牌记录新增 `street_active` / `players_dealt` /
+`seat_meta`，因此即使弃牌徽章漏读，也能从「街初在局、街末不在局」补出
+弃牌，算出真正的 VPIP 分母。爆炸底池的 5BB 强制前注属于**被动入池**：
+不补翻前 check、不计入 VPIP 分母，单独记在 `bomb_pot_hands` /
+`passive_entry_hands`，避免「人人都在池里」把 VPIP 拉低。旧日志可重放补全：
+
+```bash
+# 手牌记录 → 画像（JSONL 里有 state 帧会自动重放进 LiveHandTracker）
+.venv/bin/python tools/rebuild_opponent_profiles.py \
+  --hands hands/1023.hands.json logs/live.states.jsonl \
+  --out data/opponents/profiles.json
+
+# 人工修正 / 查看
+.venv/bin/python tools/rebuild_opponent_profiles.py --pin "芒果与西米=maniac"
+.venv/bin/python tools/rebuild_opponent_profiles.py --unpin "芒果与西米" --list
+```
+
 **爆炸底池识别**有两条线索，任一成立就写入 `Explosive pot: YES`：
 
 1. **屏幕横幅（权威）**：爆炸底池开局屏幕中央会弹「幸运暴击」四个黄字 +

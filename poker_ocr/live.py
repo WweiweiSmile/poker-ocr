@@ -76,6 +76,9 @@ from .profile import Profile
 from .roi_dedup import pixel_mad
 from .roi_reader import hero_turn_method
 from .state_stream import DEFAULT_ROI_THREADS, StateStream
+from .opponent_profile import (DEFAULT_PROFILE_PATH as DEFAULT_OPPONENT_DB,
+                               ProfileStore, format_read_line,
+                               load_profile_store, pool_key_from_blinds)
 from .table_dynamics import TableDynamics, load_table_dynamics
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -957,6 +960,7 @@ class LiveProcessor:
                  confirm_click: bool = False,
                  table_dynamics_loader: Callable[[], TableDynamics] | None = None,
                  table_dynamics_text: str = "",
+                 profile_store: ProfileStore | None = None,
                  incident_dir: Path | None = None,
                  incident_frames: int = 10,
                  incident_max: int = DEFAULT_INCIDENT_MAX,
@@ -1015,6 +1019,9 @@ class LiveProcessor:
         # 启动时已加载的文本：第一手不必再打一遍「已加载」；之后文件变化才提示。
         self._table_dynamics_text = table_dynamics_text
         self._table_dynamics_error: str | None = None
+        # 对手画像仓库：None = 关闭（--no-opponent-profile 或无 AI 建议）。
+        self.profile_store = profile_store
+        self.profile_updates = 0
         self.advice_count = 0
         # hand_id → 这一手已经给出的建议（按时间顺序）。换手 / 退出时并进
         # `hand` 记录，让「完整行动线 + 模型建议」落在同一个手牌记忆条目里，
@@ -1315,9 +1322,27 @@ class LiveProcessor:
                                 self.log("  [建议] 牌桌动态已清空，"
                                          "回到「未知对手」标准线")
                             self._table_dynamics_text = dynamics
+                if self.profile_store is not None:
+                    # `.table_dy` 按名字写的类型是画像的先验；换桌/改文件后
+                    # 下一个决策点就生效，不必重启。
+                    self.profile_store.set_table_dynamics(dynamics)
+                # 本手在局对手的画像。没有画像时为空，build_situation 仍按
+                # .table_dy 的 aggressive_table 走旧口径，不会退化。
+                reads: dict = {}
+                if self.profile_store is not None:
+                    self.profile_store.set_pool_key(pool_key_from_blinds(
+                        point.blinds, point.table_size))
+                    try:
+                        reads = self.profile_store.read_for(point.opponents)
+                    except Exception as exc:      # noqa: BLE001
+                        self.log(f"  [对手] 画像读取失败："
+                                 f"{type(exc).__name__}: {exc}")
+                        reads = {}
                 # 一个坏快照不能把整条拉流链路带下去
                 try:
-                    situation = build_situation(point, table_dynamics=dynamics)
+                    situation = build_situation(
+                        point, table_dynamics=dynamics,
+                        opponent_reads=reads.values())
                 except Exception as exc:      # noqa: BLE001
                     self.log(f"  [建议] 局面构建失败：{type(exc).__name__}: {exc}")
                     return
@@ -1410,10 +1435,43 @@ class LiveProcessor:
         finished = self.hand_tracker.take_finished()
         if finished is not None:
             self._write_hand(finished, partial=False)
+            self._update_profiles(finished)
         if final:
             current = self.hand_tracker.take_current()
             if current is not None:
                 self._write_hand(current, partial=True)
+
+    def _update_profiles(self, hand: dict) -> None:
+        """手牌结束后更新对手画像；终端打一行本手看到的类型。"""
+        store = self.profile_store
+        if store is None:
+            return
+        # 换手空档：没有 hero 手牌、也没有任何行动线，不是一手真实的牌。
+        # 把它计入画像会把「没入池」当成一次 VPIP 机会，系统性压低 VPIP。
+        if not hand.get("hero_cards") and not any(
+                street.get("actions") for street in hand.get("streets") or []):
+            return
+        try:
+            observations = store.update_hand(hand)
+        except Exception as exc:                  # noqa: BLE001
+            self.log(f"  [对手] 画像更新失败：{type(exc).__name__}: {exc}")
+            return
+        if not observations:
+            return
+        self.profile_updates += 1
+        store.save()
+        if self.quiet:
+            return
+        printed: set[str] = set()
+        for obs in observations:
+            if obs.seat_id is None or obs.seat_id in printed:
+                continue
+            printed.add(obs.seat_id)
+            read = store.read_one(obs.display_name or obs.opponent_key,
+                                  seat_id=obs.seat_id)
+            if read.archetype == "unknown":
+                continue
+            self.log(f"  [对手] {format_read_line(read, obs.position)}")
 
     def _confirm_click(self, advice) -> bool:
         """在终端问一次是否执行：只认 y / n，其他按键忽略。
@@ -1601,9 +1659,17 @@ class LiveProcessor:
         amount = f" {option.amount}BB" if option.amount is not None else ""
         tail = f"（{advice.error}）" if advice.error else ""
         elapsed = f"耗时 {advice.duration_ms / 1000:.1f}s"
+        reads = [r for r in getattr(advice, "opponent_reads", ())
+                 if r.archetype != "unknown"]
+        read_tag = ""
+        if reads:
+            brief = "，".join(
+                f"{r.display_name or r.key} {r.archetype.upper()} "
+                f"{r.confidence:.2f}" for r in reads[:2])
+            read_tag = f"｜对手 {brief}"
         if not _use_ansi():
             self.log(f"  [建议] {advice.street} ⇒ {option.label}{amount}"
-                     f"｜{elapsed}｜{advice.reason}{tail}")
+                     f"｜{elapsed}{read_tag}｜{advice.reason}{tail}")
             return
         # 模型结果只出现一次，别被滚动的识别日志淹没：
         # 留白 → 高亮横幅（街 + 动作 + 金额 + 耗时）→ 粗体理由 → 留白。
@@ -1615,6 +1681,9 @@ class LiveProcessor:
         self.log(f"{style}{bar}{_ANSI_RESET}")
         self.log(f"{style}{headline}{_ANSI_RESET}")
         self.log(f"{style}{bar}{_ANSI_RESET}")
+        if read_tag:
+            self.log(f"{_ANSI_ADVICE_TEXT} 对手：{read_tag.lstrip('｜')}"
+                     f"{_ANSI_RESET}")
         self.log(f"{_ANSI_ADVICE_TEXT} 理由：{advice.reason}{tail}{_ANSI_RESET}")
         self.log("")
 
@@ -1850,6 +1919,8 @@ class LiveProcessor:
     def summary(self) -> dict:
         extra = {"cards_unreliable_skips": self.cards_unreliable_skips,
                  "hands_skipped_no_hero": self.hands_skipped_no_hero}
+        if self.profile_store is not None:
+            extra["hands_profiled"] = self.profile_updates
         if self.clicker is not None:
             extra.update({
                 "clicks": self.click_count,
@@ -1959,6 +2030,15 @@ def build_parser() -> argparse.ArgumentParser:
                     help="轮到我时按当前街拼提示词并调用 AI 给一个选项"
                          "（默认开启；用 --no-ai-advice 关闭。需要 AI_SERVER_API_KEY / "
                          "AI_SERVER_BASE_URL / AI_SERVER_MODEL；仅 roi 模式）")
+    ap.add_argument("--opponent-db", type=Path, default=None,
+                    help="对手画像 JSON（默认读 OPPONENT_DB，否则 "
+                         f"{DEFAULT_OPPONENT_DB}）。画像缺失/损坏时按无画像运行")
+    ap.add_argument("--opponent-profile", action=argparse.BooleanOptionalAction,
+                    default=True,
+                    help="按本手在局对手的本地历史画像调整建议（默认开启；"
+                         "--no-opponent-profile 回退到 .table_dy）")
+    ap.add_argument("--reset-opponents", action="store_true",
+                    help="启动时清空当前牌桌池的对手画像（不影响其它池）")
     ap.add_argument("--advice-style", choices=PROMPT_STYLES,
                     default=DEFAULT_PROMPT_STYLE,
                     help="提示词风格：lean=契约+事实+现代范围框架（默认）；"
@@ -2132,6 +2212,7 @@ def main(argv: list[str] | None = None) -> int:
     advice_runner = None
     hand_tracker = None
     clicker = None
+    profile_store = None
     table_dynamics_text = ""
     if args.ai_advice:
         if not env_load.found:
@@ -2179,6 +2260,35 @@ def main(argv: list[str] | None = None) -> int:
             _log(f"[建议] {dynamics.path} 为空（只有注释），按「未知对手」标准线")
         else:
             _log(f"[建议] 未找到 {dynamics.path}，按「未知对手」标准线")
+        if args.opponent_profile:
+            initial_pool = (pool_key_from_blinds(initial_blinds,
+                                                 len(profile.seats))
+                            if initial_blinds is not None else "")
+            db_path = (args.opponent_db
+                       or (os.environ.get("OPPONENT_DB") or "").strip()
+                       or DEFAULT_OPPONENT_DB)
+            profile_store = load_profile_store(db_path, initial_pool)
+            if profile_store.load_error:
+                _log(f"[对手] 画像读取失败，按空画像运行："
+                     f"{profile_store.load_error}")
+            profile_store.set_table_dynamics(table_dynamics_text)
+            if args.reset_opponents:
+                removed = profile_store.clear(
+                    pool_key=initial_pool or None)
+                profile_store.save(force=True)
+                _log(f"[对手] 已清空当前池画像（{removed} 人）："
+                     f"{profile_store.path}")
+            _log(f"[对手] 画像库 {profile_store.path}"
+                 f"（池 {profile_store.pool_key or '未定（首手盲注后确定）'}，"
+                 f"玩家 {len(profile_store.players)}，"
+                 f"版本 {profile_store.classifier_version}）")
+            if profile_store.players:
+                known = sum(1 for p in profile_store.players.values()
+                            if p.preflop_opps > 0)
+                _log(f"[对手] 已有样本的玩家 {known} 人；"
+                     f"n<{8} 只显示不改变建议")
+        else:
+            _log("[对手] 已关闭（--no-opponent-profile），回退到 .table_dy")
         sampling = []
         if settings.thinking is not None:
             sampling.append(f"thinking={settings.thinking}")
@@ -2264,6 +2374,10 @@ def main(argv: list[str] | None = None) -> int:
         "resolution": None,
         # 本会话生效的牌桌动态原文。没有就不写这个键，保持旧记录形状。
         **({"table_dynamics": table_dynamics_text} if table_dynamics_text else {}),
+        **({"opponent_db": str(profile_store.path),
+            "opponent_profile": True,
+            "pool_key": profile_store.pool_key}
+           if profile_store is not None else {"opponent_profile": False}),
     })
 
     mailbox = LatestFrame()
@@ -2283,6 +2397,7 @@ def main(argv: list[str] | None = None) -> int:
         clicker=clicker, confirm_click=not args.no_confirm,
         table_dynamics_loader=load_table_dynamics if args.ai_advice else None,
         table_dynamics_text=table_dynamics_text,
+        profile_store=profile_store,
         incident_dir=(None if args.no_incident else args.incident_dir),
         incident_frames=args.incident_frames,
         incident_max=args.incident_max,
@@ -2472,6 +2587,11 @@ def main(argv: list[str] | None = None) -> int:
         writer.close()
         if state_stream is not None:
             state_stream.close()
+        if profile_store is not None:
+            ok = profile_store.save(force=True)
+            _log(f"[对手] 画像已落盘：{profile_store.path}"
+                 f"（{len(profile_store.players)} 人）"
+                 + ("" if ok else f"；失败：{profile_store.last_save_error}"))
 
         _log(f"\n会话结束：读帧 {reader.grabbed}，处理 {processor.processed}，"
              f"接受 {summary['accepted_frames']}，"

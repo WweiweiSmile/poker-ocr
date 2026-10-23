@@ -30,3 +30,6 @@ server.crt
 server.key
 /:memory:.ses
 /hands/
+
+# 对手画像（玩家昵称/统计，本地保存，不入库）
+data/opponents/

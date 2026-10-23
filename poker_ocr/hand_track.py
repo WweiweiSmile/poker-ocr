@@ -86,6 +86,10 @@ ACTION_ORDER = ("SB", "BB", "UTG", "UTG+1", "UTG+2", "LJ", "HJ", "CO", "BTN")
 # 街末对账的金额容差：底池/下注都是 0.01BB 精度的文本
 RECONCILE_TOLERANCE = 0.02
 
+# 爆炸底池强制前注：每人 5BB。横幅没抓到时，用「ante≥5 且翻前无动作」
+# 兜底识别，不能把这条强制前注当成一次翻前行动机会。
+BOMB_ANTE_BB = 5.0
+
 
 def street_of_board(board_len: int) -> str | None:
     """公共牌张数 → 街。1/2 张是动画中间态，返回 None（不推进街）。"""
@@ -238,6 +242,20 @@ class _LiveHand:
     cards_unreliable: bool = False
     # 本手看到过爆炸底池横幅。开局出现一次，之后一直保留到换手。
     bomb_pot: bool = False
+    # hero 的座位 id（只用于落库时给 ProfileStore 锚定「谁不是对手」）
+    hero_seat_id: str | None = None
+    # 街 → 该街开始时仍在局（已发牌、未弃牌、未离桌）的座位。
+    # VPIP/PFR 的分母必须按「机会」算：这些人在这条街都有行动机会，
+    # 不能用「观察到的动作数」当分母（见 docs/对手类型识别-设计.md 4.2）。
+    street_start_active: dict[str, set[str]] = field(default_factory=dict)
+    # 当前仍在局的座位（每帧更新）。街末和手末用它和 start_active 的差集
+    # 补出视频流漏掉的弃牌。
+    active: set[str] = field(default_factory=set)
+    # 本街曾经在局过的座位（含中途弃牌的人）。补过牌时只看「街末还在」
+    # 的人，所以这个集合只作审计用途。
+    street_seen: dict[str, set[str]] = field(default_factory=dict)
+    # 已经做过补全的街，避免 finish_current/take_finished 重复补
+    finalized_streets: set[str] = field(default_factory=set)
 
     def street_actions(self, street: str) -> list[ActionRecord]:
         return [a for a in self.actions if a.street == street]
@@ -344,11 +362,20 @@ class LiveHandTracker:
 
         if self._is_new_hand(state, cards, board_len):
             if self.hand is not None:
+                # 正常换手（不是 finish_current 主动收手）也要补全最后一街：
+                # 弃牌徽章漏读时，最后几帧的 active 差集就是全部证据。
+                self._finalize_street(self.hand, self.hand.street, None,
+                                      at_hand_end=True)
                 self.last_finished = copy.deepcopy(self.hand)
             self._start_hand(state, cards, board_len, board)
 
         hand = self.hand
         assert hand is not None
+        hand.hero_seat_id = state.hero_seat_id or hand.hero_seat_id
+
+        # 这一帧仍在局的人。弃牌徽章漏读时，街末就是靠它和街初快照的差集
+        # 补出弃牌；不只看 action=="fold"（实测大量弃牌徽章根本没读到）。
+        current_active = self._active_seats(state)
 
         # 手牌/位置在遮挡帧里可能读空，只更新有值的
         if cards:
@@ -378,8 +405,14 @@ class LiveHandTracker:
         if street is not None and street != hand.street and board_len >= 3:
             # 旧街已经结算：先用它的最终底池补上中间漏抓的跟注，再换街
             self._reconcile_street(hand, street, state)
+            # 补弃牌/过牌必须在换街之前：start_active 是旧街开始时的在局集合，
+            # current_active 是这一帧（新街）的在局集合，差集就是旧街上
+            # 已经弃牌、但徽章一帧都没抓到的人。
+            self._finalize_street(hand, hand.street, current_active, state=state)
             hand.street = street
             hand.pot_start.setdefault(street, state.pot_before_street)
+            hand.street_start_active.setdefault(street, set(current_active))
+            hand.street_seen.setdefault(street, set()).update(current_active)
             # **不能在这里按桌上的下注额重置基线**：那一刻的下注往往就是本街
             # 第一个动作（比如翻牌刚下的注），重置会把「他下注了」抹平。
             # 基线保持「上一街的下注额」，于是 0 → 2 仍然能被反推成下注。
@@ -389,6 +422,11 @@ class LiveHandTracker:
             hand.board = board
 
         self._record_actions(state, hand)
+        # 记录完本帧动作后再更新在局集合：本帧的弃牌徽章已经落成 fold，
+        # 街末补弃牌时不会重复补。
+        hand.active = set(current_active)
+        hand.street_start_active.setdefault(hand.street, set(current_active))
+        hand.street_seen.setdefault(hand.street, set()).update(current_active)
         # 起始筹码在翻前逐帧补齐：开场那几帧筹码可能还没渲染（或读成 0），
         # 等读到后手时用「后手 + 已投入」反推，保证整手的套池比例不漏算。
         # 放在街推进/行动记录之后：换街那一帧要按**新街**回看上一街的投入，
@@ -503,6 +541,9 @@ class LiveHandTracker:
         """主动结束当前手牌（All-in 徽章消失），等真正的新手信号再开新手。"""
         if self.hand is None:
             return
+        # 手末再补一次：河牌打完/全下摊牌时没有「下一街」可以触发街末补全。
+        self._finalize_street(self.hand, self.hand.street, None,
+                              at_hand_end=True)
         hand = copy.deepcopy(self.hand)
         self.last_finished = hand
         self._await_hand = hand
@@ -645,6 +686,10 @@ class LiveHandTracker:
             pot=state.pot,
             pot_before_street=state.pot_before_street,
             bomb_pot=state.bomb_pot,
+            hero_seat_id=state.hero_seat_id or None,
+            active=self._active_seats(state),
+            street_start_active={street: self._active_seats(state)},
+            street_seen={street: self._active_seats(state)},
         )
         hand.pot_start[street] = state.pot_before_street
         # 基线：接管链路时桌上可能已经有下注/加注，先把它当当前水位
@@ -971,6 +1016,98 @@ class LiveHandTracker:
             hand.last_index[(street, p.seat_id)] = len(hand.actions) - 1
             hand.baseline[(street, p.seat_id)] = amount
 
+    # ─────────────────────── 弃牌 / 过牌补全 ───────────────────────
+
+    @staticmethod
+    def _active_seats(state: FrameState) -> set[str]:
+        """这一帧仍在局（已发牌、未弃牌、未离桌）的座位。
+
+        弃牌后 `in_hand` 仍然是 True（status=folded），所以不能只看 in_hand。
+        空座/带入中/暂离的人 `status` 不是 playing，会被排除。
+        """
+        return {p.seat_id for p in state.players
+                if p.in_hand and p.fold is not True
+                and p.status not in ("folded", "buying_in", "away",
+                                     "sitting_out")}
+
+    def _seat_info(self, hand: _LiveHand, seat_id: str,
+                   state: FrameState | None = None) -> tuple[str | None,
+                                                              str | None]:
+        """补记录时给座位找名字/位置：当前帧 > 座位缓存 > 起始筹码 > 行动线。"""
+        if state is not None:
+            for p in state.players:
+                if p.seat_id == seat_id:
+                    if p.name or p.position:
+                        return p.name, p.position
+        name, position = self._seat_meta.get(seat_id, (None, None))
+        if name or position:
+            return name, position
+        entry = hand.start_stacks.get(seat_id)
+        if entry:
+            return entry.get("name"), entry.get("position")
+        for a in reversed(hand.actions):
+            if a.seat_id == seat_id and (a.name or a.position):
+                return a.name, a.position
+        shown = hand.shows.get(seat_id)
+        if shown:
+            return shown.get("name"), shown.get("position")
+        return None, None
+
+    def _finalize_street(self, hand: _LiveHand, street: str,
+                         current_active: set[str] | None,
+                         *, state: FrameState | None = None,
+                         at_hand_end: bool = False) -> None:
+        """街末/手末补全：漏读的弃牌 + 已经轮过且没动作的过牌。
+
+        视频流里弃牌徽章经常整条街都抓不到；但「街开始时在局、街末已经不在局」
+        是可靠的结构证据。过牌更保守：只有这一街**没有任何 bet/raise** 时才补，
+        因为一旦有人下注，没记录到动作的人更可能是跟注（金额对账会先处理），
+        把它写成 check 会污染行动线。
+        """
+        if street in hand.finalized_streets:
+            return
+        start = set(hand.street_start_active.get(street) or ())
+        if not start:
+            return
+        acts = hand.street_actions(street)
+        # 爆炸底池的「翻前」只是每人强制交 5BB 前注，没有行动。这里不能补
+        # check/fold：那些 check 会变成一次假的「翻前机会」，把 VPIP 分母
+        # 拉大、把被动入池算成弃牌。有真实 call/raise 时才按正常街处理。
+        bomb_ante = bool(hand.blinds and
+                         (hand.blinds.ante or 0.0) >= BOMB_ANTE_BB)
+        if ((hand.bomb_pot or bomb_ante) and street == PREFLOP
+                and not any(not a.inferred for a in acts)):
+            hand.finalized_streets.add(street)
+            return
+        current = set(hand.active if current_active is None else current_active)
+        recorded_folds = {a.seat_id for a in acts if a.action == "fold"}
+
+        # ① 弃牌：街初在局、街末不在局、又没有 fold 记录的座位。
+        for seat_id in sorted(start - current - recorded_folds):
+            name, position = self._seat_info(hand, seat_id, state)
+            hand.actions.append(ActionRecord(
+                street=street, seat_id=seat_id, name=name, position=position,
+                action="fold", is_hero=seat_id == hand.hero_seat_id,
+                inferred=True))
+            hand.last_index[(street, seat_id)] = len(hand.actions) - 1
+
+        acts = hand.street_actions(street)
+        acted = {a.seat_id for a in acts}
+        all_in = set(hand.all_ins) | {a.seat_id for a in acts if a.all_in}
+        aggressive = any(a.action in AGGRESSIVE for a in acts)
+
+        # ② 过牌：街末仍在局、这一街完全没动作、没有全下，且没有人下注。
+        # 手末的翻前不补：所有人弃牌到 BB 时，BB 是直接收池，不是「过牌」。
+        if not aggressive and not (at_hand_end and street == PREFLOP):
+            for seat_id in sorted((start & current) - acted - all_in):
+                name, position = self._seat_info(hand, seat_id, state)
+                hand.actions.append(ActionRecord(
+                    street=street, seat_id=seat_id, name=name,
+                    position=position, action="check",
+                    is_hero=seat_id == hand.hero_seat_id, inferred=True))
+                hand.last_index[(street, seat_id)] = len(hand.actions) - 1
+        hand.finalized_streets.add(street)
+
     @staticmethod
     def _action_rank(p: PlayerState) -> int:
         """按行动顺序排序；位置读不到时保持 state.players 顺序。"""
@@ -1183,8 +1320,7 @@ class LiveHandTracker:
         self.last_finished = None
         return self._hand_dict(hand) if hand is not None else None
 
-    @staticmethod
-    def _hand_dict(hand: _LiveHand) -> dict:
+    def _hand_dict(self, hand: _LiveHand) -> dict:
         out = {
             "hand_id": hand.hand_id,
             "hero_cards": list(hand.hero_cards),
@@ -1210,6 +1346,40 @@ class LiveHandTracker:
                 for rec in hand.snapshot()
             ],
         }
+        if hand.hero_seat_id:
+            out["hero_seat_id"] = hand.hero_seat_id
+        # 每街开始时的在局座位。对手画像的「机会」分母从这里来；旧记录没有
+        # 这个键，ProfileStore 会退回 start_stacks，再不行就跳过该手的 VPIP。
+        if hand.street_start_active:
+            out["street_active"] = {
+                street: sorted(seats)
+                for street, seats in hand.street_start_active.items()
+                if seats
+            }
+            first = hand.street_start_active.get(hand.start_street)
+            if first:
+                out["players_dealt"] = len(first)
+        # 座位元数据（名字/位置/起始筹码），只给确实在局的人。名字是画像键的
+        # 来源；没有名字的座位由 ProfileStore 用 temp key 兜底。
+        seat_meta: dict[str, dict] = {}
+        for entry in hand.start_stacks.values():
+            seat_meta[entry["seat_id"]] = {
+                "seat_id": entry["seat_id"],
+                "name": entry.get("name"),
+                "position": entry.get("position"),
+                "stack": entry.get("stack"),
+            }
+        for seat_id in {s for seats in hand.street_start_active.values()
+                        for s in seats}:
+            item = seat_meta.setdefault(seat_id, {"seat_id": seat_id})
+            if item.get("name") is None or item.get("position") is None:
+                name, position = self._seat_info(hand, seat_id)
+                if item.get("name") is None:
+                    item["name"] = name
+                if item.get("position") is None:
+                    item["position"] = position
+        if seat_meta:
+            out["seat_meta"] = [seat_meta[key] for key in sorted(seat_meta)]
         # 起始筹码（含前注/盲注之前的值）。复跑控制台靠它重建 hero 剩余筹码和
         # 有效筹码；没有它整手只能按 unknown 跑，套池/隐含赔率约束全部失效。
         if hand.start_stack is not None:
