@@ -24,7 +24,8 @@ sys.path.insert(0, str(ROOT))
 from poker_ocr.advice import _LEAN_SYSTEM  # noqa: E402
 from poker_ocr.preflop_ranges import (  # noqa: E402
     CHART_ADDITIONS, OPEN_POSITIONS, RFI, chart_text, expand, hand_key,
-    open_frequency, range_verdict, sb_completable,
+    is_set_mine_pair, is_speculative, open_frequency, range_verdict,
+    sb_completable,
 )
 
 FAILS: list[str] = []
@@ -220,6 +221,80 @@ def test_isolation_range_tightens_over_limpers() -> None:
           "无人入池时不该有隔离判定")
 
 
+def test_set_mine_pairs_below_tt() -> None:
+    """TT 以下（22-99）都按买 set 玩；TT+ 才是超对价值。
+
+    2026-10-23 用户口径：平均 3-4 人底池，99 翻牌约 79% 见高张、77 约 92%，
+    没中 set 的超对太容易被高张/更大对子统治。
+    """
+    check(is_set_mine_pair("99") and is_set_mine_pair("77")
+          and is_set_mine_pair("22"), "22-99 应判 set-mine 对")
+    check(not is_set_mine_pair("TT") and not is_set_mine_pair("JJ")
+          and not is_set_mine_pair("A4s"), "TT+/非对子不该判 set-mine 对")
+
+    v = range_verdict("CO", ("9h", "9d"))
+    text = v.render() if v else ""
+    check("set-mine" in text and "value/isolation" not in text,
+          f"99 CO 应按 set-mine 渲染：{text}")
+
+    loose = "松弱玩家，跟注站，很少主动加注"
+    tt = range_verdict("CO", ("Th", "Td"), table_dynamics=loose)
+    check("value/isolation" in (tt.render() if tt else ""),
+          f"TT CO 仍是超对价值：{tt.render() if tt else None}")
+
+    # 有 limper 时也一样：99 仍是 set-mine，不是价值隔离
+    v1 = range_verdict("CO", ("9h", "9d"), table_dynamics=loose, limpers=1)
+    text1 = v1.render() if v1 else ""
+    check("set-mine" in text1 and "value/isolation" not in text1,
+          f"99 面对 1 个 limper 仍是 set-mine：{text1}")
+
+
+def test_speculative_hands_not_value_isolation() -> None:
+    """#990052：A4s CO、1 个 limper，模型把它说成「value/isolation」。
+
+    松弱跟注站不弃牌，隔离不了；A4s 对 1 个 limper 只有 ~55%，2-3 家更差
+    （36% / 28%）。它在收紧后的范围里，但加注理由只能是「死钱 + 主动权，
+    预期多人池」—— 这手牌的真正价值是坚果同花听牌的隐含赔率。
+    """
+    loose = "松弱玩家，跟注站，很少主动加注"
+
+    check(is_speculative("A4s") and is_speculative("54s")
+          and is_speculative("J9s"), "小同花 A / 同花连张应判投机牌")
+    check(not is_speculative("ATs") and not is_speculative("ATo")
+          and not is_speculative("KQs") and not is_speculative("77"),
+          "ATs/KQs/对子不该判投机牌")
+
+    for limpers in (1, 2):
+        v = range_verdict("CO", ("Ah", "4h"), table_dynamics=loose, limpers=limpers)
+        check(v is not None and v.isolation_ok is True,
+              f"A4s CO 面对 {limpers} 个 limper 仍在收紧范围里")
+        text = v.render() if v else ""
+        check("SPECULATIVE" in text and "not a value hand" in text,
+              f"A4s 应标明是投机牌而不是价值牌：{text}")
+        check("value/isolation" not in text,
+              f"A4s 不该被说成 value/isolation：{text}")
+        check("over-limp" in text, f"A4s 应给出 over-limp 选项：{text}")
+
+    # 3 个 limper 出局时，不能套「dominated offsuit」的理由（A4s 是同花）
+    out = range_verdict("CO", ("Ah", "4h"), table_dynamics=loose, limpers=3)
+    check(out is not None and out.isolation_ok is False, "A4s 3 limper 应出局")
+    text = out.render() if out else ""
+    check("speculative" in text.lower() and "over-limp" in text,
+          f"出局的 A4s 应给「便宜看翻牌」的理由：{text}")
+    check("Dominated offsuit" not in text,
+          f"A4s 是同花，不能说成 dominated offsuit：{text}")
+
+    # 真正的价值牌仍走 value/isolation
+    ato = range_verdict("CO", ("Th", "Ad"), table_dynamics=loose, limpers=2)
+    check(ato is not None and ato.isolation_ok is True, "ATo 2 limper 可隔离")
+    check("value/isolation" in (ato.render() if ato else ""),
+          "ATo 是价值牌，应保留 value/isolation")
+
+    jj = range_verdict("LJ", ("Jc", "Jd"), table_dynamics=loose, limpers=2)
+    check("value/isolation" in (jj.render() if jj else ""),
+          "JJ 是价值牌，不该走投机牌文案")
+
+
 def test_prompt_hierarchy_table_dynamics_first() -> None:
     """提示词必须把优先级写清楚：桌风 > 图表默认 > 通用启发。"""
     check("Priority (highest first)" in _LEAN_SYSTEM, "提示词缺优先级段")
@@ -291,6 +366,8 @@ def main() -> int:
         test_sb_complete_requires_playability,
         test_small_pair_overlimp_exception, test_table_dynamics_outranks_chart,
         test_isolation_range_tightens_over_limpers,
+        test_set_mine_pairs_below_tt,
+        test_speculative_hands_not_value_isolation,
         test_sb_low_straight_note,
         test_prompt_hierarchy_table_dynamics_first, test_utg2_exists,
         test_prompt_chart_matches_code, test_open_frequency_ramps_up_by_position,

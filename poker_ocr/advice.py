@@ -39,7 +39,7 @@ from .coach import (
     WEAK_DRAW, board_texture, opponent_strength, parse_cards, read_hand,
 )
 from .ground_truth import GroundTruth, compute_ground_truth
-from .hand_track import ActionRecord, HandSnapshot, PREFLOP, RIVER, TURN
+from .hand_track import ActionRecord, FLOP, HandSnapshot, PREFLOP, RIVER, TURN
 from .preflop_ranges import chart_text, range_verdict
 from .table_dynamics import is_loose_table, value_heavy_aggression
 
@@ -620,6 +620,23 @@ def _passive_value_line(sit: Situation) -> bool:
             and value_heavy_aggression(sit.table_dynamics))
 
 
+def _heads_up_flop_overpair(sit: Situation) -> bool:
+    """单挑翻牌、超对、面对一枪加注且赔率不差 → 至少跟一枪。
+
+    2026-10-23 用户口径：KK 在 8d10c4c 单挑翻牌被 BB check-raise 一枪，
+    「一对 vs 加注 → 弃」把超对也一起弃了，太紧弱。超对不是边际一对：
+    对手的加注范围里仍有顶对/听牌，22.5 跟 68 只需要 25% 胜率。只有
+    多人池、转/河、或加注大到赔率不够（跟注额 > 半个底池）时才弃。
+    """
+    if sit.hand_tier != OVERPAIR or sit.street != FLOP:
+        return False
+    if (sit.opponents_in_hand or 0) != 1:
+        return False
+    pot = sit.snap.pot or 0.0
+    to_call = sit.snap.to_call or 0.0
+    return pot > 0 and 0 < to_call <= 0.5 * pot
+
+
 # ─────────────────────────── 爆炸底池 ───────────────────────────
 
 # 爆炸底池的前注是固定金额：每个参与者在翻前正好交 5BB（8 人局 40BB、
@@ -780,6 +797,30 @@ def value_directive(sit: Situation) -> str | None:
                 f"Check and give up; call one small bet as a bluff-catcher only when the "
                 f"price is very good. If you bet, it is a bluff with no fold equity.")
 
+    # 2026-10-23 用户口径：TT 以下（22-99）都按买 set 玩。没中 set 时，
+    # 超对/中对只是中等牌 —— 3-4 人池里 99 有 ~79%、77 有 ~92% 的概率见高张，
+    # 不能拿「超对」的名头去价值下注/打光。TT+ 不受这条约束。
+    if _is_set_mine_pair(sit.snap.hero_cards) and tier in (OVERPAIR, MID_BOTTOM):
+        n = sit.opponents_in_hand or 1
+        way = f"{n + 1}-way"
+        if facing_raise:
+            return (f"SET-MINE PAIR ({way}) vs AGGRESSION: 22-99 unimproved is only "
+                    "one pair — FOLD to the raise/all-in. Do not stack off; no set, "
+                    "no big pot.")
+        if facing:
+            if _passive_value_line(sit):
+                return ("TABLE DYNAMICS OVERRIDE: 22-99 unimproved is a medium hand and "
+                        "the opponent's raises/barrels are value-heavy — FOLD to the "
+                        "turn/river barrel. Do not pay off with one pair.")
+            return (f"SET-MINE PAIR ({way}): 22-99 unimproved is a medium hand / "
+                    "bluff-catcher — call one small bet (up to ~1/2 pot), fold to a "
+                    "large bet or multi-street barrel. Do not stack off.")
+        pick = _pick_size(sit, 0.4)
+        hint = f" Use option {pick}." if pick else ""
+        return (f"SET-MINE PAIR ({way}): 22-99 unimproved is a MEDIUM hand, not a value "
+                "stack-off — overcards dominate it. Bet small (1/3–1/2 pot) for "
+                "protection or check; do not build a big pot." + hint)
+
     if tier == STRONG_MADE:
         # 精确坚果：枚举结果说「没有任何对手持牌能打败我」。这时模型最常见的
         # 退化是「怕一个牌面上不存在的更大的牌」而只跟（990010 坚果顺 → call）。
@@ -859,8 +900,19 @@ def value_directive(sit: Situation) -> str | None:
                     "pot-control; do not build a huge pot. Fold to a raise or to "
                     "multi-street aggression.")
         if facing_raise:
-            return ("ONE PAIR vs AGGRESSION: overpair/top pair facing a raise or all-in — "
-                    "FOLD unless you have a set, two pair, or a strong draw. One pair is "
+            if _heads_up_flop_overpair(sit):
+                pot = sit.snap.pot or 0.0
+                to_call = sit.snap.to_call or 0.0
+                bep = to_call / (pot + to_call) * 100
+                return (f"ONE PAIR vs AGGRESSION — CALL: heads-up on the flop, an "
+                        f"overpair is not the marginal one pair the table note refers "
+                        f"to. The raise range still contains top pair and draws, and "
+                        f"you need only {bep:.0f}% equity to call. Do NOT fold to a "
+                        "single raise — call and re-evaluate the turn. Re-raise only "
+                        "if you can name a draw-heavy range.")
+            return ("ONE PAIR vs AGGRESSION: top pair, or an overpair in a multiway "
+                    "pot / on the turn or river, facing a raise or all-in — FOLD "
+                    "unless you have a set, two pair, or a strong draw. One pair is "
                     "not a stack-off hand; do not pay off a raise.")
         if facing:
             if _passive_value_line(sit):
@@ -1002,6 +1054,22 @@ def _is_pocket_pair(cards: tuple[str, ...] | list[str]) -> bool:
     """两张底牌同点数。翻前抽 set 的隐含赔率只对口袋对有意义。"""
     return (len(cards) == 2 and all(len(c) >= 2 for c in cards)
             and cards[0][0] == cards[1][0])
+
+
+def _is_set_mine_pair(cards: tuple[str, ...] | list[str]) -> bool:
+    """22-99：只按「买 set」看的口袋对；TT+ 才算超对价值。
+
+    3-4 人池里高张统治的概率太高（99 翻牌 ~79% 见高张，77 ~92%），
+    没中 set 的超对/中对不能按价值牌打光。见 `preflop_ranges.is_set_mine_pair`。
+    """
+    if len(cards) != 2 or not all(len(c) >= 2 for c in cards):
+        return False
+    ra, rb = cards[0][0].upper(), cards[1][0].upper()
+    if ra == "1":                       # '10h' 这种写法
+        ra = "T"
+    if rb == "1":
+        rb = "T"
+    return ra == rb and ra in "23456789"
 
 
 def render_hand_facts(sit: Situation) -> str:
@@ -1228,7 +1296,9 @@ def _build_messages_skills(sit: Situation) -> tuple[str, str]:
         "output any amount — output only the id.",
         "3. When facing a bet, actually compare pot odds: the equity needed to call comes from "
         "«Odds & Probability Quick Reference»; compare it against your hand strength / draw "
-        "equity — fold if short, call or raise if enough.",
+        "equity — fold if short, call or raise if enough. For draws, count implied odds as "
+        "AT MOST 2 percentage points: call only when (equity + 2%) >= the break-even "
+        "equity; otherwise FOLD — do not pay to chase.",
         "4. Preflop there is no made-hand equity to compare: use the sizing tables in the "
         "«Preflop» skills, by position, number of prior raises, and number of opponents.",
         "5. Default order of thought: with a strong made hand, first ask «bet or raise for "
@@ -1261,18 +1331,19 @@ def _build_messages_skills(sit: Situation) -> tuple[str, str]:
         "board. Do not default to the smallest size.",
         "6. Strong draw (8+ outs) with no bet in front → betting (semi-bluff) is preferred — "
         "**heads-up only**: with 3+ opponents in the pot, check instead, because a draw has "
-        "no fold equity against a calling field. Facing a bet, compare the stated estimated "
-        "equity with the break-even equity; do "
-        "not fold a draw that has enough equity.",
+        "no fold equity against a calling field. Facing a bet, use the equity + 2% implied "
+        "gate from rule 3: call only if it clears the break-even; otherwise fold.",
         "7. The user facts include an explicit «Value directive» when one of these rules "
         "applies. It is a default for strong made hands; the «Table dynamics» section "
         "overrides it when it describes the opponent's aggression as value-heavy. In "
         "particular, a Value directive that says «call a normal-sized bet» does NOT bind "
         "you to call a turn/river barrel with one pair or two pair when the table notes "
         "say that line is value-heavy.",
-        "8. One pair is not a stack-off hand: overpair/top pair facing a raise or all-in "
-        "→ fold unless you have a set, two pair, or a strong draw. Do not call off a "
-        "large bet with one pair.",
+        "8. One pair is not a stack-off hand, but do not auto-fold it: heads-up on the "
+        "flop, an overpair (TT+) facing a single raise is a CALL — the raise range still "
+        "contains top pair and draws. Fold top pair / marginal one pair, and fold an "
+        "overpair to multiway aggression, a turn/river barrel, or a raise that gives bad "
+        "odds.",
         "9. Before raising a strong hand, check whether the board allows a better hand: "
         "three or more of one suit → a flush is possible; a paired board → a full house "
         "or quads are possible. A straight/two pair/set is NOT the nuts then. On such a "
@@ -1310,7 +1381,8 @@ def _build_messages_skills(sit: Situation) -> tuple[str, str]:
         "(more marginal hands) and size up, and never slow-play strong hands. Their "
         "raises and multi-street barrels are value-heavy: fold marginal made hands "
         "(including two pair on a paired board) instead of paying them off, unless you "
-        "have a set/straight/flush or a strong draw with the right price;",
+        "have a set/straight/flush or a strong draw with the right price. A heads-up "
+        "flop overpair is not marginal — call one raise;",
         "- tight / rarely bluffs / nit: fold marginal bluff-catchers, do not pay off, "
         "value-bet tighter (fewer marginal value hands), respect raises, and bluff more "
         "selectively;",
@@ -1391,8 +1463,11 @@ defaults (ranges, sizings) are not math — table dynamics may change them.
 limp as the first player in, except an SB complete or a small pocket pair (22-66) \
 over-limping for 1BB to set-mine.
 3. Postflop: judge the calling range and board texture first; then value/check/size.
-4. Call only when your equity beats the stated break-even equity. Implied odds need \
-position and stack depth.
+4. Call only when your equity beats the stated break-even equity. For draws, count \
+implied odds as AT MOST 2 percentage points: you may call only when (draw equity + 2%) \
+is at least the break-even; otherwise FOLD — do not pay to chase. Example: break-even \
+29%, draw equity 18% → 18 + 2 = 20 < 29 → FOLD. Unquantified "implied odds" is never a \
+reason to call.
 5. Table dynamics outrank the chart and every generic heuristic here; they never override \
 computed equity or pot odds.
 6. If calling covers Hero's stack, the decision is all-in or fold.
@@ -1415,7 +1490,10 @@ widen or narrow what is playable. One exception — a small pocket pair (22-66) 
 for 1BB to set-mine even when the chart says OUT. A non-pair hand never qualifies. \
 This chart is RFI (unopened pot). Over limpers the isolation range is tighter: use the \
 limper note on that line, and never treat "IN the open range" as an isolation license. \
-Isolation never moves a hand into an earlier seat's open-raise range.
+Isolation never moves a hand into an earlier seat's open-raise range. \
+Speculative hands over limpers (A2s-A9s, suited connectors/gappers): raise for \
+initiative and dead money, not value isolation — expect calls, and over-limping for \
+1BB is fine.
 3-bet: value QQ+/AK; bluffs A5s-A2s, KQs, KJs vs late opens; 3x IP, 4x OOP.
 Cold-call IP: 22-99, 54s-JTs, KTs, QJs; no offsuit broadways vs early opens.
 BB vs late open: defend wide; 3-bet linear 55+, A9s+, KTs+, ATo+, KQo.
@@ -1434,20 +1512,23 @@ the calling stations come along with any draw or top pair, and a draw has no mad
 to charge them with. Check; call only when the price is right. (The program withholds \
 the bet/raise options in that multiway spot; heads-up it does not.)
 - One pair: one bet, then pot-control; do not stack off.
-- Facing a raise or a multi-street barrel from a passive player: FOLD one pair and non-nut \
-made hands. Their line is value.
+- Pocket pairs 22-99 are set-mines: unimproved (overpair/underpair) they are MEDIUM \
+hands — bet small/check, never stack off on an overpair, especially 3+ way.
+- Facing a raise or a multi-street barrel from a passive player: FOLD marginal one pair \
+(top pair, middle/bottom pair) and non-nut made hands. A heads-up flop overpair calls one \
+raise — the range still has top pair/draws.
 - MDF assumes an opponent who bluffs. This table does not — fold more than MDF says.
 
 ## Explosive pot
 «Explosive pot: YES» (bomb banner, or 5BB per player) means wide ranges and many two \
 pair/trips. Top pair/overpair is a MEDIUM hand — pot-control it.
 
-## Table dynamics (user-provided, when present — outranks the chart)
+## Table dynamics (user-provided, when present)
 It is the primary strategic layer and outranks the chart and every generic heuristic above: \
 loose-passive → no bluffs, value-bet big, respect raises, widen preflop; nit → steal more, \
 fold marginal; loose-aggressive → trap, call down lighter; tight-aggressive → straightforward. \
-It never overrides computed hand strength or pot odds. When it changes the line, say which \
-tendency drove it.
+It overrides the default «unknown opponent» assumption and never overrides computed hand \
+strength or pot odds. When it changes the line, say which tendency drove it.
 - If the table says raises are rare (loose-passive), limping is cheap: a small pair may \
 over-limp for 1BB even out of position. Do not cite "limping invites raises" unless the \
 dynamics actually say raises are common — check the table text, not the generic fear.

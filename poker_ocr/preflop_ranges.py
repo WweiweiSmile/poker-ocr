@@ -202,6 +202,36 @@ def is_small_pair(key: str) -> bool:
     return len(key) == 2 and key[0] == key[1] and key[0] in "23456"
 
 
+def is_set_mine_pair(key: str) -> bool:
+    """22-99：只按「买 set」玩的口袋对；TT+ 才算超对价值。
+
+    2026-10-23 用户按当前松弱桌定的口径：平均 3-4 人底池，TT 以下的口袋对
+    没中 set 时太容易被歪中的高张统治 —— 99 翻牌约 79% 至少见一张高张，
+    77 约 92%。所以 77-99 不能再按「超对=价值牌」打光，和 22-66 一样按
+    set-mine 处理（可以小加注拿主动，但翻后没中 set 就是中等牌）。
+    """
+    return len(key) == 2 and key[0] == key[1] and key[0] in "23456789"
+
+
+def is_speculative(key: str) -> bool:
+    """小同花 A / 同花连张、隔张 —— 赚隐含赔率的牌，不是价值牌。
+
+    A4s 这类牌翻牌听花只有 10.9%、河牌成花 6.4%，顺子只有轮子；绝大多数
+    翻牌只是 A 高或弱对。它在收紧后的隔离范围里（1-2 个 limper），但 raise
+    的理由是「死钱 + 主动权、预期多人池」，不是「价值隔离」—— 松弱跟注站
+    不会弃牌，隔离不了。它真正的价值是坚果同花听牌的隐含赔率，而这恰恰
+    偏好便宜的多人池。
+    """
+    if len(key) != 3 or key[2] != "s":
+        return False
+    hi, lo = key[0], key[1]
+    if hi == "A" and lo in "23456789":      # A2s-A9s；ATs+ 算价值
+        return True
+    if hi not in "AKQ" and RANKS.index(hi) - RANKS.index(lo) <= 2:
+        return True                          # 同花连张/隔张：54s-JTs、64s-J9s
+    return False
+
+
 def hand_key(cards) -> str:
     """('Jh','Ks') → 'KJo'。"""
     a, b = cards[0], cards[1]
@@ -272,6 +302,12 @@ class Verdict:
 
     `in_range` 是 RFI（无人入池）口径；`isolation_ok` 是「前面有 N 个 limper」
     的口径 —— 用 N 个更早位置的 RFI 范围近似：人越多，能隔离的牌越强。
+
+    在隔离范围里的牌还分两类：`is_speculative` 为真的投机牌（小同花 A、
+    同花连张/隔张）只给「死钱 + 主动权、预期多人池」的理由，不给
+    「value/isolation」—— 对松弱跟注站既隔离不了，也不是价值牌。
+    `is_set_mine_pair` 为真的 22-99 只给 set-mine 口径：可以小加注拿主动，
+    但没中 set 的超对是中等牌，不按价值牌打光。
     """
 
     hand: str
@@ -289,12 +325,25 @@ class Verdict:
             return f"Preflop range: {self.hand} from {self.position} — {self.note}"
         if self.limpers > 0 and self.in_range and self.isolation_ok is not None:
             if self.isolation_ok:
-                if is_small_pair(self.hand):
+                if is_set_mine_pair(self.hand):
                     text = (f"Preflop range: {self.hand} is IN the {self.position} RFI "
                             f"range, and still IN the tighter {self.isolation_position} "
-                            f"range over {self.limpers} limper(s). A small pair is a "
-                            f"set-mine here: over-limp for 1BB, or make a small raise "
-                            f"for initiative — do not bloat the pot.")
+                            f"range over {self.limpers} limper(s). A set-mine pair "
+                            f"(22-99) here: over-limp for 1BB, or make a small raise "
+                            f"for initiative — do not bloat the pot; an unimproved "
+                            f"overpair is only a medium hand multiway.")
+                elif is_speculative(self.hand):
+                    # 2026-10-23 #990052：A4s CO、1 个 limper，模型把「IN open
+                    # range」说成了 value/isolation。对跟注站它隔离不了，也不是
+                    # 价值牌 —— 小同花 A / 同花连张赚的是坚果花/顺子的隐含赔率，
+                    # 加注的正当理由是死钱 + 主动权，且预期被跟。
+                    text = (f"Preflop range: {self.hand} is IN the {self.position} RFI "
+                            f"range, and still IN the tighter {self.isolation_position} "
+                            f"range over {self.limpers} limper(s) — but this is a "
+                            f"SPECULATIVE hand, not a value hand. Raise for initiative "
+                            f"and the dead money (antes), expecting calls and a "
+                            f"multiway pot; over-limping for 1BB to keep the pot small "
+                            f"is equally fine. Do not call it a value isolation.")
                 else:
                     text = (f"Preflop range: {self.hand} is IN the {self.position} RFI "
                             f"range, and still IN the tighter {self.isolation_position} "
@@ -302,8 +351,14 @@ class Verdict:
                             f"value/isolation — but expect calls, so size for value, "
                             f"not to fold them out.")
                 if self.loose:
-                    text += (" Loose-passive table: they call wide — isolate the hands "
-                             "that flop well multiway, not dominated offsuit aces.")
+                    if is_speculative(self.hand):
+                        text += (" Loose-passive table: they call wide and rarely "
+                                 "fold — a raise will not isolate them; it only builds "
+                                 "a pot you will often miss. Size small or over-limp.")
+                    elif not is_set_mine_pair(self.hand):
+                        text += (" Loose-passive table: they call wide — isolate the "
+                                 "hands that flop well multiway, not dominated offsuit "
+                                 "aces.")
                 return text
             # 2026-10-23 h3：A8o CO、3 个 limper，模型看到「IN CO open range」
             # 就开到 11BB；4 家跟注后 A8o 变成弱牌。RFI 表是「无人入池」的表，
@@ -315,18 +370,42 @@ class Verdict:
             if is_small_pair(self.hand):
                 text += (" A small pocket pair may still over-limp for 1BB to set-mine; "
                          "do not raise it just to isolate.")
-            else:
+            elif is_speculative(self.hand):
+                # suited 的投机牌不能套「dominated offsuit」那套理由 —— A4s/A5s
+                # 是坚果花潜力，出局时该给的是「便宜看翻牌」，不是「踢脚弱弃掉」。
+                text += (" This is a speculative hand (nut-flush / straight implied "
+                         "odds): over-limp for 1BB to see a cheap flop, or fold — "
+                         "do not raise it just to isolate.")
+            elif self.hand.endswith("o"):
                 text += (" Dominated offsuit hands play badly multiway (weak kicker, "
                          "reverse implied odds). FOLD, or over-limp for 1BB only if you "
                          "can fold easily when you flop one pair.")
+            else:
+                text += (" FOLD as a raise; an over-limp for 1BB is a thin alternative "
+                         "only on a passive table.")
             return text
         if self.in_range:
             text = (f"Preflop range: {self.hand} is IN the {self.position} open "
                     f"range (first position that opens it: {self.first_position}). "
                     f"Chart says RAISE.")
-            if self.loose:
-                text += (" Loose-passive table: the chart is a floor here — raise for "
-                         "value/isolation and expect calls.")
+            if is_set_mine_pair(self.hand):
+                # 2026-10-23 用户口径：TT 以下（22-99）都按买 set 玩。
+                # 加注可以拿主动，但没中 set 的超对只是中等牌，不能打光。
+                text += (" It is a set-mine pair (22-99): raise for initiative, but "
+                         "treat an unimproved overpair as a medium hand — no set, "
+                         "no big pot.")
+                if self.loose:
+                    text += (" Loose-passive table: 3-4 way pots are the norm — "
+                             "expect calls and play it as a set-mine.")
+            elif self.loose:
+                if is_speculative(self.hand):
+                    text += (" Loose-passive table: the chart is a floor here — a raise "
+                             "is fine for initiative and dead money, but this is a "
+                             "speculative hand: expect a multiway pot and do not "
+                             "overplay one pair.")
+                else:
+                    text += (" Loose-passive table: the chart is a floor here — raise "
+                             "for value/isolation and expect calls.")
             return text
         if self.first_position:
             text = (f"Preflop range: {self.hand} is OUTSIDE the {self.position} open "

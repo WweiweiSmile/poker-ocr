@@ -810,6 +810,89 @@ def test_one_pair_does_not_stack_off_against_a_raise() -> None:
     check("VALUE/DEFEND" in (d or ""), f"顶对面对普通下注应允许跟注：{d}")
 
 
+def test_heads_up_flop_overpair_calls_a_single_raise() -> None:
+    """2026-10-23 h10：KK 在 8dTc4c 单挑翻牌被 BB check-raise 一枪。
+
+    68 池跟 22.5（25% 盈亏平衡），超对不是边际一对；价值指令必须给 CALL，
+    不能再写「一对面对加注就弃」。多人池 / 转河 / 赔率差时才弃。
+    """
+    from poker_ocr.hand_track import ActionRecord, OpponentSnapshot, StreetRecord
+
+    def spot(opponents, *, to_call=22.5, pot=68.0):
+        return build_situation(make_point(
+            street="flop", board=("8d", "10c", "4c"), hero_cards=("Kh", "Kc"),
+            opponents=opponents, to_call=to_call, pot=pot,
+            streets=(
+                StreetRecord("preflop", 0.0, ()),
+                StreetRecord("flop", 19.5, (
+                    ActionRecord("flop", "hero", "svsvbmbm", "HJ", "bet", 13.0,
+                                 False, True),
+                    ActionRecord("flop", "a", "老王", "BB", "raise", 35.5,
+                                 False, False),
+                )),
+            )))
+
+    heads_up = spot(
+        (OpponentSnapshot("a", "老王", "BB", 53.0, 35.5, False),))
+    d = value_directive(heads_up) or ""
+    check("ONE PAIR vs AGGRESSION" in d and "CALL" in d and "Do NOT fold" in d,
+          f"单挑翻牌超对面对一枪加注应跟：{d}")
+
+    # 多人池仍然弃：不是无脑跟
+    multi = spot((
+        OpponentSnapshot("a", "老王", "BB", 53.0, 35.5, False),
+        OpponentSnapshot("b", "小李", "CO", 90.0, 0.0, False),
+    ))
+    d2 = value_directive(multi) or ""
+    check("FOLD" in d2 and "CALL" not in d2,
+          f"多人池超对面对加注仍应弃：{d2}")
+
+    # 赔率太差（跟注额超过半个底池）→ 弃
+    bad = spot((OpponentSnapshot("a", "老王", "BB", 53.0, 35.5, False),),
+               to_call=40.0, pot=50.0)
+    d3 = value_directive(bad) or ""
+    check("FOLD" in d3 and "CALL" not in d3,
+          f"赔率不够时超对仍应弃：{d3}")
+
+
+def test_set_mine_pairs_do_not_stack_off() -> None:
+    """22-99 没中 set 时只是中等牌：超对不能打光，3-4 人池尤其明显。
+
+    2026-10-23 用户口径：TT 以下都按买 set 玩。99 在 752 上是超对，但 3 人池
+    里高张统治概率高（99 翻牌 ~79% 见高张），不能按价值牌 bet big / 打光。
+    """
+    from poker_ocr.hand_track import ActionRecord, OpponentSnapshot, StreetRecord
+
+    opps = (OpponentSnapshot("a", "老王", "BB", 97.0, 0.0, False),
+            OpponentSnapshot("b", "小李", "CO", 97.0, 0.0, False))
+    sit = build_situation(make_point(hero_cards=("9h", "9d"),
+                                     board=("7s", "5d", "2c"),
+                                     opponents=opps))
+    d = value_directive(sit) or ""
+    check("SET-MINE PAIR" in d and "MEDIUM" in d,
+          f"99 超对应给 set-mine/medium 指令：{d}")
+    check("stack-off" in d or "stack off" in d,
+          f"99 超对不该鼓励打光：{d}")
+
+    # TT 仍是超对价值，不该降级成 set-mine
+    tt = build_situation(make_point(hero_cards=("Th", "Td"),
+                                    board=("7s", "5d", "2c"),
+                                    opponents=opps))
+    check("SET-MINE" not in (value_directive(tt) or ""),
+          f"TT 不该走 set-mine 文案：{value_directive(tt)}")
+
+    # 面对加注 → 明确弃牌，不拿一对打光
+    raise_street = StreetRecord("flop", 6.0, (
+        ActionRecord("flop", "a", "老王", "BB", "raise", 20.0, False, False),))
+    raised = build_situation(make_point(
+        hero_cards=("9h", "9d"), board=("7s", "5d", "2c"), opponents=opps,
+        to_call=14.0, pot=30.0,
+        streets=(StreetRecord("preflop", 0.0, ()), raise_street)))
+    d2 = value_directive(raised) or ""
+    check("SET-MINE PAIR" in d2 and "FOLD" in d2,
+          f"99 面对加注应弃牌：{d2}")
+
+
 def test_straight_is_not_nuts_on_a_flush_board() -> None:
     """三张同花面：顺子不是坚果，不能被价值指令推着加注。
 
@@ -1218,6 +1301,18 @@ def test_prompt_contains_full_action_line_and_options() -> None:
         check(oid in user, f"选项 {oid} 应出现在提示词里")
 
 
+def test_prompt_has_implied_odds_cap() -> None:
+    """听牌跟注：隐含赔率最多算 2 个百分点，权益 + 2% 不够就弃。"""
+    point = make_point(to_call=30.0, pot=75.0, hero_stack=100.0)
+    sit = build_situation(point)
+    for style in ("lean", "skills"):
+        system, _ = build_messages(sit, style=style)
+        check("AT MOST 2 percentage points" in system,
+              f"{style} 提示词应写明隐含赔率上限：\n{system}")
+        check("equity + 2%" in system,
+              f"{style} 提示词应写明 equity + 2% 的口径：\n{system}")
+
+
 def test_prompt_is_english_only() -> None:
     """JEV 等模型对中文的识别较差：喂给模型的提示词不能有中文文案。
 
@@ -1407,7 +1502,12 @@ def test_lean_prompt_is_compact_and_range_based() -> None:
     check("## Postflop" in system and "C-bet" in system, "lean 应有翻后框架")
     check("Break-even equity" in user or "My hand strength" in user,
           "计算事实仍应完整")
-    check(len(system) < 6000, f"lean system 应显著变短，实际 {len(system)}")
+    # 6000 是 lean 正文还没有 GROUND TRUTH + 生成式 RFI 表时的预算；现在
+    # 正文 ~7.5k + GT ~1.2k。上限 9300 只留防膨胀余量（其中约 250 字符是
+    # 「听牌隐含赔率最多 2 个百分点」的硬闸），下面还有
+    # len(with_skills) > 2× 的相对检查，防止 lean 膨胀回 skills 版。
+    check(len(system) < 9300,
+          f"lean system 应保持紧凑（< 9300），实际 {len(system)}")
 
     with_skills, _ = build_messages(sit, style="skills")
     check("Coach Skill Catalog" in with_skills, "skills 风格应保留")
@@ -2058,6 +2158,8 @@ def main() -> int:
         test_options_no_bet_are_labelled_bets,
         test_value_directive_covers_strong_hands,
         test_one_pair_does_not_stack_off_against_a_raise,
+        test_heads_up_flop_overpair_calls_a_single_raise,
+        test_set_mine_pairs_do_not_stack_off,
         test_straight_is_not_nuts_on_a_flush_board,
         test_prompt_renders_value_directive_and_draw_equity,
         test_prompt_renders_implied_odds_for_pocket_pair,
@@ -2074,6 +2176,7 @@ def main() -> int:
         test_covered_stack_has_only_fold_or_all_in,
         test_prompt_marks_inferred_actions,
         test_prompt_contains_full_action_line_and_options,
+        test_prompt_has_implied_odds_cap,
         test_prompt_preflop_has_no_strength_facts,
         test_table_dynamics_parse_and_load,
         test_table_dynamics_in_prompt,
