@@ -4,14 +4,15 @@ import {
   Skeleton, Space, Spin, Switch, Tag, Tooltip,
 } from 'antd'
 import {
-  ArrowLeftOutlined, ReloadOutlined, StarFilled, StarOutlined,
-  ThunderboltOutlined, WarningOutlined,
+  ArrowLeftOutlined, DeleteOutlined, ReloadOutlined, StarFilled,
+  StarOutlined, ThunderboltOutlined, WarningOutlined,
 } from '@ant-design/icons'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate, useParams } from 'react-router-dom'
 import { api, errorMessage } from '../api'
 import type {
-  ComparisonDecision, HandComparison, HandDetail, Meta, Version, VersionBlock,
+  ComparisonDecision, HandComparison, HandDeleteResult, HandDetail, Meta,
+  Version, VersionBlock,
 } from '../types'
 import {
   BoardCards, BucketTag, HandCards, QualityBadge, SourceTag,
@@ -205,7 +206,7 @@ function DecisionCard({ decision }: { decision: ComparisonDecision }) {
 export default function HandDetailPage() {
   const { handId } = useParams()
   const navigate = useNavigate()
-  const { message } = App.useApp()
+  const { message, modal } = App.useApp()
   const queryClient = useQueryClient()
   const id = Number(handId)
   const [selectedVersions, setSelectedVersions] = useState<number[]>([])
@@ -277,6 +278,35 @@ export default function HandDetailPage() {
     onError: (error) => message.error(errorMessage(error)),
   })
 
+  const deleteMutation = useMutation({
+    mutationFn: () => api.delete<HandDeleteResult>(`/hands/${id}`),
+    onSuccess: () => {
+      message.success(`手牌 #${id} 已删除`)
+      queryClient.invalidateQueries({ queryKey: ['hands'] })
+      queryClient.invalidateQueries({ queryKey: ['meta'] })
+      queryClient.invalidateQueries({ queryKey: ['health'] })
+      navigate('/hands')
+    },
+    onError: (error) => message.error(errorMessage(error)),
+  })
+
+  const confirmDelete = () => {
+    modal.confirm({
+      title: `删除手牌 #${id}`,
+      content: '导入手牌会软删除，已跑结果保留；复盘手牌只会从控制台隐藏，不会修改 review_hands。',
+      okText: '删除',
+      okButtonProps: { danger: true },
+      cancelText: '取消',
+      async onOk() {
+        try {
+          await deleteMutation.mutateAsync()
+        } catch {
+          throw new Error('delete failed')
+        }
+      },
+    })
+  }
+
   const blocks: ComparisonDecision[] = useMemo(() => {
     if (comparison.data) return comparison.data.decisions
     return (detail.data?.decisions || []).map((d) => ({
@@ -313,6 +343,11 @@ export default function HandDetailPage() {
       <div className="detail-back">
         <Button type="text" icon={<ArrowLeftOutlined />} onClick={() => navigate('/hands')}>手牌库</Button>
         <span className="mono muted">#{hand.id}</span>
+        {hand.source !== 'db' ? (
+          <Tag color={hand.source === 'live' ? 'geekblue' : 'cyan'}>
+            {hand.sourceLabel}{hand.externalId ? ` · ${hand.externalId}` : ''}
+          </Tag>
+        ) : null}
         {hand.duplicate ? <Tag color="purple">内容重复</Tag> : null}
       </div>
 
@@ -351,6 +386,9 @@ export default function HandDetailPage() {
               </button>
               <Button type="primary" icon={<ThunderboltOutlined />} disabled={blocked} onClick={() => setRerunOpen(true)}>
                 重跑这手
+              </Button>
+              <Button danger icon={<DeleteOutlined />} onClick={confirmDelete}>
+                删除这手
               </Button>
             </Space>
           </div>

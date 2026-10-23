@@ -21,6 +21,10 @@ export interface LastRun {
 
 export interface HandSummary {
   id: number
+  source: 'db' | 'review' | 'live' | string
+  sourceLabel: string
+  externalId: string | null
+  importBatchId: number | null
   title: string
   heroCards: string
   board: string
@@ -369,6 +373,7 @@ export interface Health {
   ok: boolean
   db: { ok: boolean; detail: string; host: string; name: string }
   reviewHands: { ok: boolean; detail: string | null }
+  imports?: { ok: boolean; detail: string | null; count: number | null }
   aiKey: { ok: boolean; detail: string }
   worker: {
     alive: boolean
@@ -396,6 +401,7 @@ export interface Meta {
     engine: { commit: string | null; dirty: boolean }
   }
   tags: string[]
+  handSources?: { value: string; label: string; count: number }[]
   markStatuses: string[]
   runStatuses: RunStatus[]
   limits: {
@@ -415,4 +421,80 @@ export interface HandsPage {
   items: HandSummary[]
   filters: Record<string, unknown>
   tagOptions: string[]
+}
+
+export type ImportFormat = 'auto' | 'review' | 'live'
+export type ImportStatus = 'imported' | 'updated' | 'duplicate' | 'invalid' | 'error'
+
+export interface ImportIssue {
+  index?: number
+  line?: number | null
+  reason: string
+}
+
+export interface ImportSample {
+  index: number
+  source: string
+  externalId: string | null
+  title: string | null
+  heroCards: string | null
+  board: string | null
+  heroPosition: string | null
+  status: ImportStatus
+  decisionCount: number
+  quality: Quality | null
+  reason: string | null
+}
+
+export interface ImportResult {
+  dryRun: boolean
+  batchId: number | null
+  source: 'review' | 'live' | string
+  sourceLabel: string
+  container: 'json' | 'jsonl' | string
+  filename: string | null
+  total: number
+  hands: number
+  imported: number
+  updated: number
+  duplicates: number
+  invalid: number
+  errors: number
+  skippedNonHand: number
+  skippedPartial: number
+  skippedMidHand: number
+  sessionCount: number
+  dedupe: boolean
+  allowInvalid: boolean
+  samples: ImportSample[]
+  issues: ImportIssue[]
+}
+
+export interface ImportBatch {
+  id: number
+  user_id: number
+  source: string
+  sourceLabel: string
+  container: string
+  filename: string | null
+  total_records: number
+  imported_count: number
+  updated_count: number
+  duplicate_count: number
+  invalid_count: number
+  error_count: number
+  status: string
+  error_msg: string | null
+  summary: Record<string, unknown>
+  createdAt: string | null
+  finishedAt: string | null
+}
+
+export interface HandDeleteResult {
+  requested: number
+  deleted: number
+  imported: number
+  reviewHidden: number
+  missing: number[]
+  handId?: number
 }

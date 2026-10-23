@@ -19,8 +19,8 @@ from .db import Database
 from .errors import ApiError
 from .runner import Runner
 from .schemas import (
-    MarkPatch, RunCreate, RunPreview, VersionClone, VersionCreate,
-    VersionMetaPatch,
+    HandDelete, ImportHands, MarkPatch, RunCreate, RunPreview, VersionClone,
+    VersionCreate, VersionMetaPatch,
 )
 from .service import ReplayService
 
@@ -188,9 +188,28 @@ def create_app(settings: Settings | None = None,
     def list_hands(request: Request):
         return service(request).list_hands(dict(request.query_params))
 
+    # 静态路径必须放在 /api/hands/{hand_id} 之前；否则 "import" 会被当成 int
+    @app.post("/api/hands/import")
+    def import_hands(body: ImportHands, request: Request):
+        return service(request).import_hands(
+            body.model_dump(exclude_unset=True))
+
+    @app.post("/api/hands/delete")
+    def delete_hands(body: HandDelete, request: Request):
+        return service(request).delete_hands(
+            body.model_dump(exclude_unset=True))
+
+    @app.get("/api/imports")
+    def list_imports(request: Request):
+        return service(request).list_imports(dict(request.query_params))
+
     @app.get("/api/hands/{hand_id}")
     def get_hand(hand_id: int, request: Request):
         return service(request).get_hand(hand_id)
+
+    @app.delete("/api/hands/{hand_id}")
+    def delete_hand(hand_id: int, request: Request):
+        return service(request).delete_hand(hand_id)
 
     @app.get("/api/hands/{hand_id}/comparison")
     def get_hand_comparison(hand_id: int, request: Request):

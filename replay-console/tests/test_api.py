@@ -51,6 +51,31 @@ class FakeService:
         return {"handId": hand_id, "favorite": payload.get("favorite", False),
                 "tags": payload.get("tags", []), "status": "todo", "note": ""}
 
+    def import_hands(self, payload):
+        self._check()
+        self.calls.append(("import_hands", payload))
+        return {"dryRun": payload.get("dryRun", False), "source": "review",
+                "sourceLabel": "导入·复盘", "imported": 1, "updated": 0,
+                "duplicates": 0, "invalid": 0, "errors": 0, "samples": [],
+                "issues": []}
+
+    def list_imports(self, query):
+        self._check()
+        return {"items": [{"id": 1, "source": "review", "status": "succeeded"}]}
+
+    def delete_hands(self, payload):
+        self._check()
+        self.calls.append(("delete_hands", payload))
+        ids = payload.get("handIds") or []
+        return {"requested": len(ids), "deleted": len(ids),
+                "imported": 0, "reviewHidden": len(ids), "missing": []}
+
+    def delete_hand(self, hand_id):
+        self._check()
+        self.calls.append(("delete_hand", hand_id))
+        return {"requested": 1, "deleted": 1, "imported": 0,
+                "reviewHidden": 1, "missing": [], "handId": hand_id}
+
     def list_versions(self, include_archived):
         self._check()
         return [{"id": 1, "name": "v1", "archived": include_archived}]
@@ -159,3 +184,45 @@ def test_export_headers(client):
     assert response.status_code == 200
     assert response.text.startswith("a,b")
     assert "attachment" in response.headers["content-disposition"]
+
+
+def test_import_hands_route_and_history(client):
+    test_client, fake = client
+    response = test_client.post("/api/hands/import", json={
+        "format": "auto",
+        "content": '[{"heroCards":"AhKd","streets":[]}]',
+        "dryRun": True,
+        "dedupe": True,
+    })
+    assert response.status_code == 200
+    assert response.json()["source"] == "review"
+    payload = [call for call in fake.calls if call[0] == "import_hands"][0][1]
+    assert payload["dryRun"] is True
+    assert payload["format"] == "auto"
+
+    history = test_client.get("/api/imports")
+    assert history.status_code == 200
+    assert history.json()["items"][0]["id"] == 1
+
+
+def test_import_hands_route_validates_empty_content(client):
+    test_client, _fake = client
+    response = test_client.post("/api/hands/import", json={"content": ""})
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "VALIDATION_ERROR"
+
+
+def test_delete_hands_routes(client):
+    test_client, fake = client
+    response = test_client.post("/api/hands/delete", json={"handIds": [1, 2]})
+    assert response.status_code == 200
+    assert response.json()["deleted"] == 2
+    assert ("delete_hands", {"handIds": [1, 2]}) in fake.calls
+
+    single = test_client.delete("/api/hands/3")
+    assert single.status_code == 200
+    assert single.json()["handId"] == 3
+    assert ("delete_hand", 3) in fake.calls
+
+    empty = test_client.post("/api/hands/delete", json={"handIds": []})
+    assert empty.status_code == 422

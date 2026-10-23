@@ -6,16 +6,18 @@ import {
 import type { ColumnsType } from 'antd/es/table'
 import type { TablePaginationConfig } from 'antd/es/table/interface'
 import {
-  FilterOutlined, ReloadOutlined, StarFilled, StarOutlined, ThunderboltOutlined,
+  DeleteOutlined, FilterOutlined, ReloadOutlined, StarFilled, StarOutlined,
+  ThunderboltOutlined, UploadOutlined,
 } from '@ant-design/icons'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import dayjs from 'dayjs'
 import { api, errorMessage, toQuery } from '../api'
-import type { HandsPage, HandSummary, Meta } from '../types'
+import type { HandDeleteResult, HandsPage, HandSummary, Meta } from '../types'
 import {
   BoardCards, HandCards, QualityBadge,
 } from '../components/CardChips'
+import ImportHandsModal from '../components/ImportHandsModal'
 import RunModal from '../components/RunModal'
 import { formatAmount, formatBB, formatDate, QUALITY } from '../lib/format'
 
@@ -26,6 +28,11 @@ const RESULTS = [
   { value: 'fold', label: '弃牌' },
   { value: 'unknown', label: '未知' },
 ]
+const SOURCE_COLORS: Record<string, string> = {
+  db: 'default',
+  review: 'cyan',
+  live: 'geekblue',
+}
 
 function ResultValue({ hand }: { hand: HandSummary }) {
   if (hand.resultAmount !== null && hand.resultAmount !== undefined) {
@@ -40,12 +47,13 @@ function ResultValue({ hand }: { hand: HandSummary }) {
 }
 
 export default function HandsPage() {
-  const { message } = App.useApp()
+  const { message, modal: modalApi } = App.useApp()
   const navigate = useNavigate()
   const queryClient = useQueryClient()
   const [searchParams, setSearchParams] = useSearchParams()
   const [selected, setSelected] = useState<React.Key[]>([])
   const [modal, setModal] = useState<null | 'hands' | 'favorites' | 'filter'>(null)
+  const [importOpen, setImportOpen] = useState(false)
   const [keywordDraft, setKeywordDraft] = useState(searchParams.get('keyword') || '')
 
   const queryString = searchParams.toString()
@@ -60,6 +68,16 @@ export default function HandsPage() {
   })
   const meta = useQuery<Meta>({ queryKey: ['meta'], queryFn: () => api.get('/meta') })
   const tagOptions = hands.data?.tagOptions || meta.data?.tags || []
+  const sourceOptions = meta.data?.handSources?.length
+    ? meta.data.handSources.map((item) => ({
+        value: item.value,
+        label: `${item.label} (${item.count})`,
+      }))
+    : [
+        { value: 'db', label: '复盘库' },
+        { value: 'review', label: '导入·复盘' },
+        { value: 'live', label: '导入·实时' },
+      ]
 
   useEffect(() => { setSelected([]) }, [queryString])
   useEffect(() => {
@@ -110,6 +128,65 @@ export default function HandsPage() {
     },
   })
 
+  const deleteMutation = useMutation({
+    mutationFn: (handIds: number[]) =>
+      api.post<HandDeleteResult>('/hands/delete', { handIds }),
+    onMutate: async (handIds) => {
+      await queryClient.cancelQueries({ queryKey: handsKey })
+      const previous = queryClient.getQueryData<HandsPage>(handsKey)
+      const removed = new Set(handIds)
+      queryClient.setQueryData<HandsPage>(handsKey, (old) => old ? {
+        ...old,
+        total: Math.max(0, old.total - old.items.filter((item) => removed.has(item.id)).length),
+        items: old.items.filter((item) => !removed.has(item.id)),
+      } : old)
+      return { previous }
+    },
+    onSuccess: (result) => {
+      setSelected([])
+      queryClient.invalidateQueries({ queryKey: ['hands'] })
+      queryClient.invalidateQueries({ queryKey: ['meta'] })
+      queryClient.invalidateQueries({ queryKey: ['health'] })
+      const details = [
+        result.imported ? `导入 ${result.imported}` : '',
+        result.reviewHidden ? `隐藏复盘 ${result.reviewHidden}` : '',
+      ].filter(Boolean).join(' · ')
+      message.success(`已删除 ${result.deleted} 手牌${details ? `（${details}）` : ''}`)
+      if (result.missing.length) {
+        message.warning(`${result.missing.length} 手牌已不存在或已删除，已跳过`)
+      }
+    },
+    onError: (error, _handIds, context) => {
+      if (context?.previous) queryClient.setQueryData(handsKey, context.previous)
+      message.error(errorMessage(error))
+    },
+  })
+
+  const confirmDelete = (handIds: number[], label: string) => {
+    modalApi.confirm({
+      title: label,
+      content: (
+        <div>
+          <div>导入手牌会软删除，已跑结果保留，重新导入同一份内容可恢复。</div>
+          <div className="muted">
+            review_hands 的复盘手牌只会从控制台隐藏，不会修改 call-back 生产表。
+          </div>
+        </div>
+      ),
+      okText: '删除',
+      okButtonProps: { danger: true },
+      cancelText: '取消',
+      async onOk() {
+        try {
+          await deleteMutation.mutateAsync(handIds)
+        } catch {
+          // 错误已由 mutation 的 onError 提示；保留弹窗打开状态
+          throw new Error('delete failed')
+        }
+      },
+    })
+  }
+
   const onTableChange = (pagination: TablePaginationConfig, _filters: unknown, sorter: unknown) => {
     const next = new URLSearchParams(searchParams)
     next.set('page', String(pagination.current || 1))
@@ -156,7 +233,7 @@ export default function HandsPage() {
     {
       title: '手牌',
       dataIndex: 'heroCards',
-      width: 180,
+      width: 210,
       render: (_: unknown, hand) => (
         <div className="hand-cell">
           <HandCards cards={hand.heroCards} small />
@@ -169,7 +246,15 @@ export default function HandsPage() {
                 </Tooltip>
               ) : null}
             </div>
-            <div className="hand-cell-sub mono">#{hand.id}</div>
+            <div className="hand-cell-sub mono">
+              #{hand.id}
+              {hand.source !== 'db' ? (
+                <Tag className="mini-tag source-tag" color={SOURCE_COLORS[hand.source] || 'default'}>
+                  {hand.sourceLabel}
+                </Tag>
+              ) : null}
+              {hand.externalId ? <span className="hand-external-id">{hand.externalId}</span> : null}
+            </div>
           </div>
         </div>
       ),
@@ -236,25 +321,38 @@ export default function HandsPage() {
     },
     {
       title: '操作',
-      width: 52,
+      width: 112,
       fixed: 'right',
       render: (_: unknown, hand) => (
-        <Button
-          type="link"
-          size="small"
-          onClick={(event) => {
-            event.stopPropagation()
-            navigate(`/hands/${hand.id}`)
-          }}
-        >
-          详情
-        </Button>
+        <Space size={0}>
+          <Button
+            type="link"
+            size="small"
+            onClick={(event) => {
+              event.stopPropagation()
+              navigate(`/hands/${hand.id}`)
+            }}
+          >
+            详情
+          </Button>
+          <Button
+            danger
+            type="link"
+            size="small"
+            onClick={(event) => {
+              event.stopPropagation()
+              confirmDelete([hand.id], `删除手牌 #${hand.id}`)
+            }}
+          >
+            删除
+          </Button>
+        </Space>
       ),
     },
   ]
 
   const selectedIds = selected.map(Number)
-  const activeFilterCount = ['favorite', 'position', 'result', 'tag', 'hasRun', 'quality', 'keyword',
+  const activeFilterCount = ['favorite', 'source', 'position', 'result', 'tag', 'hasRun', 'quality', 'keyword',
     'dateFrom', 'dateTo'].filter((key) => searchParams.get(key)).length
   const favoriteCount = meta.data?.favoriteCount ?? 0
   const maxCalls = meta.data?.limits.maxCallsPerJob || 2000
@@ -266,11 +364,15 @@ export default function HandsPage() {
           <div className="eyebrow">HAND LIBRARY</div>
           <h1>手牌库</h1>
           <p className="page-sub">
-            从 call-back 的 <span className="mono">review_hands</span> 只读加载 ·
+            从 call-back 的 <span className="mono">review_hands</span> 只读加载，
+            或导入复盘 JSON / 实时日志手牌 ·
             收藏典型手牌，逐街对比多版本 AI 建议。
           </p>
         </div>
         <Space size={8} wrap>
+          <Button icon={<UploadOutlined />} onClick={() => setImportOpen(true)}>
+            导入手牌
+          </Button>
           <Button icon={<ReloadOutlined />} onClick={() => hands.refetch()} loading={hands.isFetching}>
             刷新
           </Button>
@@ -324,6 +426,18 @@ export default function HandsPage() {
                 { label: '已收藏', value: '1' },
                 { label: '未收藏', value: '0' },
               ]}
+            />
+          </div>
+
+          <div className="filter-field">
+            <label>来源</label>
+            <Select
+              mode="multiple"
+              allowClear
+              placeholder="全部来源"
+              value={(searchParams.get('source') || '').split(',').filter(Boolean)}
+              onChange={(value) => setFilter('source', value)}
+              options={sourceOptions}
             />
           </div>
 
@@ -448,7 +562,7 @@ export default function HandsPage() {
               dataSource={hands.data?.items || []}
               columns={columns}
               size="middle"
-              scroll={{ x: 840 }}
+              scroll={{ x: 980 }}
               rowSelection={{
                 selectedRowKeys: selected,
                 onChange: setSelected,
@@ -471,9 +585,13 @@ export default function HandsPage() {
                 emptyText: (
                   <Empty
                     image={Empty.PRESENTED_IMAGE_SIMPLE}
-                    description={activeFilterCount ? '当前筛选没有手牌' : '还没有可重跑的手牌'}
+                    description={activeFilterCount
+                      ? '当前筛选没有手牌'
+                      : '还没有可重跑的手牌，先导入复盘 JSON 或实时日志'}
                   >
-                    {activeFilterCount ? <Button onClick={resetFilters}>清除筛选</Button> : null}
+                    {activeFilterCount
+                      ? <Button onClick={resetFilters}>清除筛选</Button>
+                      : <Button type="primary" icon={<UploadOutlined />} onClick={() => setImportOpen(true)}>导入手牌</Button>}
                   </Empty>
                 ),
               }}
@@ -487,6 +605,14 @@ export default function HandsPage() {
           <span>已选 <strong>{selectedIds.length}</strong> 手</span>
           <Space size={8}>
             <Button size="small" onClick={() => setSelected([])}>取消选择</Button>
+            <Button
+              size="small"
+              danger
+              icon={<DeleteOutlined />}
+              onClick={() => confirmDelete(selectedIds, `删除选中的 ${selectedIds.length} 手`)}
+            >
+              删除选中
+            </Button>
             <Button size="small" type="primary" icon={<ThunderboltOutlined />} onClick={() => setModal('hands')}>
               重跑选中
             </Button>
@@ -505,6 +631,16 @@ export default function HandsPage() {
           : modal === 'filter'
             ? '重跑当前筛选结果'
             : `重跑 ${selectedIds.length} 手`}
+      />
+
+      <ImportHandsModal
+        open={importOpen}
+        onClose={() => setImportOpen(false)}
+        onImported={() => {
+          queryClient.invalidateQueries({ queryKey: ['hands'] })
+          queryClient.invalidateQueries({ queryKey: ['meta'] })
+          queryClient.invalidateQueries({ queryKey: ['health'] })
+        }}
       />
     </div>
   )

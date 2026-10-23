@@ -55,7 +55,10 @@ class Database:
                 database=self.settings.db_name,
                 charset="utf8mb4",
                 cursorclass=DictCursor,
-                autocommit=False,
+                # 读也立即结束事务。连接池里的连接如果在 autocommit=False 下只做
+                # SELECT，会一直停在 REPEATABLE READ 的旧快照里：删除/导入/收藏
+                # 提交后，同一连接上的下一次列表查询仍可能读到旧数据。
+                autocommit=True,
                 connect_timeout=self.settings.db_connect_timeout,
                 read_timeout=30,
                 write_timeout=30,

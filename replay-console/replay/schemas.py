@@ -18,6 +18,27 @@ class MarkPatch(APIModel):
     note: str | None = None
 
 
+class ImportHands(APIModel):
+    """复盘手牌 / 实时日志手牌的导入请求。
+
+    `content` 是文件原文或粘贴的 JSON/JSONL；`format=auto` 时按记录形状识别。
+    先 `dryRun=true` 预览，再 `dryRun=false` 落库。
+    """
+
+    format: Literal["auto", "review", "live"] = "auto"
+    content: str = Field(min_length=1)
+    filename: str | None = None
+    dryRun: bool = False
+    dedupe: bool = True
+    allowInvalid: bool = False
+    includePartial: bool = False
+    includeMidHand: bool = False
+
+
+class HandDelete(APIModel):
+    handIds: list[int] = Field(min_length=1, max_length=1000)
+
+
 class VersionCreate(APIModel):
     name: str | None = None
     provider: str = "deepseek"

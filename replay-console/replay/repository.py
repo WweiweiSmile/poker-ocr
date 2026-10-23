@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import json
+import datetime as dt
 import logging
 from typing import Any, Iterable
 
@@ -15,18 +15,38 @@ from .util import iso, json_dumps, json_load, median, now_cn
 
 log = logging.getLogger("replay.repo")
 
+# 导入的手牌使用独立的 id 段，避免和 review_hands 自增 id 冲突。
+# MySQL 的 BIGINT UNSIGNED 和 JS number 都能安全容纳 1e12。
+IMPORTED_HAND_ID_BASE = 1_000_000_000_000
+
+HAND_SOURCE_DB = "db"
+HAND_SOURCE_REVIEW = "review"
+HAND_SOURCE_LIVE = "live"
+HAND_SOURCE_LABELS = {
+    HAND_SOURCE_DB: "复盘库",
+    HAND_SOURCE_REVIEW: "导入·复盘",
+    HAND_SOURCE_LIVE: "导入·实时",
+}
+
+
+def is_imported_hand_id(hand_id: int) -> bool:
+    return int(hand_id) >= IMPORTED_HAND_ID_BASE
+
 
 class HandRepository:
-    def __init__(self, db: Database, user_id: int = 0):
+    def __init__(self, db: Database, user_id: int = 0,
+                 console_user_id: int = 0):
         self.db = db
         self.hand_user_id = user_id
+        self.console_user_id = console_user_id
+        self.imports = ImportedHandRepository(db, console_user_id)
 
     def _where(self) -> tuple[str, tuple]:
         if self.hand_user_id > 0:
             return " AND h.user_id = %s", (self.hand_user_id,)
         return "", ()
 
-    def list_rows(self, *, limit: int = 10000) -> list[dict]:
+    def list_review_rows(self, *, limit: int = 10000) -> list[dict]:
         where, params = self._where()
         sql = f"""
             SELECT h.*,
@@ -37,13 +57,30 @@ class HandRepository:
               FROM review_hands h
               LEFT JOIN replay_marks m
                 ON m.user_id = %s AND m.hand_id = h.id
-             WHERE h.deleted_at IS NULL{where}
+              LEFT JOIN replay_hand_deletions d
+                ON d.user_id = %s AND d.hand_id = h.id
+             WHERE h.deleted_at IS NULL AND d.hand_id IS NULL{where}
              ORDER BY h.created_at DESC, h.id DESC
              LIMIT %s
         """
-        return self.db.query(sql, (0,) + params + (limit,))
+        rows = self.db.query(sql, (self.console_user_id,
+                                   self.console_user_id) + params + (limit,))
+        for row in rows:
+            row["source"] = HAND_SOURCE_DB
+            row["external_id"] = None
+            row["batch_id"] = None
+        return rows
+
+    def list_rows(self, *, limit: int = 10000) -> list[dict]:
+        rows = self.list_review_rows(limit=limit)
+        rows += self.imports.list_rows(limit=limit)
+        rows.sort(key=lambda r: (r.get("created_at") or dt.datetime.min,
+                                 int(r["id"])), reverse=True)
+        return rows[:limit]
 
     def get_row(self, hand_id: int) -> dict | None:
+        if is_imported_hand_id(hand_id):
+            return self.imports.get_row(hand_id)
         where, params = self._where()
         sql = f"""
             SELECT h.*,
@@ -54,43 +91,309 @@ class HandRepository:
               FROM review_hands h
               LEFT JOIN replay_marks m
                 ON m.user_id = %s AND m.hand_id = h.id
-             WHERE h.id = %s AND h.deleted_at IS NULL{where}
+              LEFT JOIN replay_hand_deletions d
+                ON d.user_id = %s AND d.hand_id = h.id
+             WHERE h.id = %s AND h.deleted_at IS NULL
+               AND d.hand_id IS NULL{where}
              LIMIT 1
         """
-        return self.db.one(sql, (0, hand_id) + params)
+        row = self.db.one(sql, (self.console_user_id, self.console_user_id,
+                               hand_id) + params)
+        if row is not None:
+            row["source"] = HAND_SOURCE_DB
+            row["external_id"] = None
+            row["batch_id"] = None
+        return row
 
     def get_by_ids(self, hand_ids: Iterable[int]) -> list[dict]:
         ids = [int(x) for x in hand_ids]
         if not ids:
             return []
-        where, params = self._where()
-        placeholders = ",".join(["%s"] * len(ids))
-        sql = f"""
-            SELECT h.*,
-                   m.favorite AS mark_favorite,
-                   m.tags AS mark_tags,
-                   m.status AS mark_status,
-                   m.note AS mark_note
-              FROM review_hands h
-              LEFT JOIN replay_marks m
-                ON m.user_id = %s AND m.hand_id = h.id
-             WHERE h.id IN ({placeholders}) AND h.deleted_at IS NULL{where}
-        """
-        return self.db.query(sql, (0, *ids, *params))
+        imported = [x for x in ids if is_imported_hand_id(x)]
+        review = [x for x in ids if not is_imported_hand_id(x)]
+        rows = self.imports.get_by_ids(imported)
+        if review:
+            where, params = self._where()
+            placeholders = ",".join(["%s"] * len(review))
+            sql = f"""
+                SELECT h.*,
+                       m.favorite AS mark_favorite,
+                       m.tags AS mark_tags,
+                       m.status AS mark_status,
+                       m.note AS mark_note
+                  FROM review_hands h
+                  LEFT JOIN replay_marks m
+                    ON m.user_id = %s AND m.hand_id = h.id
+                  LEFT JOIN replay_hand_deletions d
+                    ON d.user_id = %s AND d.hand_id = h.id
+                 WHERE h.id IN ({placeholders}) AND h.deleted_at IS NULL
+                   AND d.hand_id IS NULL{where}
+            """
+            review_rows = self.db.query(
+                sql, (self.console_user_id, self.console_user_id,
+                      *review, *params))
+            for row in review_rows:
+                row["source"] = HAND_SOURCE_DB
+                row["external_id"] = None
+                row["batch_id"] = None
+            rows += review_rows
+        return rows
 
     def count(self) -> int:
         where, params = self._where()
-        sql = f"SELECT COUNT(*) n FROM review_hands h WHERE h.deleted_at IS NULL{where}"
-        return int(self.db.scalar(sql, params) or 0)
+        sql = f"""
+            SELECT COUNT(*) n FROM review_hands h
+              LEFT JOIN replay_hand_deletions d
+                ON d.user_id = %s AND d.hand_id = h.id
+             WHERE h.deleted_at IS NULL AND d.hand_id IS NULL{where}
+        """
+        review = int(self.db.scalar(
+            sql, (self.console_user_id,) + params) or 0)
+        return review + self.imports.count()
 
     def favorite_count(self) -> int:
         where, params = self._where()
         sql = f"""
             SELECT COUNT(*) n FROM review_hands h
               JOIN replay_marks m ON m.user_id = %s AND m.hand_id = h.id
-             WHERE h.deleted_at IS NULL AND m.favorite = 1{where}
+              LEFT JOIN replay_hand_deletions d
+                ON d.user_id = %s AND d.hand_id = h.id
+             WHERE h.deleted_at IS NULL AND d.hand_id IS NULL
+               AND m.favorite = 1{where}
         """
-        return int(self.db.scalar(sql, (0,) + params) or 0)
+        review = int(self.db.scalar(
+            sql, (self.console_user_id, self.console_user_id) + params) or 0)
+        return review + self.imports.favorite_count()
+
+    def delete_hands(self, hand_ids: Iterable[int]) -> dict:
+        """删除手牌：导入手牌软删除；review_hands 只在控制台隐藏。"""
+        ids = [int(x) for x in hand_ids]
+        imported = [x for x in ids if is_imported_hand_id(x)]
+        review = [x for x in ids if not is_imported_hand_id(x)]
+        imported_deleted = self.imports.soft_delete(imported)
+        review_hidden = 0
+        if review:
+            now = now_cn()
+            self.db.execute_many(
+                """INSERT INTO replay_hand_deletions (user_id, hand_id, deleted_at)
+                   VALUES (%s, %s, %s)
+                   ON DUPLICATE KEY UPDATE deleted_at=VALUES(deleted_at)""",
+                [(self.console_user_id, hand_id, now) for hand_id in review],
+            )
+            review_hidden = len(review)
+        return {
+            "imported": imported_deleted,
+            "reviewHidden": review_hidden,
+        }
+
+
+class ImportedHandRepository:
+    """导入手牌的读写。列表查询不取 payload/raw，避免把大字段带进列表。"""
+
+    COLUMNS = """
+        h.id, h.user_id, h.batch_id, h.source, h.external_id, h.fingerprint,
+        h.title, h.hero_cards, h.board, h.hero_position, h.table_size,
+        h.hero_stack_bb, h.small_blind_bb, h.big_blind_bb, h.ante_bb,
+        h.bomb_pot_bb, h.villain_count, h.villains, h.streets, h.result,
+        h.result_amount, h.pot_type, h.hero_tags, h.source_created_at,
+        h.created_at, h.updated_at
+    """
+
+    def __init__(self, db: Database, user_id: int = 0):
+        self.db = db
+        self.user_id = user_id
+
+    def _select(self) -> str:
+        return f"""
+            SELECT {self.COLUMNS},
+                   m.favorite AS mark_favorite,
+                   m.tags AS mark_tags,
+                   m.status AS mark_status,
+                   m.note AS mark_note
+              FROM replay_imported_hands h
+              LEFT JOIN replay_marks m
+                ON m.user_id = %s AND m.hand_id = h.id
+        """
+
+    def list_rows(self, *, limit: int = 10000) -> list[dict]:
+        sql = self._select() + """
+             WHERE h.user_id = %s AND h.deleted_at IS NULL
+             ORDER BY h.created_at DESC, h.id DESC
+             LIMIT %s
+        """
+        return self.db.query(sql, (self.user_id, self.user_id, limit))
+
+    def get_row(self, hand_id: int) -> dict | None:
+        sql = self._select() + """
+             WHERE h.id = %s AND h.user_id = %s AND h.deleted_at IS NULL
+             LIMIT 1
+        """
+        return self.db.one(sql, (self.user_id, hand_id, self.user_id))
+
+    def get_by_ids(self, hand_ids: Iterable[int]) -> list[dict]:
+        ids = [int(x) for x in hand_ids]
+        if not ids:
+            return []
+        placeholders = ",".join(["%s"] * len(ids))
+        sql = self._select() + f"""
+             WHERE h.id IN ({placeholders}) AND h.user_id = %s
+               AND h.deleted_at IS NULL
+        """
+        return self.db.query(sql, (self.user_id, *ids, self.user_id))
+
+    def count(self) -> int:
+        return int(self.db.scalar(
+            "SELECT COUNT(*) n FROM replay_imported_hands "
+            "WHERE user_id=%s AND deleted_at IS NULL",
+            (self.user_id,)) or 0)
+
+    def favorite_count(self) -> int:
+        return int(self.db.scalar(
+            """SELECT COUNT(*) n FROM replay_imported_hands h
+                 JOIN replay_marks m ON m.user_id=%s AND m.hand_id=h.id
+                WHERE h.user_id=%s AND h.deleted_at IS NULL AND m.favorite=1""",
+            (self.user_id, self.user_id)) or 0)
+
+    def soft_delete(self, hand_ids: Iterable[int]) -> int:
+        ids = [int(x) for x in hand_ids]
+        if not ids:
+            return 0
+        placeholders = ",".join(["%s"] * len(ids))
+        self.db.execute(
+            f"""UPDATE replay_imported_hands SET deleted_at=%s
+                 WHERE user_id=%s AND id IN ({placeholders})
+                   AND deleted_at IS NULL""",
+            (now_cn(), self.user_id, *ids),
+        )
+        return len(ids)
+
+    def fingerprint_map(self) -> dict[tuple[str, str], int]:
+        rows = self.db.query(
+            "SELECT id, source, fingerprint FROM replay_imported_hands "
+            "WHERE user_id=%s", (self.user_id,))
+        return {(r["source"], r["fingerprint"]): int(r["id"]) for r in rows}
+
+    def find_by_fingerprint(self, source: str,
+                            fingerprint: str) -> dict | None:
+        return self.db.one(
+            """SELECT id, source, fingerprint FROM replay_imported_hands
+                WHERE user_id=%s AND source=%s AND fingerprint=%s""",
+            (self.user_id, source, fingerprint))
+
+    def upsert(self, row: dict, *, batch_id: int | None = None) -> tuple[int, bool]:
+        """按 (user, source, fingerprint) 幂等写入。返回 (id, 是否新建)。"""
+        existing = self.find_by_fingerprint(row["source"], row["fingerprint"])
+        payload = {k: v for k, v in row.items() if k != "raw"}
+        created_at = row.get("source_created_at") or now_cn()
+        values = (
+            self.user_id, batch_id, row["source"],
+            (row.get("external_id") or "")[:128],
+            row["fingerprint"],
+            ((row.get("title") or "")[:255] or None),
+            (row.get("hero_cards") or "")[:8],
+            (row.get("board") or "")[:10],
+            ((row.get("hero_position") or "")[:10] or None),
+            int(row.get("table_size") or 0), row.get("hero_stack_bb"),
+            row.get("small_blind_bb"), row.get("big_blind_bb"),
+            row.get("ante_bb"), row.get("bomb_pot_bb"),
+            int(row.get("villain_count") or 0),
+            json_dumps(row.get("villains") or []),
+            json_dumps(row.get("streets") or []),
+            (row.get("result") or "unknown")[:16], row.get("result_amount"),
+            ((row.get("pot_type") or "")[:16] or None),
+            json_dumps(row.get("hero_tags") or []),
+            json_dumps(payload), json_dumps(row.get("raw") or {}),
+            row.get("source_created_at") or created_at, created_at, now_cn(),
+        )
+        if existing is not None:
+            self.db.execute(
+                """UPDATE replay_imported_hands SET
+                     batch_id=%s, external_id=%s, title=%s, hero_cards=%s,
+                     board=%s, hero_position=%s, table_size=%s, hero_stack_bb=%s,
+                     small_blind_bb=%s, big_blind_bb=%s, ante_bb=%s,
+                     bomb_pot_bb=%s, villain_count=%s, villains=%s, streets=%s,
+                     result=%s, result_amount=%s, pot_type=%s, hero_tags=%s,
+                     payload_json=%s, raw_json=%s, source_created_at=%s,
+                     updated_at=%s, deleted_at=NULL
+                   WHERE id=%s AND user_id=%s""",
+                (values[1], values[3], values[5], values[6], values[7], values[8],
+                 values[9], values[10], values[11], values[12], values[13],
+                 values[14], values[15], values[16], values[17], values[18],
+                 values[19], values[20], values[21], values[22], values[23],
+                 values[24], values[26], int(existing["id"]), self.user_id),
+            )
+            return int(existing["id"]), False
+        try:
+            new_id = self.db.execute(
+                """INSERT INTO replay_imported_hands
+                     (user_id, batch_id, source, external_id, fingerprint, title,
+                      hero_cards, board, hero_position, table_size, hero_stack_bb,
+                      small_blind_bb, big_blind_bb, ante_bb, bomb_pot_bb,
+                      villain_count, villains, streets, result, result_amount,
+                      pot_type, hero_tags, payload_json, raw_json,
+                      source_created_at, created_at, updated_at)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
+                           %s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                values,
+            )
+            return int(new_id), True
+        except IntegrityError:
+            existing = self.find_by_fingerprint(row["source"],
+                                                row["fingerprint"])
+            if existing is None:
+                raise
+            return int(existing["id"]), False
+
+
+class ImportBatchRepository:
+    def __init__(self, db: Database, user_id: int = 0):
+        self.db = db
+        self.user_id = user_id
+
+    def create(self, *, source: str, container: str, filename: str | None,
+               total_records: int) -> int:
+        return int(self.db.execute(
+            """INSERT INTO replay_import_batches
+                 (user_id, source, container, filename, total_records, status)
+               VALUES (%s,%s,%s,%s,%s,'running')""",
+            (self.user_id, source, container, (filename or "")[:255] or None,
+             int(total_records)),
+        ))
+
+    def finish(self, batch_id: int, *, status: str, imported: int = 0,
+               updated: int = 0, duplicates: int = 0, invalid: int = 0,
+               errors: int = 0, summary: dict | None = None,
+               error_msg: str | None = None) -> None:
+        self.db.execute(
+            """UPDATE replay_import_batches SET
+                 status=%s, imported_count=%s, updated_count=%s,
+                 duplicate_count=%s, invalid_count=%s, error_count=%s,
+                 summary_json=%s, error_msg=%s, finished_at=%s
+               WHERE id=%s AND user_id=%s""",
+            (status, int(imported), int(updated), int(duplicates), int(invalid),
+             int(errors), json_dumps(summary or {}), (error_msg or "")[:500] or None,
+             now_cn(), int(batch_id), self.user_id),
+        )
+
+    def list(self, limit: int = 20) -> list[dict]:
+        rows = self.db.query(
+            """SELECT id, user_id, source, container, filename, total_records,
+                      imported_count, updated_count, duplicate_count,
+                      invalid_count, error_count, status, error_msg,
+                      summary_json, created_at, finished_at
+                 FROM replay_import_batches WHERE user_id=%s
+                ORDER BY id DESC LIMIT %s""",
+            (self.user_id, int(limit)),
+        )
+        for row in rows:
+            row["summary"] = json_load(row.get("summary_json"), {}) or {}
+            row["createdAt"] = iso(row.get("created_at"))
+            row["finishedAt"] = iso(row.get("finished_at"))
+            row["sourceLabel"] = HAND_SOURCE_LABELS.get(row.get("source"),
+                                                        row.get("source"))
+            row.pop("created_at", None)
+            row.pop("finished_at", None)
+        return rows
 
 
 class MarkRepository:

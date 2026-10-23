@@ -427,3 +427,44 @@ h1, h2, h3, p { margin: 0; }
 @media (max-width: 1180px) {
   .app-shell { min-width: 1180px; }
 }
+
+/* ───────────── import hands ───────────── */
+.source-tag { margin-left: 4px !important; font-weight: 500; }
+.hand-external-id { margin-left: 5px; color: var(--muted-2); font-size: 9.5px; }
+.import-copy { color: var(--muted); font-size: 11.5px; line-height: 1.8; margin-bottom: 14px; }
+.import-copy b { color: var(--text); }
+.import-format-row { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; }
+.import-label { color: var(--muted); font-size: 11px; white-space: nowrap; }
+.import-format-option { display: inline-flex; flex-direction: column; line-height: 1.3; padding: 1px 0; }
+.import-format-hint { font-size: 9px; opacity: .65; }
+.import-upload .ant-upload-drag { border-radius: 12px; background: #f8fbfa; }
+.import-upload .ant-upload-drag-icon { margin-bottom: 4px !important; }
+.import-upload .ant-upload-drag-icon .anticon { font-size: 30px !important; color: var(--brand) !important; }
+.import-upload .ant-upload-text { font-size: 12.5px !important; }
+.import-upload .ant-upload-hint { font-size: 10.5px !important; }
+.import-textarea { margin-top: 2px; font-size: 11px !important; line-height: 1.55 !important; }
+.import-file {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  border: 1px solid var(--line); background: #f8fbfa; border-radius: 12px; padding: 12px 14px;
+}
+.import-file-main { display: flex; align-items: center; gap: 11px; min-width: 0; }
+.import-file-main .anticon { font-size: 22px; color: var(--brand); }
+.import-file-name { font-size: 12.5px; font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 620px; }
+.import-file-size { font-size: 10px; margin-top: 2px; }
+.import-options { display: flex; flex-wrap: wrap; gap: 8px 20px; margin-top: 14px; font-size: 11.5px; }
+.import-result-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 11.5px; margin-bottom: 10px; }
+.import-result-head .ant-tag { margin-right: 7px; }
+.import-summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(96px, 1fr)); gap: 8px; margin-bottom: 12px; }
+.import-summary .stat { border: 1px solid var(--line); border-radius: 10px; padding: 9px 11px; background: #fbfdfc; }
+.import-summary .stat-value { font-size: 20px; font-weight: 700; line-height: 1.15; font-variant-numeric: tabular-nums; }
+.import-summary .stat-label { font-size: 10px; color: var(--muted); margin-top: 2px; }
+.import-summary .stat-hint { font-size: 9px; color: var(--muted-2); margin-top: 1px; }
+.import-issues { margin-bottom: 10px; }
+.import-issues ul { margin: 4px 0 0; padding-left: 17px; font-size: 10.5px; line-height: 1.7; }
+.import-samples .ant-table { font-size: 11px; }
+.import-hand-cell { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.import-hand-title { font-size: 11px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100px; }
+.import-hand-id { font-size: 9px; }
+.import-reason { font-size: 10.5px; color: var(--muted); }
+.import-done, .import-footnote { margin-top: 10px; }
+.import-footnote { color: var(--muted-2); font-size: 10.5px; border-top: 1px solid var(--line); padding-top: 9px; }

@@ -28,9 +28,13 @@ from .engine import (
     audit, classify, decision_to_public, fmt_option, summarize_version,
 )
 from .errors import ApiError
+from .importer import (
+    SOURCE_LABELS, SOURCE_LIVE, SOURCE_REVIEW, parse_hand_text,
+)
 from .repository import (
-    DecisionRepository, HandRepository, JobRepository, MarkRepository,
-    ResultRepository, VersionRepository,
+    HAND_SOURCE_DB, HAND_SOURCE_LABELS, HAND_SOURCE_LIVE, HAND_SOURCE_REVIEW,
+    DecisionRepository, HandRepository, ImportBatchRepository, JobRepository,
+    MarkRepository, ResultRepository, VersionRepository,
 )
 from .util import (
     BOARD_LEN, STREET_LABELS, iso, json_load, median, now_cn, split_board,
@@ -95,7 +99,10 @@ class ReplayService:
         self._lock = threading.Lock()
         self._analysis_cache: dict[tuple, HandAnalysis] = {}
 
-        self.hand_repo = HandRepository(db, settings.hand_user_id)
+        self.hand_repo = HandRepository(db, settings.hand_user_id,
+                                        settings.console_user_id)
+        self.import_repo = self.hand_repo.imports
+        self.batch_repo = ImportBatchRepository(db, settings.console_user_id)
         self.mark_repo = MarkRepository(db, settings.console_user_id)
         self.version_repo = VersionRepository(db, settings.console_user_id)
         self.decision_repo = DecisionRepository(db)
@@ -186,8 +193,13 @@ class ReplayService:
         hand_id = int(row["id"])
         dups = duplicate_ids or []
         widest = max(dups) if dups else hand_id
+        source = row.get("source") or HAND_SOURCE_DB
         return {
             "id": hand_id,
+            "source": source,
+            "sourceLabel": HAND_SOURCE_LABELS.get(source, source),
+            "externalId": row.get("external_id"),
+            "importBatchId": row.get("batch_id"),
             "title": row.get("title") or self._default_title(row),
             "heroCards": row.get("hero_cards") or "",
             "board": row.get("board") or "",
@@ -227,6 +239,7 @@ class ReplayService:
     def _filter_rows(self, rows: list[dict], analyses: dict[int, HandAnalysis],
                      last_runs: dict[int, dict], filters: dict) -> list[dict]:
         favorite = _parse_bool(filters.get("favorite"))
+        sources = {s.lower() for s in _as_list(filters.get("source"))}
         positions = {p.upper() for p in _as_list(filters.get("position"))}
         results = {p.lower() for p in _as_list(filters.get("result"))}
         tags = [t.lower() for t in _as_list(filters.get("tag"))]
@@ -243,6 +256,8 @@ class ReplayService:
             analysis = analyses[hand_id]
             mark = self._mark(row)
             if favorite is not None and mark["favorite"] != favorite:
+                continue
+            if sources and (row.get("source") or HAND_SOURCE_DB).lower() not in sources:
                 continue
             if positions and (row.get("hero_position") or "").upper() not in positions:
                 continue
@@ -262,6 +277,7 @@ class ReplayService:
                 hay = " ".join([
                     str(row.get("title") or ""), str(row.get("hero_cards") or ""),
                     str(row.get("board") or ""), str(row.get("hero_position") or ""),
+                    str(row.get("external_id") or ""),
                 ]).lower()
                 if keyword not in hay:
                     continue
@@ -331,6 +347,247 @@ class ReplayService:
         for row in rows:
             tags.update(str(t) for t in (json_load(row.get("mark_tags"), []) or []))
         return sorted(tags)
+
+    # ─────────────────────────── 导入手牌 ───────────────────────────
+
+    def list_imports(self, query: dict) -> dict:
+        limit = min(100, max(1, int(query.get("limit") or 20)))
+        return {"items": self.batch_repo.list(limit)}
+
+    def _review_fingerprints(self) -> set[str]:
+        """review_hands 的内容指纹，用于导入时避免重复。"""
+        out: set[str] = set()
+        for row in self.hand_repo.list_review_rows():
+            try:
+                out.add(self.analyze(row).fingerprint)
+            except Exception:  # noqa: BLE001
+                log.warning("计算 review_hands #%s 指纹失败，导入去重跳过",
+                            row.get("id"))
+        return out
+
+    def import_hands(self, payload: dict) -> dict:
+        """解析并（可选）写入复盘/实时手牌。
+
+        第一次调用建议 `dryRun=true` 先预览计数与逐手状态；确认后再导入。
+        同一 `(source, fingerprint)` 重复导入是幂等的，会更新已有记录。
+        """
+        fmt = str(payload.get("format") or "auto").strip().lower()
+        dry_run = bool(payload.get("dryRun"))
+        dedupe = payload.get("dedupe")
+        dedupe = True if dedupe is None else bool(dedupe)
+        allow_invalid = bool(payload.get("allowInvalid"))
+        include_partial = bool(payload.get("includePartial"))
+        include_mid_hand = bool(payload.get("includeMidHand"))
+        filename = str(payload.get("filename") or "").strip()[:255] or None
+
+        parsed = parse_hand_text(
+            str(payload.get("content") or ""),
+            source=fmt, include_partial=include_partial,
+            include_mid_hand=include_mid_hand,
+        )
+        existing_map = self.import_repo.fingerprint_map()
+        existing_fps = {fp for _source, fp in existing_map}
+        review_fps = self._review_fingerprints() if dedupe else set()
+
+        imported = updated = duplicates = invalid = 0
+        written = 0
+        batch_id: int | None = None
+        seen_keys: set[tuple[str, str]] = set()
+        file_fps: set[str] = set()
+        samples: list[dict] = []
+        issues: list[dict] = list(parsed.errors[:50])
+        error_total = len(parsed.errors)
+
+        def add_sample(ph, status: str, **extra) -> None:
+            if len(samples) >= 100:
+                return
+            row = ph.row
+            samples.append({
+                "index": ph.index,
+                "source": ph.source,
+                "externalId": row.get("external_id"),
+                "title": row.get("title"),
+                "heroCards": row.get("hero_cards"),
+                "board": row.get("board"),
+                "heroPosition": row.get("hero_position"),
+                "status": status,
+                "decisionCount": extra.pop("decisionCount", 0),
+                "quality": extra.pop("quality", None),
+                "reason": extra.pop("reason", None),
+                **extra,
+            })
+
+        for ph in parsed.records:
+            row = dict(ph.row)
+            row["raw"] = ph.raw
+            row["source"] = ph.source
+            row["external_id"] = row.get("external_id") or ""
+            try:
+                analysis = analyze_hand({**row, "id": 0})
+            except Exception as exc:  # noqa: BLE001
+                issues.append({"index": ph.index, "line": ph.line,
+                               "reason": f"分析失败：{type(exc).__name__}: {exc}"})
+                error_total += 1
+                add_sample(ph, "error", reason=f"分析失败：{exc}")
+                continue
+            fingerprint = analysis.fingerprint
+            row["fingerprint"] = fingerprint
+            key = (ph.source, fingerprint)
+            info = {"decisionCount": analysis.decision_count,
+                    "quality": analysis.quality}
+
+            if analysis.quality == INVALID and not allow_invalid:
+                invalid += 1
+                add_sample(ph, "invalid", reason=analysis.invalid_reason,
+                           **info)
+                continue
+
+            if key in seen_keys:
+                status = "duplicate"
+                reason = "本次文件内内容重复"
+            elif key in existing_map:
+                status = "updated"
+                reason = "已存在相同内容，更新原记录"
+            elif dedupe and (fingerprint in review_fps
+                             or fingerprint in existing_fps
+                             or fingerprint in file_fps):
+                status = "duplicate"
+                reason = "库中已有相同内容的手牌"
+            else:
+                status = "imported"
+                reason = None
+
+            if status == "duplicate":
+                duplicates += 1
+                add_sample(ph, status, reason=reason, **info)
+                seen_keys.add(key)
+                file_fps.add(fingerprint)
+                continue
+            seen_keys.add(key)
+            file_fps.add(fingerprint)
+
+            if dry_run:
+                if status == "imported":
+                    imported += 1
+                else:
+                    updated += 1
+                add_sample(ph, status, reason=reason, **info)
+                continue
+
+            if batch_id is None:
+                batch_id = self.batch_repo.create(
+                    source=parsed.source, container=parsed.container,
+                    filename=filename, total_records=parsed.scanned)
+            try:
+                _hand_id, created = self.import_repo.upsert(
+                    row, batch_id=batch_id)
+                actual = "imported" if created else "updated"
+                if created:
+                    imported += 1
+                else:
+                    updated += 1
+                written += 1
+                add_sample(ph, actual,
+                           reason=None if created else "已存在相同内容，更新原记录",
+                           **info)
+            except Exception as exc:  # noqa: BLE001
+                log.exception("写入手牌失败：%s", row.get("external_id"))
+                issues.append({"index": ph.index, "line": ph.line,
+                               "reason": f"写库失败：{type(exc).__name__}: {exc}"})
+                error_total += 1
+                add_sample(ph, "error", reason=f"写库失败：{exc}", **info)
+
+        summary = {
+            "dryRun": dry_run,
+            "batchId": batch_id,
+            "source": parsed.source,
+            "sourceLabel": SOURCE_LABELS.get(parsed.source, parsed.source),
+            "container": parsed.container,
+            "filename": filename,
+            "total": parsed.scanned,
+            "hands": len(parsed.records),
+            "imported": imported,
+            "updated": updated,
+            "duplicates": duplicates,
+            "invalid": invalid,
+            "errors": error_total,
+            "skippedNonHand": parsed.skipped_non_hand,
+            "skippedPartial": parsed.skipped_partial,
+            "skippedMidHand": parsed.skipped_mid_hand,
+            "sessionCount": parsed.session_count,
+            "dedupe": dedupe,
+            "allowInvalid": allow_invalid,
+            "samples": samples,
+            "issues": issues[:50],
+        }
+        if batch_id is not None:
+            status = "succeeded" if (written or not issues) else "failed"
+            self.batch_repo.finish(
+                batch_id, status=status, imported=imported, updated=updated,
+                duplicates=duplicates, invalid=invalid, errors=error_total,
+                summary={k: v for k, v in summary.items()
+                         if k not in ("samples", "issues")},
+            )
+        return summary
+
+    # ─────────────────────────── 删除手牌 ───────────────────────────
+
+    def _parse_hand_ids(self, payload: dict) -> list[int]:
+        raw = payload.get("handIds")
+        if raw is None:
+            raw = payload.get("hand_ids")
+        if not isinstance(raw, (list, tuple)):
+            raise ApiError("INVALID_HAND_IDS", "handIds 必须是数组", 422)
+        ids: list[int] = []
+        for value in raw:
+            try:
+                hand_id = int(value)
+            except (TypeError, ValueError) as exc:
+                raise ApiError("INVALID_HAND_IDS",
+                               f"手牌 id 不合法：{value!r}", 422) from exc
+            if hand_id not in ids:
+                ids.append(hand_id)
+        if not ids:
+            raise ApiError("INVALID_HAND_IDS", "至少选择一手牌", 422)
+        if len(ids) > 1000:
+            raise ApiError("TOO_MANY_HANDS",
+                           "一次最多删除 1000 手牌", 422)
+        return ids
+
+    def delete_hands(self, payload: dict) -> dict:
+        """删除手牌。
+
+        · 导入手牌：写 `replay_imported_hands.deleted_at`，收藏/决策/结果保留；
+        · review_hands 手牌：只写 `replay_hand_deletions`，不改生产业务表。
+        """
+        ids = self._parse_hand_ids(payload)
+        rows = self.hand_repo.get_by_ids(ids)
+        found = {int(r["id"]) for r in rows}
+        missing = [hand_id for hand_id in ids if hand_id not in found]
+        if not found:
+            return {
+                "requested": len(ids), "deleted": 0,
+                "imported": 0, "reviewHidden": 0, "missing": missing,
+            }
+        counts = self.hand_repo.delete_hands(sorted(found))
+        with self._lock:
+            for key in list(self._analysis_cache):
+                if key and key[0] in found:
+                    self._analysis_cache.pop(key, None)
+        return {
+            "requested": len(ids),
+            "deleted": int(counts["imported"]) + int(counts["reviewHidden"]),
+            "imported": int(counts["imported"]),
+            "reviewHidden": int(counts["reviewHidden"]),
+            "missing": missing,
+        }
+
+    def delete_hand(self, hand_id: int) -> dict:
+        result = self.delete_hands({"handIds": [hand_id]})
+        if result["deleted"] == 0:
+            raise ApiError("HAND_NOT_FOUND",
+                           f"手牌 {hand_id} 不存在或已删除", 404)
+        return {**result, "handId": hand_id}
 
     def get_hand(self, hand_id: int) -> dict:
         row = self.hand_repo.get_row(hand_id)
@@ -1362,6 +1619,7 @@ class ReplayService:
         rows = self.hand_repo.list_rows()
         total = len(rows)
         favorite = sum(1 for r in rows if r.get("mark_favorite"))
+        source_counts = Counter((r.get("source") or HAND_SOURCE_DB) for r in rows)
         versions = self.version_repo.list(False)
         last_job = self.job_repo.list(page=1, page_size=1)[1]
         defaults = {"versionIds": [], "repeat": self.settings.default_repeat}
@@ -1387,6 +1645,13 @@ class ReplayService:
                 "engine": dict(zip(("commit", "dirty"), engine_state())),
             },
             "tags": self._tag_options(rows),
+            "handSources": [
+                {"value": source,
+                 "label": HAND_SOURCE_LABELS.get(source, source),
+                 "count": source_counts.get(source, 0)}
+                for source in (HAND_SOURCE_DB, HAND_SOURCE_REVIEW,
+                               HAND_SOURCE_LIVE)
+            ],
             "markStatuses": list(MARK_STATUSES),
             "runStatuses": list(RUN_STATUSES),
             "limits": {
@@ -1403,13 +1668,20 @@ class ReplayService:
         db_ok, db_detail = self.db.ping()
         review_ok = False
         review_detail = None
+        import_ok = False
+        import_count = None
+        import_detail = None
         if db_ok:
             try:
-                n = self.hand_repo.count()
+                import_count = self.import_repo.count()
+                total = self.hand_repo.count()
                 review_ok = True
-                review_detail = f"{n} 手"
+                import_ok = True
+                review_detail = f"{max(total - import_count, 0)} 手复盘 + {import_count} 手导入"
+                import_detail = f"{import_count} 手"
             except Exception as exc:  # noqa: BLE001
                 review_detail = str(exc)
+                import_detail = str(exc)
         key_ok = has_key("AI_SERVER_API_KEY")
         version_key = False
         try:
@@ -1424,10 +1696,12 @@ class ReplayService:
         except Exception:  # noqa: BLE001
             queue = None
         return {
-            "ok": db_ok and review_ok,
+            "ok": db_ok and review_ok and import_ok,
             "db": {"ok": db_ok, "detail": db_detail,
                    "host": self.settings.db_host, "name": self.settings.db_name},
             "reviewHands": {"ok": review_ok, "detail": review_detail},
+            "imports": {"ok": import_ok, "detail": import_detail,
+                        "count": import_count},
             "aiKey": {"ok": key_ok or version_key,
                       "detail": "已配置" if (key_ok or version_key) else "未配置"},
             "worker": worker,

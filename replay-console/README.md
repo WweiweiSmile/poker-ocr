@@ -38,6 +38,8 @@
 另外实现的功能：
 
 - **重建质量分级**：`exact` / `approx` / `invalid`，页面徽标 + 原因；
+- **手牌导入**：手牌库支持导入两种来源——**复盘手牌**（`review_hands` 导出的 JSON/JSONL）和**实时日志手牌记录**（`hands.json` 或 `live.states.jsonl`）；自动识别、预览计数、按内容幂等去重；
+- **删除手牌**：列表行内、勾选批量、详情页均可删除；导入手牌软删除（重新导入可恢复），`review_hands` 手牌仅在控制台隐藏，不修改生产业务表；
 - **去重**：按手牌内容指纹识别；批量任务默认跳过重复，保留较新的一手；
 - **成本与时间预估**：调用单元、预计耗时、超过单任务上限需显式确认；
 - **逐 unit 进度**：`done_units / total_units`、分版本完成/失败/兜底/p50；
@@ -54,7 +56,7 @@
 | M2 版本管理 / 单手重跑 / 决策卡对比 | ✅ | `/versions`、版本导入/克隆/归档、重跑弹窗、逐街对比 |
 | M3 批量任务 / 进度 / 取消 / 重试 / 预估 | ✅ | `/jobs`、任务详情、worker、`POST /api/runs` |
 | M4 对比筛选 / 导出 / 质量徽标 / 恢复 | ✅ | 对比视图、CSV/Markdown、保留策略、重启恢复 |
-| M5 live log / 线上建议基线 / 多用户 | ⛔ 未做 | 明确作为后续扩展 |
+| M5 live log / 线上建议基线 / 多用户 | 🟡 部分 | 已支持导入 live log / `hands.json` 作为第二手牌源；线上建议基线、多用户鉴权未做 |
 
 ---
 
@@ -133,20 +135,21 @@ replay-console/
 │   ├── config.py              # 分层 .env、运行配置、git 版本
 │   ├── db.py                  # PyMySQL 连接池 + 迁移
 │   ├── decisions.py           # review_hands → 决策点 / 指纹 / 质量 / 快照序列化
+│   ├── importer.py            # 复盘 / 实时日志手牌 → 统一内部行
 │   ├── versioning.py          # 版本不可变配置哈希 / advice_version / 桌风
 │   ├── engine.py              # 规则审计、动作分类、模型调用重试、重复分布聚合
-│   ├── repository.py          # review_hands 只读 + replay_* 读写
-│   ├── service.py             # 手牌库/详情/版本/任务/对比/导出/健康
+│   ├── repository.py          # review_hands 只读 + 导入手牌 + replay_* 读写
+│   ├── service.py             # 手牌库/导入/详情/版本/任务/对比/导出/健康
 │   ├── runner.py              # DB 队列 worker + 线程池 + 断点恢复
 │   ├── worker.py              # 可选独立 worker 进程
 │   ├── api.py                 # FastAPI 路由 + SPA 托管
 │   ├── schemas.py             # 请求体
-│   └── migrations/001_init.sql
+│   └── migrations/001_init.sql, 002_imported_hands.sql, 003_hand_deletions.sql
 ├── replay_web/                # React + Vite + AntD
 └── tests/                     # 决策点 / 引擎 / 版本 / API / 提示词 golden
 ```
 
-数据表：`replay_versions`、`replay_jobs`、`replay_job_hands`、`replay_decisions`、`replay_results`、`replay_marks`、`replay_schema_migrations`。全部是逻辑外键，不修改 `review_hands`。
+数据表：`replay_versions`、`replay_jobs`、`replay_job_hands`、`replay_decisions`、`replay_results`、`replay_marks`、`replay_imported_hands`、`replay_import_batches`、`replay_hand_deletions`、`replay_schema_migrations`。全部是逻辑外键，不修改 `review_hands`。
 
 ---
 
@@ -194,10 +197,14 @@ replay-console/
 | --- | --- | --- |
 | GET | `/api/meta` | 手牌数、收藏数、版本数、默认版本/重复、健康摘要 |
 | GET | `/api/health` | DB、review_hands、AI Key、worker、队列、schema |
-| GET | `/api/hands` | 筛选/分页/排序（`favorite`, `position`, `result`, `tag`, `hasRun`, `quality`, `keyword`, `dateFrom`, `dateTo`, `page`, `pageSize`） |
+| GET | `/api/hands` | 筛选/分页/排序（`favorite`, `source`, `position`, `result`, `tag`, `hasRun`, `quality`, `keyword`, `dateFrom`, `dateTo`, `page`, `pageSize`） |
+| POST | `/api/hands/import` | 导入复盘/实时手牌；先 `dryRun=true` 预览，再落库 |
+| GET | `/api/imports` | 最近导入批次（来源、计数、状态、错误） |
 | GET | `/api/hands/{id}` | 详情 + 行动街 + 决策点元数据 |
 | GET | `/api/hands/{id}/comparison` | `versionIds=1,2&jobId=...` 多版本对比 |
 | PATCH | `/api/hands/{id}/mark` | 收藏/标签/状态/结论 |
+| DELETE | `/api/hands/{id}` | 删除单只手牌（导入手牌软删除；review_hands 仅隐藏） |
+| POST | `/api/hands/delete` | 批量删除，body `{"handIds":[1,2]}`，最多 1000 手 |
 | GET | `/api/versions` | 版本列表（`includeArchived=1`） |
 | POST | `/api/versions` | 新建 |
 | POST | `/api/versions/import-env` | 从当前 `.env` + `.table_dy` 导入 |
@@ -220,6 +227,57 @@ replay-console/
 
 常见错误码：`HAND_NOT_FOUND`、`VERSION_NOT_FOUND`、`VERSION_ARCHIVED`、`VERSION_STALE`、`INVALID_VERSION_CONFIG`、`AI_KEY_MISSING`、`TOO_MANY_CALLS`、`JOB_QUEUE_FULL`、`JOB_NOT_CANCELABLE`、`DB_UNAVAILABLE`、`EXPORT_EMPTY`。
 
+### 5.1 导入手牌
+
+页面入口：手牌库右上角 **导入手牌**。支持拖入文件或直接粘贴，先「解析预览」再「确认导入」。
+
+请求示例：
+
+```bash
+curl -s http://127.0.0.1:8010/api/hands/import \
+  -H 'Content-Type: application/json' \
+  -d '{"format":"auto","dryRun":true,"dedupe":true,"content":"<文件原文>"}'
+```
+
+两种输入：
+
+| 格式 | 典型文件 | 识别依据 | 说明 |
+| --- | --- | --- | --- |
+| 复盘手牌 | `review_hands` 导出的 JSON / JSONL | `heroCards` / `hero_cards` + `streets[].actions[].actor` | 兼容 camelCase 与 snake_case；`streets` 可以是 JSON 字符串 |
+| 实时日志 | `hands.json`、`live.states.jsonl` | `type=hand`、`hero_cards` 数组、`blinds`、`streets[].actions[].seat_id` | JSONL 会自动跳过 `state`/`session_start`；默认跳过 `partial` 和翻后接管手牌。新版记录还带 `hero_stack_bb` / `start_stacks`，直接用于重建筹码约束 |
+
+导入选项：
+
+- `dryRun=true`：只解析、分析、去重计数，不写库；
+- `dedupe=true`（默认）：同一来源 + 相同内容更新原记录；库中已有相同内容（包括 `review_hands`）时跳过；
+- `allowInvalid=false`（默认）：跳过缺底牌/行动线/bb 的不可重跑手牌；
+- `includePartial` / `includeMidHand`：仅实时日志，保留截断手牌/翻后接管手牌。
+
+落库后，导入手牌使用 `1e12` 起的独立 id 段，和 `review_hands` 一起出现在手牌库；来源筛选区分 **复盘库 / 导入·复盘 / 导入·实时**。收藏、决策点、重跑结果与原生手牌共用同一套 `replay_*` 表。
+
+详细字段映射与样例见 [`docs/导入手牌-格式说明.md`](docs/导入手牌-格式说明.md)。
+
+### 5.2 删除手牌
+
+入口：列表行内「删除」、勾选底部「删除选中」、详情页「删除这手」。
+
+删除语义刻意分成两种，避免控制台写生产业务表：
+
+| 手牌来源 | 删除行为 | 能否恢复 |
+| --- | --- | --- |
+| 导入手牌（复盘/实时） | `replay_imported_hands.deleted_at` 软删除；收藏、决策点、历史结果保留 | 重新导入同一份内容会更新并恢复该记录 |
+| `review_hands` 手牌 | 写 `replay_hand_deletions`，列表/详情过滤；**不修改** `review_hands` | 删除对应隐藏记录即可（需手工 SQL） |
+
+批量删除接口：
+
+```bash
+curl -s http://127.0.0.1:8010/api/hands/delete \
+  -H 'Content-Type: application/json' \
+  -d '{"handIds":[1000000000002, 990052]}'
+```
+
+返回 `{requested, deleted, imported, reviewHidden, missing}`。已删除手牌不会出现在手牌库、收藏、筛选和重跑范围中；历史任务的结果行仍保留用于追溯。
+
 ---
 
 ## 6. 测试
@@ -234,7 +292,9 @@ CI=true ../.venv/bin/python -m pytest tests -q
 - 决策点重建：preflop 起始 exact、bb=0 invalid、翻后起始 approx、旧 actor approx、缺 hero 动作 approx、指纹排除标题/输赢、快照 JSON roundtrip；
 - 引擎：preflop 尺度容差、`open-4` 这类 option id 的 kind 映射、重复分布、fallback 不计入一致率、对比数据结构；
 - 版本：配置哈希稳定性/敏感性、Key 缺失/归档/旧语义 blocker、public view 不泄露 Key；
-- API：meta、校验错误、收藏、创建任务、错误 envelope、导出头；
+- 导入：复盘 JSON/JSONL、实时 `hands.json`/原始日志、自动识别、partial/中途接管过滤、去重/更新/不可重跑、预览不写库；
+- 删除：单删/批量删除、导入手牌软删除、review_hands 仅隐藏、missing 返回、参数校验；
+- API：meta、校验错误、收藏、创建任务、错误 envelope、导出头、导入与删除路由；
 - 提示词 golden：改动提示词但未 bump `ADVICE_VERSION` 时失败。
 
 前端类型检查与构建：
@@ -271,7 +331,7 @@ CI=true pnpm build
 
 1. **项目位置**：设计文档写的是在 poker-ocr 根下加 `replay_api.py` / `replay/` / `replay_web/`；这里做成独立 `replay-console/` 子项目，通过父路径复用 `poker_ocr`。原因：新项目边界更干净，不污染根目录；启动命令和端口保持一致。
 2. **一次只跑一个任务**：设计里的 `REPLAY_MAX_CONCURRENT_JOBS` 默认 1；当前实现是单 worker 循环，先不做多任务并发。`REPLAY_WORKERS` 控制单个任务内的 unit 并发（默认 2）。
-3. **M5 未做**：不导入 live log / `hands.json`，不导入线上当时建议，不做多用户鉴权。
+3. **M5 部分完成**：已支持导入 live log / `hands.json` 作为第二手牌源（复盘手牌也支持导入），但**不导入线上当时的 AI 建议**作为对比基线，也不做多用户鉴权。
 4. **设置页只读**：改上限/保留策略仍通过环境变量；页面只展示与健康检查。
 5. **版本「测试连接」**：设计里标可选的按钮未实现，避免误点消耗额度。
 6. **跳过的重复/不可重跑手牌**：只记在任务 `config_snapshot.skipped` 与响应里，不写 `replay_job_hands`；`replay_job_hands` 只包含真正进入任务范围的手牌。
