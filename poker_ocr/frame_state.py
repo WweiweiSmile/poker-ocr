@@ -392,7 +392,10 @@ def build_state(frame: RoiFrame, profile: Profile,
     in_hand = [p for p in players if p.in_hand]
 
     # ── 位置（要等在场人数定下来） ─────────────────────────
-    pos = assign_positions([p.seat_id for p in in_hand], dealer)
+    # `seat_ring` 传整张桌的固定座位环（含空座）：中途有人退出、按钮还留在
+    # 空座上时按死按钮排，而不是把整帧判成「庄位不在环上」丢掉。见 positions.py。
+    pos = assign_positions([p.seat_id for p in in_hand], dealer,
+                           seat_ring=[s.seat_id for s in frame.seats])
     if pos.ok:
         for p in in_hand:
             p.position = pos.positions.get(p.seat_id)

@@ -78,6 +78,47 @@ def test_errors() -> None:
         check(not r.ok, f"{label}: 应当失败，实际成功了 {r.positions}")
 
 
+def test_dead_button_dealer_left() -> None:
+    """庄家退出 / 暂离（按钮留在空座）：按完整座位环排位置，不报错。
+
+    9 人桌 dealer=s0，s0 中途退出，剩 s1..s8。按钮下家 s1 是 SB，s2 是 BB，
+    最后一个在场的人 s8 拿 CO（这一手没有真正的 BTN 玩家）。
+    """
+    seat_ring = [f"s{i}" for i in range(9)]
+    active = seat_ring[1:]
+    r = assign_positions(active, "s0", seat_ring=seat_ring)
+    check(r.ok, f"死按钮应能定出位置，实际 {r.error}")
+    check(r.dead_button, "应标记为死按钮")
+    check(r.table_size == 8, f"桌号应为在场人数 8，实际 {r.table_size}")
+    check(r.positions.get("s1") == "SB",
+          f"按钮下家应是 SB，实际 {r.positions.get('s1')}")
+    check(r.positions.get("s2") == "BB",
+          f"再下家应是 BB，实际 {r.positions.get('s2')}")
+    check(r.positions.get("s8") == "CO",
+          f"最后一个在场的人应是 CO（不是 BTN），实际 {r.positions.get('s8')}")
+    check("s0" not in r.positions, "退出的人不该有位置")
+    check(sorted(r.positions.values()) == sorted(POSITIONS_BY_TABLE_SIZE[9][:-1]),
+          f"9 人桌去掉 BTN 的位置集合应完整且唯一：{r.positions}")
+
+
+def test_empty_seats_are_skipped_from_fixed_ring() -> None:
+    """没坐满的桌：空座只跳过，位置按固定座位环的相对顺序发。"""
+    seat_ring = [f"s{i}" for i in range(9)]
+    active = ["s0", "s1", "s3", "s4", "s5", "s6", "s7", "s8"]  # s2 空座
+    r = assign_positions(active, "s0", seat_ring=seat_ring)
+    check(r.ok, f"应能定出位置，实际 {r.error}")
+    check(r.positions.get("s0") == "BTN", f"s0 应是 BTN，实际 {r.positions.get('s0')}")
+    check(r.positions.get("s1") == "SB", f"s1 应是 SB，实际 {r.positions.get('s1')}")
+    check(r.positions.get("s3") == "BB", f"s3 应是 BB，实际 {r.positions.get('s3')}")
+
+
+def test_dead_button_requires_dealer_in_seat_ring() -> None:
+    """庄位既不在在场环、也不在完整座位环 —— 仍应报「不在环上」。"""
+    r = assign_positions(["a", "b", "c"], "zzz", seat_ring=["a", "b", "c"])
+    check(not r.ok and "不在环上" in (r.error or ""),
+          f"庄位不在完整环上应失败，实际 {r.positions} / {r.error}")
+
+
 def test_matches_callback_contract() -> None:
     """和 call-back/utils/hand.go 的 positionsByTableSize 逐项对齐。
 
@@ -103,6 +144,9 @@ def main() -> int:
         test_ring_rotation_is_irrelevant,
         test_heads_up,
         test_errors,
+        test_dead_button_dealer_left,
+        test_empty_seats_are_skipped_from_fixed_ring,
+        test_dead_button_requires_dealer_in_seat_ring,
         test_matches_callback_contract,
     ]
     for t in tests:

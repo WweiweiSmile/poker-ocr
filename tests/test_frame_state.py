@@ -149,6 +149,42 @@ def test_empty_seat_is_not_in_hand() -> None:
     check(not s.errors, f"空座不该触发质量闸：{s.errors}")
 
 
+def test_dealer_left_mid_hand_is_dead_button_not_discard() -> None:
+    """庄家中途退出（按钮留在空座）不能整帧丢弃。
+
+    实盘 2026-10-23：9 人桌有人退出、按钮正好在他身上，之后每帧都报
+    `positions:庄位 xxx 不在环上`，识别彻底停住。按死按钮继续排位置：
+    按钮下家 SB，其余人的相对位置不变，只把退出的人从位置表里去掉。
+    """
+    rows = {k: dict(v) for k, v in BASE.items()}
+    rows["topR"] = {"name": "", "chip": "", "bet": ""}
+    s = state(rows, dealer="topR")
+    check(s.ok, f"死按钮帧不该被质量闸丢掉：{s.errors}")
+    check(s.players_in_hand == 8, f"在场人数应为 8，实际 {s.players_in_hand}")
+    top = s.player("topR")
+    check(not top.in_hand and top.position is None,
+          f"退出的庄家不该有位置：{top.to_debug()}")
+    check(s.player("upR").position == "SB",
+          f"按钮下家应是 SB，实际 {s.player('upR').position}")
+    check(s.player("midR").position == "BB",
+          f"再下家应是 BB，实际 {s.player('midR').position}")
+    # dealer=topR 时这一手按 9 人桌发牌：upR=SB、midR=BB、lowR=UTG、
+    # hero=UTG+1、lowL=UTG+2、midL=LJ、upL=HJ、topL=CO。死按钮只把
+    # topR 的位置去掉，不能让其余人整体往前挪一位。
+    check(s.player("hero").position == "UTG+1",
+          f"hero 应仍是 UTG+1（不能按剩下人数重新编号），实际 "
+          f"{s.player('hero').position}")
+    check(s.player("lowL").position == "UTG+2",
+          f"lowL 应仍是 UTG+2，实际 {s.player('lowL').position}")
+    check(s.player("midL").position == "LJ",
+          f"midL 应仍是 LJ，实际 {s.player('midL').position}")
+    check(s.player("upL").position == "HJ",
+          f"upL 应仍是 HJ，实际 {s.player('upL').position}")
+    check(s.player("topL").position == "CO",
+          f"按钮前最后一位应是 CO（这一手没有 BTN），实际 "
+          f"{s.player('topL').position}")
+
+
 def test_card_icon_decides_fold_without_ocr() -> None:
     """头像底角的手牌图标：有=还在池里，没有=弃牌。
 

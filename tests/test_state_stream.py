@@ -146,6 +146,24 @@ def test_vanished_seat_needs_max_vanish_frames() -> None:
               f"vanished 计数应为 3：{s.summary()['discarded_reasons']}")
 
 
+def test_dead_button_dealer_left_keeps_recording() -> None:
+    """庄家中途退出：按钮留在他身上时不能整段丢帧（2026-10-23 实盘）。"""
+    with stub_env():
+        s = new_stream()
+        rows = {k: dict(v) for k, v in BASE.items()}
+        rows["topR"] = {"name": "", "chip": "", "bet": ""}
+        out = feed(s, make_frame(rows, dealer="topR"))
+        check(out.kind == "record",
+              f"死按钮首帧应记录，实际 {out.kind} / {out.errors}")
+        check(not out.errors, f"死按钮不该进质量闸：{out.errors}")
+        check(out.state.player("hero").position == "UTG+1",
+              f"hero 位置应按死按钮排：{out.state.player('hero').to_debug()}")
+        check(out.state.player("lowL").position == "UTG+2",
+              f"lowL 不能因庄家退出往前挪：{out.state.player('lowL').to_debug()}")
+        check(out.state.player("topR").position is None,
+              "退出的庄家不该有位置")
+
+
 def test_initial_blinds_carried_when_banner_unreadable() -> None:
     with stub_env():
         s = new_stream(initial_blinds=Blinds(0.5, 1.0, None, "1/2"))
@@ -376,6 +394,7 @@ def main() -> int:
         test_single_stable_frame_records_immediately,
         test_discard_does_not_advance_prev,
         test_vanished_seat_needs_max_vanish_frames,
+        test_dead_button_dealer_left_keeps_recording,
         test_initial_blinds_carried_when_banner_unreadable,
         test_reset_makes_next_frame_a_new_baseline,
         test_dealer_rotation_clears_all_in_carry,

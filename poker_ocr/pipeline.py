@@ -259,9 +259,18 @@ def extract(img: np.ndarray, profile: Profile, engine: OcrEngine,
         s.in_hand = s.status != EMPTY and (
             s.stack is not None or s.seat_id == profile.hero_seat_id)
 
-    # 位置要等占用判定跑完才知道人数 —— 不在场的人不发牌、不占位置
+    # 位置要等占用判定跑完才知道人数 —— 不在场的人不发牌、不占位置。
+    # 庄家座位**确实空了**（人退出 / 暂离）时，按钮还留在他身上；这时传
+    # 完整座位环按死按钮排，而不是「庄位不在环上」整帧判无效。如果庄家座位
+    # 是 UNCERTAIN（有人但筹码读不出），仍保留原来的严格失败：那是识别问题，
+    # 不能当成有人退出。
+    dealer_id = dealer.seat_id if dealer.status == "found" else None
+    dealer_seat = next((s for s in seats if s.seat_id == dealer_id), None)
+    dead_button = dealer_seat is not None and dealer_seat.status == EMPTY
     occupied_ring = [s.seat_id for s in seats if s.in_hand]
-    pos = assign_positions(occupied_ring, dealer.seat_id if dealer.status == "found" else None)
+    pos = assign_positions(occupied_ring, dealer_id,
+                           seat_ring=([s.seat_id for s in seats]
+                                      if dead_button else None))
     if pos.ok:
         for s in seats:
             s.position = pos.positions.get(s.seat_id)
@@ -308,9 +317,12 @@ def _check_invariants(seats: list[SeatState], dealer: DealerResult,
         if dup:
             v.append(f"位置重复：{sorted(dup)}")
         if dealer.status == "found" and pos.table_size > 2:
-            # 单挑时庄家兼任 SB，位置名不是 BTN，所以只在 3 人以上查
+            # 单挑时庄家兼任 SB，位置名不是 BTN，所以只在 3 人以上查。
+            # 死按钮（庄家已退出 / 暂离）时庄家不在位置表里，跳过这条：
+            # 这一手没有真正的 BTN 玩家，最后一个在场的人拿 BTN 只为定行动序。
             d = next((s for s in seats if s.is_dealer), None)
-            if d and d.position != "BTN":
+            if (d and d.position is not None and d.position != "BTN"
+                    and not pos.dead_button):
                 v.append(f"庄家 {d.seat_id} 的位置应是 BTN，实际 {d.position}")
 
     dealer_seats = [s.seat_id for s in seats if s.is_dealer]
