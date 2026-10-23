@@ -130,6 +130,122 @@ def test_sb_complete_requires_playability() -> None:
     check("FOLD" not in v.render(), f"T9s 的 SB 判定不该说 FOLD：{v.render()}")
 
 
+def test_small_pair_overlimp_exception() -> None:
+    """小对子不在开池表里，但事实层必须保留 over-limp 的例外。
+
+    h13（2026-10-23）：44 UTG，桌风松弱「很少主动加注」，有效筹码 85BB。
+    模型只看到「Chart says FOLD from UTG」就弃了，理由还写成
+    「limping invites raises」——正好和桌风相反。例外不能只埋在 system prompt
+    里，必须跟结论一起出现，模型才不会把它当成绝对的 FOLD。
+    """
+    v = range_verdict("UTG", ("4h", "4s"))
+    check(v is not None and v.in_range is False, "44 UTG 应判 OUT")
+    if v is not None:
+        text = v.render()
+        check("over-limp" in text or "set-mine" in text,
+              f"44 UTG 的判定应提到 over-limp/set-mine 例外：{text}")
+        check("22-66" in text, f"例外应写清 22-66：{text}")
+        check("Chart says FOLD" in text,
+              f"例外不该抹掉「不在开池范围」这个事实：{text}")
+
+    # 22 在 UTG 也适用；77 已经在 UTG 的开池范围里，不该再触发例外
+    v22 = range_verdict("UTG", ("2c", "2d"))
+    check(v22 is not None and not v22.in_range
+          and "22-66" in v22.render(), f"22 UTG 应保留例外：{v22.render() if v22 else None}")
+    v77 = range_verdict("UTG", ("7c", "7d"))
+    check(v77 is not None and v77.in_range
+          and "22-66" not in v77.render(), "77 UTG 在开池表内，不该走例外")
+
+
+def test_table_dynamics_outranks_chart() -> None:
+    """桌风 > 图表默认：同样的 44 UTG，松弱桌的默认是 over-limp，紧桌才是 FOLD。
+
+    h13 的教训：标准表在错误的桌子上只会越错越多。桌风必须能改变默认线，
+    而不是只当一句注释。
+    """
+    loose = range_verdict("UTG", ("4h", "4s"),
+                          table_dynamics="松弱玩家，跟注站，很少主动加注")
+    check(loose is not None and loose.loose, "松弱桌应标记 loose")
+    text = loose.render()
+    check("better default" in text,
+          f"松弱桌 44 UTG 应把 over-limp 说成更好的默认：{text}")
+    check("folding" in text, f"应明确不建议 fold：{text}")
+
+    tight = range_verdict("UTG", ("4h", "4s"), table_dynamics="紧弱，尊重加注")
+    check(tight is not None and not tight.loose, "紧桌不应标记 loose")
+    check("better default" not in tight.render(),
+          f"紧桌不该给松桌的放宽结论：{tight.render()}")
+
+    # 松桌只放宽有听牌/成牌潜力的类别，不是无脑放宽
+    suited = range_verdict("UTG", ("Ah", "8h"), table_dynamics="松弱玩家，跟注站")
+    check(suited is not None and not suited.in_range, "A8s UTG 应判 OUT")
+    check("playable hands" in suited.render(),
+          f"松桌的非对子应以「可玩类别」放宽：{suited.render()}")
+
+    junk = range_verdict("CO", ("7c", "6s"), table_dynamics="松弱玩家，跟注站")
+    check(junk is not None and not junk.in_range
+          and "OUTSIDE every open range" in junk.render(),
+          f"76o 仍在所有范围之外：{junk.render() if junk else None}")
+
+
+def test_isolation_range_tightens_over_limpers() -> None:
+    """RFI 表是无人入池的表；有 limper 时要收紧，不能把「IN open range」当隔离许可证。
+
+    h3（2026-10-23）：A8o CO、前面 3 个 limper，模型看到「A8o is IN the CO open
+    range」就开到 11BB；4 家跟注后 A8o 成了弱牌。隔离范围用「N 个更早位置」近似。
+    """
+    loose = "松弱玩家，跟注站，很少主动加注"
+
+    a8o = range_verdict("CO", ("8h", "Ad"), table_dynamics=loose, limpers=3)
+    check(a8o is not None and a8o.in_range is True, "A8o CO 在 RFI 表内")
+    check(a8o is not None and a8o.isolation_ok is False,
+          "A8o CO 面对 3 个 limper 应判不在隔离范围")
+    text = a8o.render() if a8o else ""
+    check("UNOPENED pot" in text and "OUTSIDE it" in text,
+          f"A8o 隔离判定应说清「RFI 不等于隔离」：{text}")
+    check("Do not isolate big" in text, f"A8o 应明确不要大额隔离：{text}")
+
+    ato = range_verdict("CO", ("Th", "Ad"), table_dynamics=loose, limpers=3)
+    check(ato is not None and ato.isolation_ok is True,
+          "ATo CO 面对 3 个 limper 仍在收紧后的范围里")
+    check("still IN the tighter" in (ato.render() if ato else ""),
+          f"ATo 应判可以价值隔离：{ato.render() if ato else None}")
+
+    jj = range_verdict("LJ", ("Jc", "Jd"), table_dynamics=loose, limpers=2)
+    check(jj is not None and jj.isolation_ok is True, "JJ LJ 面对 2 个 limper 可隔离")
+
+    # 没有 limper 时不算隔离范围
+    a8o_open = range_verdict("CO", ("8h", "Ad"), table_dynamics=loose, limpers=0)
+    check(a8o_open is not None and a8o_open.isolation_ok is None,
+          "无人入池时不该有隔离判定")
+
+
+def test_prompt_hierarchy_table_dynamics_first() -> None:
+    """提示词必须把优先级写清楚：桌风 > 图表默认 > 通用启发。"""
+    check("Priority (highest first)" in _LEAN_SYSTEM, "提示词缺优先级段")
+    check("outranks the chart" in _LEAN_SYSTEM, "桌风应明确高于图表")
+    check("never override table dynamics" in _LEAN_SYSTEM,
+          "图表应明确不能覆盖桌风")
+
+
+def test_sb_low_straight_note() -> None:
+    """43o 有顺子结构，弃牌理由不能说「没有顺子潜力」。
+
+    h60（2026-10-23）：SB 43o，补 0.5BB 进 9BB。模型说「no flush or straight
+    potential」——但 43 能成 A-5/2-6/3-7，只是底端顺。理由要说对，否则用户
+    会以为规则把 43o 当成了 92o 那种纯垃圾。
+    """
+    v = range_verdict("SB", ("3h", "4s"))
+    text = v.render()
+    check("low-end straight" in text, f"43o 应说低端顺：{text}")
+    check("no straight potential" not in text, f"43o 不能说没有顺子潜力：{text}")
+    check("FOLD" in text, f"43o 仍应默认弃牌：{text}")
+
+    v92 = range_verdict("SB", ("9d", "2h"))
+    check("limited straight" in v92.render() and "FOLD" in v92.render(),
+          f"92o 应说顺子潜力有限：{v92.render()}")
+
+
 def test_utg2_exists() -> None:
     """9 人桌有 7 个非盲位，原表漏了 UTG+2 整行，模型只能瞎插值。"""
     check("UTG+2" in RFI, "UTG+2 缺失")
@@ -172,7 +288,11 @@ def main() -> int:
     tests = [
         test_expand_notation, test_hand_key, test_positions_are_monotonic,
         test_known_verdicts, test_sb_bb_are_not_lists,
-        test_sb_complete_requires_playability, test_utg2_exists,
+        test_sb_complete_requires_playability,
+        test_small_pair_overlimp_exception, test_table_dynamics_outranks_chart,
+        test_isolation_range_tightens_over_limpers,
+        test_sb_low_straight_note,
+        test_prompt_hierarchy_table_dynamics_first, test_utg2_exists,
         test_prompt_chart_matches_code, test_open_frequency_ramps_up_by_position,
     ]
     for t in tests:

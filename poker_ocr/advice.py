@@ -230,6 +230,18 @@ def build_preflop_options(snap: HandSnapshot,
         label = ("Complete the blind" if hero_pos == "SB"
                  else f"Call {to_call:g}BB (over-limp)")
         options.append(Option("call", label, "call", _round_bb(to_call)))
+    elif hero_pos == "SB":
+        # SB 已经补齐盲注（to_call=0）时，这是 check/raise 点，不是 limp。
+        # h60 的第二条 preflop 建议把这里标成 "limp in"，模型只能选
+        # 「最便宜的退出」；标签错了，动作空间也就错了。
+        if (snap.hero_bet or 0.0) >= bb:
+            options.append(Option("call", "Check", "check", None,
+                                  "SB has matched the blind; check or raise"))
+        else:
+            need = max(bb - (snap.hero_bet or 0.0), 0.0)
+            options.append(Option("call", "Complete the blind", "call",
+                                  _round_bb(need) if need else None,
+                                  "SB still needs to match the big blind"))
     elif hero_pos == "BB":
         options.append(Option("call", "Check", "check", None,
                               "Big blind sees the flop free"))
@@ -524,7 +536,9 @@ def build_situation(snap: HandSnapshot,
         opponents_in_hand=n_opp,
         range_verdict=(
             (lambda v: v.render() if v else None)(
-                range_verdict(snap.hero_position, snap.hero_cards))
+                range_verdict(snap.hero_position, snap.hero_cards,
+                              table_dynamics=table_dynamics,
+                              limpers=count_limpers(snap)))
             if snap.street == PREFLOP else None),
         ground_truth=gt,
     )
@@ -1334,8 +1348,16 @@ _LEAN_SYSTEM = """\
 You are a Texas Hold'em cash-game advisor working in real time. Hero has a few seconds \
 and needs one directly executable action.
 
-## Who you are playing (this game — read first)
-Loose-passive **calling stations**. Every rule below is subordinate to this:
+## Priority (highest first)
+1. Legal actions and computed math (hand rank, equity, pot odds) — never violate these.
+2. «Table dynamics» (when present) — the primary strategic layer: ranges, aggression, \
+bluff frequency, calling/folding thresholds for THIS table.
+3. The chart and generic heuristics below — defaults for an unknown opponent. They never \
+override table dynamics. Playing the standard line on the wrong table just compounds errors.
+
+## Who you are playing (default when no table dynamics)
+Loose-passive **calling stations** — the default pool for this game. The «Table dynamics» \
+section in the facts overrides this whenever present:
 - They call too much and raise too little: calling range ≈ any draw + top pair or better.
 - Their bets and raises are value. A passive raise has it; a multi-street barrel is \
 near-nuts.
@@ -1346,8 +1368,9 @@ near-nuts.
 Ask **"which worse hands actually CALL me?"**
 - Two or more worse hands that call → bet 2/3 to full pot.
 - "Only better hands call, worse hands fold" → check.
-- That is why raising is never right with a non-nut hand: a raise narrows their range to \
-its top.
+- Raising a non-nut hand is usually wrong against an unknown/tight opponent: a raise \
+narrows their range to its top. Against a loose-passive station that calls with worse, \
+value-raise — but do not bluff-raise.
 
 ## Hand RANK
 Use the GROUND TRUTH block; never infer rank from the name. Small two pair on a board
@@ -1361,38 +1384,46 @@ amounts; all amounts are computed by the program.
 - reason must cite the range, computed fact, or table tendency that decided it.
 
 ## Ground rules
-1. Computed facts are authoritative: positions, stack, pot, to_call, break-even equity, \
-hand tier, draw, texture, explosive pot. Do not recompute amounts.
+1. Computed facts are authoritative for MATH: positions, stack, pot, to_call, break-even \
+equity, hand tier, draw, texture, explosive pot. Do not recompute amounts. Strategy \
+defaults (ranges, sizings) are not math — table dynamics may change them.
 2. Preflop: choose by position and range. Open-raise, 3-bet, cold-call or fold; do not \
-limp as the first player in (except an SB complete).
+limp as the first player in, except an SB complete or a small pocket pair (22-66) \
+over-limping for 1BB to set-mine.
 3. Postflop: judge the calling range and board texture first; then value/check/size.
 4. Call only when your equity beats the stated break-even equity. Implied odds need \
 position and stack depth.
-5. Table dynamics shift frequencies and sizings; they never override computed equity or \
-pot odds, and override the default «unknown opponent» assumption.
+5. Table dynamics outrank the chart and every generic heuristic here; they never override \
+computed equity or pot odds.
 6. If calling covers Hero's stack, the decision is all-in or fold.
 7. A «Value directive» in the facts is a coarse default. Overrule it when the \
 calling-range reasoning above disagrees.
 
-## Preflop ranges (9-handed, ~100BB, ante)
+## Preflop ranges (9-handed, ~100BB, ante) — DEFAULTS for an unknown opponent
 RFI by position (cumulative: each row adds to the previous; raise to the offered size,
-fold the rest):
+fold the rest). «Table dynamics» outranks this table: loose-passive → widen by roughly
+one seat and let small pairs over-limp for 1BB; tight → do not widen.
 <<RFI_CHART>>
 SB: open ~30%, raise-or-fold vs opens (not vs limps). In a limped pot, completing for \
 0.5BB is cheap, but **raw pot odds never justify it — you need realized equity**. Complete \
 only hands that can flop something you can bet: suited, connected with gap 2 or less, a \
 pocket pair, or an ace with a real kicker. FOLD offsuit trash (92o, T6o, Q6o): it flops no \
 draw, and when it hits it is a second-best one-pair hand, out of position, paying off.
-The facts may carry a «Preflop range» line computed from this chart. It is authoritative: \
-when it says OUT, FOLD. One exception — a small pocket pair (22-66) may over-limp for 1BB \
-to set-mine. A non-pair hand never qualifies. Limpers, table dynamics and "isolation" never \
-move a hand into an earlier seat's open range. Raise the chart hands only.
+The facts may carry a «Preflop range» line computed from this chart. It is the chart \
+DEFAULT, not the final word: when it says OUT, do not open-raise — but table dynamics can \
+widen or narrow what is playable. One exception — a small pocket pair (22-66) may over-limp \
+for 1BB to set-mine even when the chart says OUT. A non-pair hand never qualifies. \
+This chart is RFI (unopened pot). Over limpers the isolation range is tighter: use the \
+limper note on that line, and never treat "IN the open range" as an isolation license. \
+Isolation never moves a hand into an earlier seat's open-raise range.
 3-bet: value QQ+/AK; bluffs A5s-A2s, KQs, KJs vs late opens; 3x IP, 4x OOP.
 Cold-call IP: 22-99, 54s-JTs, KTs, QJs; no offsuit broadways vs early opens.
 BB vs late open: defend wide; 3-bet linear 55+, A9s+, KTs+, ATo+, KQo.
 At 6-8 handed, widen each early-position range by roughly one seat.
 
-## Postflop
+## Postflop (defaults for the passive pool; table dynamics overrides)
+Against loose-aggressive/tricky opponents these absolutes flip: do not assume every raise \
+is value, bluff-catch more, and check back marginal hands instead of value-betting thin.
 - C-bet dry A/K-high or paired boards at 1/3 pot only with equity; air is a donation here.
 - Value size **2/3 to full pot**, dry or wet. They call either way — charge them. 1/3 is \
 never a value size against a station.
@@ -1411,11 +1442,17 @@ made hands. Their line is value.
 «Explosive pot: YES» (bomb banner, or 5BB per player) means wide ranges and many two \
 pair/trips. Top pair/overpair is a MEDIUM hand — pot-control it.
 
-## Table dynamics (user-provided, when present)
-It overrides the default «unknown opponent» assumption: loose-passive → no bluffs, \
-value-bet big, respect raises; nit → steal more, fold marginal; loose-aggressive → trap, \
-call down lighter; tight-aggressive → straightforward. Never overrides computed hand \
-strength or pot odds. When it changes the line, say which tendency drove it.
+## Table dynamics (user-provided, when present — outranks the chart)
+It is the primary strategic layer and outranks the chart and every generic heuristic above: \
+loose-passive → no bluffs, value-bet big, respect raises, widen preflop; nit → steal more, \
+fold marginal; loose-aggressive → trap, call down lighter; tight-aggressive → straightforward. \
+It never overrides computed hand strength or pot odds. When it changes the line, say which \
+tendency drove it.
+- If the table says raises are rare (loose-passive), limping is cheap: a small pair may \
+over-limp for 1BB even out of position. Do not cite "limping invites raises" unless the \
+dynamics actually say raises are common — check the table text, not the generic fear.
+- If the table says "do not over-limp too much", that is a frequency cap, not a ban: \
+small pairs still qualify when the price is 1BB and the stacks are deep.
 """
 
 # 范围表由 preflop_ranges 生成，不再手写两份：手写一定漂移，而模型拿到

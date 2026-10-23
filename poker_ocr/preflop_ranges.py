@@ -29,6 +29,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from .table_dynamics import is_loose_table
+
 RANKS = "23456789TJQKA"
 
 # 9 人桌的非盲位置，按翻前行动顺序（先说话 → 最后说话）
@@ -191,6 +193,15 @@ def open_frequency(position: str) -> float:
     return total / 1326 * 100
 
 
+def is_small_pair(key: str) -> bool:
+    """'44' → True；'77' / 'AJo' → False。
+
+    「小对子」按提示词里的例外定义：22–66。它们不在靠前位置的开池表里，
+    但允许为 1BB 的 over-limp 抽三条（见 `_LEAN_SYSTEM` 的 Preflop 段）。
+    """
+    return len(key) == 2 and key[0] == key[1] and key[0] in "23456"
+
+
 def hand_key(cards) -> str:
     """('Jh','Ks') → 'KJo'。"""
     a, b = cards[0], cards[1]
@@ -238,35 +249,131 @@ def sb_completable(cards) -> bool:
     return False
 
 
+def has_low_straight_potential(cards) -> bool:
+    """43o / 32o / 42o / 53o：有顺子结构，但只能成**最低端**的顺。
+
+    不能说它们「没有顺子潜力」—— 43 能成 A-5、2-6、3-7，但都是底端顺，
+    常被更高的顺和同花反超。`sb_completable` 因此把「最小 ≥ 5」作为门槛；
+    这里单独把这一类挑出来，是为了让弃牌理由说对话，而不是把 43o 说成垃圾。
+    """
+    a, b = cards[0].upper(), cards[1].upper()
+    ra = "T" if a.startswith("1") else a[0]
+    rb = "T" if b.startswith("1") else b[0]
+    try:
+        ia, ib = RANKS.index(ra), RANKS.index(rb)
+    except ValueError:
+        return False
+    return abs(ia - ib) <= 2 and min(ia, ib) < 3
+
+
 @dataclass(frozen=True)
 class Verdict:
-    """这手牌在该位置的开池归属。"""
+    """这手牌在该位置的开池归属，以及「有 limper 时的隔离归属」。
+
+    `in_range` 是 RFI（无人入池）口径；`isolation_ok` 是「前面有 N 个 limper」
+    的口径 —— 用 N 个更早位置的 RFI 范围近似：人越多，能隔离的牌越强。
+    """
 
     hand: str
     position: str
     in_range: bool | None            # None = 该位置没有清单（SB/BB）
     first_position: str | None        # 最早包含它的位置
     note: str = ""
+    loose: bool = False              # 桌风明确松弱/跟注站
+    limpers: int = 0                 # 我行动前已经溜入的人数
+    isolation_position: str | None = None   # 收紧后的参照位置
+    isolation_ok: bool | None = None        # 这手牌在收紧后的范围里？
 
     def render(self) -> str:
         if self.in_range is None:
             return f"Preflop range: {self.hand} from {self.position} — {self.note}"
+        if self.limpers > 0 and self.in_range and self.isolation_ok is not None:
+            if self.isolation_ok:
+                if is_small_pair(self.hand):
+                    text = (f"Preflop range: {self.hand} is IN the {self.position} RFI "
+                            f"range, and still IN the tighter {self.isolation_position} "
+                            f"range over {self.limpers} limper(s). A small pair is a "
+                            f"set-mine here: over-limp for 1BB, or make a small raise "
+                            f"for initiative — do not bloat the pot.")
+                else:
+                    text = (f"Preflop range: {self.hand} is IN the {self.position} RFI "
+                            f"range, and still IN the tighter {self.isolation_position} "
+                            f"range over {self.limpers} limper(s). Raise for "
+                            f"value/isolation — but expect calls, so size for value, "
+                            f"not to fold them out.")
+                if self.loose:
+                    text += (" Loose-passive table: they call wide — isolate the hands "
+                             "that flop well multiway, not dominated offsuit aces.")
+                return text
+            # 2026-10-23 h3：A8o CO、3 个 limper，模型看到「IN CO open range」
+            # 就开到 11BB；4 家跟注后 A8o 变成弱牌。RFI 表是「无人入池」的表，
+            # 不能直接当隔离范围用 —— 有 limper 时要收紧。
+            text = (f"Preflop range: {self.hand} is IN the {self.position} RFI range — but "
+                    f"that is for an UNOPENED pot. Over {self.limpers} limper(s) the "
+                    f"isolation range tightens to {self.isolation_position}, and {self.hand} "
+                    f"is OUTSIDE it. Do not isolate big.")
+            if is_small_pair(self.hand):
+                text += (" A small pocket pair may still over-limp for 1BB to set-mine; "
+                         "do not raise it just to isolate.")
+            else:
+                text += (" Dominated offsuit hands play badly multiway (weak kicker, "
+                         "reverse implied odds). FOLD, or over-limp for 1BB only if you "
+                         "can fold easily when you flop one pair.")
+            return text
         if self.in_range:
-            return (f"Preflop range: {self.hand} is IN the {self.position} open "
+            text = (f"Preflop range: {self.hand} is IN the {self.position} open "
                     f"range (first position that opens it: {self.first_position}). "
                     f"Chart says RAISE.")
+            if self.loose:
+                text += (" Loose-passive table: the chart is a floor here — raise for "
+                         "value/isolation and expect calls.")
+            return text
         if self.first_position:
-            return (f"Preflop range: {self.hand} is OUTSIDE the {self.position} open "
+            text = (f"Preflop range: {self.hand} is OUTSIDE the {self.position} open "
                     f"range — it only enters at {self.first_position}. "
-                    f"Chart says FOLD from {self.position}.")
+                    f"Chart says FOLD as an open from {self.position}.")
+            if is_small_pair(self.hand):
+                # 2026-10-23 h13：44 UTG 只看到「Chart says FOLD」就弃了，
+                # 理由还写成「limping invites raises」，和松弱桌风正相反。
+                # 例外不能只埋在 system prompt 的 SB 段里，必须跟结论一起出现。
+                text += (" But a small pocket pair (22-66) may over-limp for 1BB to "
+                         "set-mine — that is the chart's explicit exception.")
+                if self.loose:
+                    # 桌风优先：同样的牌在松弱桌和紧桌是两种默认。h13 的桌风
+                    # 明确「很少主动加注」，limp 的加注税很低，弃牌反而更差。
+                    text += (" This table is loose-passive (raises are rare): "
+                             "over-limping for 1BB to set-mine is the better default "
+                             "than folding — the chart is too tight here.")
+                else:
+                    text += (" Check the implied-odds fact and the table dynamics "
+                             "before folding.")
+            elif self.loose:
+                # 松桌不等于什么都能溜：只放宽有听牌/成牌潜力的类别。
+                text += (" This table is loose-passive: the chart is a default, not a "
+                         "ban — but widen only with playable hands (pairs, suited, "
+                         "connected), not offsuit trash.")
+            return text
         return (f"Preflop range: {self.hand} is OUTSIDE every open range in the chart. "
                 f"Chart says FOLD.")
 
 
-def range_verdict(position: str | None, cards) -> Verdict | None:
-    """位置 + 两张手牌 → 范围归属。牌不全或位置未知时返回 None。"""
+def range_verdict(position: str | None, cards,
+                  table_dynamics: str | None = None,
+                  limpers: int = 0) -> Verdict | None:
+    """位置 + 两张手牌 → 范围归属。
+
+    `table_dynamics` 只影响「默认线」的渲染：桌风明确松弱时，开池表按**默认值**
+    对待（放宽一档/小对子 over-limp），而不是绝对的 FOLD。它不改变 `in_range`
+    本身 —— 事实和解释分开，复盘时仍然能看到「这手牌在标准表里本来不进」。
+
+    `limpers` > 0 时额外算「隔离归属」：RFI 表是无人入池的表，有 N 个 limper
+    就用 N 个更早位置的范围来近似（人越多，能隔离的牌越强）。h3 的 A8o 就是
+    只有 `in_range=True`、隔离归属却是 OUT —— 模型不能把前者当开池许可证。
+    """
     if not position or not cards or len(cards) != 2:
         return None
+    loose = is_loose_table(table_dynamics)
+    limpers = max(int(limpers or 0), 0)
     pos = position.strip().upper().replace("+", "+")
     if pos not in RFI:
         if pos == "SB":
@@ -275,18 +382,37 @@ def range_verdict(position: str | None, cards) -> Verdict | None:
                 note = (f"{key} can flop something you can bet (same suit / pair / "
                         f"connected / two broadways / AJ+). Completing for 0.5BB is fine; "
                         f"do not raise it.")
+            elif has_low_straight_potential(cards):
+                # 2026-10-23 h60：43o 的弃牌理由被写成「no straight potential」，
+                # 但 43 是有顺子结构的，只是只能成底端顺。理由必须说对。
+                note = (f"{key} has only low-end straight potential: 43/32 make the "
+                        f"bottom of the straight (A-5, 2-6, 3-7), often beaten by "
+                        f"higher straights and flushes. Offsuit and out of position, "
+                        f"the 0.5BB price does not pay for the reverse implied odds. "
+                        f"FOLD is the lower-variance default; completing is a thin "
+                        f"exploit only on a very passive table.")
             else:
-                note = (f"{key} is offsuit with no flush and no straight potential. "
-                        f"Completing only buys second-best one-pair hands out of "
-                        f"position — the 0.5BB price does not pay for that. FOLD.")
-            return Verdict(key, pos, None, None, note=note)
+                note = (f"{key} is offsuit with no flush and only limited straight "
+                        f"potential. Completing only buys second-best one-pair hands "
+                        f"out of position — the 0.5BB price does not pay for that. FOLD.")
+            return Verdict(key, pos, None, None, note=note, loose=loose,
+                           limpers=limpers)
         if pos == "BB":
             return Verdict(hand_key(cards), pos, None, None,
                            note="BB has no open range (already posted) — this is a "
-                                "check/defend spot, not an RFI decision")
+                                "check/defend spot, not an RFI decision",
+                           loose=loose, limpers=limpers)
         return None
 
     key = hand_key(cards)
     first = next((p for p in OPEN_POSITIONS if key in RFI[p]), None)
+    isolation_position = None
+    isolation_ok = None
+    if limpers > 0:
+        idx = OPEN_POSITIONS.index(pos)
+        isolation_position = OPEN_POSITIONS[max(0, idx - limpers)]
+        isolation_ok = key in RFI[isolation_position]
     return Verdict(hand=key, position=pos, in_range=key in RFI[pos],
-                   first_position=first, note=NOTES.get(pos, ""))
+                   first_position=first, note=NOTES.get(pos, ""), loose=loose,
+                   limpers=limpers, isolation_position=isolation_position,
+                   isolation_ok=isolation_ok)

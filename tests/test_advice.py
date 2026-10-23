@@ -1028,6 +1028,26 @@ def test_options_preflop_uses_bb_sizing() -> None:
           f"非盲位平跟应标 over-limp：{by['call']}")
 
 
+def test_sb_after_complete_is_check_not_limp() -> None:
+    """SB 补齐盲注后（to_call=0）应是 Check，不是 limp in。
+
+    h60 的第二条 preflop 建议（pot 9.5, to_call 0, SB 已投 1BB）被标成
+    "limp in"，模型只能选「最便宜的退出」。这是标签/动作空间错误，
+    不是策略错误；43o 的弃牌决策（to_call=0.5 那条）保持不变。
+    """
+    point = make_point(
+        street="preflop", board=(), to_call=0.0, pot=9.5,
+        hero_position="SB", hero_cards=("3h", "4s"), hero_bet=1.0,
+        hero_stack=79.0, preflop_shapes=("limped",), cbet_spot=False,
+        blinds=Blinds(0.5, 1.0, 0.5, "1/2(1)"),
+    )
+    by = {o.id: o for o in build_options(point)}
+    check(by["call"].kind == "check" and by["call"].label == "Check",
+          f"SB 补齐后应是 Check：{by['call']}")
+    check("limp" not in by["call"].label.lower(),
+          f"不该再标 limp in：{by['call'].label}")
+
+
 def test_options_facing_bet_uses_pot_after_call() -> None:
     # 对手下注到 4（老王），hero 已投 0 → 需跟 4；再加注 1/2 池
     # = 4 + 0.5 × (10 + 4) = 11（「加注到 11」）
@@ -2044,6 +2064,7 @@ def main() -> int:
         test_limpers_count_from_state_and_bonus_decays,
         test_loose_table_adds_open_bonus,
         test_options_preflop_uses_bb_sizing,
+        test_sb_after_complete_is_check_not_limp,
         test_options_facing_bet_uses_pot_after_call,
         test_options_bump_to_min_raise_when_fraction_too_small,
         test_options_capped_by_stack,

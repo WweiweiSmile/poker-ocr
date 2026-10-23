@@ -64,8 +64,9 @@ _LOOSE_WORDS = (
 def is_loose_table(text: str | None) -> bool:
     """桌风是否明确是「松」桌（松弱/松凶/跟注站/新手鱼）。
 
-    只影响翻前开池尺度（`advice.build_options` 的 `open_bonus`）。
-    没有桌风、或写的是紧弱/尊重加注，都不算松 —— 紧桌反而该缩小开池。
+    影响两处：翻前开池尺度（`advice.build_options` 的 `open_bonus`），以及
+    `preflop_ranges.range_verdict` 对「默认线」的解释（松桌允许更宽、
+    小对子可以 over-limp）。没有桌风、或写的是紧弱/尊重加注，都不算松。
     """
     t = (text or "").lower()
     return bool(t) and any(w in t for w in _LOOSE_WORDS)
