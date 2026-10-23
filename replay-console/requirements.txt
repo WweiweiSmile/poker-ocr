@@ -1,0 +1,8 @@
+# 控制台后端依赖。poker_ocr 的依赖（fastapi/uvicorn 已有）由父项目提供。
+fastapi>=0.115
+uvicorn[standard]>=0.30
+pymysql>=1.1
+httpx>=0.27
+
+# 测试
+pytest>=8.0
