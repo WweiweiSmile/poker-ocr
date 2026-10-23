@@ -208,7 +208,7 @@ ROI 路线只裁固定槽位、只跑 rec，不跑全图检测，是实时链路
   暂停期间每秒打一行 `[建议] 生成中… Ns` 心跳（实测 JEV 一次 1.7–3.4s），
   避免控制台先静默、再把建议和恢复后的识别日志一次性吐出来；建议行同时带上
   本次耗时，慢在模型还是识别一眼可见。失败时回退到最保守动作并记录原因。
-- **自动点击（`--auto-click`，默认关闭）**：先用
+- **自动点击（`--auto-click`，默认开启）**：先用
   `tools/calibrate_clicker.py` 在客户端上方拖出按钮外接框，标定
   `fold / call` 和五个快捷档位；默认按圆形采样（内切椭圆，按 `C`
   可切换方形），建议返回后在区域内缩一圈的范围里取**随机坐标**点击。
@@ -217,6 +217,10 @@ ROI 路线只裁固定槽位、只跑 rec，不跑全图检测，是实时链路
   翻前 `open-* / raise-3x` 按金额选最近的底池档位。
   只有当前帧仍 `hero_turn=true`、`state.ok`、决策点/手牌一致、牌面可靠且未
   点过时才执行；`source=fallback` 默认不点（配置 `allow_fallback: true` 可开）。
+  **默认在终端问 `y` 确认 / `n` 拒绝**（单键、不用回车，其他按键忽略；
+  提示前会用 `tcflush` 清空终端缓存的按键）；按 `n` 记为
+  `click.status=skipped, click.reason=user_rejected`。加 `--no-confirm`
+  则模型结果返回后直接执行（无人值守）。
   点击后约 0.5s 用动作指纹（`hero_turn` / 动作徽章 / 底池 / 下注 / 筹码）确认
   是否生效；没变化会再点一次（`retry_delay_ms=500`、`retry_count=1`，可配置）。
   真实点击需要 macOS「辅助功能」权限，且客户端要保持在最前。
@@ -433,6 +437,7 @@ cd ~/codes/poker-ocr
 
 # 正式运行（Ctrl-C 结束，自动写 session_end）
 # 默认 --url cam:auto（自动选 OBS 虚拟摄像头）、--auto-click 开启
+# 建议返回后默认在终端问 y/n；要直接执行就加 --no-confirm
 .venv/bin/python -m poker_ocr.live \
   --profile config/table_wpk_1080x2400.json \
   --every 0.5 \
@@ -442,6 +447,8 @@ cd ~/codes/poker-ocr
 #   --url rtsp://127.0.0.1:8554/live
 # 不要自动点击时：
 #   --no-auto-click
+# 不要每次确认时：
+#   --no-confirm
 ```
 
 启动顺序无所谓：worker 连不上会每 1s 重试。
@@ -731,7 +738,7 @@ cd ~/codes/poker-ocr
 `click` 只在启用 `--auto-click` 时出现；未启用 / 不需要点击时保持旧记录形状。
 `status` 为 `clicked` / `dry_run` / `skipped` / `error`；`skipped` 带 `reason`
 （如 `hero_turn_false`、`stale_decision`、`fallback_advice`、
-`already_clicked`、`missing_preset:raise-1/2`）。
+`already_clicked`、`user_rejected`、`missing_preset:raise-1/2`）。
 
 点击后 0.5s 页面仍无变化时会补点一次，另写一条记录：
 
@@ -760,6 +767,8 @@ cd ~/codes/poker-ocr
 换手时写一条，内容是**上一手完整的逐街行动线 + 这一手给过的全部 AI 建议**
 （对手与自己都记），这条记录就是一手牌的“手牌记忆”，可直接用于复盘。
 退出时若最后一手还没换手，也会写一条并标 `"partial":true`。
+完整手牌落库时终端会打一条**亮黄底**提示：`完整手牌 6，id h6 日志已经生成`
+（`partial` 不打）；AI 决策有问题时凭这行按 `hand_id` 回 JSONL 定位。
 
 ```json
 {"type":"hand","ts":"...","hand_id":"h6",
@@ -879,6 +888,7 @@ All-in 文本）会立即收掉当前手牌，不依赖牌面/庄位变化。
 | `--ai-timeout` | `20` | 单次 AI 建议超时（秒）；后台线程，不阻塞采样 |
 | `--ai-confirm` | `1` | `hero_turn` 连续几帧才认定轮到我（蓝色下注按钮下第一帧即可） |
 | `--auto-click` / `--no-auto-click` | 开 | AI 建议返回后自动点击桌面客户端（需先标定；仅 macOS） |
+| `--no-confirm` | 关 | 自动点击不再询问；默认每次执行前单键读 `y` 确认 / `n` 拒绝（其他键忽略） |
 | `--clicker-config` | `config/clicker_local.json` | 自动点击按钮坐标 JSON |
 | `--clicker-dry-run` | 关 | 只打印将点击的随机坐标，不发送真实鼠标事件 |
 | `--quiet` | 关 | 只打状态行和最终汇总 |

@@ -60,17 +60,21 @@ ROI 识别座位、筹码、下注、动作、庄位、底池和盲注，输出�
   --out logs/live.states.jsonl \
   --clicker-dry-run
 
-# 2) 真实运行（默认 cam:auto + 自动点击）
+# 2) 真实运行（默认 cam:auto + 自动点击；每次点击前单键确认 y/n）
 .venv/bin/python -m poker_ocr.live \
   --profile config/table_wpk_live.json \
   --initial-blinds 1/2 \
   --out logs/live.states.jsonl
+
+# 完全自动、不再询问：追加 --no-confirm
 ```
 
 - `--url` 默认 `cam:auto`（自动选择 OBS 虚拟摄像头，索引用 `tools/list_cameras.py` 查）；
   走 MediaMTX 时加 `--url rtsp://127.0.0.1:8554/live`，并先
   `mediamtx config/mediamtx.yml`。
 - `--auto-click` 默认开启；只要 AI 建议、不要自动点击时加 `--no-auto-click`。
+- 自动点击默认是**交互确认**模式：模型给出建议后终端问 `y` 确认 / `n` 拒绝。
+  想回到「结果返回立刻点」的无人值守模式，加 `--no-confirm`。
 - 关闭 AI 建议时（`--no-ai-advice`）自动点击会跟着关闭。
 - 没有 `config/clicker_local.json` 时启动会明确报错，先跑第 0 步。
 - 真实点击需要 macOS「辅助功能」权限，见下方自动点击小节。
@@ -201,7 +205,9 @@ OpenRouter 的 Activity 页看被拒原因，或换一个有 OpenAI 模型权限
   （`shows`，例如 `{"seat_id":"midL","name":"许文文啊","cards":["Ac","Qh"]}`；
   河牌只主动秀一张时 `cards` 只有一张）和全下汇总（`all_ins`，含全下金额与
   界面实时胜率；全下需连续 2 帧确认，避免亮牌牌背的单帧误判），可以直接拿去
-  复盘或对照。
+  复盘或对照。完整手牌落库时终端会打一条**亮黄底**提示（如
+  `完整手牌 7，id h7 日志已经生成`），AI 决策有问题时凭这行就能按 `hand_id`
+  回到 JSONL 定位。
 - 头像上的黄色「All-in」徽章会被识别成 `all_in`；全下摊牌时筹码/下注位的
   百分比会写入 `equity`。徽章从 All-in 变成其他状态时，按这手结束处理，
   不必等庄位/牌面变化。
@@ -232,24 +238,33 @@ AI 建议返回后，可以在客户端的对应按钮上自动点一下。先�
 
 翻前建议（`open-2.5`、`raise-3x` 等）没有对应的底池档位，按**金额最近**的档位点。
 
+默认是**人工确认**模式：建议打印出来后在终端问
+`[确认] flop 建议 Call 4BB，是否执行？`，**按 `y` 才点，按 `n` 拒绝**。
+单键读取、不用回车；其他按键（含回车）一律忽略，继续等 `y`/`n`。每次提示
+出现前会清空终端里缓存的按键，模型生成期间提前敲的键不会误触这次确认。
+确认期间主循环会等待（等同于模型生成期间的暂停），所以建议在看到提示后
+尽快作答。想让模型结果返回后立即执行，加 `--no-confirm`。
+
 ```bash
 # 1) 标定：客户端窗口摆好后，按提示依次拖出按钮外接框
 #    默认画圆形，按 C 切换圆形/方形；--shape rect 可让新按钮默认方形
 .venv/bin/python tools/calibrate_clicker.py --list-displays
 .venv/bin/python tools/calibrate_clicker.py --out config/clicker_local.json
 
-# 2) 先 dry-run：只打印随机坐标，不真的点（--url 默认 cam:auto）
+# 2) 先 dry-run：只打印随机坐标，不真的点；建议返回时仍需 y/n 确认
 .venv/bin/python -m poker_ocr.live \
   --profile config/table_wpk_1080x2400.json \
   --initial-blinds 1/2 --clicker-dry-run
 
-# 3) 确认坐标无误后真实运行（--auto-click 默认开启）
+# 3) 确认坐标无误后真实运行（--auto-click 默认开启，建议前会问 y/n）
 .venv/bin/python -m poker_ocr.live \
   --profile config/table_wpk_1080x2400.json \
   --initial-blinds 1/2
 
 # 不需要自动点击时：
 #   --no-auto-click
+# 不需要每次确认、结果返回立刻点击时：
+#   --no-confirm
 # 走 MediaMTX 而不是虚拟摄像头时：
 #   --url rtsp://127.0.0.1:8554/live
 ```
@@ -260,9 +275,11 @@ iTerm / IDE**（不是 Python 本身），然后完全退出并重开它。也�
 直接报错，不会静默不点。
 
 **安全闸**：只有当前帧仍然 `hero_turn=true`、`state.ok`、决策点与投递时一致、
-手牌一致、牌面可靠、且这条建议没点过，才会执行；模型超时/回退建议默认不点
+手牌一致、牌面可靠、且这条建议没点过，**并且终端确认了 y**（`--no-confirm`
+时跳过最后一条），才会执行；模型超时/回退建议默认不点
 （`clicker_local.json` 里 `allow_fallback: true` 可打开）。退出/换手/断流重连
-的 drain 只落库不点击。每次点击结果写在 `advice` 记录的 `click` 字段里。
+的 drain 只落库不点击。每次点击结果写在 `advice` 记录的 `click` 字段里；
+用户按 `n` 时记为 `status=skipped, reason=user_rejected`。
 
 **生效确认与重试**：点击后约 0.5s，用下一帧的动作指纹（`hero_turn`、每座动作
 徽章、底池/下注/筹码等）和点击时对比；页面已经变化就不再动，**没变化会再执行

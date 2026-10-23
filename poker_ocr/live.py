@@ -127,6 +127,8 @@ _ANSI_ADVICE_BAR = {
 }
 _ANSI_ADVICE_BAR_DEFAULT = "\033[1;30;103m"   # 未知动作退回原来的亮黄底
 _ANSI_ADVICE_TEXT = "\033[1m"         # 粗体
+# 完整手牌落库提示：亮黄底黑字，和滚动中的识别日志拉开，方便事后回看这一手。
+_ANSI_HAND_DONE = "\033[1;30;103m"
 
 
 def _advice_bar(kind: str) -> str:
@@ -134,8 +136,107 @@ def _advice_bar(kind: str) -> str:
     return _ANSI_ADVICE_BAR.get(kind, _ANSI_ADVICE_BAR_DEFAULT)
 
 
+def _hand_done_text(hand: dict) -> str:
+    """完整手牌落库提示文案：手牌序号 + hand_id（JSONL 里按 id 能直接搜到）。"""
+    hand_id = str(hand.get("hand_id") or "?")
+    seq = hand_id[1:] if hand_id[:1] == "h" and hand_id[1:].isdigit() else "?"
+    return f"完整手牌 {seq}，id {hand_id} 日志已经生成"
+
+
+def _log_hand_done(log: Callable[[str], None], hand: dict) -> None:
+    """完整手牌落库时打一条黄色横幅；重定向到文件时保持纯文本。"""
+    text = f" {_hand_done_text(hand)} "
+    log(f"{_ANSI_HAND_DONE}{text}{_ANSI_RESET}" if _use_ansi() else text.strip())
+
+
 def _use_ansi() -> bool:
     return sys.stdout.isatty() and not os.environ.get("NO_COLOR")
+
+
+def _confirm_key_choice(key: str) -> bool | None:
+    """把一次输入映射成确认结果：只有 y/n 有效，其他返回 None（忽略）。"""
+    key = (key or "").strip().lower()
+    if key == "y":
+        return True
+    if key == "n":
+        return False
+    return None
+
+
+def _ask_confirm_line(log: Callable[[str], None]) -> bool:
+    """非 TTY（管道/重定向）下按行读确认：整行只有 y/n 才算有效。"""
+    while True:
+        try:
+            line = input()
+        except (EOFError, OSError):
+            log("  [确认] 没有读到输入，按拒绝处理")
+            return False
+        choice = _confirm_key_choice(line)
+        if choice is None:
+            continue                     # 其他按键/内容不识别，继续等
+        if not choice:
+            log("  [确认] 已拒绝，不执行")
+        return choice
+
+
+def _ask_confirm(log: Callable[[str], None]) -> bool:
+    """读取确认键：只识别 y / n，其他键直接忽略。
+
+    TTY 下用 cbreak 单键读取（不需要回车），并在读取前 `tcflush` 清空终端
+    里缓存的按键 —— 模型生成/用户提前敲的键不会被当成这次确认。非 TTY
+    （管道、重定向、单测）退回按行读取，整行必须恰好是 y / n。
+    """
+    stream = sys.stdin
+    if stream is None:
+        log("  [确认] 标准输入不可用，按拒绝处理")
+        return False
+    if not stream.isatty():
+        return _ask_confirm_line(log)
+
+    try:
+        import termios
+        import tty
+    except ImportError:                  # pragma: no cover — Windows
+        return _ask_confirm_line(log)
+    try:
+        fd = stream.fileno()
+        old = termios.tcgetattr(fd)
+    except (OSError, ValueError, termios.error):
+        return _ask_confirm_line(log)
+
+    try:
+        tty.setcbreak(fd, termios.TCSANOW)
+        # 切到 cbreak 后再清一次：把提示出现前/模型生成期间敲下的键丢掉，
+        # 只认这条提示之后真正按下的 y / n。
+        try:
+            termios.tcflush(fd, termios.TCIFLUSH)
+        except termios.error:
+            pass
+        while True:
+            try:
+                raw = os.read(fd, 1)
+            except OSError:
+                log("  [确认] 读取键盘失败，按拒绝处理")
+                return False
+            if not raw:
+                log("  [确认] 输入已关闭，按拒绝处理")
+                return False
+            choice = _confirm_key_choice(raw.decode("utf-8", "ignore"))
+            if choice is None:
+                continue                 # 其他按键不识别，继续等
+            if not choice:
+                log("  [确认] 已拒绝，不执行")
+            return choice
+    finally:
+        # 读完再清一次：y/n 之后多按的键不会残留到下一次确认或退出后的终端。
+        try:
+            termios.tcflush(fd, termios.TCIFLUSH)
+        except termios.error:
+            pass
+        try:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old)
+        except termios.error:
+            pass
 
 
 def _iso_now() -> str:
@@ -830,6 +931,7 @@ class LiveProcessor:
                  hand_tracker: LiveHandTracker | None = None,
                  advice_runner: AdviceRunner | None = None,
                  clicker: Clicker | None = None,
+                 confirm_click: bool = False,
                  table_dynamics_loader: Callable[[], TableDynamics] | None = None,
                  table_dynamics_text: str = "",
                  incident_dir: Path | None = None,
@@ -867,6 +969,9 @@ class LiveProcessor:
         # 桌面自动点击：None = 不点击（默认）。点击器自己负责映射与随机坐标，
         # processor 只负责判断「这条建议是不是当前决策点、现在还能不能点」。
         self.clicker = clicker
+        # 默认不询问（保持程序化调用/单测的旧行为）；CLI 默认开启询问，
+        # 只有显式 `--no-confirm` 才直接执行。自动点击关闭时该开关无意义。
+        self.confirm_click = bool(confirm_click)
         self._pending_decision_key: tuple | None = None
         self._clicked_keys: set[tuple] = set()
         self.click_count = 0
@@ -1280,8 +1385,26 @@ class LiveProcessor:
             if current is not None:
                 self._write_hand(current, partial=True)
 
+    def _confirm_click(self, advice) -> bool:
+        """在终端问一次是否执行：只认 y / n，其他按键忽略。
+
+        默认（不加 `--no-confirm`）走这里：模型结果返回后，用户能看到建议、
+        金额和耗时，再决定是否真的点。读取前会清空终端缓存的按键，输入流
+        关闭/非交互环境按拒绝处理，避免自动化脚本在没有确认的情况下误点。
+        """
+        option = advice.option
+        amount = f" {option.amount}BB" if option.amount is not None else ""
+        prompt = (f"  [确认] {advice.street} 建议 {option.label}{amount}，"
+                  f"是否执行？只识别 y / n（其他键忽略）：")
+        self.log(prompt)
+        return _ask_confirm(self.log)
+
     def _maybe_click(self, advice, *, state, allow_click: bool):
-        """执行自动点击；未启用点击器时返回 None（JSONL 不出现 click 键）。"""
+        """执行自动点击；未启用点击器时返回 None（JSONL 不出现 click 键）。
+
+        `confirm_click=True` 时，安全闸全部通过后还要在终端等一次 y/n；
+        用户拒绝会返回 `skipped/user_rejected`，不会触碰鼠标。
+        """
         if self.clicker is None:
             return None
         matched = bool(advice.decision_key) \
@@ -1289,7 +1412,11 @@ class LiveProcessor:
         reason = self._click_skip_reason(
             advice, state=state, allow_click=allow_click)
         if reason is None:
-            result = self.clicker.run(advice)
+            if self.confirm_click and not self._confirm_click(advice):
+                result = ClickResult("skipped", action=advice.option.kind,
+                                     reason="user_rejected")
+            else:
+                result = self.clicker.run(advice)
         else:
             result = ClickResult("skipped", action=advice.option.kind,
                                  reason=reason)
@@ -1399,7 +1526,9 @@ class LiveProcessor:
 
     def _log_click(self, result) -> None:
         if result.status == "skipped":
-            self.log(f"  [点击] 跳过：{result.reason}")
+            reason = {"user_rejected": "用户拒绝"}.get(
+                result.reason, result.reason)
+            self.log(f"  [点击] 跳过：{reason}")
             return
         if result.status == "error":
             self.log(f"  [点击] 失败：{result.error}")
@@ -1422,6 +1551,10 @@ class LiveProcessor:
             # 没有建议时连键都不出现，保持无 AI 模式下的输出与旧版一致
             record["advices"] = advices
         self.writer.write(record)
+        if not partial:
+            # 完整手牌落库后立刻在终端打一条黄色提示：AI 决策出问题时，
+            # 用户能凭这行记住「第几手 / hand_id」，再回 JSONL 按 id 定位。
+            _log_hand_done(self.log, hand)
 
     def _log_advice(self, advice) -> None:
         option = advice.option
@@ -1792,6 +1925,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help="AI 建议返回后自动点击桌面客户端的对应按钮"
                          "（默认开启；需要先跑 tools/calibrate_clicker.py。"
                          "用 --no-auto-click 关闭）")
+    ap.add_argument("--no-confirm", action="store_true",
+                    help="自动点击不再询问：模型建议返回后直接执行"
+                         "（默认会在终端问 y 确认 / n 拒绝）")
     ap.add_argument("--clicker-config", type=Path, default=None,
                     help="自动点击的按钮坐标 JSON（默认 config/clicker_local.json）")
     ap.add_argument("--clicker-dry-run", action="store_true",
@@ -2024,10 +2160,13 @@ def main(argv: list[str] | None = None) -> int:
                     "只想先验证坐标可加 --clicker-dry-run")
         clicker = Clicker(clicker_cfg, backend,
                           dry_run=args.clicker_dry_run, log=_log)
+        confirm_mode = ("直接执行（--no-confirm）" if args.no_confirm
+                        else "执行前在终端询问 y/n")
         _log(f"[点击] 已启用自动点击：{cfg_path}"
              f"（{len(clicker_cfg.buttons)} 个按钮，"
              + ("dry-run，不发送真实事件" if args.clicker_dry_run else "真实点击")
-             + f"；{clicker_cfg.retry_delay_ms / 1000:.1f}s 未变化重试 "
+             + f"；{confirm_mode}；"
+             f"{clicker_cfg.retry_delay_ms / 1000:.1f}s 未变化重试 "
              f"{clicker_cfg.retry_count} 次）")
 
     writer = JsonlWriter(args.out, append=args.append)
@@ -2043,7 +2182,8 @@ def main(argv: list[str] | None = None) -> int:
         **({"advice_style": args.advice_style} if args.ai_advice else {}),
         "auto_click": bool(args.auto_click),
         **({"clicker_config": str(args.clicker_config or DEFAULT_CLICKER_CONFIG),
-            "clicker_dry_run": bool(args.clicker_dry_run)}
+            "clicker_dry_run": bool(args.clicker_dry_run),
+            "click_confirm": not args.no_confirm}
            if args.auto_click else {}),
         "resolution": None,
         # 本会话生效的牌桌动态原文。没有就不写这个键，保持旧记录形状。
@@ -2060,7 +2200,7 @@ def main(argv: list[str] | None = None) -> int:
         every=args.every, max_frame_age=args.max_frame_age,
         dump_dir=args.dump_frames, quiet=args.quiet,
         hand_tracker=hand_tracker, advice_runner=advice_runner,
-        clicker=clicker,
+        clicker=clicker, confirm_click=not args.no_confirm,
         table_dynamics_loader=load_table_dynamics if args.ai_advice else None,
         table_dynamics_text=table_dynamics_text,
         incident_dir=(None if args.no_incident else args.incident_dir),

@@ -1161,7 +1161,9 @@ class OneShotRunner:
 
 def _drain_click(advice, *, clicker, state=None, allow_click: bool = True,
                  pending: bool = True, current_hand: str = "h1",
-                 clock=None):
+                 clock=None, confirm_click: bool = False,
+                 confirm_answer: bool | None = None,
+                 logs: list[str] | None = None):
     writer = StubWriter()
     tracker = SimpleNamespace(
         hand=SimpleNamespace(hand_id=current_hand),
@@ -1169,13 +1171,19 @@ def _drain_click(advice, *, clicker, state=None, allow_click: bool = True,
     kwargs = {"clock": clock} if clock is not None else {}
     proc = LiveProcessor(StubStateStream(), writer, quiet=True,
                          hand_tracker=tracker, clicker=clicker,
+                         confirm_click=confirm_click,
                          advice_runner=OneShotRunner([advice]),
-                         log=lambda *_: None, **kwargs)
+                         log=(logs.append if logs is not None
+                              else (lambda *_: None)), **kwargs)
     if pending:
         proc._pending_decision_key = advice.decision_key
     if state is None:
         state = click_state()
-    proc.drain_advice(state=state, allow_click=allow_click)
+    if confirm_click and confirm_answer is not None:
+        with patch.object(live, "_ask_confirm", return_value=confirm_answer):
+            proc.drain_advice(state=state, allow_click=allow_click)
+    else:
+        proc.drain_advice(state=state, allow_click=allow_click)
     return proc, writer.rows
 
 
@@ -1191,6 +1199,130 @@ def test_auto_click_current_decision() -> None:
     check(row["type"] == "advice" and row["click"]["status"] == "clicked",
           f"建议记录应带 click：{row}")
     check(proc._pending_decision_key is None, "点击后应清掉待点击决策点")
+
+
+def test_auto_click_asks_and_y_confirms() -> None:
+    """默认交互模式：先问 y/n，按 y 才真的点。"""
+    clicker = FakeClicker()
+    logs: list[str] = []
+    proc, rows = _drain_click(_click_advice(), clicker=clicker,
+                              confirm_click=True, confirm_answer=True,
+                              logs=logs)
+    prompt = next((line for line in logs if "确认" in line), "")
+    check(bool(prompt), f"应先打印确认提示：{logs}")
+    check("Fold" in prompt and "只识别 y / n" in prompt,
+          f"提示应带建议动作和按键说明：{prompt}")
+    check(len(clicker.calls) == 1, f"按 y 应执行点击：{clicker.calls}")
+    check(rows[0]["click"]["status"] == "clicked", f"应记录已点击：{rows[0]}")
+
+    # --no-confirm（confirm_click=False）不询问，直接点
+    clicker2 = FakeClicker()
+    with patch.object(live, "_ask_confirm",
+                      side_effect=AssertionError("--no-confirm 不该询问")):
+        proc2, rows2 = _drain_click(_click_advice(), clicker=clicker2)
+    check(len(clicker2.calls) == 1, "--no-confirm 应直接执行")
+    check(rows2[0]["click"]["status"] == "clicked", f"应记录已点击：{rows2[0]}")
+
+
+def test_auto_click_n_rejects() -> None:
+    """按 n 拒绝执行，但不影响建议落库。"""
+    clicker = FakeClicker()
+    proc, rows = _drain_click(_click_advice(), clicker=clicker,
+                              confirm_click=True, confirm_answer=False)
+    check(clicker.calls == [], "按 n 不能点击")
+    check(rows[0]["click"]["status"] == "skipped"
+          and rows[0]["click"]["reason"] == "user_rejected",
+          f"应记录 user_rejected：{rows[0]}")
+    check(proc.click_skip_count == 1, "拒绝应计入跳过数")
+
+    # 安全闸已经判跳过时，不应再问用户
+    clicker3 = FakeClicker()
+    with patch.object(live, "_ask_confirm",
+                      side_effect=AssertionError("已被安全闸拦截，不该询问")):
+        _proc3, rows3 = _drain_click(
+            _click_advice(), clicker=clicker3,
+            state=SimpleNamespace(ok=True, hero_turn=False),
+            confirm_click=True)
+    check(clicker3.calls == [], "非我方回合不能点击")
+    check(rows3[0]["click"]["reason"] == "hero_turn_false",
+          f"应记录 hero_turn_false：{rows3[0]}")
+
+
+def test_confirm_only_recognizes_y_and_n() -> None:
+    """确认输入只认 y/n：其他键、空行、yes 都不算，继续等下一个键。"""
+    check(live._confirm_key_choice("y") is True, "y 应确认")
+    check(live._confirm_key_choice("Y") is True, "Y 应确认")
+    check(live._confirm_key_choice("n") is False, "n 应拒绝")
+    check(live._confirm_key_choice("N") is False, "N 应拒绝")
+    for key in ("", "yes", "no", "x", "\n", "yy", "yn"):
+        check(live._confirm_key_choice(key) is None,
+              f"{key!r} 不应被识别")
+
+    class FakeStdin:
+        def isatty(self) -> bool:
+            return False
+
+    logs: list[str] = []
+    with patch.object(live.sys, "stdin", FakeStdin()), \
+            patch("builtins.input",
+                  side_effect=["x", "yes", "", "y"]) as ask:
+        check(live._ask_confirm(logs.append) is True,
+              "应忽略无效输入，直到读到 y")
+        check(ask.call_count == 4,
+              f"无效输入不该结束确认，实际读了 {ask.call_count} 次")
+
+    with patch.object(live.sys, "stdin", FakeStdin()), \
+            patch("builtins.input", side_effect=["x", "n"]):
+        check(live._ask_confirm(logs.append) is False,
+              "无效输入后按 n 应拒绝")
+
+    with patch.object(live.sys, "stdin", FakeStdin()), \
+            patch("builtins.input", side_effect=EOFError):
+        logs2: list[str] = []
+        check(live._ask_confirm(logs2.append) is False,
+              "EOF 应按拒绝处理")
+        check(any("没有读到输入" in line for line in logs2),
+              f"EOF 应打提示：{logs2}")
+
+
+def test_confirm_tty_flushes_typeahead_and_reads_single_keys() -> None:
+    """TTY：读取前 tcflush 清缓存，单键读取，忽略 y/n 之外的键。"""
+    try:
+        import termios
+        import tty
+    except ImportError:                  # pragma: no cover — Windows
+        return
+
+    class FakeTTY:
+        def isatty(self) -> bool:
+            return True
+
+        def fileno(self) -> int:
+            return 123
+
+    logs: list[str] = []
+    with patch.object(live.sys, "stdin", FakeTTY()), \
+            patch.object(termios, "tcgetattr", return_value=[]), \
+            patch.object(termios, "tcflush") as flush, \
+            patch.object(termios, "tcsetattr") as restore, \
+            patch.object(tty, "setcbreak") as cbreak, \
+            patch.object(live.os, "read", side_effect=[b"x", b"Y"]):
+        check(live._ask_confirm(logs.append) is True,
+              "TTY 下应忽略 x，再读到 Y 确认")
+    flush.assert_any_call(123, termios.TCIFLUSH)
+    check(flush.call_count >= 1, "读取前后都应清理终端缓存")
+    cbreak.assert_called_once_with(123, termios.TCSANOW)
+    restore.assert_called_once()
+    check(not any("没有读到输入" in line for line in logs), f"不应报错：{logs}")
+
+
+def test_no_confirm_flag_defaults_to_asking() -> None:
+    """CLI 默认询问；--no-confirm 才直接执行。"""
+    ap = live.build_parser()
+    check(ap.parse_args([]).no_confirm is False,
+          "默认应在终端询问 y/n")
+    check(ap.parse_args(["--no-confirm"]).no_confirm is True,
+          "--no-confirm 应能关闭询问")
 
 
 def test_auto_click_skips_when_not_hero_turn() -> None:
@@ -1516,6 +1648,49 @@ def test_advice_wait_logs_heartbeat_each_second() -> None:
     check(logs[-1].endswith("1s"), f"新一次建议应重新从 1s 报：{logs}")
 
 
+def test_complete_hand_logs_yellow_banner() -> None:
+    """完整手牌落库时打黄底提示；退出时的 partial 手牌不算完整，不打。"""
+    class FakeTracker:
+        def __init__(self) -> None:
+            self.finished: dict | None = None
+            self.current: dict | None = None
+
+        def take_finished(self):
+            hand, self.finished = self.finished, None
+            return hand
+
+        def take_current(self):
+            hand, self.current = self.current, None
+            return hand
+
+    tracker = FakeTracker()
+    tracker.finished = {"hand_id": "h7", "streets": []}
+    logs: list[str] = []
+    proc = LiveProcessor(StubStateStream(), StubWriter(), quiet=True,
+                         hand_tracker=tracker, log=logs.append)
+    with patch.object(live, "_use_ansi", lambda: True):
+        proc.drain_advice()
+        tracker.current = {"hand_id": "h8", "streets": []}
+        proc.drain_advice(final=True)
+
+    check(len(logs) == 1,
+          f"只有完整手牌才打提示，实际 {logs}")
+    check("完整手牌 7，id h7 日志已经生成" in logs[0],
+          f"提示应带手牌序号和 hand_id：{logs[0]}")
+    check(logs[0].startswith(live._ANSI_HAND_DONE)
+          and logs[0].endswith(live._ANSI_RESET),
+          f"提示应是黄色背景：{logs[0]!r}")
+
+    plain: list[str] = []
+    tracker.finished = {"hand_id": "h9", "streets": []}
+    proc2 = LiveProcessor(StubStateStream(), StubWriter(), quiet=True,
+                          hand_tracker=tracker, log=plain.append)
+    with patch.object(live, "_use_ansi", lambda: False):
+        proc2.drain_advice()
+    check(plain == ["完整手牌 9，id h9 日志已经生成"],
+          f"重定向时不应带 ANSI 转义：{plain}")
+
+
 def test_advice_bar_colors_by_action() -> None:
     """建议横幅：弃牌红底、跟注/过牌蓝底、下注/加注绿底。"""
     check(live._advice_bar("fold") == "\033[1;97;41m",
@@ -1571,6 +1746,11 @@ def main() -> int:
         test_hand_memory_keeps_action_line_and_advices,
         test_hand_memory_flushes_on_switch_frame,
         test_auto_click_current_decision,
+        test_auto_click_asks_and_y_confirms,
+        test_auto_click_n_rejects,
+        test_confirm_only_recognizes_y_and_n,
+        test_confirm_tty_flushes_typeahead_and_reads_single_keys,
+        test_no_confirm_flag_defaults_to_asking,
         test_auto_click_skips_when_not_hero_turn,
         test_auto_click_skips_stale_decision,
         test_auto_click_skips_fallback_and_error,
@@ -1585,6 +1765,7 @@ def main() -> int:
         test_processor_pauses_while_advice_is_generating,
         test_advice_wait_logs_heartbeat_each_second,
         test_advice_bar_colors_by_action,
+        test_complete_hand_logs_yellow_banner,
         test_rotate_frame_clockwise,
         test_open_capture_supports_virtual_camera_index,
     ]
