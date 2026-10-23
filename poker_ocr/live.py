@@ -153,6 +153,26 @@ def _use_ansi() -> bool:
     return sys.stdout.isatty() and not os.environ.get("NO_COLOR")
 
 
+_ENV_TRUE = {"1", "true", "yes", "on"}
+_ENV_FALSE = {"0", "false", "no", "off"}
+
+
+def _env_flag(name: str) -> bool | None:
+    """读布尔环境变量：没设返回 None，值无法识别抛 ValueError。
+
+    显式写 0/false 是「关闭」，和没写区分开：调用方可以用命令行参数覆盖
+    `.env` 里的默认值。
+    """
+    raw = (os.environ.get(name) or "").strip().lower()
+    if not raw:
+        return None
+    if raw in _ENV_TRUE:
+        return True
+    if raw in _ENV_FALSE:
+        return False
+    raise ValueError(f"{name}={raw!r} 不是布尔值（用 1/0、true/false）")
+
+
 def _confirm_key_choice(key: str) -> bool | None:
     """把一次输入映射成确认结果：只有 y/n 有效，其他返回 None（忽略）。"""
     key = (key or "").strip().lower()
@@ -929,6 +949,7 @@ class LiveProcessor:
                  every: float = DEFAULT_EVERY, max_frame_age: float = 2.0,
                  dump_dir: Path | None = None, quiet: bool = False,
                  hand_tracker: LiveHandTracker | None = None,
+                 record_without_hero: bool = False,
                  advice_runner: AdviceRunner | None = None,
                  clicker: Clicker | None = None,
                  confirm_click: bool = False,
@@ -965,6 +986,11 @@ class LiveProcessor:
         # AI 建议只在 roi 路线可用：全图路线读不到每座的「本街下注」，
         # 也没有 hero_turn，算不出跟注额与选项金额
         self.hand_tracker = hand_tracker
+        # 没读到自己手牌的记录默认不写：上一手收牌后、下一手发牌前，追踪器会
+        # 开一手没有 hero 手牌、也没有行动线的「空档手牌」，写下来就是每手牌
+        # 后面多一条重复的空记录。旁观/观察对手时才打开。
+        self.record_without_hero = bool(record_without_hero)
+        self.hands_skipped_no_hero = 0
         self.advice_runner = advice_runner
         # 桌面自动点击：None = 不点击（默认）。点击器自己负责映射与随机坐标，
         # processor 只负责判断「这条建议是不是当前决策点、现在还能不能点」。
@@ -1541,7 +1567,17 @@ class LiveProcessor:
         self.log(f"  [点击] {prefix} {result.action}{mapping}：{points}")
 
     def _write_hand(self, hand: dict, *, partial: bool) -> None:
-        """写一条手牌记忆：完整行动线 + 这一手给出过的全部建议。"""
+        """写一条手牌记忆：完整行动线 + 这一手给出过的全部建议。
+
+        没有 hero 手牌的换手空档默认不写（见 `record_without_hero`）。
+        """
+        if not self.record_without_hero and not hand.get("hero_cards"):
+            # 换手空档：上一手已经收牌、下一手还没发牌，追踪器会开一手没有
+            # hero 手牌、也没有行动线的「手牌」。默认不落库，否则每手牌后面
+            # 都会多一条重复的空记录；旁观/观察对手时用 --record-without-hero 打开。
+            self._hand_advice.pop(hand.get("hand_id"), None)
+            self.hands_skipped_no_hero += 1
+            return
         advices = self._hand_advice.pop(hand.get("hand_id"), [])
         record: dict = {"type": "hand", "ts": _iso_now()}
         if partial:
@@ -1808,7 +1844,8 @@ class LiveProcessor:
         return dict(self.state_stream.discarded)  # type: ignore[union-attr]
 
     def summary(self) -> dict:
-        extra = {"cards_unreliable_skips": self.cards_unreliable_skips}
+        extra = {"cards_unreliable_skips": self.cards_unreliable_skips,
+                 "hands_skipped_no_hero": self.hands_skipped_no_hero}
         if self.clicker is not None:
             extra.update({
                 "clicks": self.click_count,
@@ -1920,6 +1957,11 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--ai-confirm", type=int, default=1,
                     help="轮到我需要连续几帧确认（默认 1 = 第一帧就触发，"
                          "配合蓝色下注按钮；按钮会闪断的旧 UI 可调回 2）")
+    ap.add_argument("--record-without-hero",
+                    action=argparse.BooleanOptionalAction, default=None,
+                    help="没读到自己手牌时也写入手牌记录（默认跳过换手空档"
+                         "产生的空记录）。用于旁观/观察对手；也可用环境变量 "
+                         "RECORD_WITHOUT_HERO=1 打开")
     ap.add_argument("--auto-click", action=argparse.BooleanOptionalAction,
                     default=True,
                     help="AI 建议返回后自动点击桌面客户端的对应按钮"
@@ -2013,6 +2055,13 @@ def main(argv: list[str] | None = None) -> int:
             args.ai_timeout = float(raw) if raw else 20.0
         except ValueError:
             ap.error(f"AI_SERVER_TIMEOUT 不是数字：{raw!r}")
+    # 命令行没写时读 .env / 环境变量；显式 --no-record-without-hero 可以覆盖
+    if args.record_without_hero is None:
+        try:
+            env_flag = _env_flag("RECORD_WITHOUT_HERO")
+        except ValueError as exc:
+            ap.error(str(exc))
+        args.record_without_hero = False if env_flag is None else env_flag
     _validate_args(ap, args)
 
     if args.crop is None:
@@ -2095,6 +2144,9 @@ def main(argv: list[str] | None = None) -> int:
         advice_runner = AdviceRunner(settings, timeout=args.ai_timeout, log=_log,
                                      style=args.advice_style)
         hand_tracker = LiveHandTracker(confirm_frames=args.ai_confirm)
+        _log("[手牌] 没读到自己手牌时："
+             + ("也记录（观察对手）" if args.record_without_hero
+                else "默认跳过换手空档（--record-without-hero 可开启）"))
         _log(f"[建议] 提示词风格={args.advice_style}"
              + ("（契约+事实+现代范围框架）" if args.advice_style == "lean"
                 else "（旧技能库全量注入）"))
@@ -2179,7 +2231,9 @@ def main(argv: list[str] | None = None) -> int:
         "full_config": str(args.full_config) if args.full_config else None,
         "every": args.every,
         "ai_advice": bool(args.ai_advice),
-        **({"advice_style": args.advice_style} if args.ai_advice else {}),
+        **({"advice_style": args.advice_style,
+            "record_without_hero": bool(args.record_without_hero)}
+           if args.ai_advice else {}),
         "auto_click": bool(args.auto_click),
         **({"clicker_config": str(args.clicker_config or DEFAULT_CLICKER_CONFIG),
             "clicker_dry_run": bool(args.clicker_dry_run),
@@ -2200,6 +2254,7 @@ def main(argv: list[str] | None = None) -> int:
         every=args.every, max_frame_age=args.max_frame_age,
         dump_dir=args.dump_frames, quiet=args.quiet,
         hand_tracker=hand_tracker, advice_runner=advice_runner,
+        record_without_hero=args.record_without_hero,
         clicker=clicker, confirm_click=not args.no_confirm,
         table_dynamics_loader=load_table_dynamics if args.ai_advice else None,
         table_dynamics_text=table_dynamics_text,
@@ -2402,6 +2457,9 @@ def main(argv: list[str] | None = None) -> int:
             _log("丢弃原因：" + "  ".join(
                 f"{k}={v}" for k, v in
                 sorted(summary["discarded_reasons"].items(), key=lambda kv: -kv[1])))
+        if summary.get("hands_skipped_no_hero"):
+            _log(f"手牌：跳过 {summary['hands_skipped_no_hero']} 条没有自己手牌的"
+                 f"空档记录（--record-without-hero 可保留）")
         _log(f"→ {args.out}")
 
     return 0

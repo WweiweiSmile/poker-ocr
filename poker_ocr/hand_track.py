@@ -28,6 +28,10 @@
     会在一次回合内消失又出现（见 frame_state 的注释），上升沿会重复触发；
     而多人池里 hero 过牌后对手下注、又轮回 hero 时，按钮可能全程都在、
     根本没有上升沿。指纹里含行动条数与最高下注，正好同时解决这两种情况。
+  · **换手空档也会开一手**：上一手收牌后、下一手发牌前有一段没有 hero 手牌的帧，
+    这里会先把空壳记下来。落库层默认按「没有 hero 手牌」跳过，避免每手牌后面
+    多一条空记录；旁观/观察对手时用 `--record-without-hero` 保留
+    （见 live.LiveProcessor._write_hand）。
 """
 
 from __future__ import annotations

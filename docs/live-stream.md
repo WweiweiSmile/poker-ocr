@@ -640,6 +640,8 @@ cd ~/codes/poker-ocr
 
 - `table_dynamics`：仅当启动时读到非空的 `.table_dy` 才出现，值是解析后的原文。
   没有这个键表示本次会话按「未知对手」标准线。
+- `record_without_hero`：仅 `--ai-advice` 时出现，表示是否会记录没有 hero 手牌
+  的手牌（`--record-without-hero` / `RECORD_WITHOUT_HERO`）；默认 `false`。
 
 ### 6.2 `stream_info`
 
@@ -714,8 +716,12 @@ cd ~/codes/poker-ocr
   "avg_proc_ms":526.9,"eff_hz":1.17,"reconnects":6,
   "sampled_frames":63,"accepted_frames":2,"discarded_frames":61,
   "discarded_reasons":{"dealer":60,"bet":13,"pot":21,"stack":180},
-  "record_count":1,"roi_threads":4,"roi_reuse":{...},"recognizer":"roi"}}
+  "record_count":1,"roi_threads":4,"roi_reuse":{...},"recognizer":"roi",
+  "cards_unreliable_skips":0,"hands_skipped_no_hero":2}}
 ```
+
+`hands_skipped_no_hero` 是默认口径下被跳过的「没有 hero 手牌」的手牌条数；
+用 `--record-without-hero` 打开观察对手模式后为 0。
 
 ### 6.5 `advice`
 
@@ -769,6 +775,12 @@ cd ~/codes/poker-ocr
 退出时若最后一手还没换手，也会写一条并标 `"partial":true`。
 完整手牌落库时终端会打一条**亮黄底**提示：`完整手牌 6，id h6 日志已经生成`
 （`partial` 不打）；AI 决策有问题时凭这行按 `hand_id` 回 JSONL 定位。
+
+**没有 hero 手牌的记录默认不写**：上一手收牌后、下一手发牌前，追踪器会开一手
+`hero_cards=[]`、没有行动线的「空档手牌」；写下来会让每手牌都多一条重复的
+空记录。默认跳过（`session_end.summary.hands_skipped_no_hero` 计数）；
+旁观/观察对手时用 `--record-without-hero`（或 `.env` 里
+`RECORD_WITHOUT_HERO=1`）保留这些记录。
 
 ```json
 {"type":"hand","ts":"...","hand_id":"h6",
@@ -887,6 +899,7 @@ All-in 文本）会立即收掉当前手牌，不依赖牌面/庄位变化。
 | `--advice-style` | `lean` | `lean`=契约+事实+现代范围框架；`skills`=旧的 2005 技能库全量注入（A/B 对比用） |
 | `--ai-timeout` | `20` | 单次 AI 建议超时（秒）；后台线程，不阻塞采样 |
 | `--ai-confirm` | `1` | `hero_turn` 连续几帧才认定轮到我（蓝色下注按钮下第一帧即可） |
+| `--record-without-hero` | 关 | 没读到自己手牌时也写入手牌记录（默认跳过换手空档；观察对手用） |
 | `--auto-click` / `--no-auto-click` | 开 | AI 建议返回后自动点击桌面客户端（需先标定；仅 macOS） |
 | `--no-confirm` | 关 | 自动点击不再询问；默认每次执行前单键读 `y` 确认 / `n` 拒绝（其他键忽略） |
 | `--clicker-config` | `config/clicker_local.json` | 自动点击按钮坐标 JSON |

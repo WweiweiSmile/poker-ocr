@@ -72,6 +72,32 @@ def check(cond: bool, msg: str) -> None:
         FAILS.append(msg)
 
 
+def test_record_without_hero_defaults_off_and_env_flag() -> None:
+    """没有自己手牌的记录默认不写；CLI / RECORD_WITHOUT_HERO 可以打开。"""
+    ap = live.build_parser()
+    # 命令行不写时保持 None，main() 才能读 .env 里的默认值
+    check(ap.parse_args([]).record_without_hero is None,
+          "命令行没写时应留给 .env/环境变量决定")
+    check(ap.parse_args(["--record-without-hero"]).record_without_hero is True,
+          "--record-without-hero 应打开")
+    check(ap.parse_args(["--no-record-without-hero"]).record_without_hero is False,
+          "--no-record-without-hero 应显式关闭")
+
+    with patch.dict("os.environ", {"RECORD_WITHOUT_HERO": "1"}):
+        check(live._env_flag("RECORD_WITHOUT_HERO") is True, "1 应解析为开")
+    with patch.dict("os.environ", {"RECORD_WITHOUT_HERO": "off"}):
+        check(live._env_flag("RECORD_WITHOUT_HERO") is False, "off 应解析为关")
+    with patch.dict("os.environ", {"RECORD_WITHOUT_HERO": " "}):
+        check(live._env_flag("RECORD_WITHOUT_HERO") is None, "空值应视为没设")
+    with patch.dict("os.environ", {"RECORD_WITHOUT_HERO": "maybe"}):
+        try:
+            live._env_flag("RECORD_WITHOUT_HERO")
+        except ValueError:
+            pass
+        else:
+            FAILS.append("无法识别的布尔值应报错，而不是静默当成关")
+
+
 def test_auto_click_defaults_on_and_follows_advice() -> None:
     ap = live.build_parser()
     args = ap.parse_args([])
@@ -1010,7 +1036,8 @@ def test_hand_memory_keeps_action_line_and_advices() -> None:
             "actions": [{"seat_id": "a", "action": "bet", "amount": 4.0,
                          "is_hero": False}]}
     tracker = FakeTracker()
-    tracker.finished = {"hand_id": "h1", "streets": [flop]}
+    tracker.finished = {"hand_id": "h1", "hero_cards": ["Ah", "Kd"],
+                        "streets": [flop]}
     writer = StubWriter()
     proc = LiveProcessor(StubStateStream(), writer, quiet=True,
                          hand_tracker=tracker,
@@ -1032,7 +1059,8 @@ def test_hand_memory_keeps_action_line_and_advices() -> None:
           f"手牌记忆应带上这一手的建议：{advices}")
 
     # 退出时最后一手还没换手：partial 记录同样带建议
-    tracker.current = {"hand_id": "h2", "streets": [flop]}
+    tracker.current = {"hand_id": "h2", "hero_cards": ["Ah", "Kd"],
+                       "streets": [flop]}
     writer2 = StubWriter()
     proc2 = LiveProcessor(StubStateStream(), writer2, quiet=True,
                           hand_tracker=tracker,
@@ -1046,7 +1074,8 @@ def test_hand_memory_keeps_action_line_and_advices() -> None:
           f"partial 手牌记忆也要带建议：{partial}")
 
     # 没有建议时保持旧输出，不出现 advices 键
-    tracker.current = {"hand_id": "h3", "streets": [flop]}
+    tracker.current = {"hand_id": "h3", "hero_cards": ["Ah", "Kd"],
+                       "streets": [flop]}
     writer3 = StubWriter()
     proc3 = LiveProcessor(StubStateStream(), writer3, quiet=True,
                           hand_tracker=tracker, log=lambda *_: None)
@@ -1094,6 +1123,67 @@ def test_hand_memory_flushes_on_switch_frame() -> None:
     hands = [r for r in writer.rows if r["type"] == "hand"]
     check(len(hands) == 1 and hands[0]["hand_id"] == "h1",
           f"换手那一帧就应落库上一手：{hands}")
+
+
+def test_hand_gap_without_hero_is_skipped_by_default() -> None:
+    """换手空档（自己没牌、也没行动线）默认不写，避免每手记两条。"""
+    class GapStream(StubStateStream):
+        def ingest(self, img, frame_id: str, t: float, *,
+                   extra_signature: tuple | None = None) -> FrameOutcome:
+            st = FrameState(
+                frame_id=frame_id, table_seats=2, players_in_hand=2,
+                players=[
+                    PlayerState("hero", name="me", position="BTN", stack=100.0,
+                                bet=0.0, in_hand=True),
+                    PlayerState("a", name="A", position="BB", stack=99.0,
+                                bet=1.0, in_hand=True),
+                ],
+                blinds=live.parse_blinds("1/2"), dealer="a",
+                hero_seat_id="hero", hero_turn=False, pot=1.5,
+                pot_before_street=0.0)
+            return FrameOutcome("no_change", st, [], None, 0, 0)
+
+    # 一手真牌 → 收牌空档 → 下一手真牌 → 再收牌空档
+    script = [
+        SimpleNamespace(hero_codes=["Ah", "Kd"], board_codes=[], warnings=[]),
+        SimpleNamespace(hero_codes=["Ah", "Kd"],
+                        board_codes=["Ks", "7d", "2c"], warnings=[]),
+        None, None,
+        SimpleNamespace(hero_codes=["7c", "7s"], board_codes=[], warnings=[]),
+        SimpleNamespace(hero_codes=["7c", "7s"],
+                        board_codes=["2h", "9d", "4c"], warnings=[]),
+        None, None,
+    ]
+
+    def run(record_without_hero: bool):
+        frames = iter(script)
+        writer = StubWriter()
+        tracker = LiveHandTracker(confirm_frames=1)
+        with patch.object(live, "recognize_cards",
+                          lambda img, profile: next(frames)):
+            proc = LiveProcessor(GapStream(), writer, quiet=True,
+                                 profile=SimpleNamespace(),
+                                 hand_tracker=tracker,
+                                 record_without_hero=record_without_hero,
+                                 log=lambda *_: None)
+            for seq in range(1, len(script) + 1):
+                proc.handle(packet(seq))
+            proc.drain_advice(final=True)
+        return proc, [r for r in writer.rows if r["type"] == "hand"]
+
+    proc, hands = run(False)
+    check([h["hand_id"] for h in hands] == ["h1", "h3"],
+          f"默认只应记真正有手牌的两手，实际 {[h['hand_id'] for h in hands]}")
+    check(all(h.get("hero_cards") for h in hands),
+          f"落库的手牌都应带 hero 手牌：{hands}")
+    check(proc.hands_skipped_no_hero == 2,
+          f"两次换手空档都应跳过，实际 {proc.hands_skipped_no_hero}")
+
+    proc2, hands2 = run(True)
+    check([h["hand_id"] for h in hands2] == ["h1", "h2", "h3", "h4"],
+          f"观察对手模式应把空档也记下来：{[h['hand_id'] for h in hands2]}")
+    check(proc2.hands_skipped_no_hero == 0,
+          f"观察对手模式不应再跳过，实际 {proc2.hands_skipped_no_hero}")
 
 
 # ─────────────────────────── 自动点击 ───────────────────────────
@@ -1664,7 +1754,8 @@ def test_complete_hand_logs_yellow_banner() -> None:
             return hand
 
     tracker = FakeTracker()
-    tracker.finished = {"hand_id": "h7", "streets": []}
+    tracker.finished = {"hand_id": "h7", "hero_cards": ["Ah", "Kd"],
+                        "streets": []}
     logs: list[str] = []
     proc = LiveProcessor(StubStateStream(), StubWriter(), quiet=True,
                          hand_tracker=tracker, log=logs.append)
@@ -1682,7 +1773,8 @@ def test_complete_hand_logs_yellow_banner() -> None:
           f"提示应是黄色背景：{logs[0]!r}")
 
     plain: list[str] = []
-    tracker.finished = {"hand_id": "h9", "streets": []}
+    tracker.finished = {"hand_id": "h9", "hero_cards": ["Ah", "Kd"],
+                        "streets": []}
     proc2 = LiveProcessor(StubStateStream(), StubWriter(), quiet=True,
                           hand_tracker=tracker, log=plain.append)
     with patch.object(live, "_use_ansi", lambda: False):
@@ -1710,6 +1802,7 @@ def test_advice_bar_colors_by_action() -> None:
 def main() -> int:
     tests = [
         test_defaults_are_no_throttle_and_instant_turn,
+        test_record_without_hero_defaults_off_and_env_flag,
         test_auto_click_defaults_on_and_follows_advice,
         test_mailbox_keeps_only_latest,
         test_wait_newer_wakes_up,
@@ -1745,6 +1838,7 @@ def main() -> int:
         test_unreliable_cards_skip_advice_until_recovered,
         test_hand_memory_keeps_action_line_and_advices,
         test_hand_memory_flushes_on_switch_frame,
+        test_hand_gap_without_hero_is_skipped_by_default,
         test_auto_click_current_decision,
         test_auto_click_asks_and_y_confirms,
         test_auto_click_n_rejects,
