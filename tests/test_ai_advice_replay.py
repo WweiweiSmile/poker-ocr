@@ -17,6 +17,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tools"))
 
 import ai_advice_dev_hands as tool  # noqa: E402
+import replay_live_decisions as live_tool  # noqa: E402
 
 FAILS: list[str] = []
 
@@ -154,6 +155,43 @@ def test_classify_roundtrip() -> None:
     check(tool.classify("raise", "raise", 30, 90, 60) == "尺度差", "尺度差 60 应超 1/4 池")
     # 实际 allin 与模型 raise 都算激进，看尺度
     check(tool.classify("raise", "allin", 100, 100, 40) == "一致", "raise/allin 同额应一致")
+
+
+def test_live_synth_preflop_skips_blinds() -> None:
+    """翻前 state 里的 SB/BB bet 是盲注，不能重建成主动下注。
+
+    h113（LJ Q8s）就是被这个 bug 打成「SB bet 0.5 → BB bet 1.0」→ three-bet，
+    模型因此拿范围里的 Q8s 去弃牌。纯盲注必须从行动线里消失。
+    """
+    state = {
+        "hero": {"seat_id": "hero", "position": "LJ", "bet": 0.0},
+        "opponents": [
+            {"seat_id": "sb", "position": "SB", "bet": 0.5},
+            {"seat_id": "bb", "position": "BB", "bet": 1.0},
+        ],
+        "blinds": {"sb": 0.5, "bb": 1.0},
+        "pot_before_street": 4.0,
+    }
+    street = live_tool.synth_street(state, "preflop")
+    check(street.actions == (),
+          f"纯盲注不应生成行动：{[(a.position, a.action) for a in street.actions]}")
+
+
+def test_live_synth_preflop_raise_and_limp() -> None:
+    """翻前 >1BB 是 raise，补到 1BB 是 limp；两者都要保留。"""
+    state = {
+        "hero": {"seat_id": "hero", "position": "CO", "bet": 0.0},
+        "opponents": [
+            {"seat_id": "utg", "position": "UTG", "bet": 1.0},
+            {"seat_id": "hj", "position": "HJ", "bet": 5.0},
+        ],
+        "blinds": {"sb": 0.5, "bb": 1.0},
+        "pot_before_street": 6.0,
+    }
+    actions = live_tool.synth_street(state, "preflop").actions
+    by_pos = {a.position: a for a in actions}
+    check(by_pos["UTG"].action == "call", f"UTG 补 1BB 应是 call：{by_pos['UTG'].action}")
+    check(by_pos["HJ"].action == "raise", f"HJ 加到 5BB 应是 raise：{by_pos['HJ'].action}")
 
 
 if __name__ == "__main__":

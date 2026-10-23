@@ -103,18 +103,38 @@ def find_state(advice: dict, states: list[dict], since: str = "") -> dict | None
 
 
 def synth_street(state: dict, street: str) -> StreetRecord:
-    """用 state 里各家的 bet 反推本街行动线（谁下注、谁是 raise）。"""
+    """用 state 里各家的 bet 反推本街行动线（谁下注、谁是 raise）。
+
+    翻前要特别处理：state 里 SB/BB 的 `bet` 是**盲注**，不是主动下注。
+    如果照搬成 "bet"，h113 这类「无人入池、轮到我开池」的点会被重建成
+    「SB bet 0.5 → BB bet 1.0」→ 形状变成 three-bet，选项变成 3bet/fold，
+    模型于是拿 Q8s（LJ 在范围内）去弃牌。这是重建口径的错，不是模型错。
+    所以翻前跳过纯盲注，把 ==BB 的投入记成 limp/call，>BB 的记成 raise。
+    """
     rows: list[ActionRecord] = []
     hero = state.get("hero") or {}
     seats = [(hero, True)] + [(o, False) for o in state.get("opponents") or []]
+    blinds = state.get("blinds") or {}
+    sb = float(blinds.get("sb") or 0.0)
+    bb = float(blinds.get("bb") or 1.0)
     for seat, is_hero in seats:
         bet = float(seat.get("bet") or 0.0)
         if bet <= 0:
             continue
+        action = "bet"
+        if street == "preflop":
+            pos = seat.get("position")
+            # 纯盲注不是行动：SB 只投了 0.5、BB 只投了 1.0 → 跳过。
+            if pos == "SB" and bet <= sb + 1e-9:
+                continue
+            if pos == "BB" and bet <= bb + 1e-9:
+                continue
+            # 补到 1BB 是 limp/complete，超过 1BB 才是加注。
+            action = "raise" if bet > bb + 1e-9 else "call"
         rows.append(ActionRecord(
             street=street, seat_id=str(seat.get("seat_id") or ""),
             name=seat.get("name"), position=seat.get("position"),
-            action="bet", amount=bet, all_in=bool(seat.get("all_in")),
+            action=action, amount=bet, all_in=bool(seat.get("all_in")),
             is_hero=is_hero))
     rows.sort(key=lambda a: a.amount or 0.0)
     return StreetRecord(street, float(state.get("pot_before_street") or 0.0),
@@ -341,6 +361,10 @@ def main(argv: list[str] | None = None) -> int:
                 "tier": sit.hand_tier, "label": sit.hand_label_en,
                 "beat_pct": r["beat"], "texture": sit.texture_en,
                 "equity_pct": sit.equity_pct,
+                "nuts": (sit.ground_truth.hero_is_nuts
+                         if sit.ground_truth is not None else None),
+                "ground_truth": (sit.ground_truth.to_dict()
+                                 if sit.ground_truth is not None else None),
                 "old": r["old"], "old_reason": r["old_reason"],
                 "directive": r["directive"],
                 "new": r.get("new"), "new_reason": r.get("new_reason"),

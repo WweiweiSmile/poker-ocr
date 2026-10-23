@@ -33,6 +33,7 @@ from pydantic import BaseModel, Field
 
 from poker_ocr.cards import CardsResult, SUIT_NAMES, recognize_cards
 from poker_ocr.coach import advise
+from poker_ocr.ground_truth import compute_ground_truth
 from poker_ocr.dealer import build_detector
 from poker_ocr.ocr import OcrEngine
 from poker_ocr.pipeline import FrameResult, extract
@@ -100,6 +101,9 @@ class CoachOut(BaseModel):
     opponent_strength: dict | None = Field(
         None, description="从对手动作读出的牌力 {value:0-100, label:弱/中/强/极强, reason}")
     warnings: list[str] = Field(default_factory=list, description="数据不足等提示")
+    # 与实时 AI 建议共用同一份事实：单手提牌分析也能拿到「最好五张/坚果/听牌」。
+    ground_truth: dict | None = Field(
+        None, description="牌力事实块（best five / nuts / beaten_by / draws / board）")
 
 
 class TableOut(BaseModel):
@@ -296,7 +300,12 @@ def coach_advice(payload: CoachIn) -> CoachOut:
         stack_bb=payload.stack_bb,
         hero_invested_bb=payload.hero_invested_bb,
     )
-    return CoachOut(**decision.to_dict())
+    out = decision.to_dict()
+    # 规则建议和 AI 建议看同一份 GroundTruth（同一个评估器），避免口径分裂。
+    gt = compute_ground_truth(payload.hero_cards, payload.board,
+                              max(payload.opponents or 1, 1))
+    out["ground_truth"] = gt.to_dict() if gt else None
+    return CoachOut(**out)
 
 
 @app.post("/ocr/table", response_model=TableOut, summary="识别牌桌")

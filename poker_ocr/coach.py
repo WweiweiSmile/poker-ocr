@@ -50,6 +50,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field as dc_field, replace
+from functools import lru_cache
 from itertools import combinations
 
 # ─────────────────────────── 牌 ───────────────────────────
@@ -283,9 +284,114 @@ def board_ceiling(board: list[tuple[int, str]]) -> int:
     ceiling = FULL_HOUSE if pairs >= 1 else ONE_PAIR
     if max(_suit_counts(board).values()) >= 3:
         ceiling = max(ceiling, FLUSH)
+    # 这里保留「3 连」的粗判据（规则表的历史口径）；事实层用 rank_hands 的
+    # 精确枚举（允许 5-7-9 这种两洞，也会算上我手里的阻断牌）。
     if _has_run({r for r, _ in board}, 3):
         ceiling = max(ceiling, STRAIGHT)
     return ceiling
+
+
+@dataclass(frozen=True)
+class BeatenBy:
+    """一种能打败我的牌型，以及枚举出来的组合数/示例。"""
+
+    category: int
+    combos: int
+    example: tuple[tuple[int, str], ...]
+
+
+@dataclass(frozen=True)
+class RankDetail:
+    """我的成手牌在「对手任意两张暗牌」里的精确排名。
+
+    与 `beat_rate` 的区别：不只给「多少比例比我大」，还给出**到底哪些牌型**
+    比我大、牌面上最大的牌是什么。这是「坚果校验」的事实层：
+      · `beaten_by` 为空 = 没有任何对手持牌能打败我（可能是分池的坚果）；
+      · `best_opponent_*` = 牌面上对手能拿到的最强牌（绝对坚果基准）。
+    """
+
+    total: int
+    win_pct: float                 # 对手严格小于我
+    tie_pct: float
+    beat_pct: float                # 对手严格大于我
+    beat_at_least_pct: float       # 多人时至少一家大于我（独立近似）
+    equity_pct: float              # (win + tie/2)
+    beaten_by: tuple[BeatenBy, ...]
+    best_opponent_category: int | None
+    best_opponent_cards: tuple[tuple[int, str], ...] | None
+
+    @property
+    def hero_is_nuts(self) -> bool:
+        """没有任何对手持牌能打败我。可能仍有分池（tie_pct > 0）。"""
+        return self.total > 0 and not self.beaten_by
+
+
+def _rank_cached(hole: tuple[tuple[int, str], ...],
+                 board: tuple[tuple[int, str], ...]) -> RankDetail:
+    """枚举一次，同时算胜/平/负、按牌型分组的「打败我的牌」、牌面坚果。"""
+    if len(hole) + len(board) < 5:
+        return RankDetail(0, 0.0, 0.0, 0.0, 0.0, 0.0, (), None, None)
+    me = evaluate(list(hole) + list(board))
+    used = set(hole) | set(board)
+    deck = [(r, s) for r in range(len(RANK_CHARS)) for s in VALID_SUITS
+            if (r, s) not in used]
+
+    win = tie = 0
+    total = 0
+    groups: dict[int, list] = {}          # 牌型 → [组合数, 示例两张]
+    best_key: tuple[int, list[int]] | None = None
+    best_cards: tuple[tuple[int, str], ...] | None = None
+
+    for c1, c2 in combinations(deck, 2):
+        total += 1
+        key = evaluate([c1, c2] + list(board))
+        if key > me:
+            grp = groups.setdefault(key[0], [0, None])
+            grp[0] += 1
+            if grp[1] is None:
+                grp[1] = (c1, c2)
+        elif key == me:
+            tie += 1
+        else:
+            win += 1
+        if best_key is None or key > best_key:
+            best_key = key
+            best_cards = (c1, c2)
+
+    if not total:
+        return RankDetail(0, 0.0, 0.0, 0.0, 0.0, 0.0, (),
+                          None, None)
+
+    beaten = tuple(
+        BeatenBy(cat, grp[0], tuple(grp[1]))
+        for cat, grp in sorted(groups.items())
+    )
+    return RankDetail(
+        total=total,
+        win_pct=win / total,
+        tie_pct=tie / total,
+        beat_pct=(total - win - tie) / total,
+        beat_at_least_pct=(total - win - tie) / total,
+        equity_pct=(win + tie / 2) / total,
+        beaten_by=beaten,
+        best_opponent_category=best_key[0] if best_key else None,
+        best_opponent_cards=best_cards,
+    )
+
+
+def rank_hands(hole: list[tuple[int, str]], board: list[tuple[int, str]],
+               opponents: int = 1) -> RankDetail:
+    """精确枚举对手所有两张暗牌，返回 `RankDetail`（含坚果校验）。
+
+    这个函数是 `beat_rate` 和 `ground_truth` 的**唯一枚举入口**：两者看到的
+    胜/平/负、牌型分组、牌面坚果必须完全一致。纯 Python 一次约 5–8ms。
+    """
+    detail = _rank_cached(tuple(hole), tuple(board))
+    n = max(int(opponents), 1)
+    if n == 1:
+        return detail
+    return replace(detail,
+                   beat_at_least_pct=1.0 - (1.0 - detail.beat_pct) ** n)
 
 
 def beat_rate(hole: list[tuple[int, str]], board: list[tuple[int, str]],
@@ -310,19 +416,8 @@ def beat_rate(hole: list[tuple[int, str]], board: list[tuple[int, str]],
 
     纯 Python 枚举一次约 5ms（47 张牌 C(47,2)=1081 组），每个决策点算一次可以接受。
     """
-    me = evaluate(list(hole) + list(board))
-    used = set(hole) | set(board)
-    deck = [(r, s) for r in range(len(RANK_CHARS)) for s in VALID_SUITS
-            if (r, s) not in used]
-    better = total = 0
-    for c1, c2 in combinations(deck, 2):
-        total += 1
-        if evaluate([c1, c2] + list(board)) > me:
-            better += 1
-    if not total:
-        return 0.0, 0.0
-    p = better / total
-    return p, 1.0 - (1.0 - p) ** max(opponents, 1)
+    detail = rank_hands(hole, board, opponents)
+    return detail.beat_pct, detail.beat_at_least_pct
 
 
 # ─────────────────────────── 牌力分档 ───────────────────────────

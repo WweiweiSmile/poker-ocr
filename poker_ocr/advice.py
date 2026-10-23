@@ -38,6 +38,7 @@ from .coach import (
     DRY, MID_BOTTOM, OVERPAIR, STRONG_DRAW, STRONG_MADE, TPTK, TP_WEAK, TWO_PAIR,
     WEAK_DRAW, board_texture, opponent_strength, parse_cards, read_hand,
 )
+from .ground_truth import GroundTruth, compute_ground_truth
 from .hand_track import ActionRecord, HandSnapshot, PREFLOP, RIVER, TURN
 from .preflop_ranges import chart_text, range_verdict
 from .table_dynamics import is_loose_table, value_heavy_aggression
@@ -396,6 +397,9 @@ class Situation:
     # 翻前：这手牌在该位置的开池范围归属（见 preflop_ranges.range_verdict）。
     # 由程序算、作为事实注入，模型只负责在事实之上做选择。
     range_verdict: str | None = None
+    # 牌力事实块：最好的五张、精确坚果校验、听牌、牌面结构。
+    # 由 ground_truth.compute_ground_truth 生成；None = 翻前/牌不全。
+    ground_truth: GroundTruth | None = None
 
     @property
     def street(self) -> str:
@@ -415,6 +419,29 @@ def _read(snap: HandSnapshot):
         return None
 
 
+def _precise_texture_en(gt: GroundTruth | None, texture: str | None) -> str | None:
+    """给模型/复盘看的牌面标签。两张同花不能再叫 "Flush + straight"。
+
+    规则引擎的 `board_texture` 仍按历史口径（2 张同花 = 花面）用于下注尺度；
+    这里只改「事实怎么说」，避免 990010 那类「只有花听被读成已成花」。
+    """
+    if gt is None:
+        return _TEXTURE_EN.get(texture, texture) if texture else None
+    b = gt.board_info
+    parts: list[str] = []
+    if b.flush_made_possible:
+        parts.append("Flush possible")
+    elif b.flush_draw_possible:
+        parts.append("Two-tone (flush draw only — no made flush)")
+    else:
+        parts.append("Rainbow")
+    if b.paired:
+        parts.append("paired")
+    if b.straight_possible:
+        parts.append("straight possible")
+    return " + ".join(parts)
+
+
 def build_situation(snap: HandSnapshot,
                     table_dynamics: str | None = None) -> Situation:
     """把快照整理成一次决策的事实。
@@ -425,9 +452,22 @@ def build_situation(snap: HandSnapshot,
     """
     read = _read(snap)
     warnings: list[str] = list(snap.warnings)
+    n_opp = sum(1 for o in snap.opponents if not o.folded)
+
+    # 事实块只算一次：牌面结构、最好五张、精确排名、坚果校验全从这里出。
+    # 实时建议和复盘共用同一个 GroundTruth，避免「一个说听牌没成、一个说成对」。
+    gt = None
+    if read is not None:
+        try:
+            gt = compute_ground_truth(list(snap.hero_cards),
+                                      list(snap.board[:5]), n_opp)
+        except (ValueError, TypeError):
+            gt = None
 
     texture = None
-    if read is not None:
+    if gt is not None:
+        texture = gt.board_info.texture
+    elif read is not None:
         try:
             texture, _tags = board_texture(parse_cards("".join(snap.board[:5])))
         except ValueError:
@@ -443,15 +483,17 @@ def build_situation(snap: HandSnapshot,
                   "reason": opp_read.reason_en}
 
     per_player = pot_per_player(snap)
-    n_opp = sum(1 for o in snap.opponents if not o.folded)
     # 纯听牌 + 3 家以上：没有弃牌率，主动下注/加注不该出现在选项里（h31）。
     # 「纯听」= 读牌分档在听牌档；已经成牌（一对以上）不在此列——
     # 那种情况是价值下注，哪怕多路也允许。
     draw_only = bool(read and read.tier in (STRONG_DRAW, WEAK_DRAW))
     block_draw_bets = (snap.street != PREFLOP and n_opp >= 3 and draw_only)
     beat_pct = beat_at_least = None
-    if read is not None:
-        # 复用 read_hand 里已经枚举过的单人比例，不重复跑一遍 beat_rate
+    if gt is not None:
+        beat_pct = round(gt.rank.beat_pct * 100, 1)
+        beat_at_least = round(gt.rank.beat_at_least_pct * 100, 1)
+    elif read is not None:
+        # 兜底：gt 计算失败时仍复用 read_hand 已经枚举过的单人比例
         p = read.beat_pct
         beat_pct = round(p * 100, 1)
         beat_at_least = round((1.0 - (1.0 - p) ** max(n_opp, 1)) * 100, 1)
@@ -471,7 +513,7 @@ def build_situation(snap: HandSnapshot,
         opponent_strength=opp,
         warnings=warnings,
         hand_label_en=read.label_en if read else None,
-        texture_en=_TEXTURE_EN.get(texture, texture) if texture else None,
+        texture_en=_precise_texture_en(gt, texture),
         opponent_strength_en=opp_en,
         equity_pct=read.equity_pct if read else None,
         table_dynamics=(table_dynamics or "").strip() or None,
@@ -484,6 +526,7 @@ def build_situation(snap: HandSnapshot,
             (lambda v: v.render() if v else None)(
                 range_verdict(snap.hero_position, snap.hero_cards))
             if snap.street == PREFLOP else None),
+        ground_truth=gt,
     )
 
 
@@ -724,6 +767,24 @@ def value_directive(sit: Situation) -> str | None:
                 f"price is very good. If you bet, it is a bluff with no fold equity.")
 
     if tier == STRONG_MADE:
+        # 精确坚果：枚举结果说「没有任何对手持牌能打败我」。这时模型最常见的
+        # 退化是「怕一个牌面上不存在的更大的牌」而只跟（990010 坚果顺 → call）。
+        # 用一句明确的 ABSOLUTE NUTS 指令压住它，而不是让它自己组合推理。
+        if sit.ground_truth is not None and sit.ground_truth.hero_is_nuts:
+            size = "1/2–2/3 pot" if sit.texture == DRY else "2/3–full pot"
+            pick = _pick_size(sit, 0.5 if sit.texture == DRY else 0.7)
+            hint = f" Use option {pick}." if pick else ""
+            if facing:
+                return ("VALUE DEFAULT — ABSOLUTE NUTS: the evaluator enumerated every "
+                        f"opponent holding and NONE beats you. RAISE for value (2/3–full "
+                        f"pot).{hint} Do NOT call, do NOT check, and do NOT describe a "
+                        "flush/full house/any higher hand as possible — the facts list "
+                        "no hand that beats you.")
+            return (f"VALUE DEFAULT — ABSOLUTE NUTS: no opponent holding beats you. BET "
+                    f"for value ({size}).{hint} Do NOT check out of fear of a better hand; "
+                    "the facts list nothing that beats you. Slow-play only if you can "
+                    "name a concrete reason from the action line, not from the board.")
+
         # 顺子/同花/两对不是「有名字就强」：牌力要看它在**这个牌面**上的排名。
         #   · 公对面：连**同花**都可能被葫芦打败（h100 的 44 就是这一类），
         #     只有葫芦/四条以上才豁免；
@@ -848,6 +909,19 @@ def value_directive(sit: Situation) -> str | None:
 
 
 # ─────────────────────────── 提示词 ───────────────────────────
+
+# 事实块的最高优先规则。两套提示词都注入同一段：牌力事实只能引用，不能重算。
+_GROUND_TRUTH_RULES = """\
+## GROUND TRUTH (highest priority)
+The facts include a «GROUND TRUTH» block from a deterministic evaluator: exact hand,
+best five, nut status, every hand class that beats you, board flush/straight possibility,
+draws. It is the only source for these; never contradict or recompute it.
+- "No made flush possible (at most 2 of any suit)" → no flush exists yet; do not call
+  the board a flush board.
+- "NUTS" → no opponent holding beats you; facing a bet, RAISE. Never invent a higher hand.
+- "Beaten by" is exact: only those classes beat you.
+- A non-nut straight or flush is still strong, but call — do not raise as if unbeatable.
+"""
 
 _STREET_EN = {"preflop": "Preflop", "flop": "Flop", "turn": "Turn", "river": "River"}
 
@@ -1007,30 +1081,41 @@ def render_hand_facts(sit: Situation) -> str:
         tier_en = _TIER_EN.get(sit.hand_tier, sit.hand_tier or "unknown")
         lines.append(f"My hand strength: {sit.hand_label_en or 'unreadable'}"
                      f" (tier: {tier_en})")
-        lines.append(f"Board texture: {sit.texture_en or 'unknown'}｜"
-                     f"Draw: {'yes' if sit.has_draw else 'no'}｜"
-                     f"Plays the board (best five all from board): "
-                     f"{'yes' if sit.plays_board else 'no'}")
-        # 「两对」「顺子」只是名字，不是强度。把实际排名算出来给模型看 ——
-        # 8822 在 88T 上 87.7% 已被领先，和「花面的顺子」19.9% 差一个量级，
-        # 靠 capped_by_board 这个布尔值分不开。见 coach.beat_rate。
-        if sit.beat_pct is not None and sit.beat_at_least_pct is not None:
-            n = sit.opponents_in_hand or 0
+        if sit.ground_truth is not None:
+            # 成手牌、最好五张、精确排名、坚果校验、听牌、牌面结构。
+            # 这一段是模型唯一允许引用的牌力事实；不要再在别处重复。
+            lines.append(sit.ground_truth.render())
             if sit.hand_tier in (STRONG_DRAW, WEAK_DRAW):
-                # 听牌时这个数只反映「还没成牌」（坚果同花听牌此刻只是 A 高，
-                # 会被算成 40%+ 已落后）。不提示清楚会把它推去弃牌。
+                # 听牌时排名只反映「还没成牌」（坚果同花听牌此刻可能只是 A 高）。
                 lines.append(
-                    f"Made-hand rank of the CURRENT (unmade) hand: "
-                    f"{sit.beat_at_least_pct:g}% of the time someone already has "
-                    f"you beaten right now. This does NOT apply to a draw — judge "
-                    f"a draw by its outs and the pot odds, not by this number.")
-            else:
-                lines.append(
-                    f"Made-hand rank (exact count over all {n + 1}-way holdings): "
-                    f"beaten by {sit.beat_pct:g}% of random hands per opponent; with "
-                    f"{n} opponent(s) in the hand, {sit.beat_at_least_pct:g}% chance at "
-                    f"least one is ahead. Random hands are a LOWER bound — anyone who "
-                    f"called or raised has a stronger range than random.")
+                    "Note: the rank above is for the CURRENT unmade hand. This does "
+                    "NOT apply to a draw — judge a draw by its outs and the pot odds, "
+                    "not by this number.")
+        else:
+            lines.append(f"Board texture: {sit.texture_en or 'unknown'}｜"
+                         f"Draw: {'yes' if sit.has_draw else 'no'}｜"
+                         f"Plays the board (best five all from board): "
+                         f"{'yes' if sit.plays_board else 'no'}")
+            # 「两对」「顺子」只是名字，不是强度。把实际排名算出来给模型看 ——
+            # 8822 在 88T 上 87.7% 已被领先，和「花面的顺子」19.9% 差一个量级，
+            # 靠 capped_by_board 这个布尔值分不开。见 coach.beat_rate。
+            if sit.beat_pct is not None and sit.beat_at_least_pct is not None:
+                n = sit.opponents_in_hand or 0
+                if sit.hand_tier in (STRONG_DRAW, WEAK_DRAW):
+                    # 听牌时这个数只反映「还没成牌」（坚果同花听牌此刻只是 A 高，
+                    # 会被算成 40%+ 已落后）。不提示清楚会把它推去弃牌。
+                    lines.append(
+                        f"Made-hand rank of the CURRENT (unmade) hand: "
+                        f"{sit.beat_at_least_pct:g}% of the time someone already has "
+                        f"you beaten right now. This does NOT apply to a draw — judge "
+                        f"a draw by its outs and the pot odds, not by this number.")
+                else:
+                    lines.append(
+                        f"Made-hand rank (exact count over all {n + 1}-way holdings): "
+                        f"beaten by {sit.beat_pct:g}% of random hands per opponent; with "
+                        f"{n} opponent(s) in the hand, {sit.beat_at_least_pct:g}% chance at "
+                        f"least one is ahead. Random hands are a LOWER bound — anyone who "
+                        f"called or raised has a stronger range than random.")
         if snap.bomb_pot:
             lines.append("Bomb pot banner: YES (幸运暴击 / BOMB POT shown on screen)")
         prev_pot = previous_street_pot(snap)
@@ -1222,6 +1307,7 @@ def _build_messages_skills(sit: Situation) -> tuple[str, str]:
         "equity. When the dynamics change the line, say which tendency drove it.",
         "",
     ]
+    system_parts.append(_GROUND_TRUTH_RULES)
     system_parts.append(skills.render_catalog(all_, selected))
     system_parts.append(skills.render_block(selected))
 
@@ -1252,14 +1338,9 @@ Ask **"which worse hands actually CALL me?"**
 - That is why raising is never right with a non-nut hand: a raise narrows their range to \
 its top.
 
-## Hand RANK on this board (not its name)
-- Straight on a flush board (3+ suited): a flush beats you and made flushes are exactly \
-what they call with. No raise; bet small or check-call; fold to a raise.
-- Flush or straight on a paired board: a full house beats you, and they call with \
-trips/boats. No raise; check-call or a small bet; fold to a raise.
-- Small two pair built on a board pair (8822 on 88T, 6644 on QJ266): the worst two pair — \
-any pocket pair above yours, or an over-card that pairs, beats it. Not a value hand.
-- Only the nut straight/flush may be raised.
+## Hand RANK
+Use the GROUND TRUTH block; never infer rank from the name. Small two pair on a board
+pair is not a value hand.
 
 ## Output
 Return exactly one JSON object, no markdown fence and no other text:
@@ -1332,7 +1413,7 @@ _LEAN_SYSTEM = _LEAN_SYSTEM.replace("<<RFI_CHART>>", chart_text())
 
 
 def _build_messages_lean(sit: Situation) -> tuple[str, str]:
-    return _LEAN_SYSTEM, render_hand_facts(sit)
+    return _LEAN_SYSTEM + "\n" + _GROUND_TRUTH_RULES, render_hand_facts(sit)
 
 
 def build_messages(sit: Situation,

@@ -45,6 +45,7 @@ SUITES = ["test_positions.py", "test_env.py", "test_coach.py", "test_advice.py",
           "test_runtime_profile.py", "test_stable_cards.py",
           "test_doubt_window.py", "test_export_live_hands.py",
           "test_compare_advice_styles.py", "test_beat_rate.py",
+          "test_ground_truth.py",
           "test_build_sft_dataset.py",
           "test_preflop_ranges.py", "test_cards.py",
           "test_card_replay.py", "test_extract.py", "test_api.py"]
