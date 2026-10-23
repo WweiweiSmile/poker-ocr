@@ -32,7 +32,8 @@ from poker_ocr.frame_state import FrameState, PlayerState  # noqa: E402
 from poker_ocr.hand_track import LiveHandTracker, street_of_board  # noqa: E402
 from poker_ocr.parse import Blinds  # noqa: E402
 from poker_ocr.table_dynamics import (  # noqa: E402
-    MAX_CHARS, load_table_dynamics, parse_table_dynamics, value_heavy_aggression,
+    MAX_CHARS, is_aggressive_table, load_table_dynamics, parse_table_dynamics,
+    value_heavy_aggression,
 )
 
 FAILS: list[str] = []
@@ -1456,6 +1457,99 @@ def test_value_directive_table_dynamics_override() -> None:
           f"翻牌不该触发多街覆盖：{flop_directive}")
 
 
+MIXED_TABLE = (
+    "当前是混合桌：A. 松浪/松凶（芒果与西米、葡萄牙h）：open 8–11BB，"
+    "翻后 60–100% 会 bet/raise，下注不保证是价值。"
+    "B. 松弱/跟注站（FatherTM、好运常在ok）：翻前很少加注，翻后多跟注。"
+)
+
+
+def _h8_like_point(*, to_call: float = 0.0):
+    """h8 的转牌：QJ 在 A A Q K 上，两个对手，无人下注。"""
+    from poker_ocr.hand_track import OpponentSnapshot, StreetRecord
+    return make_point(
+        hand_id="h8", street="turn",
+        board=("Ad", "As", "Qc", "Kc"), hero_cards=("Jh", "Qd"),
+        hero_position="BB", hero_is_pfr=False, cbet_spot=False,
+        to_call=to_call, pot=47.5, pot_before_street=47.5,
+        opponents=(
+            OpponentSnapshot("midR", "芒果与西米", "BTN", 95.0, 0.0, False),
+            OpponentSnapshot("lowR", "好运常在ok", "SB", 95.0, 0.0, False),
+        ),
+        streets=(StreetRecord("preflop", 4.0, ()),
+                 StreetRecord("flop", 19.0, ()),
+                 StreetRecord("turn", 47.5, ())),
+        players_dealt=9,
+    )
+
+
+def test_is_aggressive_table_flags() -> None:
+    """显式松浪/松凶 → True；纯松弱/紧弱 → False；混合桌也要 True。"""
+    for text in ("松浪玩家", "松凶/松浪混合", "maniac", "loose-aggressive"):
+        check(is_aggressive_table(text), f"应判为激进桌：{text}")
+    for text in ("基本都是松弱玩家，很少诈唬", "紧弱，尊重加注", "", None):
+        check(not is_aggressive_table(text), f"不该判为激进桌：{text}")
+    check(is_aggressive_table(MIXED_TABLE), "混合桌里有松浪，应判为激进桌")
+    check(not is_aggressive_table("松凶但很少诈唬"),
+          "松凶+很少诈唬不该按松浪处理")
+    check(not value_heavy_aggression(MIXED_TABLE),
+          "混合桌不能再判成纯价值线——否则会把松浪当跟注站")
+
+
+def test_value_directive_aggressive_table_checks_two_pair() -> None:
+    """h8 类：松浪桌上两对无人下注 → 不薄价值；面对单注 → 抓诈。"""
+    sit = build_situation(_h8_like_point(), table_dynamics=MIXED_TABLE)
+    directive = value_directive(sit)
+    check(bool(directive) and "AGGRESSIVE TABLE" in directive,
+          f"松浪桌两对应走 aggressive 分支：{directive}")
+    check("DO NOT THIN-VALUE" in (directive or "") and "CHECK" in (directive or ""),
+          f"松浪桌两对转牌应压成 check：{directive}")
+    check("BET for value" not in (directive or ""),
+          f"松浪桌两对不该默认价值下注：{directive}")
+
+    facing = build_situation(_h8_like_point(to_call=10.0),
+                             table_dynamics=MIXED_TABLE)
+    facing_directive = value_directive(facing)
+    check("BLUFF-CATCH" in (facing_directive or "")
+          and "CALL one bet" in (facing_directive or ""),
+          f"松浪桌两对面对单注应抓诈：{facing_directive}")
+
+    # 强牌（暗三）不压：松浪桌仍该价值下注，别把中等牌的规则套到强牌上。
+    strong = build_situation(make_point(
+        street="flop", board=("Ks", "7d", "2c"), hero_cards=("Kd", "Kh"),
+        to_call=0.0, pot=6.0), table_dynamics=MIXED_TABLE)
+    strong_directive = value_directive(strong)
+    check("BET for value" in (strong_directive or ""),
+          f"松浪桌暗三仍应价值下注：{strong_directive}")
+
+    # 纯松弱桌：不走 aggressive 分支，但 4 张卡顺也不该豁免「被统治」判定。
+    # 22.0% 刚好压 DOMINATED_BEAT_PCT，规则应给 NOT A VALUE → check。
+    passive = build_situation(
+        _h8_like_point(),
+        table_dynamics="桌上都是松弱玩家，跟注站，很少诈唬")
+    passive_directive = value_directive(passive)
+    check("AGGRESSIVE TABLE" not in (passive_directive or ""),
+          f"松弱桌不该走 aggressive 分支：{passive_directive}")
+    check("NOT A VALUE HAND" in (passive_directive or ""),
+          f"4 张卡顺不该让被统治的两对变成价值牌：{passive_directive}")
+
+
+def test_lean_prompt_is_per_opponent() -> None:
+    """lean 提示词不再默认「全桌松弱」，并要求按对手/座位分别套。"""
+    sit = build_situation(make_point())
+    system, _ = build_messages(sit)
+    check("The pool is **mixed**" in system,
+          "lean 默认画像应改成 mixed")
+    check("do not project one label" in system,
+          "lean 应明确不要给整桌贴一个标签")
+    check("Which better hands RAISE me" in system,
+          "lean 的决策提问应包含「谁会加注我」")
+    check("never average it into" in system,
+          "lean 应说明混合桌不能平均成松弱")
+    check("LAG/maniac (loose-maniac/loose-aggressive)" in system,
+          "lean 应点名松浪/松凶的处理方式")
+
+
 # ─────────────────────────── 模型调用 ───────────────────────────
 
 SETTINGS = AISettings(api_key="k", base_url="https://example.invalid", model="m")
@@ -2182,6 +2276,9 @@ def main() -> int:
         test_table_dynamics_in_prompt,
         test_value_heavy_aggression_flags,
         test_value_directive_table_dynamics_override,
+        test_is_aggressive_table_flags,
+        test_value_directive_aggressive_table_checks_two_pair,
+        test_lean_prompt_is_per_opponent,
         test_explosive_pot_detection,
         test_explosive_pot_pbs_misread_falls_back_to_pot_minus_bets,
         test_explosive_pot_from_screen_banner,

@@ -41,7 +41,8 @@ from .coach import (
 from .ground_truth import GroundTruth, compute_ground_truth
 from .hand_track import ActionRecord, FLOP, HandSnapshot, PREFLOP, RIVER, TURN
 from .preflop_ranges import chart_text, range_verdict
-from .table_dynamics import is_loose_table, value_heavy_aggression
+from .table_dynamics import (is_aggressive_table, is_loose_table,
+                             value_heavy_aggression)
 
 # ─────────────────────────── 选项 ───────────────────────────
 
@@ -412,6 +413,12 @@ class Situation:
     # 牌力事实块：最好的五张、精确坚果校验、听牌、牌面结构。
     # 由 ground_truth.compute_ground_truth 生成；None = 翻前/牌不全。
     ground_truth: GroundTruth | None = None
+    # 桌风是否明确含「松浪/松凶」。混合桌也可以为 True：只要桌上有一个
+    # LAG，中等成牌就不能默认做薄价值。见 table_dynamics.is_aggressive_table。
+    aggressive_table: bool = False
+    # 当前改良 outs（coach.Read.outs）。用于区分「成牌+弱听」和「成牌+强听」：
+    # 4 张卡顺不该豁免「被统治」判定，8+ 张 combo draw 才该按半诈唬处理。
+    outs: int | None = None
 
     @property
     def street(self) -> str:
@@ -541,6 +548,8 @@ def build_situation(snap: HandSnapshot,
                               limpers=count_limpers(snap)))
             if snap.street == PREFLOP else None),
         ground_truth=gt,
+        aggressive_table=is_aggressive_table(table_dynamics),
+        outs=read.outs if read else None,
     )
 
 
@@ -783,9 +792,14 @@ def value_directive(sit: Situation) -> str | None:
     # 任何「bet small for value」的措辞都会把模型推向送钱。
     # 用**单人**比例做判据（不是全桌）：全桌比例会被人数放大，见 DOMINATED_BEAT_PCT。
     # 只对**成牌**生效：听牌的枚举结果反映的是「当前还没成牌」，没有意义。
+    # 成牌+4-7 张弱听不豁免（h8 的 QJ 在 AAQK 上多 4 张 T，不能因此变成价值牌）；
+    # 只有 8+ 张强听（combo draw）才按半诈唬处理，交给下面的听牌分支。
+    # 松浪桌不走这条、交给下面的 aggressive 分支：动作同样是 check，但会补
+    # 「让对手先开枪 / 抓诈」的后续计划。
     if (not facing
+            and not sit.aggressive_table
             and sit.hand_tier in (STRONG_MADE, OVERPAIR, TPTK, TP_WEAK, MID_BOTTOM)
-            and not sit.has_draw
+            and not (sit.has_draw and (sit.outs or 0) >= 8)
             and (sit.beat_pct or 0.0) >= DOMINATED_BEAT_PCT):
         n = sit.opponents_in_hand or 1
         return (f"NOT A VALUE HAND BY RANK: nominal {sit.hand_label_en or 'made hand'}, "
@@ -820,6 +834,25 @@ def value_directive(sit: Situation) -> str | None:
         return (f"SET-MINE PAIR ({way}): 22-99 unimproved is a MEDIUM hand, not a value "
                 "stack-off — overcards dominate it. Bet small (1/3–1/2 pot) for "
                 "protection or check; do not build a big pot." + hint)
+
+    # 松浪/松凶桌：中等成牌默认不是薄价值牌。对手的范围更宽、更爱加注，
+    # OOP 主动下注只会让更差的牌弃掉、更好的牌跟/加。混合桌也走这条：
+    # 只要桌上有一个 LAG，就不该把全桌默认成跟注站。
+    if sit.aggressive_table:
+        medium = (sit.category == TWO_PAIR
+                  or tier in (TPTK, TP_WEAK, MID_BOTTOM))
+        if medium and not facing and not (
+                sit.ground_truth is not None and sit.ground_truth.hero_is_nuts):
+            return ("AGGRESSIVE TABLE — DO NOT THIN-VALUE: a maniac/LAG is in the "
+                    "hand. This medium made hand (two pair / one pair) is a CHECK, "
+                    "not a small value bet: a bet folds out the hands you beat and "
+                    "gets called or raised by better. Check, let them barrel, and "
+                    "call one bet as a bluff-catcher. Do not bet-fold.")
+        if medium and facing and not facing_raise:
+            return ("AGGRESSIVE TABLE — BLUFF-CATCH: a maniac/LAG's single bet is "
+                    "not automatically value. CALL one bet with this medium made "
+                    "hand; do not fold to a single barrel. Fold only to a raise, "
+                    "an overbet, or a multi-street barrel.")
 
     if tier == STRONG_MADE:
         # 精确坚果：枚举结果说「没有任何对手持牌能打败我」。这时模型最常见的
@@ -1224,7 +1257,15 @@ def render_hand_facts(sit: Situation) -> str:
             lines.append("Explosive pot: YES (bomb-pot banner on screen)")
         if sit.opponent_strength_en:
             o = sit.opponent_strength_en
-            lines.append(f"Opponent strength from actions: {o['label']} ({o['reason']})")
+            suffix = (" — on this LAG/maniac table, aggression is not automatically "
+                      "value." if sit.aggressive_table else "")
+            lines.append(f"Opponent strength from actions: {o['label']} ({o['reason']})"
+                         f"{suffix}")
+        if sit.aggressive_table:
+            lines.append(
+                "Table read: value-light aggression (LAG/maniac present) — their bets "
+                "and raises are NOT automatically value. Do not thin-value a medium "
+                "made hand; check-call and let them barrel.")
         if sit.equity_pct and sit.hand_tier in (STRONG_DRAW, WEAK_DRAW):
             # 四二法则只对**听牌**有意义。成牌（顺子/三条等）的 outs 数的是
             # 「还能不能改进」，不是胜率，直接乘会得到 92% 这种假精确值
@@ -1376,7 +1417,9 @@ def _build_messages_skills(sit: Situation) -> tuple[str, str]:
         "",
         "## Table dynamics (user-provided, when present)",
         "The user facts may include a «Table dynamics» section written by the player. "
-        "Treat it as authoritative for the current table and adjust exploitative choices:",
+        "Treat it as authoritative for the current table and adjust exploitative choices. "
+        "**The table may be mixed:** apply the note per opponent/seat, match the opponent "
+        "in this hand, and never average it into one «loose-passive» profile:",
         "- loose-passive / calling station / novice: bluff less, value-bet thinner "
         "(more marginal hands) and size up, and never slow-play strong hands. Their "
         "raises and multi-street barrels are value-heavy: fold marginal made hands "
@@ -1386,8 +1429,12 @@ def _build_messages_skills(sit: Situation) -> tuple[str, str]:
         "- tight / rarely bluffs / nit: fold marginal bluff-catchers, do not pay off, "
         "value-bet tighter (fewer marginal value hands), respect raises, and bluff more "
         "selectively;",
-        "- loose-aggressive / maniac: trap with strong hands, call down lighter, and avoid "
-        "bluffing wars;",
+        "- loose-aggressive / maniac (LAG, loose-maniac/loose-aggressive): do NOT "
+        "assume their bet/raise is value. Trap with strong hands, call down lighter, "
+        "avoid thin value and bluffing wars; do not bet-fold a medium hand. Let them "
+        "barrel into your bluff-catchers;",
+        "- passive preflop + aggressive postflop: preflop calls are wide, but postflop "
+        "bets are not automatically value — treat it as a bluff-catching spot;",
         "- tight-aggressive / solid: play straightforwardly, avoid fancy plays, and give "
         "credit to aggression.",
         "- in an explosive pot (bomb pot or exactly 5BB per player, everyone in), "
@@ -1421,28 +1468,35 @@ You are a Texas Hold'em cash-game advisor working in real time. Hero has a few s
 and needs one directly executable action.
 
 ## Priority (highest first)
-1. Legal actions and computed math (hand rank, equity, pot odds) — never violate these.
-2. «Table dynamics» (when present) — the primary strategic layer: ranges, aggression, \
-bluff frequency, calling/folding thresholds for THIS table.
-3. The chart and generic heuristics below — defaults for an unknown opponent. They never \
-override table dynamics. Playing the standard line on the wrong table just compounds errors.
+1. Legal actions and computed math (hand rank, equity, pot odds) — never violate.
+2. «Table dynamics» (when present) — the primary strategic layer for THIS table.
+3. The chart and generic heuristics — defaults for an unknown opponent; never override \
+table dynamics.
 
 ## Who you are playing (default when no table dynamics)
-Loose-passive **calling stations** — the default pool for this game. The «Table dynamics» \
-section in the facts overrides this whenever present:
-- They call too much and raise too little: calling range ≈ any draw + top pair or better.
-- Their bets and raises are value. A passive raise has it; a multi-street barrel is \
-near-nuts.
-- Bluffing is dead money — you cannot fold out a draw or top pair.
-- The only way to win is value.
+The pool is **mixed** — do not project one label onto the whole table. Classify the \
+opponent(s) from the «Table dynamics» notes and the action line:
+- station: calls wide, raises little; their bet/raise is value → thin value, size up, \
+fold marginal hands to barrels.
+- LAG/maniac (loose-maniac/loose-aggressive): opens/3-bets large, barrels wide, overbets; \
+their bet is NOT automatically value → do not thin-value OOP; check-call, let them barrel, \
+do not bet-fold; bluff-catch more.
+- passive preflop + aggressive postflop: preflop calls are wide, postflop bets are not \
+automatically value → treat as a bluff-catching spot, not a value spot.
+When the notes are silent, treat the opponent as unknown — not as a station. Bluffing \
+is dead money only against a station.
 
 ## The question that decides every bet
-Ask **"which worse hands actually CALL me?"**
-- Two or more worse hands that call → bet 2/3 to full pot.
+Ask two questions, in order:
+1. **Which worse hands actually CALL me?** (value)
+2. **Which better hands RAISE me, and who is left to act?** (risk)
+- Two or more worse callers and no better raiser → bet 2/3 to full pot.
 - "Only better hands call, worse hands fold" → check.
-- Raising a non-nut hand is usually wrong against an unknown/tight opponent: a raise \
-narrows their range to its top. Against a loose-passive station that calls with worse, \
-value-raise — but do not bluff-raise.
+- Against a station, Q1 dominates. Against a maniac/LAG, Q2 dominates: a "value" bet \
+that folds worse and gets raised by better is a check. Let them barrel into your \
+medium hands.
+- Raising a non-nut hand narrows their range to its top: value-raise a station, but do \
+not bluff-raise a maniac.
 
 ## Hand RANK
 Use the GROUND TRUTH block; never infer rank from the name. Small two pair on a board
@@ -1463,11 +1517,9 @@ defaults (ranges, sizings) are not math — table dynamics may change them.
 limp as the first player in, except an SB complete or a small pocket pair (22-66) \
 over-limping for 1BB to set-mine.
 3. Postflop: judge the calling range and board texture first; then value/check/size.
-4. Call only when your equity beats the stated break-even equity. For draws, count \
-implied odds as AT MOST 2 percentage points: you may call only when (draw equity + 2%) \
-is at least the break-even; otherwise FOLD — do not pay to chase. Example: break-even \
-29%, draw equity 18% → 18 + 2 = 20 < 29 → FOLD. Unquantified "implied odds" is never a \
-reason to call.
+4. Call only when your equity beats the stated break-even. For draws, count implied odds \
+as AT MOST 2 percentage points: call only when (equity + 2%) >= break-even; otherwise \
+FOLD. Unquantified "implied odds" is never a reason to call.
 5. Table dynamics outrank the chart and every generic heuristic here; they never override \
 computed equity or pot odds.
 6. If calling covers Hero's stack, the decision is all-in or fold.
@@ -1476,8 +1528,8 @@ calling-range reasoning above disagrees.
 
 ## Preflop ranges (9-handed, ~100BB, ante) — DEFAULTS for an unknown opponent
 RFI by position (cumulative: each row adds to the previous; raise to the offered size,
-fold the rest). «Table dynamics» outranks this table: loose-passive → widen by roughly
-one seat and let small pairs over-limp for 1BB; tight → do not widen.
+fold the rest). «Table dynamics» outranks this table: loose → widen by roughly one \
+seat and let small pairs over-limp for 1BB; tight → do not widen.
 <<RFI_CHART>>
 SB: open ~30%, raise-or-fold vs opens (not vs limps). In a limped pot, completing for \
 0.5BB is cheap, but **raw pot odds never justify it — you need realized equity**. Complete \
@@ -1499,41 +1551,41 @@ Cold-call IP: 22-99, 54s-JTs, KTs, QJs; no offsuit broadways vs early opens.
 BB vs late open: defend wide; 3-bet linear 55+, A9s+, KTs+, ATo+, KQo.
 At 6-8 handed, widen each early-position range by roughly one seat.
 
-## Postflop (defaults for the passive pool; table dynamics overrides)
-Against loose-aggressive/tricky opponents these absolutes flip: do not assume every raise \
-is value, bluff-catch more, and check back marginal hands instead of value-betting thin.
-- C-bet dry A/K-high or paired boards at 1/3 pot only with equity; air is a donation here.
-- Value size **2/3 to full pot**, dry or wet. They call either way — charge them. 1/3 is \
-never a value size against a station.
-- Bluff only with a real draw. Heads-up: a strong draw with no bet in front is a BET \
-(semi-bluff) — fold equity is real there, and checking gives the pot away. \
-**3+ opponents: never bet or raise a draw.** A multiway pot has no fold equity — \
-the calling stations come along with any draw or top pair, and a draw has no made hand \
-to charge them with. Check; call only when the price is right. (The program withholds \
-the bet/raise options in that multiway spot; heads-up it does not.)
+## Postflop (defaults; table dynamics and opponent type override)
+**Opponent type changes the line.** The absolutes below are for a station. Against a \
+maniac/LAG: do not thin-value OOP; check-call medium hands, let them barrel, do not \
+bet-fold; bluff-catch more and give less credit to a single bet.
+- C-bet dry A/K-high or paired boards at 1/3 pot only with equity; air is a donation.
+- Value size **2/3 to full pot** — against a station. They call either way; 1/3 is never \
+a value size vs a station. Against a LAG, a small "blocker" bet with a medium hand is \
+worse than a check: it folds worse and gets raised.
+- Bluff only with a real draw. Heads-up, a strong draw with no bet in front is a BET. \
+**3+ opponents: never bet/raise a draw** — no fold equity; check and call only with the \
+right price. (The program withholds those options multiway.)
 - One pair: one bet, then pot-control; do not stack off.
-- Pocket pairs 22-99 are set-mines: unimproved (overpair/underpair) they are MEDIUM \
-hands — bet small/check, never stack off on an overpair, especially 3+ way.
-- Facing a raise or a multi-street barrel from a passive player: FOLD marginal one pair \
-(top pair, middle/bottom pair) and non-nut made hands. A heads-up flop overpair calls one \
-raise — the range still has top pair/draws.
-- MDF assumes an opponent who bluffs. This table does not — fold more than MDF says.
+- 22-99 unimproved are MEDIUM set-mines — bet small/check, never stack off, especially \
+3+ way.
+- Facing a raise or a multi-street barrel from a station: FOLD marginal one pair and \
+non-nut made hands; a heads-up flop overpair calls one raise.
+- MDF assumes a bluffer. vs a station, fold more than MDF; vs a LAG, do not over-fold to \
+a single barrel — call more, fold to the raise/overbet or multi-street barrel.
 
 ## Explosive pot
 «Explosive pot: YES» (bomb banner, or 5BB per player) means wide ranges and many two \
 pair/trips. Top pair/overpair is a MEDIUM hand — pot-control it.
 
 ## Table dynamics (user-provided, when present)
-It is the primary strategic layer and outranks the chart and every generic heuristic above: \
-loose-passive → no bluffs, value-bet big, respect raises, widen preflop; nit → steal more, \
-fold marginal; loose-aggressive → trap, call down lighter; tight-aggressive → straightforward. \
-It overrides the default «unknown opponent» assumption and never overrides computed hand \
-strength or pot odds. When it changes the line, say which tendency drove it.
-- If the table says raises are rare (loose-passive), limping is cheap: a small pair may \
-over-limp for 1BB even out of position. Do not cite "limping invites raises" unless the \
-dynamics actually say raises are common — check the table text, not the generic fear.
-- If the table says "do not over-limp too much", that is a frequency cap, not a ban: \
-small pairs still qualify when the price is 1BB and the stacks are deep.
+It is the primary strategic layer and outranks the chart and generic heuristics. **The \
+table may be mixed:** apply the note per opponent/seat; never average it into \
+"loose-passive". It overrides the default «unknown opponent» assumption, never computed \
+hand strength or pot odds.
+- station: value-bet thin/big, respect raises; their bet/raise is value.
+- LAG/maniac (loose-maniac/loose-aggressive): their bet/raise is not automatically value; \
+do not thin-value or bet-fold a medium hand — check-call and let them barrel.
+- passive preflop + aggressive postflop: postflop bets are bluff-catches, not value.
+- nit/tight: steal more, fold marginal. TAG: straightforward.
+- If raises are rare (loose-passive), a small pair may over-limp for 1BB even OOP; \
+"do not over-limp too much" is a frequency cap, not a ban at 1BB.
 """
 
 # 范围表由 preflop_ranges 生成，不再手写两份：手写一定漂移，而模型拿到

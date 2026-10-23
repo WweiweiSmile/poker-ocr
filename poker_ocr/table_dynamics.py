@@ -88,6 +88,29 @@ def value_heavy_aggression(text: str | None) -> bool:
     return any(w.lower() in t for w in _VALUE_HEAVY_WORDS)
 
 
+def is_aggressive_table(text: str | None) -> bool:
+    """桌风里是否有明确的「松浪/松凶」玩家。
+
+    与 `value_heavy_aggression()` 的区别：混合桌可以**同时**有松弱和松浪，
+    前者返回 False（不能假设全桌价值线），但后者仍返回 True——只要桌上
+    有松浪，`value_directive` 就不该对中等成牌默认做薄价值。
+
+    只看显式标签，不靠「爱诈唬」这类泛化词：避免把「松凶但很少诈唬」
+    误判成松浪。宁可漏判，也不要把被动桌当成激进桌。
+    """
+    t = (text or "").lower()
+    if not t:
+        return False
+    # 「松浪」是明确的爱开火标签，出现即算；「松凶」可能被用户补一句
+    # 「但很少诈唬」，那就不能按松浪处理。
+    if any(w in t for w in ("松浪", "maniac", "loose-aggressive",
+                            "loose aggressive", "spewy")):
+        return True
+    if "松凶" in t:
+        return not any(w in t for w in _RARELY_BLUFFS_WORDS)
+    return False
+
+
 @dataclass(frozen=True)
 class TableDynamics:
     """一次读取的结果。`text` 为空表示没有可用的动态。"""
