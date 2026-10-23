@@ -645,8 +645,13 @@ class FullOutcome:
 class FullStateRecorder:
     """全图结果的防抖/记录器。语义和 ROI 路线一致：首帧基线、稳定帧才记录。"""
 
-    def __init__(self, stable_frames: int = 2) -> None:
+    def __init__(self, stable_frames: int = 2,
+                 stable_seconds: float = 0.0,
+                 stable_reset_on_discard: bool = True) -> None:
         self.stable_frames = max(1, int(stable_frames))
+        # 与 ROI 路线同语义：帧数 + 最小稳定时长都满足才记录。
+        self.stable_seconds = max(0.0, float(stable_seconds))
+        self.stable_reset_on_discard = bool(stable_reset_on_discard)
         self.sampled = 0
         self.accepted = 0
         self.records = 0
@@ -654,18 +659,25 @@ class FullStateRecorder:
         self.last_sig: tuple | None = None
         self.cand_sig: tuple | None = None
         self.cand_n = 0
+        self.cand_since: float | None = None
+
+    def _discard(self, result: FullTableResult, reason: str) -> FullOutcome:
+        self.discarded[reason] += 1
+        if self.stable_reset_on_discard:
+            self.cand_sig = None
+            self.cand_n = 0
+            self.cand_since = None
+        return FullOutcome("discard", result, None)
 
     def push(self, result: FullTableResult, t: float,
              frame_id: str, *, extra_signature: tuple | None = None) -> FullOutcome:
         """`extra_signature` 语义同 ROI 路线：把牌面变化并进指纹。"""
         self.sampled += 1
         if result.table_size < 2:
-            self.discarded["seats"] += 1
-            return FullOutcome("discard", result, None)
+            return self._discard(result, "seats")
         if result.dealer_status not in ("found", "carried") \
                 or result.dealer_seat_id is None:
-            self.discarded[f"dealer:{result.dealer_status}"] += 1
-            return FullOutcome("discard", result, None)
+            return self._discard(result, f"dealer:{result.dealer_status}")
 
         sig = self.signature(result)
         if extra_signature is not None:
@@ -674,12 +686,17 @@ class FullStateRecorder:
         record = None
         if self.last_sig is None:
             record = self.payload(result, t, frame_id, self.records + 1)
-        elif sig == self.cand_sig:
-            self.cand_n += 1
-            if self.cand_n >= self.stable_frames and sig != self.last_sig:
-                record = self.payload(result, t, frame_id, self.records + 1)
         else:
-            self.cand_sig, self.cand_n = sig, 1
+            if sig == self.cand_sig:
+                self.cand_n += 1
+            else:
+                self.cand_sig, self.cand_n = sig, 1
+                self.cand_since = t
+            stable_time = (self.cand_since is not None
+                           and t - self.cand_since + 1e-9 >= self.stable_seconds)
+            if (self.cand_n >= self.stable_frames and stable_time
+                    and sig != self.last_sig):
+                record = self.payload(result, t, frame_id, self.records + 1)
 
         if record is not None:
             self.last_sig = sig
@@ -729,6 +746,7 @@ class FullStateRecorder:
         self.last_sig = None
         self.cand_sig = None
         self.cand_n = 0
+        self.cand_since = None
 
     def summary(self) -> dict:
         return {

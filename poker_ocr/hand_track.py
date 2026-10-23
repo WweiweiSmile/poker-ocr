@@ -22,8 +22,13 @@
     先按已知水位补跟注；对不上再用剩余人数反解最终水位，补「一次加注 + 跟注」。
     加注金额由底池精确反解，但谁是加注者只能按行动顺序取最早能行动的人；
     两种情况都对不上就留空不猜。
-  · **换手判据**：庄位变了 / 公共牌掉回 0 或 3 张 / hero 手牌变成另一组 / 人数骤变。
-    1/2 张牌是发牌动画，5→4 更像读错一张，都不算换手。
+  · **换手判据**：庄位变了 / 公共牌连续 2 帧掉回 0 / hero 手牌变成另一组。
+    hero 换牌不再单独触发换手：翻后（或翻前已经有人入池）换牌按 OCR 纠正原地
+    更新，只有底池还在盲注/前注水位时才当新手；人数骤变也只在翻前 + 初始底池
+    时才认，避免资料弹窗把一手牌劈成两半。1/2 张牌是发牌动画，5→4 更像读错
+    一张，都不算换手。
+  · **换手空档就是新手**：空档手（还没有 hero 手牌）读到第一组牌时直接补上，
+    不另开一手；空档期间读到的起始筹码也能继续用。
   · **轮到我用「连续帧确认 + 决策点指纹」去重**，不用单帧上升沿。真机上预设按钮
     会在一次回合内消失又出现（见 frame_state 的注释），上升沿会重复触发；
     而多人池里 hero 过牌后对手下注、又轮回 hero 时，按钮可能全程都在、
@@ -197,9 +202,19 @@ class _LiveHand:
     table_size: int = 0
     dealer: str | None = None
     blinds: Blinds | None = None
+    # hero 这一手的**起始筹码**（翻前下注/前注之前）。不是「第一帧读到的后手」：
+    # 开局前几帧还没渲染筹码时，用「当前后手 + 已投入」反推，否则整手的套池
+    # 比例都会少算掉翻前已经投进去的那部分。
     start_stack: float | None = None
+    # 各座起始筹码：seat_id → {seat_id, name, position, stack}（**不含 hero**，
+    # hero 在 start_stack / hero_stack_bb）。翻前逐帧补齐，落库时写进 hand 记录，
+    # 复跑控制台重建有效筹码时要用（缺了就只能按 unknown）。
+    start_stacks: dict[str, dict] = field(default_factory=dict)
     board: tuple[str, ...] = ()
     street: str = PREFLOP
+    # 这一手从哪条街开始观察。正常从翻前开始；中途接管（第一条街是
+    # flop/turn/river）只输出观察到的街，不凭空补一个没见过的翻前。
+    start_street: str = PREFLOP
     pot: float | None = None
     pot_before_street: float | None = None
     # 街 → 该街起始底池
@@ -228,11 +243,22 @@ class _LiveHand:
         return [a for a in self.actions if a.street == street]
 
     def snapshot(self) -> tuple[StreetRecord, ...]:
+        """从 start_street 到当前街，**每一街都输出**（空街也留一条）。
+
+        旧写法只输出「有动作或就是当前街」的街：发牌动画/遮挡导致翻牌或转牌
+        一帧都没接住时，记录会从 preflop 直接跳到 river，看起来像缺了一整条街。
+        现在空街也留 `pot_start`（可能为 None）和空 actions，复盘时能明确看出
+        「这一街确实打了，只是没抓到动作」，而不是凭空消失。
+        """
         out: list[StreetRecord] = []
+        start = STREET_SEQ.get(self.start_street, 0)
+        end = STREET_SEQ.get(self.street, 0)
         for street in (PREFLOP, FLOP, TURN, RIVER):
+            i = STREET_SEQ[street]
+            if i < start or i > end:
+                continue
             acts = tuple(a for a in self.actions if a.street == street)
-            if acts or street == self.street:
-                out.append(StreetRecord(street, self.pot_start.get(street), acts))
+            out.append(StreetRecord(street, self.pot_start.get(street), acts))
         return tuple(out)
 
 
@@ -337,8 +363,6 @@ class LiveHandTracker:
         hero = self._hero(state)
         if hero is not None and hero.position:
             hand.hero_position = hero.position
-        if hand.start_stack is None and hero is not None and hero.stack is not None:
-            hand.start_stack = hero.stack
         # 桌型 = 座位数。不能再拿 players_in_hand：弃牌会让 9 人桌越打越小，
         # 提示词里就会写成「2-handed」，误导模型。
         hand.table_size = state.table_seats
@@ -365,6 +389,11 @@ class LiveHandTracker:
             hand.board = board
 
         self._record_actions(state, hand)
+        # 起始筹码在翻前逐帧补齐：开场那几帧筹码可能还没渲染（或读成 0），
+        # 等读到后手时用「后手 + 已投入」反推，保证整手的套池比例不漏算。
+        # 放在街推进/行动记录之后：换街那一帧要按**新街**回看上一街的投入，
+        # 否则会把翻前已经投进去的筹码漏掉。
+        self._fill_start_stacks(state, hand)
         self._prev_hero_cards = cards or self._prev_hero_cards
         self._prev_in_hand = state.players_in_hand
 
@@ -547,15 +576,51 @@ class LiveHandTracker:
             # 确认之前不改写手牌（牌面/街仍沿用上一帧）
             return False
         self._drop_frames = 0
-        # hero 手牌换成另一组（两张都非空才算，读空是遮挡）
-        if len(cards) == 2 and len(self._prev_hero_cards) == 2 \
-                and cards != self._prev_hero_cards:
-            return True
-        # 在局人数一次变化 ≥2：更像是一手结束/换桌，而不是单个人弃牌
+
+        card_changed = (len(cards) == 2 and len(self._prev_hero_cards) == 2
+                        and cards != self._prev_hero_cards)
+        if card_changed:
+            # 换手空档：当前手还没有 hero 手牌，这一组牌就是它自己的，
+            # 直接补上，不另开一手（否则每手都会多一条被跳过的空档记录，
+            # 而且空档里更早读到的起始筹码会被丢掉）。
+            if not hand.hero_cards:
+                return False
+            # 已经打到翻后：同一手的牌面不会中途换两张，换牌只可能是 OCR
+            # 纠正（实测 8s 会持续被读成 6s 好几秒，按换手会把一手劈成两半）。
+            # 例外：底池比上一帧还小 = 真正的新一手已经开始了（中途接管）。
+            if board_len >= 3:
+                if (hand.pot is not None and state.pot is not None
+                        and state.pot < hand.pot - 0.01):
+                    return True
+                return False
+            # 翻前：只有底池还停在盲注/前注水位（没人入池）才像新手开局；
+            # 已经有人加注后再换牌，按 OCR 纠正处理。
+            return self._pot_is_initial(state, hand)
+        # 在局人数一次变化 ≥2：旧口径直接判换手，资料弹窗让两个人短暂
+        # in_hand=false 就会把一手牌劈成两半。现在只在「翻前 + 底池还是盲注
+        # 水位」时才认；真正换桌/换手通常还有庄位变化兜底。
         if (self._prev_in_hand
-                and abs(state.players_in_hand - self._prev_in_hand) >= IN_HAND_JUMP):
+                and abs(state.players_in_hand - self._prev_in_hand) >= IN_HAND_JUMP
+                and board_len == 0
+                and self._pot_is_initial(state, hand)):
             return True
         return False
+
+    @staticmethod
+    def _pot_is_initial(state: FrameState, hand: _LiveHand) -> bool:
+        """底池是否还停在「盲注 + 前注」的初始水位（没人主动入池）。
+
+        换手用的辅助判据：新手第一帧的底池是 sb+bb+ante×人数。资料弹窗/
+        遮挡也会让人数跳变，但那时通常已经有人加注，底池明显更大。
+        没有底池/盲注信息时返回 True —— 宁可多开一手，也不要吞掉真换手。
+        """
+        blinds = state.blinds or hand.blinds
+        if blinds is None or state.pot is None:
+            return True
+        ante = blinds.ante or 0.0
+        seats = state.table_seats or state.players_in_hand or 2
+        initial = blinds.sb + blinds.bb + ante * max(seats, 2)
+        return state.pot <= initial + 0.01
 
     def _start_hand(self, state: FrameState, cards: tuple[str, ...],
                     board_len: int, board: tuple[str, ...]) -> None:
@@ -571,9 +636,12 @@ class LiveHandTracker:
             table_size=state.table_seats,
             dealer=state.dealer,
             blinds=state.blinds,
-            start_stack=hero.stack if hero else None,
+            # 起始筹码不在这里从单帧后手直接取（开场帧可能还没渲染筹码），
+            # 交给 `_fill_start_stacks` 用「后手 + 已投入」逐帧补齐。
+            start_stack=None,
             board=board if board_len >= 3 else tuple(),
             street=street,
+            start_street=street,
             pot=state.pot,
             pot_before_street=state.pot_before_street,
             bomb_pot=state.bomb_pot,
@@ -585,6 +653,80 @@ class LiveHandTracker:
             hand.baseline[(street, p.seat_id)] = p.bet or 0.0
         self.hand = hand
         self.turn_frames = 0
+
+    # ─────────────────────── 起始筹码 ───────────────────────
+
+    def _fill_start_stacks(self, state: FrameState, hand: _LiveHand) -> None:
+        """把这一手各座的**起始筹码**补全（每帧调用，只补缺、不改写）。
+
+        为什么不能只在开局那一帧取：发牌动画的前几帧筹码胶囊可能还没渲染，
+        OCR 快的时候恰恰最容易抓到这些帧；只取一次会让 hero 的起始筹码空着，
+        整手都算不出套池比例。这里允许晚几帧补，并把「这期间已经投进去的
+        筹码」加回去，得到真正的起始值。
+
+        `stack <= 0` 一律不当起始筹码：翻前还没下注就 0，只可能是误读
+        （实测筹码图标会被读成裸 `0`）或者人已经不在这一手；真正的全下
+        在起始筹码已经抓到之后才发生，不需要在这里补。
+        """
+        hero = self._hero(state)
+        # hero 只在「这一手确实在局」时才取：换手空档里 hero 可能还没被发牌，
+        # 那几帧的后手属于上一手，不能当新手的起始筹码。
+        if hero is not None and hero.in_hand and hand.start_stack is None:
+            hand.start_stack = self._opening_stack(state, hand, hero)
+        for p in state.players:
+            entry = hand.start_stacks.get(p.seat_id)
+            if entry is not None:
+                # 起始筹码抓到的那一帧名字/位置可能还空着（发牌动画），补上
+                if entry.get("name") is None and p.name:
+                    entry["name"] = p.name
+                if entry.get("position") is None and p.position:
+                    entry["position"] = p.position
+                continue
+            if not p.in_hand or p.seat_id == state.hero_seat_id:
+                continue
+            value = self._opening_stack(state, hand, p)
+            if value is None:
+                continue
+            hand.start_stacks[p.seat_id] = {
+                "seat_id": p.seat_id,
+                "name": p.name,
+                "position": p.position,
+                "stack": value,
+            }
+
+    def _opening_stack(self, state: FrameState, hand: _LiveHand,
+                       p: PlayerState) -> float | None:
+        """当前后手 + 这一手已经投入的筹码 = 起始筹码（BB）。"""
+        if p.stack is None or p.stack <= 0:
+            return None
+        return round(p.stack + self._posted_so_far(state, hand, p), 2)
+
+    def _posted_so_far(self, state: FrameState, hand: _LiveHand,
+                       p: PlayerState) -> float:
+        """这个座位这一手到目前为止已经投进底池的筹码（BB，含前注）。
+
+        · 本街用下注 pill（`p.bet`）：它天然包含盲注和本街已加到的总额；
+        · 已结束的街用**该座最后一次行动金额**（口径是「本街加到总额」）；
+          翻前还要和盲注取大 —— 大盲过牌时行动金额是 None，但那 1BB 确实
+          已经投进去了。
+        · 前注按人收，每手一次，单独加。
+        """
+        ante = hand.blinds.ante if hand.blinds and hand.blinds.ante else 0.0
+        total = ante + (p.bet or 0.0)
+        for street in (PREFLOP, FLOP, TURN, RIVER):
+            if street == hand.street:
+                break
+            last: float | None = None
+            for a in hand.actions:
+                if (a.street == street and a.seat_id == p.seat_id
+                        and a.amount is not None):
+                    last = a.amount
+            if street == PREFLOP and hand.blinds is not None:
+                blind = {"SB": hand.blinds.sb,
+                         "BB": hand.blinds.bb}.get(p.position or "", 0.0)
+                last = max(last or 0.0, blind)
+            total += last or 0.0
+        return total
 
     # ─────────────────────────── 行动 ───────────────────────────
 
@@ -1068,6 +1210,13 @@ class LiveHandTracker:
                 for rec in hand.snapshot()
             ],
         }
+        # 起始筹码（含前注/盲注之前的值）。复跑控制台靠它重建 hero 剩余筹码和
+        # 有效筹码；没有它整手只能按 unknown 跑，套池/隐含赔率约束全部失效。
+        if hand.start_stack is not None:
+            out["hero_stack_bb"] = round(hand.start_stack, 2)
+        if hand.start_stacks:
+            out["start_stacks"] = [hand.start_stacks[seat_id]
+                                   for seat_id in hand.start_stacks]
         # 摊牌/主动秀牌读到的对手手牌。没有亮牌时连键都不出现。
         if hand.shows:
             out["shows"] = [hand.shows[seat_id]

@@ -103,7 +103,9 @@ class StateStream:
                  initial_blinds: Blinds | None = None,
                  lenient_chips: bool = False,
                  ante_fallback: float | None = None,
-                 roi_threads: int = DEFAULT_ROI_THREADS) -> None:
+                 roi_threads: int = DEFAULT_ROI_THREADS,
+                 stable_seconds: float = 0.0,
+                 stable_reset_on_discard: bool = True) -> None:
         self.profile = profile
         self.engine = engine or OcrEngine()
         self.detect_fold = detect_fold
@@ -114,6 +116,12 @@ class StateStream:
             max_workers=self.roi_threads, thread_name_prefix="roi-rec")
             if self.roi_threads > 1 else None)
         self.stable_frames = max(1, int(stable_frames))
+        # 光按帧数确认，帧率变化时确认窗口会漂（150ms×3=0.45s，300ms×3=0.9s）。
+        # 给一个**最小稳定时长**：两个条件都满足才记录。0 = 只看帧数。
+        self.stable_seconds = max(0.0, float(stable_seconds))
+        # 质量闸丢弃的帧算不算打断"连续"：算。否则动画里被丢掉的帧不会
+        # 中断计数，3 个跨动画的接受帧也能凑成一次"连续三帧"。
+        self.stable_reset_on_discard = bool(stable_reset_on_discard)
         self.max_vanish = max(0, int(max_vanish))
         self.name_confirm = max(1, int(name_confirm))
         # 标定帧里盲注横幅被挡住时，给一个已知盲注做首帧继承
@@ -157,6 +165,8 @@ class StateStream:
         self.last_sig: tuple | None = None
         self.cand_sig: tuple | None = None
         self.cand_n = 0
+        # 候选第一次出现的时刻（`stable_seconds` 用）。None = 没有候选。
+        self.cand_since: float | None = None
 
         # 累计计数不随 reset() 清零：断流重连后仍要汇总整个会话
         self.sampled = 0
@@ -347,6 +357,12 @@ class StateStream:
         if not state.ok:
             for e in state.errors:
                 self.discarded[e.split(":", 1)[0]] += 1
+            # 丢弃帧打断"连续三帧"：否则动画里的 3 个接受帧能跨过丢弃帧
+            # 拼成一次假稳定。strict 口径下宁可不记，也不记动画中间态。
+            if self.stable_reset_on_discard:
+                self.cand_sig = None
+                self.cand_n = 0
+                self.cand_since = None
             return FrameOutcome("discard", state, list(state.errors), None,
                                 frame.n_reused, frame.n_roi,
                                 hand_end=badge_ended, new_hand=new_hand)
@@ -363,9 +379,13 @@ class StateStream:
                 self.cand_n += 1
             else:
                 self.cand_sig, self.cand_n = sig, 1
+                self.cand_since = t
+            stable_time = (self.cand_since is not None
+                           and t - self.cand_since + 1e-9 >= self.stable_seconds)
+            # 帧数 + 最小稳定时长两个条件都要满足；stable_seconds=0 时只看帧数。
             # stable_frames=1 时第一次出现就记录（不再等第二帧）。
-            # 旧写法把记录判断放在「重复出现」分支里，1 帧确认也要等两帧。
-            if self.cand_n >= self.stable_frames and sig != self.last_sig:
+            if (self.cand_n >= self.stable_frames and stable_time
+                    and sig != self.last_sig):
                 record = self._payload(state, t, self.records + 1)
 
         self.prev = state
@@ -509,6 +529,7 @@ class StateStream:
         self.last_sig = None
         self.cand_sig = None
         self.cand_n = 0
+        self.cand_since = None
         self._dealer_result = None
         self._dealer_seat = None
         self._dealer_checked_at = None

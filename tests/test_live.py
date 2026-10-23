@@ -41,12 +41,16 @@ IMG = np.zeros((4, 4, 3), np.uint8)
 
 
 def test_defaults_are_no_throttle_and_instant_turn() -> None:
-    """用户口径：不节流、不做 2 帧确认、轮到我第一帧就调用模型。"""
+    """用户口径：日志做 3 帧稳定确认，但轮到我仍第一帧就调用模型（不拖建议）。"""
     ap = live.build_parser()
     args = ap.parse_args([])
     check(args.every == 0.0, f"默认应不节流，实际 --every={args.every}")
-    check(args.stable_frames == 1,
-          f"默认应取消 2 帧稳定确认，实际 {args.stable_frames}")
+    check(args.stable_frames == 3,
+          f"默认应连续 3 帧稳定才记录，实际 {args.stable_frames}")
+    check(args.stable_seconds == 0.0,
+          f"默认只按帧数确认（不额外压时间窗），实际 {args.stable_seconds}")
+    check(args.stable_reset_on_discard is True,
+          "默认丢弃帧应打断连续确认")
     check(args.ai_confirm == 1,
           f"默认应第一帧就认定轮到我，实际 {args.ai_confirm}")
     check(args.ai_advice is True, "AI 建议默认应开启")
@@ -1126,7 +1130,7 @@ def test_hand_memory_flushes_on_switch_frame() -> None:
 
 
 def test_hand_gap_without_hero_is_skipped_by_default() -> None:
-    """换手空档（自己没牌、也没行动线）默认不写，避免每手记两条。"""
+    """换手空档里读到的第一组牌直接挂到空档手上，不再另开一手。"""
     class GapStream(StubStateStream):
         def ingest(self, img, frame_id: str, t: float, *,
                    extra_signature: tuple | None = None) -> FrameOutcome:
@@ -1172,16 +1176,17 @@ def test_hand_gap_without_hero_is_skipped_by_default() -> None:
         return proc, [r for r in writer.rows if r["type"] == "hand"]
 
     proc, hands = run(False)
-    check([h["hand_id"] for h in hands] == ["h1", "h3"],
-          f"默认只应记真正有手牌的两手，实际 {[h['hand_id'] for h in hands]}")
+    check([h["hand_id"] for h in hands] == ["h1", "h2"],
+          f"默认只应记真正有手牌的两手（空档直接长成真手），实际 "
+          f"{[h['hand_id'] for h in hands]}")
     check(all(h.get("hero_cards") for h in hands),
           f"落库的手牌都应带 hero 手牌：{hands}")
-    check(proc.hands_skipped_no_hero == 2,
-          f"两次换手空档都应跳过，实际 {proc.hands_skipped_no_hero}")
+    check(proc.hands_skipped_no_hero == 1,
+          f"只有退出时还没发牌的空档该跳过，实际 {proc.hands_skipped_no_hero}")
 
     proc2, hands2 = run(True)
-    check([h["hand_id"] for h in hands2] == ["h1", "h2", "h3", "h4"],
-          f"观察对手模式应把空档也记下来：{[h['hand_id'] for h in hands2]}")
+    check([h["hand_id"] for h in hands2] == ["h1", "h2", "h3"],
+          f"观察对手模式应把退出时的空档也记下来：{[h['hand_id'] for h in hands2]}")
     check(proc2.hands_skipped_no_hero == 0,
           f"观察对手模式不应再跳过，实际 {proc2.hands_skipped_no_hero}")
 
@@ -1799,6 +1804,173 @@ def test_advice_bar_colors_by_action() -> None:
           "未知动作应退回默认样式")
 
 
+def _start_stack_state(hero_stack, hero_bet, *, hero_turn: bool = False,
+                       opp_stack=200.0, pot=5.5, pbs=4.0,
+                       action: str | None = None) -> FrameState:
+    """1/2(1) 两人桌：hero 大盲、a 按钮。"""
+    return FrameState(
+        frame_id="f", table_seats=2, players_in_hand=2,
+        players=[
+            PlayerState("hero", name="me", position="BB", stack=hero_stack,
+                        bet=hero_bet, in_hand=True, action=action),
+            PlayerState("a", name="老王", position="BTN", stack=opp_stack,
+                        bet=0.0, in_hand=True),
+        ],
+        blinds=live.parse_blinds("1/2(1)"), dealer="a",
+        hero_seat_id="hero", hero_turn=hero_turn, pot=pot,
+        pot_before_street=pbs)
+
+
+def test_start_stack_backfilled_with_posted_chips() -> None:
+    """开局几帧读不到筹码时，晚一点读到要用「后手 + 已投入」反推起始筹码。
+
+    否则起始筹码会等于「读到时的后手」，整手少算翻前已经投进去的部分，
+    套池比例永远上不去（看起来像整手都没做筹码约束）。
+    """
+    tr = LiveHandTracker(confirm_frames=1)
+    # 第 1 帧：筹码槽还没渲染出来（后手 None），但盲注 pill 已经有了
+    tr.observe(_start_stack_state(None, 1.0), ["Ah", "Kd"], [])
+    check(tr.hand.start_stack is None, "筹码没读到就不该瞎填起始筹码")
+
+    # 第 2 帧：读到后手 98.5 = 100 − 前注 0.5 − 大盲 1
+    tr.observe(_start_stack_state(98.5, 1.0, hero_turn=True), ["Ah", "Kd"], [])
+    check(tr.hand.start_stack == 100.0,
+          f"起始筹码应反推为 100，实际 {tr.hand.start_stack}")
+
+    # 第 3 帧：hero 加注到 3（后手 96.5）→ 已投入 3.5
+    point = tr.observe(_start_stack_state(96.5, 3.0, hero_turn=True,
+                                          pot=7.5, action="raise"),
+                       ["Ah", "Kd"], [])
+    check(point is not None and point.hero_invested == 3.5,
+          f"整手已投入应含前注+盲注+加注：{getattr(point, 'hero_invested', None)}")
+    check(tr.hand.start_stack == 100.0, "起始筹码抓到后不应被后手覆盖")
+
+    # 翻牌：后手不变，已投入仍是 3.5（套池比例要用它）
+    flop = tr.observe(_start_stack_state(96.5, 0.0, hero_turn=True,
+                                         pot=7.5, pbs=4.0),
+                      ["Ah", "Kd"], ["Ks", "7d", "2c"])
+    check(flop is not None and flop.hero_invested == 3.5,
+          f"翻牌仍应记得翻前投入的 3.5：{getattr(flop, 'hero_invested', None)}")
+
+    rec = tr._hand_dict(tr.hand)
+    check(rec.get("hero_stack_bb") == 100.0,
+          f"hand 记录应带 hero 起始筹码：{rec.get('hero_stack_bb')}")
+    stacks = {row["position"]: row["stack"] for row in rec.get("start_stacks") or []}
+    check(stacks.get("BTN") == 200.5,
+          f"对手起始筹码也要带（后手 200 + 前注 0.5）：{rec.get('start_stacks')}")
+
+
+def test_start_stack_rejects_zero_read() -> None:
+    """开局把筹码图标读成裸 0 时不能当起始筹码（人不可能 0BB 入池）。"""
+    tr = LiveHandTracker(confirm_frames=1)
+    tr.observe(_start_stack_state(0.0, 1.0), ["Ah", "Kd"], [])
+    check(tr.hand.start_stack is None,
+          f"0 是误读，不能当起始筹码：{tr.hand.start_stack}")
+    tr.observe(_start_stack_state(98.5, 1.0), ["Ah", "Kd"], [])
+    check(tr.hand.start_stack == 100.0,
+          f"下一帧读到真实后手后应补上：{tr.hand.start_stack}")
+
+
+def test_start_stack_read_after_street_change_includes_preflop() -> None:
+    """翻牌才第一次读到筹码：起始筹码要把翻前已投入的加回去。"""
+    tr = LiveHandTracker(confirm_frames=1)
+    tr.observe(_start_stack_state(None, 1.0), ["Ah", "Kd"], [])
+    tr.observe(_start_stack_state(None, 3.0, pot=7.5, action="raise"),
+               ["Ah", "Kd"], [])
+    check(tr.hand.start_stack is None, "翻前一直读不到就先空着")
+    tr.observe(_start_stack_state(96.5, 0.0, pot=7.5, pbs=4.0),
+               ["Ah", "Kd"], ["Ks", "7d", "2c"])
+    check(tr.hand.start_stack == 100.0,
+          f"翻牌读到 96.5 时应反推 100（含翻前 3 + 前注 0.5）："
+          f"{tr.hand.start_stack}")
+
+
+def _boundary_state(*, pot=1.5, pbs=0.0, dealer="a", in_hand=3) -> FrameState:
+    """1/2 三人桌：hero BTN、a CO、b BB。"""
+    return FrameState(
+        frame_id="f", table_seats=3, players_in_hand=in_hand,
+        players=[
+            PlayerState("hero", name="me", position="BTN", stack=100.0,
+                        bet=0.0, in_hand=True),
+            PlayerState("a", name="老王", position="CO", stack=100.0,
+                        bet=0.0, in_hand=True),
+            PlayerState("b", name="小李", position="BB", stack=99.0,
+                        bet=1.0, in_hand=True),
+        ],
+        blinds=live.parse_blinds("1/2"), dealer=dealer,
+        hero_seat_id="hero", hero_turn=False, pot=pot,
+        pot_before_street=pbs)
+
+
+def test_hero_card_flicker_is_correction_not_new_hand() -> None:
+    """翻后 hero 两张牌被读错又改回来：原地纠正，不能劈成两手。"""
+    tr = LiveHandTracker(confirm_frames=1)
+    tr.observe(_boundary_state(), ["Ah", "Kd"], [])
+    hand_id = tr.hand.hand_id
+    tr.observe(_boundary_state(pot=4.5, pbs=1.5), ["Ah", "Kd"],
+               ["Ks", "7d", "2c"])
+    tr.observe(_boundary_state(pot=4.5, pbs=1.5), ["As", "Kd"],
+               ["Ks", "7d", "2c"])
+    check(tr.hand.hand_id == hand_id,
+          f"翻后换牌应视为 OCR 纠正，实际开了新手 {tr.hand.hand_id}")
+    check(tr.hand.hero_cards == ("As", "Kd"),
+          f"纠正后的牌应写回这一手：{tr.hand.hero_cards}")
+
+    # 翻前已经有人加注（底池不再是盲注水位）时同理
+    tr2 = LiveHandTracker(confirm_frames=1)
+    tr2.observe(_boundary_state(), ["Ah", "Kd"], [])
+    first = tr2.hand.hand_id
+    tr2.observe(_boundary_state(pot=7.5, pbs=4.5), ["Ah", "Qd"], [])
+    check(tr2.hand.hand_id == first,
+          f"翻前加注后换牌也应纠正，实际 {tr2.hand.hand_id}")
+    check(tr2.hand.hero_cards == ("Ah", "Qd"), "翻前纠正也要写回")
+
+    # 翻前底池还在盲注水位 = 真换手
+    tr3 = LiveHandTracker(confirm_frames=1)
+    tr3.observe(_boundary_state(), ["Ah", "Kd"], [])
+    second = tr3.hand.hand_id
+    tr3.observe(_boundary_state(), ["7c", "7s"], [])
+    check(tr3.hand.hand_id != second,
+          "底池归到盲注水位时换牌应开新手")
+
+
+def test_in_hand_jump_mid_hand_is_not_new_hand() -> None:
+    """资料弹窗让两个座位短暂消失，不能把正在打的手劈开。"""
+    tr = LiveHandTracker(confirm_frames=1)
+    tr.observe(_boundary_state(), ["Ah", "Kd"], [])
+    hand_id = tr.hand.hand_id
+    tr.observe(_boundary_state(pot=8.0, pbs=1.5, in_hand=1), ["Ah", "Kd"],
+               ["Ks", "7d", "2c"])
+    check(tr.hand.hand_id == hand_id,
+          f"翻后人数骤变不该换手，实际 {tr.hand.hand_id}")
+    tr.observe(_boundary_state(pot=12.0, pbs=8.0, in_hand=1), ["Ah", "Kd"],
+               ["Ks", "7d", "2c", "2h"])
+    check(tr.hand.hand_id == hand_id, "翻前加注后人数骤变也不该换手")
+
+
+def test_snapshot_keeps_empty_streets() -> None:
+    """跳街时中间的空街也要留一条，不能从 flop 直接跳到 river。"""
+    tr = LiveHandTracker(confirm_frames=1)
+    tr.observe(_boundary_state(), ["Ah", "Kd"], [])
+    tr.observe(_boundary_state(pot=4.5, pbs=1.5), ["Ah", "Kd"],
+               ["Ks", "7d", "2c"])
+    tr.observe(_boundary_state(pot=20.0, pbs=4.5), ["Ah", "Kd"],
+               ["Ks", "7d", "2c", "2h", "9s"])
+    streets = [r.street for r in tr.hand.snapshot()]
+    check(streets == ["preflop", "flop", "turn", "river"],
+          f"每一街都应在记录里：{streets}")
+    turn = next(r for r in tr.hand.snapshot() if r.street == "turn")
+    check(turn.actions == () and turn.pot_start is None,
+          f"空街应保留空 actions/None pot_start：{turn}")
+
+    # 中途接管：从 flop 开始的手不凭空补一个没见过的翻前
+    tr2 = LiveHandTracker(confirm_frames=1)
+    tr2.observe(_boundary_state(pot=30.0, pbs=9.0), ["Ah", "Kd"],
+                ["Ks", "7d", "2c"])
+    check([r.street for r in tr2.hand.snapshot()] == ["flop"],
+          f"中途接管的第一街应是 flop：{[r.street for r in tr2.hand.snapshot()]}")
+
+
 def main() -> int:
     tests = [
         test_defaults_are_no_throttle_and_instant_turn,
@@ -1839,6 +2011,12 @@ def main() -> int:
         test_hand_memory_keeps_action_line_and_advices,
         test_hand_memory_flushes_on_switch_frame,
         test_hand_gap_without_hero_is_skipped_by_default,
+        test_start_stack_backfilled_with_posted_chips,
+        test_start_stack_rejects_zero_read,
+        test_start_stack_read_after_street_change_includes_preflop,
+        test_hero_card_flicker_is_correction_not_new_hand,
+        test_in_hand_jump_mid_hand_is_not_new_hand,
+        test_snapshot_keeps_empty_streets,
         test_auto_click_current_decision,
         test_auto_click_asks_and_y_confirms,
         test_auto_click_n_rejects,

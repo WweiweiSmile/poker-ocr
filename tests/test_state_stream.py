@@ -386,6 +386,48 @@ def test_show_after_fold_keeps_fold() -> None:
               f"亮牌不该洗掉之前的弃牌：{out3.state.player('lowL').to_debug()}")
 
 
+def test_discard_breaks_consecutive_stability() -> None:
+    """动画里被质量闸丢掉的帧要打断「连续三帧」，不能跨过去凑数。"""
+    with stub_env():
+        s = new_stream(stable_frames=3, stable_reset_on_discard=True)
+        feed(s, make_frame())
+        changed = make_frame(pot="40BB")
+        check(feed(s, changed, t=0.5).kind == "no_change", "第 1 帧不记录")
+        check(feed(s, make_frame(pot=""), t=1.0).kind == "discard", "坏帧应丢弃")
+        check(feed(s, changed, t=1.5).kind == "no_change",
+              "丢弃后重新数，第 1 帧不记录")
+        check(feed(s, changed, t=2.0).kind == "no_change",
+              "丢弃后第 2 帧不记录")
+        out = feed(s, changed, t=2.5)
+        check(out.kind == "record",
+              f"重新连续 3 帧后才记录，实际 {out.kind}")
+
+    with stub_env():
+        s = new_stream(stable_frames=3, stable_reset_on_discard=False)
+        feed(s, make_frame())
+        changed = make_frame(pot="40BB")
+        feed(s, changed, t=0.5)
+        feed(s, make_frame(pot=""), t=1.0)
+        feed(s, changed, t=1.5)
+        out = feed(s, changed, t=2.0)
+        check(out.kind == "record",
+              f"关闭重置时丢弃帧不打断计数，实际 {out.kind}")
+
+
+def test_stable_seconds_floor() -> None:
+    """帧率变快时，光数 2 帧不够，还要满足最小稳定时长。"""
+    with stub_env():
+        s = new_stream(stable_frames=2, stable_seconds=1.0)
+        feed(s, make_frame())
+        changed = make_frame(pot="40BB")
+        check(feed(s, changed, t=0.5).kind == "no_change", "第 1 帧不记录")
+        check(feed(s, changed, t=1.0).kind == "no_change",
+              "帧数够了但时长不够，不能记录")
+        out = feed(s, changed, t=1.5)
+        check(out.kind == "record",
+              f"稳定满 1 秒后应记录，实际 {out.kind}")
+
+
 def main() -> int:
     tests = [
         test_first_frame_is_baseline,
@@ -393,6 +435,8 @@ def main() -> int:
         test_change_needs_two_stable_frames,
         test_single_stable_frame_records_immediately,
         test_discard_does_not_advance_prev,
+        test_discard_breaks_consecutive_stability,
+        test_stable_seconds_floor,
         test_vanished_seat_needs_max_vanish_frames,
         test_dead_button_dealer_left_keeps_recording,
         test_initial_blinds_carried_when_banner_unreadable,

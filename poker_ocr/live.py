@@ -944,7 +944,9 @@ class LiveProcessor:
                  engine: OcrEngine | None = None,
                  full_config: FullTableConfig | None = None,
                  profile: Profile | None = None,
-                 stable_frames: int = 1,
+                 stable_frames: int = 3,
+                 stable_seconds: float = 0.0,
+                 stable_reset_on_discard: bool = True,
                  dealer_carry: int = 4,
                  every: float = DEFAULT_EVERY, max_frame_age: float = 2.0,
                  dump_dir: Path | None = None, quiet: bool = False,
@@ -974,7 +976,9 @@ class LiveProcessor:
         # 读牌只需要 profile 的 board / hero_cards 归一化槽位，不需要 OCR 引擎。
         # None 表示不读牌（单测里构造 LiveProcessor 时通常不传）。
         self.profile = profile
-        self.full_recorder = (FullStateRecorder(stable_frames=stable_frames)
+        self.full_recorder = (FullStateRecorder(
+            stable_frames=stable_frames, stable_seconds=stable_seconds,
+            stable_reset_on_discard=stable_reset_on_discard)
                               if recognizer == "full" else None)
         self.dealer_tracker = (DealerTracker(max_carry=dealer_carry)
                                if recognizer == "full" else None)
@@ -1900,8 +1904,16 @@ def build_parser() -> argparse.ArgumentParser:
                     default=True,
                     help="追加到 --out，保留历次启动的手牌记录（默认）；"
                          "--no-append 每次启动清空")
-    ap.add_argument("--stable-frames", type=int, default=1,
-                    help="新状态连续出现几帧才记录（默认 1 = 不做多帧确认）")
+    ap.add_argument("--stable-frames", type=int, default=3,
+                    help="新状态连续出现几帧才记录（默认 3：动画中间态/"
+                         "单帧抖动不落库）")
+    ap.add_argument("--stable-seconds", type=float, default=0.0,
+                    help="新状态还要稳定多少秒才记录（默认 0 = 只看帧数；"
+                         "帧率变化大时可设 0.6 固定时间窗）")
+    ap.add_argument("--stable-reset-on-discard",
+                    action=argparse.BooleanOptionalAction, default=True,
+                    help="质量闸丢弃的帧是否打断连续确认（默认是："
+                         "否则跨动画的 3 个接受帧也会被算成连续）")
     ap.add_argument("--card-confirm-frames", type=int, default=2,
                     help="公共牌/hero 手牌新读数连续几帧一致才替换 last-good"
                          "（默认 2；牌面 4→3 回退永远不会被采用）")
@@ -2101,6 +2113,8 @@ def main(argv: list[str] | None = None) -> int:
             detect_fold=not args.no_fold,
             dedup=not args.no_dedup,
             stable_frames=args.stable_frames,
+            stable_seconds=args.stable_seconds,
+            stable_reset_on_discard=args.stable_reset_on_discard,
             max_vanish=args.max_vanish,
             name_confirm=args.name_confirm,
             initial_blinds=initial_blinds,
@@ -2110,6 +2124,10 @@ def main(argv: list[str] | None = None) -> int:
         )
         _log(f"[启动] ROI 并行线程={args.roi_threads}"
              + ("（串行）" if args.roi_threads <= 1 else ""))
+    _log(f"[启动] 状态记录：连续 {args.stable_frames} 帧"
+         + (f" / ≥{args.stable_seconds:g}s" if args.stable_seconds > 0 else "")
+         + ("，丢弃帧打断" if args.stable_reset_on_discard else "，丢弃帧不打断")
+         + "（只影响 state 日志，不拖慢建议）")
 
     advice_runner = None
     hand_tracker = None
@@ -2230,6 +2248,10 @@ def main(argv: list[str] | None = None) -> int:
         "recognizer": args.recognizer,
         "full_config": str(args.full_config) if args.full_config else None,
         "every": args.every,
+        # 日志防抖口径：复盘时能知道这批 state 记录是按几帧确认出来的。
+        "stable": {"frames": args.stable_frames,
+                   "seconds": args.stable_seconds,
+                   "reset_on_discard": args.stable_reset_on_discard},
         "ai_advice": bool(args.ai_advice),
         **({"advice_style": args.advice_style,
             "record_without_hero": bool(args.record_without_hero)}
@@ -2250,7 +2272,10 @@ def main(argv: list[str] | None = None) -> int:
         state_stream, writer,
         recognizer=args.recognizer, engine=engine, full_config=full_config,
         profile=profile,
-        stable_frames=args.stable_frames, dealer_carry=args.dealer_carry,
+        stable_frames=args.stable_frames,
+        stable_seconds=args.stable_seconds,
+        stable_reset_on_discard=args.stable_reset_on_discard,
+        dealer_carry=args.dealer_carry,
         every=args.every, max_frame_age=args.max_frame_age,
         dump_dir=args.dump_frames, quiet=args.quiet,
         hand_tracker=hand_tracker, advice_runner=advice_runner,

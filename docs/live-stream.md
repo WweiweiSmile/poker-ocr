@@ -147,7 +147,10 @@ ROI 路线只裁固定槽位、只跑 rec，不跑全图检测，是实时链路
 - 低分辨率自动放大后做庄位 blob 检测（短边 < 600px，最多 3x）
 - hero 筹码胶囊双槽位：有手牌时在最底部，无手牌时在头像下方（`chip_slot_alt`）
 - 手势/弹窗/动画帧自动丢弃，不污染状态
-- 同一状态连续 `--stable-frames` 帧才记录；名字连续 `--name-confirm` 帧才更换
+- 同一状态连续 `--stable-frames` 帧（默认 3）才记录，且默认要求质量闸丢弃的帧
+  打断连续计数；可选 `--stable-seconds` 再加一个最小稳定时长（帧率变化大时用）。
+  这只影响 **state 日志**，AI 建议/自动点击仍按 `--ai-confirm` 走，不被拖慢
+- 名字连续 `--name-confirm` 帧才更换
 - 盲注读不到时继承上一帧（`blinds.source = "carried"`）
 - 断流自动重连，JSONL 用 `epoch` 区分会话
 
@@ -635,9 +638,13 @@ cd ~/codes/poker-ocr
 ```json
 {"type":"session_start","started_at":"2026-10-19T21:30:53.441+08:00",
  "url":"cam:auto","profile":"table_wpk_live.json",
- "recognizer":"roi","full_config":null,"every":0.5,"resolution":null}
+ "recognizer":"roi","full_config":null,"every":0.5,
+ "stable":{"frames":3,"seconds":0.0,"reset_on_discard":true},
+ "resolution":null}
 ```
 
+- `stable`：这一批 `state` 记录的防抖口径（连续几帧、最小稳定秒数、丢弃帧是否
+  打断）。复盘时据此判断「少记/晚记」是配置还是识别问题。
 - `table_dynamics`：仅当启动时读到非空的 `.table_dy` 才出现，值是解析后的原文。
   没有这个键表示本次会话按「未知对手」标准线。
 - `record_without_hero`：仅 `--ai-advice` 时出现，表示是否会记录没有 hero 手牌
@@ -786,6 +793,11 @@ cd ~/codes/poker-ocr
 {"type":"hand","ts":"...","hand_id":"h6",
  "hero_cards":["Ah","Kd"],"hero_position":"BTN","table_size":6,
  "blinds":{"sb":0.5,"bb":1.0,"ante":null,"raw":"1/2"},
+ "hero_stack_bb":100.0,
+ "start_stacks":[
+   {"seat_id":"a","name":"老王","position":"CO","stack":85.0},
+   {"seat_id":"b","name":"小李","position":"BB","stack":120.0}
+ ],
  "board":["Ks","7d","2c"],"pot":19.5,
  "streets":[
    {"street":"preflop","pot_start":0.0,"actions":[
@@ -813,6 +825,20 @@ cd ~/codes/poker-ocr
     "skill_codes":["..."],"duration_ms":1840}
  ]}
 ```
+
+`hero_stack_bb` / `start_stacks` 是这一手的**起始筹码**（翻前下注/前注之前的值；
+`start_stacks` 不含 hero）。开局发牌动画的前几帧筹码胶囊可能还没渲染、或筹码图标
+被读成裸 `0`，所以它们**不是**取第一帧的后手：追踪器在翻前逐帧补，读到后手时用
+「后手 + 这一手已经投入的筹码（前注/盲注/各街总额）」反推。`0` 一律不当起始筹码
+（人不可能 0BB 入池）。复跑控制台导入实时手牌时靠这两个字段重建 hero 剩余筹码和
+有效筹码；缺了它们，整手的套池/隐含赔率约束都只能按 unknown 跑。
+
+`streets` 从这一手开始观察的街一直记到当前街，**中间的空街也保留**（`actions: []`、
+`pot_start` 可能为 `null`）：发牌/翻牌动画导致某条街一帧都没接住时，能看出「这一街
+打了但没抓到动作」，而不是从 preflop 直接跳到 river。中途接管（第一条街是 flop）
+不会凭空补一个没见过的翻前。
+hero 两张牌被 OCR 读错又改回来时，不再劈成两手：翻后或翻前已经有人入池后的换牌按
+纠正处理，原地更新 `hero_cards`。
 
 `inferred: true` 只在**街末底池对账补出来**的记录上出现（正常抓到的记录没有这个键）。
 `shows` 只在摊牌或对手主动秀牌时出现，来源是各座 `action_slot` 的亮牌识别
@@ -879,7 +905,9 @@ All-in 文本）会立即收掉当前手牌，不依赖牌面/庄位变化。
 | `--settle-max` | `1.5` | 动作合并的最长等待秒数；动作一直不停时到点先识别一帧 |
 | `--out` | `logs/live.states.jsonl` | JSONL 输出（默认追加） |
 | `--append` | 开 | 追加到 `--out`，保留历次启动的手牌记录；`--no-append` 每次启动清空 |
-| `--stable-frames` | `1` | 新状态连续出现几帧才记录（`1` = 不做多帧确认） |
+| `--stable-frames` | `3` | 新状态连续出现几帧才记录（3 = 动画中间态/单帧抖动不落库；`1` = 关闭多帧确认） |
+| `--stable-seconds` | `0` | 新状态还要稳定多少秒才记录（帧率变化大时可设 `0.6` 固定时间窗） |
+| `--stable-reset-on-discard` / `--no-stable-reset-on-discard` | 开 | 质量闸丢弃的帧是否打断连续计数（开 = 必须连续 N 个**可识别**帧） |
 | `--card-confirm-frames` | `2` | 公共牌/hero 新读数连续几帧一致才替换 last-good；4→3、5→4 回退永不采用 |
 | `--card-doubt-window` | `0.5` | 带疑点读数的疑惑帧仲裁窗口（秒）；`0` = 关闭，退回 2 帧确认 + 10 帧弱读数兜底 |
 | `--incident-dir` | `logs/incidents` | 疑惑帧落盘目录（公共牌回退/张数异常/牌背） |
@@ -921,6 +949,8 @@ All-in 文本）会立即收掉当前手牌，不依赖牌面/庄位变化。
 worker 采用最新帧优先，处理不过来就丢中间帧，队列深度恒为 1。
 开启动作合并时，单个动作会额外等 `--settle`（默认 0.25s）确认画面落定；连续动作
 反而更快：中间帧全部跳过，只在最后识别一次，不会被一串半成品状态拖慢。
+日志还要再等 `--stable-frames`（默认 3）个**连续可识别**帧：300ms/帧时约 +0.9s。
+这段延迟只加在 **state 日志**上，AI 建议/自动点击仍按 `--ai-confirm` 第一帧触发。
 
 量延迟：
 
@@ -947,6 +977,8 @@ worker 采用最新帧优先，处理不过来就丢中间帧，队列深度恒�
 | `proc_ms` 明显高于 600ms | CPU 争用；OBS 用 Apple VT 编码；试 `--no-fold` |
 | `queue_ms` 持续变大 | 不应发生；检查是否有别的东西在消费邮箱 |
 | 断流重连后第一条是重复基线 | 正常：重连会重置 ROI 缓存和状态机 |
+| 某个动作后 state 记录变少/延迟 ~1s | 正常：默认要连续 3 个可识别帧稳定才记录（约 +0.9s）；`--stable-frames 1` 退回逐帧，或 `--no-stable-reset-on-discard` 放宽 |
+| 一手牌被记成多手 | 先看记录里 `start_street` 和 `hero_cards`：已按「翻后/加注后换牌 = OCR 纠正」处理；仍频繁出现时把 `--card-confirm-frames` 提到 3 |
 | 盲注读不出（如 1/20） | 用 `--initial-blinds 1/20` 人工指定；OCR 自动读数仍按 2–10 比例闸过滤融合文本 |
 
 ---
