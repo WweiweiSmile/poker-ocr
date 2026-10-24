@@ -391,6 +391,62 @@ def call_amount(snap: HandSnapshot) -> float:
     return to_call
 
 
+def _street_bet_from_actions(snap: HandSnapshot, opponent) -> float | None:
+    """从本街行动线兜底取某座的本街下注总额（下注 pill 读不到时用）。
+
+    行动线的 amount 是「本街加到总额」，同一座多次行动取最大值即可；
+    全下记录尤其容易只有徽章没有金额，所以这个兜底不能省。
+    """
+    best: float | None = None
+    for action in snap.actions_of(snap.street):
+        if action.amount is None or action.action not in (
+                "bet", "raise", "allin", "call"):
+            continue
+        if action.seat_id not in (opponent.seat_id, opponent.position) \
+                and action.position != opponent.position:
+            continue
+        amount = float(action.amount)
+        best = amount if best is None else max(best, amount)
+    return best
+
+
+def uncalled_excess(snap: HandSnapshot) -> float:
+    """当前底池里对手下注超出「我能跟到的总额」的部分。
+
+    全下完全 cover 我时，超出我后手的筹码无人能跟，会原样退回，根本不在
+    底池里。牌桌显示的 pot 往往已经把它算进去了（990036：显示 569BB，
+    实际可争夺 433.5BB）。只统计**没弃牌**的对手：弃牌玩家投进底池的钱
+    是死钱，哪怕超过我的后手也仍然可以被我赢走。
+    """
+    owed = call_amount(snap)
+    hero_total = (snap.hero_bet or 0.0) + owed
+    excess = 0.0
+    for opponent in snap.opponents:
+        if opponent.folded:
+            continue
+        bet = opponent.bet
+        if bet is None:
+            bet = _street_bet_from_actions(snap, opponent)
+        if bet is not None:
+            excess += max(float(bet) - hero_total, 0.0)
+    return round(excess, 2)
+
+
+def winnable_pot(snap: HandSnapshot) -> float:
+    """跟注后我实际能争夺的底池（包含我的跟注）。
+
+    赔率的分母只能用这个数：`pot` 是牌桌显示的总池，对手超额全下被退回的
+    那部分也在里面。跟注额已经由 `call_amount` 封顶，底池不扣同一部分，
+    被 cover 时门槛就会被系统性低估（990036 的 23% vs 真实 39%）。
+    """
+    pot = snap.pot or 0.0
+    if pot <= 0:
+        # 底池读不到时不能拿「跟注额」冒充底池，否则门槛会变成 100%。
+        return 0.0
+    owed = call_amount(snap)
+    return round(max(pot - uncalled_excess(snap) + owed, 0.0), 2)
+
+
 def _action_order(snap: HandSnapshot,
                   street: str | None = None) -> list[str] | None:
     """本街的行动顺序。
@@ -483,9 +539,22 @@ def spr(snap: HandSnapshot) -> float | None:
 
 
 # 听牌跟注的隐含赔率上限：提示词、Math gate、单测三处必须是同一个数。
-IMPLIED_ODDS_CAP_PCT = 2.0
+# 2026-10-24 用户口径：隐含赔率按 0 算，只用即时赔率。
+IMPLIED_ODDS_CAP_PCT = 0.0
 # 权益与门槛差在这个范围内算「边界」，不给硬结论。
 GATE_MARGIN_PCT = 2.0
+
+
+def implied_odds_rule() -> str:
+    """提示词里的听牌赔率口径；与 IMPLIED_ODDS_CAP_PCT 保持同一个数。"""
+    if IMPLIED_ODDS_CAP_PCT <= 0:
+        return ("Ignore implied odds: for draws, call only when equity >= the "
+                "break-even equity; otherwise FOLD — do not pay to chase.")
+    points = "point" if IMPLIED_ODDS_CAP_PCT == 1 else "points"
+    return (f"For draws, count implied odds as AT MOST "
+            f"{IMPLIED_ODDS_CAP_PCT:g} percentage {points}: call only when "
+            f"(equity + {IMPLIED_ODDS_CAP_PCT:g}%) >= the break-even equity; "
+            "otherwise FOLD — do not pay to chase.")
 
 
 @dataclass(frozen=True)
@@ -512,10 +581,10 @@ def math_gate(sit: "Situation") -> MathGate | None:
     if sit.equity_pct is None:
         return None
     owed = call_amount(sit.snap)
-    pot = sit.snap.pot or 0.0
+    pot = winnable_pot(sit.snap)
     if owed <= 0 or pot <= 0:
         return None
-    bep = owed / (pot + owed) * 100
+    bep = owed / pot * 100
     effective = sit.equity_pct + IMPLIED_ODDS_CAP_PCT
     diff = effective - bep
     if diff >= GATE_MARGIN_PCT:
@@ -529,8 +598,13 @@ def math_gate(sit: "Situation") -> MathGate | None:
         verdict = "borderline"
         tail = ("→ BORDERLINE: the price alone does not decide it; call only "
                 "with a concrete read.")
-    text = (f"Math gate: draw equity {sit.equity_pct:.0f}% + "
-            f"{IMPLIED_ODDS_CAP_PCT:g}% implied cap = {effective:.0f}% vs "
+    if IMPLIED_ODDS_CAP_PCT > 0:
+        effective_text = (f"draw equity {sit.equity_pct:.0f}% + "
+                          f"{IMPLIED_ODDS_CAP_PCT:g}% implied cap = "
+                          f"{effective:.0f}%")
+    else:
+        effective_text = f"draw equity {sit.equity_pct:.0f}% (implied odds 0%)"
+    text = (f"Math gate: {effective_text} vs "
             f"break-even {bep:.0f}% {tail}")
     return MathGate(verdict, round(sit.equity_pct, 1), round(bep, 1), text)
 
@@ -905,9 +979,10 @@ def _heads_up_flop_overpair(sit: Situation) -> bool:
         return False
     if (sit.opponents_in_hand or 0) != 1:
         return False
-    pot = sit.snap.pot or 0.0
-    to_call = sit.snap.to_call or 0.0
-    return pot > 0 and 0 < to_call <= 0.5 * pot
+    pot = winnable_pot(sit.snap)
+    owed = call_amount(sit.snap)
+    pot_before_call = max(pot - owed, 0.0)
+    return pot > 0 and 0 < owed <= 0.5 * pot_before_call
 
 
 # ─────────────────────────── 爆炸底池 ───────────────────────────
@@ -1202,9 +1277,9 @@ def value_directive(sit: Situation) -> str | None:
                     "multi-street aggression.")
         if facing_raise:
             if _heads_up_flop_overpair(sit):
-                pot = sit.snap.pot or 0.0
-                to_call = sit.snap.to_call or 0.0
-                bep = to_call / (pot + to_call) * 100
+                pot = winnable_pot(sit.snap)
+                owed = call_amount(sit.snap)
+                bep = owed / pot * 100 if pot > 0 else 0.0
                 return (f"ONE PAIR vs AGGRESSION — CALL: heads-up on the flop, an "
                         f"overpair is not the marginal one pair the table note refers "
                         f"to. The raise range still contains top pair and draws, and "
@@ -1458,6 +1533,8 @@ def render_hand_facts(sit: Situation) -> str:
     # 后手不足以下注额时，实际只需跟到全下：客户端也只会给 Fold / All in。
     # 赔率和跟注比例必须按**实际能跟出的金额**算，否则会把门槛算高。
     owed = call_amount(snap)
+    winnable = winnable_pot(snap)
+    excess = uncalled_excess(snap)
     lines.append(f"Street: {_STREET_EN.get(snap.street, snap.street)}｜"
                  f"Board: {''.join(snap.board) or 'none'}｜"
                  f"Pot: {snap.pot if snap.pot is not None else 'unknown'}BB｜"
@@ -1478,11 +1555,20 @@ def render_hand_facts(sit: Situation) -> str:
     if owed < to_call:
         lines.append(f"The bet covers my stack: calling {owed}BB puts me "
                      f"all-in; raising is not possible.")
-    if owed > 0 and snap.pot:
-        # 赔率门槛：跟注额 ÷ 跟注后的底池。技能里的赔率表就是按这个口径
-        bep = owed / (snap.pot + owed) * 100
+    if excess > 0 and winnable > 0:
+        # 牌桌底池包含对手无人能跟的筹码，直接拿它算赔率会低估门槛。
+        matched = round((snap.hero_bet or 0.0) + owed, 2)
+        lines.append(
+            f"Uncalled bet: {excess:g}BB of the table pot is above my "
+            f"{matched:g}BB matched total and is returned — the winnable pot "
+            f"after my call is {winnable:g}BB. Use {winnable:g}BB for pot odds, "
+            f"not the table pot.")
+    if owed > 0 and winnable > 0:
+        # 赔率门槛：跟注额 ÷ 跟注后可争夺的底池。技能里的赔率表就是按这个口径
+        bep = owed / winnable * 100
+        before_call = max(winnable - owed, 1e-9)
         lines.append(f"Break-even equity to call: {bep:.0f}%; "
-                     f"call is {owed / snap.pot:.0%} of the pot")
+                     f"call is {owed / before_call:.0%} of the pot before my call")
 
     lines.append("")
     lines.append("## Action line")
@@ -1688,9 +1774,7 @@ def _build_messages_skills(sit: Situation) -> tuple[str, str]:
         "output any amount — output only the id.",
         "3. When facing a bet, actually compare pot odds: the equity needed to call comes from "
         "«Odds & Probability Quick Reference»; compare it against your hand strength / draw "
-        "equity — fold if short, call or raise if enough. For draws, count implied odds as "
-        "AT MOST 2 percentage points: call only when (equity + 2%) >= the break-even "
-        "equity; otherwise FOLD — do not pay to chase.",
+        f"equity — fold if short, call or raise if enough. {implied_odds_rule()}",
         "4. Preflop there is no made-hand equity to compare: use the sizing tables in the "
         "«Preflop» skills, by position, number of prior raises, and number of opponents.",
         "5. Default order of thought: with a strong made hand, first ask «bet or raise for "
@@ -1723,7 +1807,7 @@ def _build_messages_skills(sit: Situation) -> tuple[str, str]:
         "board. Do not default to the smallest size.",
         "6. Strong draw (8+ outs) with no bet in front → betting (semi-bluff) is preferred — "
         "**heads-up only**: with 3+ opponents in the pot, check instead, because a draw has "
-        "no fold equity against a calling field. Facing a bet, use the equity + 2% implied "
+        "no fold equity against a calling field. Facing a bet, use the pot-odds "
         "gate from rule 3: call only if it clears the break-even; otherwise fold.",
         "7. The user facts include an explicit «Value directive» when one of these rules "
         "applies. It is a default for strong made hands; the «Table dynamics» section "
@@ -1849,7 +1933,7 @@ Return exactly one JSON object, no markdown fence and no other text:
 1. Computed facts are authoritative for MATH: positions, stack, pot, to_call, break-even equity, SPR, hand tier, draw, texture, explosive pot. Do not recompute amounts.
 2. Preflop: choose by position and range. Do not limp as the first player in, except an SB complete or a small pocket pair (22-66) over-limping for 1BB to set-mine.
 3. Postflop: judge the calling range and board texture first; then value/check/size.
-4. Call only when your equity beats the stated break-even. For draws, count implied odds as AT MOST 2 percentage points: call only when (equity + 2%) >= break-even; otherwise FOLD. Unquantified "implied odds" is never a reason to call.
+4. Call only when your equity beats the stated break-even. <<IMPLIED_ODDS_RULE>> Unquantified "implied odds" is never a reason to call.
 5. If calling covers Hero's stack, the decision is all-in or fold.
 6. A «Value directive» in the facts is a coarse default; when a «Math gate» line is present, it is the binding price verdict. Overrule either only with a concrete read from the facts.
 7. Keep your own previous plan (facts: «My previous decision») unless a computed fact contradicts it. Do not reverse a line you chose last street without a reason.
@@ -1908,6 +1992,8 @@ Table-wide context outranks the chart and generic heuristics; those never overri
 # 范围表由 preflop_ranges 生成，不再手写两份：手写一定漂移，而模型拿到
 # 和代码判定不一致的表时，会挑对自己有利的那份用。
 _LEAN_SYSTEM = _LEAN_SYSTEM.replace("<<RFI_CHART>>", chart_text())
+_LEAN_SYSTEM = _LEAN_SYSTEM.replace("<<IMPLIED_ODDS_RULE>>",
+                                    implied_odds_rule())
 
 
 def _build_messages_lean(sit: Situation) -> tuple[str, str]:

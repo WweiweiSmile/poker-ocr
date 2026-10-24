@@ -147,7 +147,7 @@ ROI 路线只裁固定槽位、只跑 rec，不跑全图检测，是实时链路
 - 低分辨率自动放大后做庄位 blob 检测（短边 < 600px，最多 3x）
 - hero 筹码胶囊双槽位：有手牌时在最底部，无手牌时在头像下方（`chip_slot_alt`）
 - 手势/弹窗/动画帧自动丢弃，不污染状态
-- 同一状态连续 `--stable-frames` 帧（默认 3）才记录，且默认要求质量闸丢弃的帧
+- 同一状态连续 `--stable-frames` 帧（默认 2）才记录，且默认要求质量闸丢弃的帧
   打断连续计数；可选 `--stable-seconds` 再加一个最小稳定时长（帧率变化大时用）。
   这只影响 **state 日志**，AI 建议/自动点击仍按 `--ai-confirm` 走，不被拖慢
 - 名字连续 `--name-confirm` 帧才更换
@@ -639,7 +639,7 @@ cd ~/codes/poker-ocr
 {"type":"session_start","started_at":"2026-10-19T21:30:53.441+08:00",
  "url":"cam:auto","profile":"table_wpk_live.json",
  "recognizer":"roi","full_config":null,"every":0.5,
- "stable":{"frames":3,"seconds":0.0,"reset_on_discard":true},
+ "stable":{"frames":2,"seconds":0.0,"reset_on_discard":true},
  "resolution":null}
 ```
 
@@ -905,7 +905,7 @@ All-in 文本）会立即收掉当前手牌，不依赖牌面/庄位变化。
 | `--settle-max` | `1.5` | 动作合并的最长等待秒数；动作一直不停时到点先识别一帧 |
 | `--out` | `logs/live.states.jsonl` | JSONL 输出（默认追加） |
 | `--append` | 开 | 追加到 `--out`，保留历次启动的手牌记录；`--no-append` 每次启动清空 |
-| `--stable-frames` | `3` | 新状态连续出现几帧才记录（3 = 动画中间态/单帧抖动不落库；`1` = 关闭多帧确认） |
+| `--stable-frames` | `2` | 新状态连续出现几帧才记录（2 = 动画中间态/单帧抖动不落库；`1` = 关闭多帧确认） |
 | `--stable-seconds` | `0` | 新状态还要稳定多少秒才记录（帧率变化大时可设 `0.6` 固定时间窗） |
 | `--stable-reset-on-discard` / `--no-stable-reset-on-discard` | 开 | 质量闸丢弃的帧是否打断连续计数（开 = 必须连续 N 个**可识别**帧） |
 | `--card-confirm-frames` | `2` | 公共牌/hero 新读数连续几帧一致才替换 last-good；4→3、5→4 回退永不采用 |
@@ -949,7 +949,7 @@ All-in 文本）会立即收掉当前手牌，不依赖牌面/庄位变化。
 worker 采用最新帧优先，处理不过来就丢中间帧，队列深度恒为 1。
 开启动作合并时，单个动作会额外等 `--settle`（默认 0.25s）确认画面落定；连续动作
 反而更快：中间帧全部跳过，只在最后识别一次，不会被一串半成品状态拖慢。
-日志还要再等 `--stable-frames`（默认 3）个**连续可识别**帧：300ms/帧时约 +0.9s。
+日志还要再等 `--stable-frames`（默认 2）个**连续可识别**帧：300ms/帧时约 +0.6s。
 这段延迟只加在 **state 日志**上，AI 建议/自动点击仍按 `--ai-confirm` 第一帧触发。
 
 量延迟：
@@ -977,7 +977,7 @@ worker 采用最新帧优先，处理不过来就丢中间帧，队列深度恒�
 | `proc_ms` 明显高于 600ms | CPU 争用；OBS 用 Apple VT 编码；试 `--no-fold` |
 | `queue_ms` 持续变大 | 不应发生；检查是否有别的东西在消费邮箱 |
 | 断流重连后第一条是重复基线 | 正常：重连会重置 ROI 缓存和状态机 |
-| 某个动作后 state 记录变少/延迟 ~1s | 正常：默认要连续 3 个可识别帧稳定才记录（约 +0.9s）；`--stable-frames 1` 退回逐帧，或 `--no-stable-reset-on-discard` 放宽 |
+| 某个动作后 state 记录变少/延迟 ~1s | 正常：默认要连续 2 个可识别帧稳定才记录（约 +0.6s）；`--stable-frames 1` 退回逐帧，或 `--no-stable-reset-on-discard` 放宽 |
 | 一手牌被记成多手 | 先看记录里 `start_street` 和 `hero_cards`：已按「翻后/加注后换牌 = OCR 纠正」处理；仍频繁出现时把 `--card-confirm-frames` 提到 3 |
 | 盲注读不出（如 1/20） | 用 `--initial-blinds 1/20` 人工指定；OCR 自动读数仍按 2–10 比例闸过滤融合文本 |
 

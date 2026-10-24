@@ -173,7 +173,7 @@ function DecisionCard({ decision }: { decision: ComparisonDecision }) {
         </div>
         <div className="decision-meta">
           <span>底池 <b>{formatAmount(d.pot)}</b> BB</span>
-          <span>需跟 <b>{formatAmount(d.toCall)}</b> BB</span>
+          <span>需跟 <b>{formatAmount(d.callAmount ?? d.toCall)}</b> BB</span>
           <span>筹码 <b>{formatAmount(d.heroStack)}</b> BB</span>
           <span>{d.opponents} 个对手</span>
         </div>

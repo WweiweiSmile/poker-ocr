@@ -70,6 +70,8 @@ export interface DecisionMeta {
   actionIndex?: number
   pot: number
   toCall: number
+  // 实际跟注额：后手不足时封顶到 heroStack，旧接口没有该字段
+  callAmount?: number
   heroStack: number | null
   heroPosition: string | null
   heroCards: string[]

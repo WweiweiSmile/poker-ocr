@@ -3,8 +3,8 @@ from __future__ import annotations
 import copy
 
 from replay.decisions import (
-    APPROX, EXACT, INVALID, analyze_hand, hand_fingerprint, snapshot_from_json,
-    snapshot_to_json,
+    APPROX, EXACT, INVALID, analyze_hand, call_amount, hand_fingerprint,
+    snapshot_from_json, snapshot_to_json,
 )
 
 
@@ -154,3 +154,10 @@ def test_invalid_hand_still_marks_bomb_pot():
     analysis = analyze_hand(hand(heroCards="", bombPotBb=1.0))
     assert analysis.quality == INVALID
     assert analysis.bomb is True
+
+
+def test_call_amount_caps_to_hero_stack():
+    """对手 all-in cover 我时，「需跟」是后手，不是对手的本街最高下注。"""
+    assert call_amount(471.5, 168.0) == 168.0
+    assert call_amount(4.0, 100.0) == 4.0
+    assert call_amount(4.0, None) == 4.0

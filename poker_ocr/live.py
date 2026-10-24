@@ -58,7 +58,7 @@ import cv2
 import numpy as np
 
 from .advice import (AISettings, AdviceRunner, DEFAULT_PROMPT_STYLE,
-                     PROMPT_STYLES, build_situation)
+                     PROMPT_STYLES, build_situation, call_amount)
 from .cards import (DEFAULT_CARD_SLOTS, DEFAULT_DOUBT_WINDOW, CardsResult,
                     StableCards, recognize_cards, recognize_shown_cards)
 from .clicker import (DEFAULT_CONFIG_PATH as DEFAULT_CLICKER_CONFIG,
@@ -947,7 +947,7 @@ class LiveProcessor:
                  engine: OcrEngine | None = None,
                  full_config: FullTableConfig | None = None,
                  profile: Profile | None = None,
-                 stable_frames: int = 3,
+                 stable_frames: int = 2,
                  stable_seconds: float = 0.0,
                  stable_reset_on_discard: bool = True,
                  dealer_carry: int = 4,
@@ -1360,10 +1360,10 @@ class LiveProcessor:
                     self.log(f"  [建议] 轮到我：{point.street} 手牌 "
                              f"{''.join(point.hero_cards) or '?'} "
                              f"牌面 {''.join(point.board) or '-'} "
-                             f"需跟 {point.to_call}BB{pot_tag}（生成中…）")
+                             f"需跟 {call_amount(point)}BB{pot_tag}（生成中…）")
             elif not self.quiet:
-                self.log(f"  [建议] 轮到我：{point.street} 需跟 {point.to_call}BB"
-                         f"（未开启 AI 建议）")
+                self.log(f"  [建议] 轮到我：{point.street} 需跟 "
+                         f"{call_amount(point)}BB（未开启 AI 建议）")
 
     def _log_cards_skip(self, state, warnings: tuple[str, ...]) -> None:
         """牌面不可靠导致跳过建议：按手牌/街节流打印一次，并计数。"""
@@ -1977,8 +1977,8 @@ def build_parser() -> argparse.ArgumentParser:
                     default=True,
                     help="追加到 --out，保留历次启动的手牌记录（默认）；"
                          "--no-append 每次启动清空")
-    ap.add_argument("--stable-frames", type=int, default=3,
-                    help="新状态连续出现几帧才记录（默认 3：动画中间态/"
+    ap.add_argument("--stable-frames", type=int, default=2,
+                    help="新状态连续出现几帧才记录（默认 2：动画中间态/"
                          "单帧抖动不落库）")
     ap.add_argument("--stable-seconds", type=float, default=0.0,
                     help="新状态还要稳定多少秒才记录（默认 0 = 只看帧数；"
@@ -1986,7 +1986,7 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--stable-reset-on-discard",
                     action=argparse.BooleanOptionalAction, default=True,
                     help="质量闸丢弃的帧是否打断连续确认（默认是："
-                         "否则跨动画的 3 个接受帧也会被算成连续）")
+                         "否则跨动画的接受帧也会被算成连续）")
     ap.add_argument("--card-confirm-frames", type=int, default=2,
                     help="公共牌/hero 手牌新读数连续几帧一致才替换 last-good"
                          "（默认 2；牌面 4→3 回退永远不会被采用）")

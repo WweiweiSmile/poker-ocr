@@ -154,7 +154,7 @@ export default function JobComparisonPage() {
         render: (_: unknown, row) => (
           <div className="cmp-spot">
             <span>{formatAmount(row.decision.pot)}</span>
-            <span className="muted">/ {formatAmount(row.decision.toCall)}</span>
+            <span className="muted">/ {formatAmount(row.decision.callAmount ?? row.decision.toCall)}</span>
           </div>
         ),
       },

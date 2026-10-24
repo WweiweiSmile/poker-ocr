@@ -47,7 +47,7 @@
 - 范围内却弃牌（没人加注时）
 - 非价值下注（`value_directive` 明确 NOT A VALUE / BOARD PLAY / NO FOLD EQUITY）
 - 非坚果加注（`VALUE CAUTION` / `ONE PAIR vs AGGRESSION` / 爆炸池一对）
-- 有赔率却弃牌（听牌权益 > 跟注门槛 + 2%）
+- 有赔率却弃牌（听牌权益 > 跟注门槛；门槛按可争夺底池算，隐含赔率按 0）
 - 价值下注过小（强牌只下 1/3 池；复盘里 1/3 从不当价值尺度）
 
 审计是保守口径：宁可漏判，不把边界牌硬判成错。最终结论仍以逐手人工复核为准。
@@ -66,7 +66,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from poker_ocr.advice import (  # noqa: E402
-    AISettings, advise, build_situation, is_jev_model, value_directive,
+    AISettings, IMPLIED_ODDS_CAP_PCT, advise, build_situation, call_amount,
+    is_jev_model, value_directive, winnable_pot,
 )
 from poker_ocr.env import load_env  # noqa: E402
 from poker_ocr.hand_track import (  # noqa: E402
@@ -336,11 +337,10 @@ def audit(sit, kind: str, amount: float | None) -> set[str]:
     if kind == "fold" and to_call > 0 \
             and sit.hand_tier in ("强听", "弱听") \
             and sit.equity_pct is not None and pot > 0:
-        call = to_call
-        if snap.hero_stack is not None and 0 < snap.hero_stack < to_call:
-            call = snap.hero_stack
-        bep = call / (pot + call) * 100 if pot + call > 0 else 0.0
-        if sit.equity_pct > bep + 2:
+        call = call_amount(snap)
+        winnable = winnable_pot(snap)
+        bep = call / winnable * 100 if call > 0 and winnable > 0 else 0.0
+        if sit.equity_pct > bep + IMPLIED_ODDS_CAP_PCT:
             tags.add("有赔率却弃牌")
 
     # 价值尺度：强牌只下 1/3 池。

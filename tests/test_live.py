@@ -41,12 +41,12 @@ IMG = np.zeros((4, 4, 3), np.uint8)
 
 
 def test_defaults_are_no_throttle_and_instant_turn() -> None:
-    """用户口径：日志做 3 帧稳定确认，但轮到我仍第一帧就调用模型（不拖建议）。"""
+    """用户口径：日志做 2 帧稳定确认，但轮到我仍第一帧就调用模型（不拖建议）。"""
     ap = live.build_parser()
     args = ap.parse_args([])
     check(args.every == 0.0, f"默认应不节流，实际 --every={args.every}")
-    check(args.stable_frames == 3,
-          f"默认应连续 3 帧稳定才记录，实际 {args.stable_frames}")
+    check(args.stable_frames == 2,
+          f"默认应连续 2 帧稳定才记录，实际 {args.stable_frames}")
     check(args.stable_seconds == 0.0,
           f"默认只按帧数确认（不额外压时间窗），实际 {args.stable_seconds}")
     check(args.stable_reset_on_discard is True,

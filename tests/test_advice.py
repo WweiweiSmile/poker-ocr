@@ -23,10 +23,11 @@ import poker_ocr.advice as advice_mod  # noqa: E402
 from poker_ocr import skills  # noqa: E402
 from poker_ocr.advice import (  # noqa: E402
     AISettings, AIError, AdviceRunner, EXPLOSIVE_POT_BB_PER_PLAYER, OPTION_ORDER,
-    advise, build_messages, build_options, build_situation, complete_jev,
-    complete_json, is_explosive_pot, is_jev_model, jev_decisions, jev_headers,
-    jev_payload, math_gate, parse_json_content, pot_per_player, preset_amounts,
-    preset_targets, previous_street_pot, render_hand_facts, value_directive,
+    advise, build_messages, build_options, build_situation, call_amount,
+    complete_jev, complete_json, is_explosive_pot, is_jev_model, jev_decisions,
+    jev_headers, jev_payload, math_gate, parse_json_content, pot_per_player,
+    preset_amounts, preset_targets, previous_street_pot, render_hand_facts,
+    uncalled_excess, value_directive, winnable_pot,
 )
 from poker_ocr.frame_state import FrameState, PlayerState  # noqa: E402
 from poker_ocr.hand_track import LiveHandTracker, street_of_board  # noqa: E402
@@ -1230,8 +1231,11 @@ def test_covered_stack_has_only_fold_or_all_in() -> None:
 
     user = render_hand_facts(sit)
     check("To call: 28.5BB" in user, f"应显示实际跟注额 28.5：\n{user}")
-    check("Break-even equity to call: 13%" in user,
-          f"赔率门槛应按 28.5 算（13%）：\n{user}")
+    check("Break-even equity to call: 14%" in user,
+          f"赔率门槛应按可争夺底池 207（28.5/207=14%）算：\n{user}")
+    check("Uncalled bet: 11.5BB" in user
+          and "winnable pot after my call is 207BB" in user,
+          f"应说明超额下注被退回、可争夺底池只有 207：\n{user}")
     check("raising is not possible" in user, f"应说明不能再加注：\n{user}")
     check("raise-1/2" not in user, f"不该出现加注选项：\n{user}")
 
@@ -1242,6 +1246,42 @@ def test_covered_stack_has_only_fold_or_all_in() -> None:
     by = {o.id: o for o in build_options(pre)}
     check(set(by) == {"fold", "call"}, f"翻前被 cover 也只应有 fold/call：{by}")
     check(by["call"].amount == 10.0, f"翻前跟注应封顶到后手 10：{by['call']}")
+
+
+def test_covered_all_in_uses_winnable_pot_not_table_pot() -> None:
+    """990036：对手 491 全下 cover 我 168 后手，超出的 303.5 会退回。
+
+    牌桌底池 569 不能直接当赔率分母：真实可争夺 433.5，门槛是 39% 而不是
+    旧口径的 23%。否则坚果花听会被「便宜」的假赔率骗去跟注。
+    """
+    from poker_ocr.hand_track import OpponentSnapshot
+
+    point = make_point(
+        street="flop", board=("9d", "6d", "5s"), hero_cards=("Ad", "Qd"),
+        hero_stack=168.0, hero_bet=19.5, hero_invested=27.0,
+        to_call=471.5, pot=569.0, cbet_spot=False,
+        opponents=(
+            OpponentSnapshot("v", "八六上青山", "UTG+1", 498.0, 491.0, False),
+            OpponentSnapshot("bb", "jackhshdn", "BB", 168.0, 19.5, False),
+        ))
+
+    check(call_amount(point) == 168.0, "跟注应封顶到后手 168")
+    check(uncalled_excess(point) == 303.5,
+          f"超额下注应是 491-187.5=303.5：{uncalled_excess(point)}")
+    check(winnable_pot(point) == 433.5,
+          f"可争夺底池应是 569-303.5+168=433.5：{winnable_pot(point)}")
+
+    user = render_hand_facts(build_situation(point))
+    check("Break-even equity to call: 39%" in user,
+          f"赔率门槛应按 433.5 算成 39%，不能再用 23%：\n{user}")
+    check("Uncalled bet: 303.5BB" in user and "433.5BB" in user,
+          f"要写清退回多少、可争夺多少：\n{user}")
+
+    gate = math_gate(build_situation(point))
+    check(gate is not None and gate.break_even_pct == 38.8,
+          f"Math gate 门槛应重算为 38.8：{gate}")
+    check(gate is not None and gate.verdict == "fold",
+          f"隐含赔率按 0 后，36% 对 39% 应直接 fold：{gate}")
 
 
 # ─────────────────────────── 提示词 ───────────────────────────
@@ -1302,16 +1342,18 @@ def test_prompt_contains_full_action_line_and_options() -> None:
         check(oid in user, f"选项 {oid} 应出现在提示词里")
 
 
-def test_prompt_has_implied_odds_cap() -> None:
-    """听牌跟注：隐含赔率最多算 2 个百分点，权益 + 2% 不够就弃。"""
+def test_prompt_has_zero_implied_odds() -> None:
+    """2026-10-24 用户口径：隐含赔率按 0，只用即时赔率。"""
+    check(advice_mod.IMPLIED_ODDS_CAP_PCT == 0.0,
+          f"隐含赔率上限应为 0：{advice_mod.IMPLIED_ODDS_CAP_PCT}")
     point = make_point(to_call=30.0, pot=75.0, hero_stack=100.0)
     sit = build_situation(point)
     for style in ("lean", "skills"):
         system, _ = build_messages(sit, style=style)
-        check("AT MOST 2 percentage points" in system,
-              f"{style} 提示词应写明隐含赔率上限：\n{system}")
-        check("equity + 2%" in system,
-              f"{style} 提示词应写明 equity + 2% 的口径：\n{system}")
+        check("Ignore implied odds" in system,
+              f"{style} 提示词应写明不计算隐含赔率：\n{system}")
+        check("equity + 2%" not in system,
+              f"{style} 提示词不该再出现 +2% 口径：\n{system}")
 
 
 def test_prompt_is_english_only() -> None:
@@ -2482,9 +2524,10 @@ def main() -> int:
         test_preset_amounts_preflop_follows_pot_fraction,
         test_advice_carries_click_metadata,
         test_covered_stack_has_only_fold_or_all_in,
+        test_covered_all_in_uses_winnable_pot_not_table_pot,
         test_prompt_marks_inferred_actions,
         test_prompt_contains_full_action_line_and_options,
-        test_prompt_has_implied_odds_cap,
+        test_prompt_has_zero_implied_odds,
         test_prompt_preflop_has_no_strength_facts,
         test_table_dynamics_parse_and_load,
         test_table_dynamics_in_prompt,

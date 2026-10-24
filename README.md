@@ -106,11 +106,13 @@ worker 在**轮到我**时把这一手的完整行动线交给模型（`--no-ai-
 模型只允许引用，不允许自己重算（见 `poker_ocr/ground_truth.py`）。
 翻后还会注入一组几何事实：底池类型（单加注 / 3-bet / 溜入）、**SPR**、我在不在位置、
 身后还有几人要行动；短码 all-in 会单独标注「side pot 未建模、跟他只有这么多筹码有风险」。
-听牌面对下注时，程序先算好 **Math gate**（权益 + 2% 隐含赔率 vs 赔率门槛）并给出
-call / fold 结论；模型若在 +EV 闸门下仍弃牌，会带着结论重问一次，最终仍弃牌则记
-`gate_violation` 供复盘。模型输出除 `option` / `reason` 外还有 `plan`（下一街意图）与
-`confidence`；`plan` 会在同一手的下一街回灌成 `My previous decision`，避免翻牌说要
-抓诈、转牌又自己弃掉。
+反过来，对手全下 cover 我时，超出我后手的筹码会退回，赔率分母用**可争夺底池**
+（`winnable_pot()`，已扣掉这部分）而不是牌桌显示的总池。
+听牌面对下注时，程序先算好 **Math gate**（权益 vs 赔率门槛；隐含赔率按 0，不夸大
+潜在收益）并给出 call / fold 结论；模型若在 +EV 闸门下仍弃牌，会带着结论重问一次，
+最终仍弃牌则记 `gate_violation` 供复盘。模型输出除 `option` / `reason` 外还有
+`plan`（下一街意图）与 `confidence`；`plan` 会在同一手的下一街回灌成
+`My previous decision`，避免翻牌说要抓诈、转牌又自己弃掉。
 旧的 2005 年《Little Green Book》技能库不再默认注入，需要对比时加
 `--advice-style skills` 切回。模型从固定选项里选一个：
 

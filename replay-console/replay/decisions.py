@@ -29,6 +29,19 @@ EXACT = "exact"
 QUALITY_RANK = {INVALID: 0, APPROX: 1, EXACT: 2}
 
 
+def call_amount(to_call: float | None, hero_stack: float | None) -> float:
+    """跟注实际要付的筹码：后手不足时只能跟到全下。
+
+    与 `poker_ocr.advice.call_amount()` 同一口径。控制台展示「需跟」时不能
+    直接贴 `snap.to_call`：对手 all-in 完全 cover 我时，那个数是本街最高
+    下注（例如 471.5），而牌桌上我只需要跟到自己的后手（168）。
+    """
+    to_call = round(float(to_call or 0.0), 2)
+    if hero_stack is not None and 0 < float(hero_stack) < to_call:
+        return round(float(hero_stack), 2)
+    return to_call
+
+
 @dataclass
 class DecisionPoint:
     hand_id: str

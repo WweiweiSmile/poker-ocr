@@ -19,7 +19,7 @@ from poker_ocr.preflop_ranges import (
     hand_key, range_verdict, sb_completable,
 )
 
-from .decisions import DecisionPoint, decision_facts
+from .decisions import DecisionPoint, call_amount, decision_facts
 from .util import cards_of
 
 log = logging.getLogger("replay.engine")
@@ -457,6 +457,8 @@ def decision_to_public(decision_row: dict, version_rows: list[dict],
             "seq": int(decision_row.get("seq") or 0),
             "pot": decision_row.get("pot"),
             "toCall": decision_row.get("to_call"),
+            "callAmount": call_amount(decision_row.get("to_call"),
+                                      decision_row.get("hero_stack")),
             "heroStack": decision_row.get("hero_stack"),
             "heroPosition": decision_row.get("hero_position"),
             "heroCards": list(cards_of(decision_row.get("hero_cards"))),

@@ -116,11 +116,11 @@ class StateStream:
             max_workers=self.roi_threads, thread_name_prefix="roi-rec")
             if self.roi_threads > 1 else None)
         self.stable_frames = max(1, int(stable_frames))
-        # 光按帧数确认，帧率变化时确认窗口会漂（150ms×3=0.45s，300ms×3=0.9s）。
+        # 光按帧数确认，帧率变化时确认窗口会漂（150ms×2=0.3s，300ms×2=0.6s）。
         # 给一个**最小稳定时长**：两个条件都满足才记录。0 = 只看帧数。
         self.stable_seconds = max(0.0, float(stable_seconds))
         # 质量闸丢弃的帧算不算打断"连续"：算。否则动画里被丢掉的帧不会
-        # 中断计数，3 个跨动画的接受帧也能凑成一次"连续三帧"。
+        # 中断计数，2 个跨动画的接受帧也能凑成一次"连续两帧"。
         self.stable_reset_on_discard = bool(stable_reset_on_discard)
         self.max_vanish = max(0, int(max_vanish))
         self.name_confirm = max(1, int(name_confirm))
@@ -357,7 +357,7 @@ class StateStream:
         if not state.ok:
             for e in state.errors:
                 self.discarded[e.split(":", 1)[0]] += 1
-            # 丢弃帧打断"连续三帧"：否则动画里的 3 个接受帧能跨过丢弃帧
+            # 丢弃帧打断"连续两帧"：否则动画里的 2 个接受帧能跨过丢弃帧
             # 拼成一次假稳定。strict 口径下宁可不记，也不记动画中间态。
             if self.stable_reset_on_discard:
                 self.cand_sig = None

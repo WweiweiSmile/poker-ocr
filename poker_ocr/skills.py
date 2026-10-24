@@ -166,7 +166,7 @@ _DEFS: tuple[tuple[str, str, str, str, int, SkillTrigger, str], ...] = (
      "postflop-made-hand.md"),
     ("postflop-draw", "Draws & Semi-Bluffs", "You are on a flush or straight draw",
      "A premium draw can be played as a strong hand heads-up — betting gives you two ways "
-     "to win; on the turn, call only on implied odds",
+     "to win; on the turn, call only when the immediate price is right (implied odds = 0)",
      74, SkillTrigger(streets=POSTFLOP_STREETS, require_draw=True),
      "postflop-draw.md"),
     ("postflop-cbet", "Continuation Betting",

@@ -21,7 +21,7 @@ from poker_ocr.advice import AISettings
 from .config import Settings
 from .db import Database
 from .decisions import (
-    APPROX, EXACT, INVALID, HandAnalysis, analyze_hand, cards_of,
+    APPROX, EXACT, INVALID, HandAnalysis, analyze_hand, call_amount, cards_of,
     decision_facts, hand_fingerprint, snapshot_to_dict,
 )
 from .engine import (
@@ -703,6 +703,7 @@ class ReplayService:
             "actionIndex": d.action_index,
             "pot": d.pot,
             "toCall": d.snap.to_call,
+            "callAmount": call_amount(d.snap.to_call, d.snap.hero_stack),
             "heroStack": d.snap.hero_stack,
             "heroPosition": d.snap.hero_position,
             "heroCards": list(d.snap.hero_cards),
