@@ -25,7 +25,7 @@ from poker_ocr.advice import (  # noqa: E402
     AISettings, AIError, AdviceRunner, EXPLOSIVE_POT_BB_PER_PLAYER, OPTION_ORDER,
     advise, build_messages, build_options, build_situation, complete_jev,
     complete_json, is_explosive_pot, is_jev_model, jev_decisions, jev_headers,
-    jev_payload, parse_json_content, pot_per_player, preset_amounts,
+    jev_payload, math_gate, parse_json_content, pot_per_player, preset_amounts,
     preset_targets, previous_street_pot, render_hand_facts, value_directive,
 )
 from poker_ocr.frame_state import FrameState, PlayerState  # noqa: E402
@@ -1430,6 +1430,194 @@ def test_value_heavy_aggression_flags() -> None:
         check(not value_heavy_aggression(text), f"不该判为价值线：{text}")
 
 
+def test_table_note_matching_is_fuzzy_and_never_guesses() -> None:
+    """昵称→段落按当前座位名匹配：全角/大小写/OCR 截断能对上，名单外不猜。"""
+    from poker_ocr.table_dynamics import (match_table_notes,
+                                          normalize_player_name,
+                                          split_table_notes)
+
+    check(normalize_player_name("  Ｆather TM ") == "fathertm",
+          f"归一化应去空格/全角/大小写：{normalize_player_name('  Ｆather TM ')}")
+
+    text = ("A. 松浪/松凶（芒果与西米、葡萄牙h）：open 8–11BB，翻后高频下注。\n\n"
+            "B. 松弱/跟注站（FatherTM、好运常在ok）：翻前很少加注。")
+    got = match_table_notes(text, ["芒果西米", "fathertm", "葡萄牙", "新来的"])
+    check("芒果西米" in got and got["芒果西米"].block.startswith("A."),
+          f"少一个字的中文名应匹配到 A 段：{got.get('芒果西米')}")
+    check(got["芒果西米"].matched == "芒果与西米", "应记录命中的原写法")
+    check("fathertm" in got and got["fathertm"].block.startswith("B."),
+          f"大小写不同也应匹配：{got.get('fathertm')}")
+    check("葡萄牙" in got, f"OCR 截断的拉丁/中文混合名应匹配：{got.get('葡萄牙')}")
+    check("新来的" not in got, "名单外的名字不能硬塞一个段落")
+
+    # 一行一个玩家的写法也要能拆成独立段落
+    lines = split_table_notes("老王: 紧凶\n小李: 松弱")
+    check(len(lines) == 2, f"一行一个玩家应按行拆：{lines}")
+
+
+def test_facts_show_which_note_belongs_to_which_seat() -> None:
+    """事实块必须写清「这个座位 = 哪段笔记」，并把名单外的人标成 unknown。"""
+    from poker_ocr.hand_track import OpponentSnapshot
+
+    dyn = ("A. 松浪/松凶（芒果与西米）：open 8–11BB，翻后高频下注。\n\n"
+           "B. 松弱/跟注站（FatherTM）：翻前很少加注。")
+    point = make_point(opponents=(
+        OpponentSnapshot("a", "芒果西米", "CO", 100.0, 0.0, False),
+        OpponentSnapshot("b", "新来的", "BB", 100.0, 0.0, False)))
+    user = render_hand_facts(build_situation(point, table_dynamics=dyn))
+    check("## Table notes by seat" in user, f"事实里应有座位笔记：\n{user}")
+    check("CO 芒果西米 (note name: 芒果与西米)" in user,
+          f"模糊命中应标注原写法：\n{user}")
+    check("Not in the table notes" in user and "BB 新来的" in user,
+          f"名单外的人必须显式标 unknown：\n{user}")
+
+    # 整桌换人、名单全是旧人：不能把旧标签当整桌默认套上去
+    stale = render_hand_facts(build_situation(
+        make_point(),
+        table_dynamics="A. 松浪/松凶（旧人甲、旧人乙）：很爱开火。"))
+    check("do NOT apply them to this hand" in stale,
+          f"名单全不匹配时应提示不要套旧标签：\n{stale}")
+
+
+def test_table_dynamics_compressed_by_profile_coverage() -> None:
+    """画像覆盖全桌时不再注入整桌长文；部分覆盖降级为 background。"""
+    from poker_ocr.hand_track import OpponentSnapshot
+    from poker_ocr.opponent_profile import OpponentRead
+
+    dyn = ("A. 松浪/松凶（芒果与西米）：open 8–11BB，翻后高频下注。\n\n"
+           "B. 松弱/跟注站（FatherTM）：翻前很少加注，翻后多跟注。")
+    read = OpponentRead(
+        seat_id="a", key="FatherTM", display_name="FatherTM",
+        archetype="station", confidence=0.8, n=20, vpip=45.0, pfr=5.0,
+        af=1.2, source="auto", note="", gate="read")
+    point = make_point(
+        to_call=4.0, pot=10.0, hero_stack=90.0,
+        opponents=(OpponentSnapshot("a", "FatherTM", "BB", 100.0, 4.0,
+                                    False),))
+    covered = build_situation(point, table_dynamics=dyn,
+                              opponent_reads=[read])
+    user = render_hand_facts(covered)
+    check("## Table summary" in user, f"全覆盖应只给摘要：\n{user}")
+    check("## Table dynamics (player-provided" not in user,
+          f"全覆盖不该再注入权威整桌段：\n{user}")
+    check("FatherTM" in user and "STATION" in user,
+          f"画像本身仍要在事实里：\n{user}")
+
+    # 只覆盖一个、另一个新面孔：每段笔记只注入一次
+    two = make_point(
+        to_call=4.0, pot=10.0, hero_stack=90.0,
+        opponents=(OpponentSnapshot("a", "FatherTM", "BB", 100.0, 4.0, False),
+                   OpponentSnapshot("b", "新来的", "CO", 100.0, 0.0, False)))
+    partial = build_situation(two, table_dynamics=dyn,
+                              opponent_reads=[read])
+    user2 = render_hand_facts(partial)
+    check("## Table background" in user2, f"部分覆盖应降级为 background：\n{user2}")
+    check(dyn not in user2, f"已由座位笔记承载的段落不该再整段重复：\n{user2}")
+    check("Not in the table notes" in user2 and "新来的" in user2,
+          f"新面孔仍要标 unknown：\n{user2}")
+    check("A. 松浪" not in user2,
+         f"不在本手的玩家笔记不该注入：\n{user2}")
+    check("All player-specific notes for this hand are under" in user2,
+          f"没有桌级背景时应给一句说明：\n{user2}")
+
+    # 有桌级段落时：只注入通用部分，玩家段落仍留在座位笔记里
+    dyn_intro = "当前是混合桌，至少三类玩家：\n\n" + dyn
+    partial2 = build_situation(two, table_dynamics=dyn_intro,
+                               opponent_reads=[read])
+    user2b = render_hand_facts(partial2)
+    background = user2b.split("## Table background", 1)[1].split("## Options", 1)[0]
+    check("当前是混合桌" in background, f"桌级背景应保留：\n{background}")
+    check("A. 松浪" not in background and "B. 松弱" not in background,
+          f"玩家段落不该进桌级背景：\n{background}")
+
+    # 一个可靠画像都没有：保持原文权威口径（新桌/新人的常态）
+    plain = build_situation(two, table_dynamics=dyn)
+    user3 = render_hand_facts(plain)
+    check("## Table dynamics (player-provided, authoritative)" in user3,
+          f"无画像时应保持权威口径：\n{user3}")
+    check("group «" in user3, f"无画像时座位笔记只做指针：\n{user3}")
+    check(user3.count("翻后多跟注") == 1,
+          f"正文只该注入一次（座位笔记不再重复）：\n{user3}")
+
+
+def test_table_background_handles_line_per_player_notes() -> None:
+    """`名字: 描述` 写法没有分组标题，也要把玩家段落从桌级背景里排除。"""
+    from poker_ocr.hand_track import OpponentSnapshot
+    from poker_ocr.opponent_profile import OpponentRead
+
+    dyn = ("老王: 松弱跟注站，很少加注\n"
+           "小李: 松浪，爱开火\n\n"
+           "桌级：抽水重，别打薄价值")
+    read = OpponentRead(
+        seat_id="a", key="老王", display_name="老王", archetype="station",
+        confidence=0.8, n=20, vpip=45.0, pfr=5.0, af=1.2, source="auto",
+        note="", gate="read")
+    point = make_point(
+        to_call=4.0, pot=10.0, hero_stack=90.0,
+        opponents=(OpponentSnapshot("a", "老王", "BB", 100.0, 4.0, False),
+                   OpponentSnapshot("b", "小李", "CO", 100.0, 0.0, False)))
+    user = render_hand_facts(build_situation(point, table_dynamics=dyn,
+                                            opponent_reads=[read]))
+    background = user.split("## Table background", 1)[1].split("## Options", 1)[0]
+    check("抽水重" in background, f"桌级段落应保留：\n{background}")
+    check("老王" not in background and "小李" not in background,
+          f"玩家段落不该进桌级背景：\n{background}")
+    check("松浪，爱开火" in user, f"未画像玩家的笔记仍要进座位笔记：\n{user}")
+
+
+def test_unprofiled_note_keeps_full_text_in_some_mode() -> None:
+    """部分覆盖时，没画像的座位笔记要拿全；有画像的只需要定性补充。"""
+    from poker_ocr.hand_track import OpponentSnapshot
+    from poker_ocr.opponent_profile import OpponentRead
+
+    long_note = ("A. 松浪/松凶（芒果与西米）：" + "很爱开火；" * 50
+                 + "结尾标记XYZ")
+    dyn = long_note + "\n\nB. 松弱/跟注站（FatherTM）：很少加注。"
+    read = OpponentRead(
+        seat_id="a", key="FatherTM", display_name="FatherTM",
+        archetype="station", confidence=0.8, n=20, vpip=45.0, pfr=5.0,
+        af=1.2, source="auto", note="", gate="read")
+    point = make_point(
+        to_call=4.0, pot=10.0, hero_stack=90.0,
+        opponents=(OpponentSnapshot("a", "FatherTM", "BB", 100.0, 4.0, False),
+                   OpponentSnapshot("b", "芒果西米", "CO", 100.0, 0.0, False)))
+    user = render_hand_facts(build_situation(point, table_dynamics=dyn,
+                                             opponent_reads=[read]))
+    check("结尾标记XYZ" in user,
+          f"没画像的对手笔记不该被截断：\n{user[-800:]}")
+    check("note name: 芒果与西米" in user, "模糊命中的原写法仍要标注")
+
+
+def test_table_note_override_uses_the_actual_bettor() -> None:
+    """混合桌：跟注站的转牌下注按价值线弃，松浪的下注按抓诈跟。"""
+    from poker_ocr.hand_track import ActionRecord, OpponentSnapshot, StreetRecord
+
+    def h8(bettor: str, seat: str):
+        return make_point(
+            hand_id="h8", street="turn", board=("Ad", "As", "Qc", "Kc"),
+            hero_cards=("Jh", "Qd"), hero_position="BB", hero_is_pfr=False,
+            cbet_spot=False, to_call=10.0, pot=47.5, pot_before_street=47.5,
+            opponents=(
+                OpponentSnapshot("midR", "芒果与西米", "BTN", 95.0, 0.0, False),
+                OpponentSnapshot("lowR", "好运常在ok", "SB", 95.0, 0.0, False)),
+            streets=(StreetRecord("preflop", 4.0, ()),
+                     StreetRecord("flop", 19.0, ()),
+                     StreetRecord("turn", 47.5, (
+                         ActionRecord("turn", seat, bettor, "SB", "bet", 10.0,
+                                      False, False),))),
+            players_dealt=9)
+
+    station = value_directive(build_situation(
+        h8("好运常在ok", "lowR"), table_dynamics=MIXED_TABLE))
+    check("TABLE DYNAMICS OVERRIDE" in (station or "") and "FOLD" in (station or ""),
+          f"跟注站的下注应按价值线弃：{station}")
+
+    lag = value_directive(build_situation(
+        h8("芒果与西米", "midR"), table_dynamics=MIXED_TABLE))
+    check("AGGRESSIVE TABLE" in (lag or "") and "BLUFF-CATCH" in (lag or ""),
+          f"松浪的下注应按抓诈跟：{lag}")
+
+
 def test_value_directive_table_dynamics_override() -> None:
     """松弱桌风 + 转/河牌被下注 + 两对 → 硬指令从 call 改成 fold。"""
     dyn = "这些玩家都是松弱玩家，当他们加注、连续下注时，往往都是顶对以上的牌力"
@@ -1596,12 +1784,12 @@ def test_lean_prompt_is_compact_and_range_based() -> None:
     check("## Postflop" in system and "C-bet" in system, "lean 应有翻后框架")
     check("Break-even equity" in user or "My hand strength" in user,
           "计算事实仍应完整")
-    # 6000 是 lean 正文还没有 GROUND TRUTH + 生成式 RFI 表时的预算；现在
-    # 正文 ~7.5k + GT ~1.2k。上限 9300 只留防膨胀余量（其中约 250 字符是
-    # 「听牌隐含赔率最多 2 个百分点」的硬闸），下面还有
-    # len(with_skills) > 2× 的相对检查，防止 lean 膨胀回 skills 版。
-    check(len(system) < 9300,
-          f"lean system 应保持紧凑（< 9300），实际 {len(system)}")
+    # 6000 是 lean 正文还没有 GROUND TRUTH + 生成式 RFI 表时的预算。现在是
+    # 正文 ~9.5k + GT ~1.45k：新增了转牌/河牌/3-bet/短码四段、按座位画像的
+    # 优先级阶梯，同时删掉了重复的对手类型与牌力段。上限 11200 只留防膨胀
+    # 余量；下面还有 len(with_skills) > 2× 的相对检查，防止膨胀回 skills 版。
+    check(len(system) < 11200,
+          f"lean system 应保持紧凑（< 11200），实际 {len(system)}")
 
     with_skills, _ = build_messages(sit, style="skills")
     check("Coach Skill Catalog" in with_skills, "skills 风格应保留")
@@ -1612,6 +1800,183 @@ def test_lean_prompt_is_compact_and_range_based() -> None:
         pass
     else:
         check(False, "未知提示词风格应直接报错")
+
+
+def test_facts_include_spot_spr_and_position() -> None:
+    """翻后事实要直接给底池类型、SPR、位置和身后人数，别让模型自己推。"""
+    from poker_ocr.hand_track import OpponentSnapshot
+
+    point = make_point(
+        hero_cards=("Ah", "Kd"), to_call=4.0, pot=10.0, hero_stack=90.0,
+        opponents=(OpponentSnapshot("a", "老王", "BB", 100.0, 4.0, False),
+                   OpponentSnapshot("b", "小李", "CO", 100.0, 0.0, False)))
+    sit = build_situation(point)
+    check(sit.pot_type == "single-raised pot", f"底池类型不对：{sit.pot_type}")
+    check(sit.spr == 9.0, f"SPR 应为 9：{sit.spr}")
+    check(sit.in_position is True, f"BTN 应是有位置：{sit.in_position}")
+    check(sit.players_left_to_act == 0,
+          f"BTN 身后应为 0 人：{sit.players_left_to_act}")
+    user = render_hand_facts(sit)
+    check("Spot: single-raised pot" in user, f"事实里应有 Spot：\n{user}")
+    check("SPR 9" in user, f"事实里应有 SPR：\n{user}")
+    check("Hero in position" in user, f"事实里应写明位置：\n{user}")
+
+    oop = build_situation(make_point(
+        hero_position="BB",
+        opponents=(OpponentSnapshot("b", "小李", "CO", 100.0, 0.0, False),)))
+    check(oop.in_position is False, f"BB 应是没位置：{oop.in_position}")
+    check(oop.players_left_to_act == 1,
+          f"BB 身后应剩 1 人：{oop.players_left_to_act}")
+    check("Hero out of position" in render_hand_facts(oop),
+          "事实里应写明没位置")
+
+    # 位置读不出来时宁可不给结论，也不能说「我是最后一个行动」
+    unknown = build_situation(make_point(
+        opponents=(OpponentSnapshot("b", "小李", None, 100.0, 0.0, False),)))
+    check(unknown.in_position is None and unknown.players_left_to_act is None,
+          f"位置未知时应返回 None：{unknown.in_position}/"
+          f"{unknown.players_left_to_act}")
+
+    # 全下的对手不再行动，不能算进「身后还有人」
+    allin = build_situation(make_point(
+        hero_position="BB",
+        opponents=(OpponentSnapshot("b", "小李", "CO", 0.0, 0.0, False),)))
+    check(allin.players_left_to_act == 0,
+          f"全下对手不该算身后人数：{allin.players_left_to_act}")
+
+
+def test_short_stack_is_flagged_not_silently_effective() -> None:
+    """短码 all-in：Effective stack 会被拉到 2.5BB，必须单独说清 side pot。"""
+    from poker_ocr.hand_track import OpponentSnapshot
+
+    point = make_point(
+        to_call=30.0, pot=75.0, hero_stack=100.0,
+        opponents=(OpponentSnapshot("a", "老王", "BB", 2.5, 30.0, False),))
+    user = render_hand_facts(build_situation(point))
+    check("Short stacks: BB 2.5BB" in user, f"短码要单独写出来：\n{user}")
+    check("side pots are not modeled" in user,
+          f"要说清 side pot 没建模：\n{user}")
+
+
+def test_math_gate_for_draws() -> None:
+    """听牌赔率由程序给结论：36% 权益对 29% 门槛不该再出现「太薄所以弃」。"""
+    call_sit = build_situation(make_point(
+        hero_cards=("Ah", "Qh"), board=("9h", "6h", "5s"),
+        to_call=30.0, pot=75.0, hero_stack=100.0))
+    gate = math_gate(call_sit)
+    check(gate is not None and gate.verdict == "call",
+          f"36% > 29% 应判 call：{gate}")
+    user = render_hand_facts(call_sit)
+    check("Math gate:" in user and "CALL is +EV" in user,
+          f"事实应带 Math gate：\n{user}")
+
+    fold_sit = build_situation(make_point(
+        hero_cards=("Ah", "Qh"), board=("9h", "6h", "5s"),
+        to_call=60.0, pot=60.0, hero_stack=100.0))
+    gate = math_gate(fold_sit)
+    check(gate is not None and gate.verdict == "fold",
+          f"38% < 50% 应判 fold：{gate}")
+
+    made = build_situation(make_point(to_call=4.0, pot=10.0))
+    check(math_gate(made) is None,
+          "成牌不该有 Math gate（枚举胜率不是对跟注范围）")
+
+
+def test_math_gate_retries_a_fold() -> None:
+    """模型在 +EV 闸门下仍然弃牌时，重问一次；不覆盖它的最终答案。"""
+    sit = build_situation(make_point(
+        hero_cards=("Ah", "Qh"), board=("9h", "6h", "5s"),
+        to_call=30.0, pot=75.0, hero_stack=100.0))
+    prompts: list[str] = []
+
+    def fake(settings, system, user, timeout=20.0, options=None):
+        prompts.append(user)
+        if len(prompts) == 1:
+            return {"option": "fold", "reason": "the price is thin"}
+        return {"option": "call", "reason": "the gate says +EV"}
+
+    adv = advise(sit, SETTINGS, complete=fake)
+    check(len(prompts) == 2, f"应重问一次，实际 {len(prompts)} 次")
+    check("Math gate" in prompts[1], "重问应带上闸门结论")
+    check(adv.option.id == "call", f"重问后应改成跟注：{adv.option.id}")
+    check(adv.gate == "call" and not adv.gate_violation,
+          f"闸门标记不对：{adv.gate}/{adv.gate_violation}")
+
+
+def test_math_gate_records_violation_when_fold_sticks() -> None:
+    """重问后仍然弃牌：保留模型答案，但要落一条违规标记给复盘。"""
+    sit = build_situation(make_point(
+        hero_cards=("Ah", "Qh"), board=("9h", "6h", "5s"),
+        to_call=30.0, pot=75.0, hero_stack=100.0))
+    adv = advise(sit, SETTINGS,
+                 complete=lambda *a, **k: {"option": "fold", "reason": "still thin"})
+    check(adv.option.id == "fold", "不该覆盖模型的最终答案")
+    check(adv.gate_violation is True, "第二次仍弃牌应记违规")
+    check(adv.to_dict().get("gate_violation") is True, "违规要落进 JSONL")
+
+
+def test_advice_carries_plan_and_confidence() -> None:
+    """plan/confidence 进 Advice 与 JSONL；confidence 容忍 "72%" 这种写法。"""
+    sit = build_situation(make_point())
+    adv = advise(sit, SETTINGS, complete=lambda *a, **k: {
+        "option": "raise-1/2", "reason": "value bet",
+        "plan": "barrel the turn", "confidence": 0.72})
+    check(adv.plan == "barrel the turn", f"plan 丢了：{adv.plan}")
+    check(adv.confidence == 0.72, f"confidence 丢了：{adv.confidence}")
+    data = adv.to_dict()
+    check(data.get("plan") == "barrel the turn"
+          and data.get("confidence") == 0.72,
+          f"落库形状不对：{sorted(data)}")
+
+    pct = advise(sit, SETTINGS, complete=lambda *a, **k: {
+        "option": "call", "reason": "x", "confidence": "72%"})
+    check(pct.confidence == 0.72, f"百分比字符串应能解析：{pct.confidence}")
+
+
+def test_previous_decision_is_fed_back() -> None:
+    """同一手下一街要看到上一街的动作、理由和 plan，避免自己推翻陷阱线。"""
+    from poker_ocr.advice import Advice, Option
+
+    prev = Advice("h1", "flop", Option("call", "Call", "call", 4.0),
+                  "bluff-catch vs the LAG", "model", plan="call one barrel")
+    sit = build_situation(make_point(
+        street="turn", board=("Ks", "7d", "2c", "3h"),
+        hero_cards=("Kh", "Qh"), to_call=8.0, pot=20.0, hero_stack=88.0),
+        previous=prev)
+    user = render_hand_facts(sit)
+    check("## My previous decision (same hand)" in user,
+          f"应回灌上一街决定：\n{user}")
+    check("call one barrel" in user, f"plan 应进事实：\n{user}")
+    check("do not reverse a line" in user, f"应要求延续计划：\n{user}")
+
+
+def test_advice_runner_feeds_previous_street() -> None:
+    """后台建议器自己记住上一街，不需要 live.py 传递。"""
+    import time
+
+    flop = build_situation(make_point(hero_cards=("Kh", "Qh")))
+    turn = build_situation(make_point(
+        street="turn", board=("Ks", "7d", "2c", "3h"),
+        hero_cards=("Kh", "Qh"), to_call=8.0, pot=20.0, hero_stack=88.0,
+        decision_key=("h1", "turn", 0, 20.0, 8.0)))
+    seen: list[str] = []
+
+    def fake(settings, system, user, timeout=20.0, options=None):
+        seen.append(user)
+        return {"option": "call", "reason": "x", "plan": "call one barrel"}
+
+    runner = AdviceRunner(SETTINGS, complete=fake)
+    runner.submit(flop)
+    deadline = time.monotonic() + 3.0
+    while time.monotonic() < deadline and not runner.poll():
+        time.sleep(0.02)
+    runner.submit(turn)
+    deadline = time.monotonic() + 3.0
+    while time.monotonic() < deadline and len(seen) < 2:
+        time.sleep(0.02)
+    runner.close()
+    check(len(seen) >= 2 and "My previous decision" in seen[1],
+          f"第二街应带上上一街决定：{seen[-1][-300:] if seen else ''}")
 
 
 def test_advise_rejects_unknown_option() -> None:
@@ -2274,6 +2639,12 @@ def main() -> int:
         test_prompt_preflop_has_no_strength_facts,
         test_table_dynamics_parse_and_load,
         test_table_dynamics_in_prompt,
+        test_table_note_matching_is_fuzzy_and_never_guesses,
+        test_facts_show_which_note_belongs_to_which_seat,
+        test_table_dynamics_compressed_by_profile_coverage,
+        test_table_background_handles_line_per_player_notes,
+        test_unprofiled_note_keeps_full_text_in_some_mode,
+        test_table_note_override_uses_the_actual_bettor,
         test_value_heavy_aggression_flags,
         test_value_directive_table_dynamics_override,
         test_is_aggressive_table_flags,
@@ -2286,6 +2657,14 @@ def main() -> int:
         test_explosive_pot_prompt_and_directive,
         test_advise_uses_model_choice,
         test_lean_prompt_is_compact_and_range_based,
+        test_facts_include_spot_spr_and_position,
+        test_short_stack_is_flagged_not_silently_effective,
+        test_math_gate_for_draws,
+        test_math_gate_retries_a_fold,
+        test_math_gate_records_violation_when_fold_sticks,
+        test_advice_carries_plan_and_confidence,
+        test_previous_decision_is_fed_back,
+        test_advice_runner_feeds_previous_street,
         test_advise_rejects_unknown_option,
         test_advise_fallback_without_settings,
         test_is_jev_model,

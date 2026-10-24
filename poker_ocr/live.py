@@ -1667,9 +1667,13 @@ class LiveProcessor:
                 f"{r.display_name or r.key} {r.archetype.upper()} "
                 f"{r.confidence:.2f}" for r in reads[:2])
             read_tag = f"｜对手 {brief}"
+        # 下一街计划：同一手牌下一街会回灌「My previous decision」，
+        # 实时日志里也打出来，用户能看出模型打算怎么打这手牌。
+        plan = (getattr(advice, "plan", "") or "").strip()
+        plan_tag = f"｜计划 {plan}" if plan else ""
         if not _use_ansi():
             self.log(f"  [建议] {advice.street} ⇒ {option.label}{amount}"
-                     f"｜{elapsed}{read_tag}｜{advice.reason}{tail}")
+                     f"｜{elapsed}{read_tag}｜{advice.reason}{plan_tag}{tail}")
             return
         # 模型结果只出现一次，别被滚动的识别日志淹没：
         # 留白 → 高亮横幅（街 + 动作 + 金额 + 耗时）→ 粗体理由 → 留白。
@@ -1685,6 +1689,8 @@ class LiveProcessor:
             self.log(f"{_ANSI_ADVICE_TEXT} 对手：{read_tag.lstrip('｜')}"
                      f"{_ANSI_RESET}")
         self.log(f"{_ANSI_ADVICE_TEXT} 理由：{advice.reason}{tail}{_ANSI_RESET}")
+        if plan:
+            self.log(f"{_ANSI_ADVICE_TEXT} 计划：{plan}{_ANSI_RESET}")
         self.log("")
 
     def _read_cards(self, img: np.ndarray) -> CardsResult | None:
