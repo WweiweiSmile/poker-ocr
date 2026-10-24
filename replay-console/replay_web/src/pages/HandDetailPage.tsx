@@ -67,6 +67,7 @@ function FactStrip({ decision }: { decision: ComparisonDecision }) {
     items.push({ label: '坚果', value: facts.heroIsNuts ? '是' : '否', color: facts.heroIsNuts ? 'gold' : undefined })
   }
   if (facts.tableDynamics) items.push({ label: '桌风', value: '已注入' })
+  if (facts.explosivePot) items.push({ label: '爆炸底池', value: '是', color: 'volcano' })
   if (facts.actualViolationTags?.length) {
     items.push({ label: '实际违规', value: facts.actualViolationTags.join('、'), color: 'red' })
   }
@@ -349,6 +350,11 @@ export default function HandDetailPage() {
           </Tag>
         ) : null}
         {hand.duplicate ? <Tag color="purple">内容重复</Tag> : null}
+        {data.reconstruction.bombPot ? (
+          <Tooltip title="爆炸底池：翻前没有行动，每人强制 5BB 前注">
+            <Tag color="volcano">爆炸底池</Tag>
+          </Tooltip>
+        ) : null}
       </div>
 
       <Card className="hand-hero" bordered={false}>

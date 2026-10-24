@@ -240,6 +240,11 @@ export default function HandsPage() {
           <div className="hand-cell-copy">
             <div className="hand-cell-title">
               {hand.title}
+              {hand.bombPot ? (
+                <Tooltip title="爆炸底池：翻前没有行动，每人强制 5BB 前注">
+                  <Tag className="mini-tag" color="volcano">BOMB</Tag>
+                </Tooltip>
+              ) : null}
               {hand.duplicate ? (
                 <Tooltip title={`与 ${hand.duplicateIds.filter((id) => id !== hand.id).join(', ')} 内容重复`}>
                   <Tag className="mini-tag" color="purple">重复</Tag>

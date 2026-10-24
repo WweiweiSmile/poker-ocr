@@ -112,3 +112,45 @@ def test_snapshot_json_roundtrip():
     assert restored == snap
     assert restored.hero_cards == ("Kh", "Qh")
     assert restored.opponents == snap.opponents
+
+
+def _bomb_streets(pot_start: float = 30.0) -> list[dict]:
+    return [
+        {"street": "preflop", "actions": []},
+        {"street": "flop", "potStartBb": pot_start, "actions": [
+            {"actor": "BB", "action": "check"},
+            {"actor": "hero", "action": "check"},
+        ]},
+    ]
+
+
+def test_bomb_pot_without_preflop_actions():
+    """炸弹池：翻前没有任何动作，翻牌直接发；前注 5BB/人。"""
+    analysis = analyze_hand(hand(anteBb=5.0, streets=_bomb_streets()))
+    assert analysis.bomb is True
+    assert analysis.decisions[0].snap.bomb_pot is True
+    assert analysis.decisions[0].snap.pot == 30.0
+
+
+def test_bomb_pot_detected_from_pot_start_without_flag():
+    """没有标记、前注也没读到 5：翻牌底池正好 5BB × 人数也能认出来。"""
+    analysis = analyze_hand(hand(anteBb=0.5, streets=_bomb_streets()))
+    assert analysis.bomb is True
+
+
+def test_bomb_pot_flag_wins_even_if_actions_exist():
+    analysis = analyze_hand(hand(bombPotBb=1.0))
+    assert analysis.bomb is True
+
+
+def test_normal_hand_is_not_bomb_pot():
+    analysis = analyze_hand(hand())
+    assert analysis.bomb is False
+    assert analysis.decisions[0].snap.bomb_pot is False
+
+
+def test_invalid_hand_still_marks_bomb_pot():
+    """不能重跑的手牌也要显示爆炸底池标记：翻前无动作本身就是信息。"""
+    analysis = analyze_hand(hand(heroCards="", bombPotBb=1.0))
+    assert analysis.quality == INVALID
+    assert analysis.bomb is True

@@ -33,6 +33,7 @@ export interface HandSummary {
   tableSize: number
   heroStackBb: number | null
   bombPotBb: number
+  bombPot: boolean
   result: string
   resultAmount: number | null
   potType: string | null
@@ -160,6 +161,7 @@ export interface OptionFacts {
   warnings?: string[]
   opponentsInHand?: number | null
   tableDynamics?: boolean
+  explosivePot?: boolean | null
   actualViolationTags?: string[]
   error?: string
   [key: string]: unknown

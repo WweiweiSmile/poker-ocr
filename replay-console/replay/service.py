@@ -208,6 +208,9 @@ class ReplayService:
             "tableSize": int(row.get("table_size") or 0),
             "heroStackBb": row.get("hero_stack_bb"),
             "bombPotBb": row.get("bomb_pot_bb") or 0,
+            # 列表页直接显示「爆炸底池」：翻前无动作 + 每人 5BB 也判定为 True，
+            # 不依赖导入记录里有没有 bomb_pot 标记。
+            "bombPot": bool(analysis.bomb),
             "result": row.get("result") or "unknown",
             "resultAmount": row.get("result_amount"),
             "potType": row.get("pot_type"),

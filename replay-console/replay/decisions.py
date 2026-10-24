@@ -109,10 +109,35 @@ def _players(h: dict) -> int:
 
 
 def _bomb_pot(h: dict, ante: float) -> bool:
-    if float(h.get("bombPot") or 0) > 0:
+    """爆炸底池：显式标记，或「翻前没有任何动作 + 每人 5BB 强制前注」。
+
+    手牌记录里的 `bombPotBb` 可能存的是 1（标记）也可能真是 5（金额）；
+    更可靠的信号是**翻前一条行动都没有** —— 普通牌局不可能没人行动就发翻牌。
+    最后再用「翻牌起始底池 = 5BB × 人数」兜底，兼容没带标记的旧记录。
+    """
+    flag = h.get("bombPotBb")
+    if flag is None:
+        flag = h.get("bombPot")
+    if flag is not None and float(flag) > 0:
         return True
-    has_preflop = any(s.get("street") == "preflop" for s in h.get("streets") or [])
-    return (not has_preflop) and ante >= 5
+
+    preflop_actions = [
+        action
+        for street in h.get("streets") or []
+        if street.get("street") == "preflop"
+        for action in street.get("actions") or []
+    ]
+    if preflop_actions:
+        return False
+    if ante >= 5:                       # 炸弹池的前注就是 5BB/人
+        return True
+
+    first = next((street for street in h.get("streets") or []
+                  if street.get("street") in ("flop", "turn", "river")), None)
+    pot_start = first.get("potStartBb") if first else None
+    players = _players(h)
+    return (pot_start is not None and players > 0
+            and abs(float(pot_start) - 5.0 * players) <= 0.5)
 
 
 def _normalize_streets(raw: Any) -> list[dict]:
@@ -435,10 +460,12 @@ def analyze_hand(row: dict) -> HandAnalysis:
                               hero_start=(float(h["heroStackBb"])
                                           if h.get("heroStackBb") is not None else None))
     if invalid_reasons:
+        # 即使这手牌不能重跑（缺 bb/底牌/行动线），爆炸底池标记仍要显示：
+        # 手牌库里「翻前无动作」本身就是一条有用的信息。
         return HandAnalysis(
             hand_id=hand_id, fingerprint=fingerprint, decisions=[],
             quality=INVALID, warnings=invalid_reasons, invalid_reason="；".join(invalid_reasons),
-            bomb=False, players=players,
+            bomb=_bomb_pot(h, float(h.get("anteBb") or 0.0)), players=players,
         )
     decisions, bomb, build_warnings, players = build_decisions(h)
     if not decisions:
