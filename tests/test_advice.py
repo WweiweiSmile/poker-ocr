@@ -1404,19 +1404,19 @@ def test_table_dynamics_in_prompt() -> None:
                           table_dynamics=dyn)
     check(sit.table_dynamics == dyn, "Situation 应保存动态原文")
     system, user = build_messages(sit)
-    check("## Table dynamics (player-provided, authoritative)" in user,
-          f"user facts 应含牌桌动态段：\n{user}")
+    check("## Table context (table-level; per-seat profiles outrank it)" in user,
+          f"user facts 应含桌级背景段：\n{user}")
     check(dyn in user, f"动态原文应进入提示词：\n{user}")
-    check("## Table dynamics (user-provided, when present)" in system,
-          "system 应解释如何使用桌风动态")
+    check("## Table context (user-provided, table-level, when present)" in system,
+          "system 应解释如何使用桌级背景")
     check("It overrides the default «unknown opponent» assumption" in system,
-          "system 应说明动态覆盖「未知对手」默认假设")
+          "system 应说明桌级背景覆盖「未知对手」默认假设")
 
     blank = build_situation(make_point(to_call=4.0, pot=10.0, hero_stack=90.0),
                             table_dynamics="  \n ")
     check(blank.table_dynamics is None, "空白动态应归一成 None")
     _, plain_user = build_messages(blank)
-    check("## Table dynamics" not in plain_user,
+    check("## Table context" not in plain_user,
           f"没有动态时不该多出这段：\n{plain_user}")
 
 
@@ -1430,167 +1430,10 @@ def test_value_heavy_aggression_flags() -> None:
         check(not value_heavy_aggression(text), f"不该判为价值线：{text}")
 
 
-def test_table_note_matching_is_fuzzy_and_never_guesses() -> None:
-    """昵称→段落按当前座位名匹配：全角/大小写/OCR 截断能对上，名单外不猜。"""
-    from poker_ocr.table_dynamics import (match_table_notes,
-                                          normalize_player_name,
-                                          split_table_notes)
-
-    check(normalize_player_name("  Ｆather TM ") == "fathertm",
-          f"归一化应去空格/全角/大小写：{normalize_player_name('  Ｆather TM ')}")
-
-    text = ("A. 松浪/松凶（芒果与西米、葡萄牙h）：open 8–11BB，翻后高频下注。\n\n"
-            "B. 松弱/跟注站（FatherTM、好运常在ok）：翻前很少加注。")
-    got = match_table_notes(text, ["芒果西米", "fathertm", "葡萄牙", "新来的"])
-    check("芒果西米" in got and got["芒果西米"].block.startswith("A."),
-          f"少一个字的中文名应匹配到 A 段：{got.get('芒果西米')}")
-    check(got["芒果西米"].matched == "芒果与西米", "应记录命中的原写法")
-    check("fathertm" in got and got["fathertm"].block.startswith("B."),
-          f"大小写不同也应匹配：{got.get('fathertm')}")
-    check("葡萄牙" in got, f"OCR 截断的拉丁/中文混合名应匹配：{got.get('葡萄牙')}")
-    check("新来的" not in got, "名单外的名字不能硬塞一个段落")
-
-    # 一行一个玩家的写法也要能拆成独立段落
-    lines = split_table_notes("老王: 紧凶\n小李: 松弱")
-    check(len(lines) == 2, f"一行一个玩家应按行拆：{lines}")
-
-
-def test_facts_show_which_note_belongs_to_which_seat() -> None:
-    """事实块必须写清「这个座位 = 哪段笔记」，并把名单外的人标成 unknown。"""
-    from poker_ocr.hand_track import OpponentSnapshot
-
-    dyn = ("A. 松浪/松凶（芒果与西米）：open 8–11BB，翻后高频下注。\n\n"
-           "B. 松弱/跟注站（FatherTM）：翻前很少加注。")
-    point = make_point(opponents=(
-        OpponentSnapshot("a", "芒果西米", "CO", 100.0, 0.0, False),
-        OpponentSnapshot("b", "新来的", "BB", 100.0, 0.0, False)))
-    user = render_hand_facts(build_situation(point, table_dynamics=dyn))
-    check("## Table notes by seat" in user, f"事实里应有座位笔记：\n{user}")
-    check("CO 芒果西米 (note name: 芒果与西米)" in user,
-          f"模糊命中应标注原写法：\n{user}")
-    check("Not in the table notes" in user and "BB 新来的" in user,
-          f"名单外的人必须显式标 unknown：\n{user}")
-
-    # 整桌换人、名单全是旧人：不能把旧标签当整桌默认套上去
-    stale = render_hand_facts(build_situation(
-        make_point(),
-        table_dynamics="A. 松浪/松凶（旧人甲、旧人乙）：很爱开火。"))
-    check("do NOT apply them to this hand" in stale,
-          f"名单全不匹配时应提示不要套旧标签：\n{stale}")
-
-
-def test_table_dynamics_compressed_by_profile_coverage() -> None:
-    """画像覆盖全桌时不再注入整桌长文；部分覆盖降级为 background。"""
-    from poker_ocr.hand_track import OpponentSnapshot
-    from poker_ocr.opponent_profile import OpponentRead
-
-    dyn = ("A. 松浪/松凶（芒果与西米）：open 8–11BB，翻后高频下注。\n\n"
-           "B. 松弱/跟注站（FatherTM）：翻前很少加注，翻后多跟注。")
-    read = OpponentRead(
-        seat_id="a", key="FatherTM", display_name="FatherTM",
-        archetype="station", confidence=0.8, n=20, vpip=45.0, pfr=5.0,
-        af=1.2, source="auto", note="", gate="read")
-    point = make_point(
-        to_call=4.0, pot=10.0, hero_stack=90.0,
-        opponents=(OpponentSnapshot("a", "FatherTM", "BB", 100.0, 4.0,
-                                    False),))
-    covered = build_situation(point, table_dynamics=dyn,
-                              opponent_reads=[read])
-    user = render_hand_facts(covered)
-    check("## Table summary" in user, f"全覆盖应只给摘要：\n{user}")
-    check("## Table dynamics (player-provided" not in user,
-          f"全覆盖不该再注入权威整桌段：\n{user}")
-    check("FatherTM" in user and "STATION" in user,
-          f"画像本身仍要在事实里：\n{user}")
-
-    # 只覆盖一个、另一个新面孔：每段笔记只注入一次
-    two = make_point(
-        to_call=4.0, pot=10.0, hero_stack=90.0,
-        opponents=(OpponentSnapshot("a", "FatherTM", "BB", 100.0, 4.0, False),
-                   OpponentSnapshot("b", "新来的", "CO", 100.0, 0.0, False)))
-    partial = build_situation(two, table_dynamics=dyn,
-                              opponent_reads=[read])
-    user2 = render_hand_facts(partial)
-    check("## Table background" in user2, f"部分覆盖应降级为 background：\n{user2}")
-    check(dyn not in user2, f"已由座位笔记承载的段落不该再整段重复：\n{user2}")
-    check("Not in the table notes" in user2 and "新来的" in user2,
-          f"新面孔仍要标 unknown：\n{user2}")
-    check("A. 松浪" not in user2,
-         f"不在本手的玩家笔记不该注入：\n{user2}")
-    check("All player-specific notes for this hand are under" in user2,
-          f"没有桌级背景时应给一句说明：\n{user2}")
-
-    # 有桌级段落时：只注入通用部分，玩家段落仍留在座位笔记里
-    dyn_intro = "当前是混合桌，至少三类玩家：\n\n" + dyn
-    partial2 = build_situation(two, table_dynamics=dyn_intro,
-                               opponent_reads=[read])
-    user2b = render_hand_facts(partial2)
-    background = user2b.split("## Table background", 1)[1].split("## Options", 1)[0]
-    check("当前是混合桌" in background, f"桌级背景应保留：\n{background}")
-    check("A. 松浪" not in background and "B. 松弱" not in background,
-          f"玩家段落不该进桌级背景：\n{background}")
-
-    # 一个可靠画像都没有：保持原文权威口径（新桌/新人的常态）
-    plain = build_situation(two, table_dynamics=dyn)
-    user3 = render_hand_facts(plain)
-    check("## Table dynamics (player-provided, authoritative)" in user3,
-          f"无画像时应保持权威口径：\n{user3}")
-    check("group «" in user3, f"无画像时座位笔记只做指针：\n{user3}")
-    check(user3.count("翻后多跟注") == 1,
-          f"正文只该注入一次（座位笔记不再重复）：\n{user3}")
-
-
-def test_table_background_handles_line_per_player_notes() -> None:
-    """`名字: 描述` 写法没有分组标题，也要把玩家段落从桌级背景里排除。"""
-    from poker_ocr.hand_track import OpponentSnapshot
-    from poker_ocr.opponent_profile import OpponentRead
-
-    dyn = ("老王: 松弱跟注站，很少加注\n"
-           "小李: 松浪，爱开火\n\n"
-           "桌级：抽水重，别打薄价值")
-    read = OpponentRead(
-        seat_id="a", key="老王", display_name="老王", archetype="station",
-        confidence=0.8, n=20, vpip=45.0, pfr=5.0, af=1.2, source="auto",
-        note="", gate="read")
-    point = make_point(
-        to_call=4.0, pot=10.0, hero_stack=90.0,
-        opponents=(OpponentSnapshot("a", "老王", "BB", 100.0, 4.0, False),
-                   OpponentSnapshot("b", "小李", "CO", 100.0, 0.0, False)))
-    user = render_hand_facts(build_situation(point, table_dynamics=dyn,
-                                            opponent_reads=[read]))
-    background = user.split("## Table background", 1)[1].split("## Options", 1)[0]
-    check("抽水重" in background, f"桌级段落应保留：\n{background}")
-    check("老王" not in background and "小李" not in background,
-          f"玩家段落不该进桌级背景：\n{background}")
-    check("松浪，爱开火" in user, f"未画像玩家的笔记仍要进座位笔记：\n{user}")
-
-
-def test_unprofiled_note_keeps_full_text_in_some_mode() -> None:
-    """部分覆盖时，没画像的座位笔记要拿全；有画像的只需要定性补充。"""
-    from poker_ocr.hand_track import OpponentSnapshot
-    from poker_ocr.opponent_profile import OpponentRead
-
-    long_note = ("A. 松浪/松凶（芒果与西米）：" + "很爱开火；" * 50
-                 + "结尾标记XYZ")
-    dyn = long_note + "\n\nB. 松弱/跟注站（FatherTM）：很少加注。"
-    read = OpponentRead(
-        seat_id="a", key="FatherTM", display_name="FatherTM",
-        archetype="station", confidence=0.8, n=20, vpip=45.0, pfr=5.0,
-        af=1.2, source="auto", note="", gate="read")
-    point = make_point(
-        to_call=4.0, pot=10.0, hero_stack=90.0,
-        opponents=(OpponentSnapshot("a", "FatherTM", "BB", 100.0, 4.0, False),
-                   OpponentSnapshot("b", "芒果西米", "CO", 100.0, 0.0, False)))
-    user = render_hand_facts(build_situation(point, table_dynamics=dyn,
-                                             opponent_reads=[read]))
-    check("结尾标记XYZ" in user,
-          f"没画像的对手笔记不该被截断：\n{user[-800:]}")
-    check("note name: 芒果与西米" in user, "模糊命中的原写法仍要标注")
-
-
-def test_table_note_override_uses_the_actual_bettor() -> None:
-    """混合桌：跟注站的转牌下注按价值线弃，松浪的下注按抓诈跟。"""
+def test_table_override_uses_the_actual_bettor_profile() -> None:
+    """混合桌：跟注站画像的转牌下注按价值线弃，松浪画像的下注按抓诈跟。"""
     from poker_ocr.hand_track import ActionRecord, OpponentSnapshot, StreetRecord
+    from poker_ocr.opponent_profile import OpponentRead
 
     def h8(bettor: str, seat: str):
         return make_point(
@@ -1607,15 +1450,21 @@ def test_table_note_override_uses_the_actual_bettor() -> None:
                                       False, False),))),
             players_dealt=9)
 
+    def read(seat: str, name: str, archetype: str) -> OpponentRead:
+        return OpponentRead(seat, name, name, archetype, 0.8, 20,
+                            45.0, 5.0, 1.2, "auto", "", "read")
+
+    reads = [read("lowR", "好运常在ok", "station"),
+             read("midR", "芒果与西米", "lag")]
     station = value_directive(build_situation(
-        h8("好运常在ok", "lowR"), table_dynamics=MIXED_TABLE))
+        h8("好运常在ok", "lowR"), opponent_reads=reads))
     check("TABLE DYNAMICS OVERRIDE" in (station or "") and "FOLD" in (station or ""),
-          f"跟注站的下注应按价值线弃：{station}")
+          f"跟注站画像的下注应按价值线弃：{station}")
 
     lag = value_directive(build_situation(
-        h8("芒果与西米", "midR"), table_dynamics=MIXED_TABLE))
+        h8("芒果与西米", "midR"), opponent_reads=reads))
     check("AGGRESSIVE TABLE" in (lag or "") and "BLUFF-CATCH" in (lag or ""),
-          f"松浪的下注应按抓诈跟：{lag}")
+          f"松浪画像的下注应按抓诈跟：{lag}")
 
 
 def test_value_directive_table_dynamics_override() -> None:
@@ -1732,7 +1581,7 @@ def test_lean_prompt_is_per_opponent() -> None:
           "lean 应明确不要给整桌贴一个标签")
     check("Which better hands RAISE me" in system,
           "lean 的决策提问应包含「谁会加注我」")
-    check("never average it into" in system,
+    check("never average individuals into" in system,
           "lean 应说明混合桌不能平均成松弱")
     check("LAG/maniac (loose-maniac/loose-aggressive)" in system,
           "lean 应点名松浪/松凶的处理方式")
@@ -2639,12 +2488,7 @@ def main() -> int:
         test_prompt_preflop_has_no_strength_facts,
         test_table_dynamics_parse_and_load,
         test_table_dynamics_in_prompt,
-        test_table_note_matching_is_fuzzy_and_never_guesses,
-        test_facts_show_which_note_belongs_to_which_seat,
-        test_table_dynamics_compressed_by_profile_coverage,
-        test_table_background_handles_line_per_player_notes,
-        test_unprofiled_note_keeps_full_text_in_some_mode,
-        test_table_note_override_uses_the_actual_bettor,
+        test_table_override_uses_the_actual_bettor_profile,
         test_value_heavy_aggression_flags,
         test_value_directive_table_dynamics_override,
         test_is_aggressive_table_flags,

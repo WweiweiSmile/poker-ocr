@@ -45,9 +45,7 @@ from .opponent_profile import (AGGRESSIVE_ARCHETYPES, PASSIVE_ARCHETYPES,
                                OpponentRead)
 from .positions import BB, POSITIONS_BY_TABLE_SIZE, SB
 from .preflop_ranges import chart_text, range_verdict
-from .table_dynamics import (NoteMatch, is_aggressive_table, is_loose_table,
-                             match_table_notes, named_players,
-                             normalize_player_name, split_table_notes,
+from .table_dynamics import (is_aggressive_table, is_loose_table,
                              value_heavy_aggression)
 
 # ─────────────────────────── 选项 ───────────────────────────
@@ -864,22 +862,12 @@ def decision_read(sit: Situation) -> OpponentRead | None:
 def _aggressive_context(sit: Situation) -> bool:
     """本决策是否按「松浪/松凶在局」处理。
 
-    画像 > 座位笔记 > 整桌桌风。按座位匹配到的笔记比整桌关键词准：
-    混合桌里只要有一个 LAG，整桌关键词就会让中等成牌不敢拿价值。
+    画像优先；没有可用画像时才用整桌关键词。逐座位画像是按人统计的，
+    比「整桌有一个 LAG」这种桌级判断准。
     """
     read = decision_read(sit)
     if read is not None:
         return read.archetype in AGGRESSIVE_ARCHETYPES
-    notes = match_seat_notes(sit)
-    if notes:
-        seat = last_aggressor_seat(sit.snap)
-        if seat is None:
-            # 行动线缺失（OCR 漏了那一帧）或没人下注：只要在座有松浪，
-            # 就不能对中等牌做薄价值 —— 无法确认这条注不是他打的。
-            return any(is_aggressive_table(n.block) for n in notes.values())
-        note = notes.get(seat)
-        # 名单里没有这个下注者 → 按未知对手，不套别人的松凶标签
-        return bool(note and is_aggressive_table(note.block))
     return sit.aggressive_table
 
 
@@ -887,8 +875,7 @@ def _passive_value_line(sit: Situation) -> bool:
     """本街的多街 aggression 是否该读成价值线。
 
     画像优先：本街下注者若是可信的 station/nit，他的大注/连续下注是价值；
-    若是 LAG/maniac，则不是。没有可用画像时用**这个下注者的座位笔记**，
-    而不是整桌关键词——混合桌里「松弱」那一段不能套到 LAG 身上。
+    若是 LAG/maniac，则不是。没有可用画像时才退回桌级关键词。
     只在转牌/河牌、面对下注时触发；翻牌的单条街下注不在此列——那时的价格
     通常还够用，过早弃掉 JJ 这类牌会变成另一种漏洞。
     """
@@ -898,15 +885,6 @@ def _passive_value_line(sit: Situation) -> bool:
     read = decision_read(sit)
     if read is not None:
         return read.archetype in PASSIVE_ARCHETYPES
-    notes = match_seat_notes(sit)
-    if notes:
-        seat = last_aggressor_seat(sit.snap)
-        if seat is None:
-            # 行动线缺失：退回整桌判据，不能凭「另一个座位是跟注站」就弃牌
-            return value_heavy_aggression(sit.table_dynamics)
-        note = notes.get(seat)
-        # 名单里没有这个下注者：按未知对手，不套别人的价值线
-        return bool(note and value_heavy_aggression(note.block))
     return value_heavy_aggression(sit.table_dynamics)
 
 
@@ -1428,145 +1406,6 @@ def render_opponent_reads(sit: Situation) -> list[str]:
     return lines
 
 
-def match_seat_notes(sit: Situation) -> dict[str, NoteMatch]:
-    """本手在局对手里，能在 `.table_dy` 里按名字匹配到笔记的座位。
-
-    每次决策现算，不存映射：入桌的人随时会换，缓存下来的「昵称→座位」
-    一定会过期。名单里没有的人不会出现在返回值里。
-    """
-    names = {o.seat_id: o.name for o in sit.snap.opponents
-             if not o.folded and o.name}
-    if not sit.table_dynamics or not names:
-        return {}
-    matches = match_table_notes(sit.table_dynamics, names.values())
-    return {seat: matches[name] for seat, name in names.items()
-            if name in matches}
-
-
-def table_read_coverage(sit: Situation) -> str:
-    """本手对手被**可靠画像**覆盖的程度：all / some / none。
-
-    只认 read/stable 与人工 pin。tentative 和「`.table_dy` 先验」不算：
-    它们本来就是需要桌风解释的东西，不能让桌风提前退场。
-    """
-    live = {o.seat_id for o in sit.snap.opponents if not o.folded}
-    if not live:
-        return "none"
-    covered = live & {r.seat_id for r in _reliable_reads(sit) if r.seat_id}
-    if not covered:
-        return "none"
-    return "all" if live <= covered else "some"
-
-
-# 单个座位注入的笔记长度上限。有可靠画像的座位只把笔记当定性补充（200 字），
-# 没有画像的座位笔记就是主读（420 字），不能让关键建议被截掉。
-_TABLE_NOTE_CHARS = 200
-_TABLE_NOTE_CHARS_PRIMARY = 420
-# 桌级背景（与任何名单玩家无关的段落）的总上限。
-_TABLE_BACKGROUND_CHARS = 600
-
-
-def render_table_notes(sit: Situation) -> list[str]:
-    """把「这个座位对应哪段桌风笔记」直接写进事实块。
-
-    模型最容易犯的错，是拿整桌默认标签套到一个新来的身上（「桌上都是
-    跟注站，所以他也跟」）。名单里没有的名字必须显式标成 unknown。
-    """
-    live = [o for o in sit.snap.opponents if not o.folded and o.name]
-    if not sit.table_dynamics or not live:
-        return []
-    matches = match_table_notes(sit.table_dynamics, [o.name for o in live])
-    reliable = {r.seat_id for r in _reliable_reads(sit) if r.seat_id}
-    coverage = table_read_coverage(sit)
-    groups: dict[str, list[str]] = {}
-    primary: set[str] = set()
-    unknown: list[str] = []
-    for opponent in live:
-        label = f"{opponent.position or opponent.seat_id} {opponent.name}"
-        note = matches.get(opponent.name)
-        if note is None:
-            unknown.append(label)
-            continue
-        if (normalize_player_name(note.matched)
-                != normalize_player_name(opponent.name)):
-            # 让复盘能看出是模糊匹配命中的，而不是真同名
-            label += f" (note name: {note.matched})"
-        if opponent.seat_id not in reliable:
-            primary.add(note.block)
-        groups.setdefault(note.block, []).append(label)
-
-    lines = ["## Table notes by seat (names matched against «Table dynamics»)"]
-    for block, seats in groups.items():
-        if coverage == "none":
-            # 整桌原文紧接着会完整注入一次，这里只做「谁对应哪段」的指针，
-            # 不再重复正文 —— 新桌/新人是常态，9 个座位重复 9 遍很贵。
-            # 只保留「分组标记 + 名字列表」这一段做指针。取前 140 字里
-            # 最后一个冒号：`C. 混合：...（伯克利丁真、...）：` 这种名字在
-            # 第二个冒号前的写法也能保住名字。
-            header = block.splitlines()[0].strip()
-            window = header[:140]
-            cut = max(window.rfind("："), window.rfind(":"))
-            header = window[:cut + 1] if cut >= 0 else header[:60]
-            if len(header) > 80:
-                header = header[:80].rstrip() + "…"
-            lines.append(f"- {' / '.join(seats)}: group «{header}» "
-                         f"— full text under «Table dynamics» below")
-            continue
-        text = " ".join(block.split())
-        # some/all 档整桌原文被压缩或省略，没画像的座位必须拿全；
-        # 有画像的座位只把笔记当定性补充。
-        cap = (_TABLE_NOTE_CHARS_PRIMARY if block in primary
-               else _TABLE_NOTE_CHARS)
-        if len(text) > cap:
-            text = text[:cap].rstrip() + "…"
-        lines.append(f"- {' / '.join(seats)}: {text}")
-    if unknown:
-        lines.append("- Not in the table notes (treat as UNKNOWN, not as the "
-                     "table's majority type): " + ", ".join(unknown))
-    if not groups:
-        lines.append("- No current seat name appears in the notes. If the notes list "
-                     "players (names in brackets), do NOT apply them to this hand — "
-                     "treat everyone as UNKNOWN; if they describe the table in "
-                     "general, use them as table-wide context.")
-    return lines
-
-
-def render_table_background(sit: Situation) -> list[str]:
-    """`some` 覆盖时，只注入「不是针对某个玩家」的段落。
-
-    每个段落只出现一次：要么在「Table notes by seat」，要么在这里。
-    针对**不在本手**的玩家的段落也跳过 —— 这手用不上，还会把旧桌风
-    带回来。分组标题里的名字由 `named_players()` 识别，不依赖类型标签
-    （`C. 混合：...` 这种没有统一标签的分组也能认出来）。
-    """
-    text = sit.table_dynamics or ""
-    if not text:
-        return []
-    known = named_players(text)
-    live_names = [o.name for o in sit.snap.opponents
-                  if not o.folded and o.name]
-    # 两种「玩家段落」都要排除：分组标题里列了名字的，以及被在座名字匹配到的
-    # （`名字: 描述` 一行一个玩家的写法没有分组标题）。
-    matched_blocks = {m.block for m in
-                      match_table_notes(text, live_names).values()}
-    general = [block for block in split_table_notes(text)
-               if block not in matched_blocks
-               and not any(name in normalize_player_name(block)
-                           for name in known)]
-    out: list[str] = []
-    used = 0
-    for block in general:
-        body = " ".join(block.split())
-        room = _TABLE_BACKGROUND_CHARS - used
-        if room <= 0:
-            break
-        if len(body) > room:
-            body = body[:room].rstrip() + "…"
-        out.append(body)
-        used += len(body)
-    return out
-
-
 def render_hand_facts(sit: Situation) -> str:
     """把当前局面写成紧凑的手牌历史式文本 —— 模型对这套写法先验最强。"""
     snap = sit.snap
@@ -1687,7 +1526,6 @@ def render_hand_facts(sit: Situation) -> str:
                 f"{effective / to_call:.0f}:1; flopping a set is 11.8% (1 in 8.5), "
                 f"so 15:1 or better makes set-mining profitable (10:1 with antes).")
         lines.extend(render_opponent_reads(sit))
-        lines.extend(render_table_notes(sit))
     else:
         tier_en = _TIER_EN.get(sit.hand_tier, sit.hand_tier or "unknown")
         lines.append(f"My hand strength: {sit.hand_label_en or 'unreadable'}"
@@ -1751,7 +1589,6 @@ def render_hand_facts(sit: Situation) -> str:
             lines.append(f"Opponent strength from actions: {o['label']} ({o['reason']})"
                          f"{suffix}")
         lines.extend(render_opponent_reads(sit))
-        lines.extend(render_table_notes(sit))
         if aggressive:
             lines.append(
                 "Table read: value-light aggression (LAG/maniac present) — their bets "
@@ -1798,31 +1635,12 @@ def render_hand_facts(sit: Situation) -> str:
                      "reverse a line you chose last street without a reason.")
 
     if sit.table_dynamics:
-        # 人工维护的整桌倾向。放在选项之前：模型对「最后看到的几条事实」
-        # 更敏感，而且它不是本手牌的计算结果，不该混进 Computed facts。
-        #
-        # 注入深度按**本手对手的画像覆盖**分三档：全部有可靠画像时，整桌
-        # 长文只会和「Opponent reads」打架；部分覆盖时降级成 background；
-        # 一个都没有时才是权威先验（新桌/新人的常态）。
-        coverage = table_read_coverage(sit)
+        # 人工维护的**桌级**倾向（不含玩家名字/单人风格）。放在选项之前：
+        # 模型对「最后看到的几条事实」更敏感，而且它不是本手牌的计算结果。
+        # 逐座位画像/人工 pin 永远优先于这段桌级描述。
         lines.append("")
-        if coverage == "all":
-            lines.append("## Table summary")
-            lines.append("Every opponent in this hand has a reliable per-seat "
-                         "profile — use «Opponent reads» and «Table notes by seat»; "
-                         "do not fall back to a table-wide label.")
-        elif coverage == "some":
-            lines.append("## Table background (general notes — a reliable profile "
-                         "or a matched seat note outranks this)")
-            background = render_table_background(sit)
-            if background:
-                lines.extend(background)
-            else:
-                lines.append("All player-specific notes for this hand are under "
-                             "«Table notes by seat»; no separate table-wide context.")
-        else:
-            lines.append("## Table dynamics (player-provided, authoritative)")
-            lines.append(sit.table_dynamics)
+        lines.append("## Table context (table-level; per-seat profiles outrank it)")
+        lines.append(sit.table_dynamics)
 
     lines.append("")
     lines.append("## Options (pick exactly one id)")
@@ -2001,12 +1819,11 @@ You are a Texas Hold'em cash-game advisor working in real time. Hero has a few s
 
 ## Priority (highest first)
 1. Legal actions and computed math (hand rank, equity, pot odds, SPR) — never violate.
-2. A reliable per-seat read — «Opponent reads» or a manual pin — outranks every table-wide label.
-3. The matched «Table notes by seat» — this opponent's own notes.
-4. Table-wide notes, the chart and generic heuristics — priors and defaults; never override 1–3.
+2. A reliable per-seat read — «Opponent reads» or a manual pin — outranks every table-wide statement.
+3. Table-wide context, the chart and generic heuristics — priors and defaults; never override 1–2.
 
 ## Who you are playing
-The pool is **mixed** — do not project one label onto the whole table. Classify each opponent from «Opponent reads» first, then «Table dynamics», then the action line; «tentative» is a hint. With no notes, treat the opponent as unknown, not as a station.
+The pool is **mixed** — do not project one label onto the whole table. Classify each opponent from «Opponent reads» (per-seat stats or a manual pin); «tentative» is a hint. With no read, treat the opponent as unknown, not as a station. «Table context» is table-level only — it never names individual players.
 - station: calls wide, raises little; their bet/raise is value → thin value, size up, fold marginal hands to barrels.
 - LAG/maniac (loose-maniac/loose-aggressive): opens/3-bets large, barrels wide, overbets; their bet is NOT automatically value → do not thin-value OOP; check-call, let them barrel, do not bet-fold; bluff-catch more.
 - passive preflop + aggressive postflop: postflop bets are not automatically value → bluff-catching spot.
@@ -2079,10 +1896,8 @@ At 6-8 handed, widen each early-position range by roughly one seat. Below ~25BB 
 ## Explosive pot
 «Explosive pot: YES» (bomb banner, or 5BB per player) means wide ranges and many two pair/trips. Top pair/overpair is a MEDIUM hand — pot-control it.
 
-## Table dynamics (user-provided, when present)
-A table-wide note outranks the chart and generic heuristics; those never override table dynamics or computed math. A reliable per-seat profile or matched seat note outranks the table-wide text. **The table may be mixed:** apply the note per opponent/seat; never average it into "loose-passive". It overrides the default «unknown opponent» assumption, never computed hand strength or pot odds.
-- «Table notes by seat» in the facts is the program's name match: trust it. A seat listed as "not in the table notes" is UNKNOWN — do not give it the table's majority type.
-- When the facts say «Table summary», every opponent in the hand has a reliable profile: use the per-seat reads, not a table-wide label.
+## Table context (user-provided, table-level, when present)
+Table-wide context outranks the chart and generic heuristics; those never override table dynamics or computed math. A reliable per-seat profile or a manual pin outranks it. **The table may be mixed:** apply the note to the table's overall tendency; never average individuals into "loose-passive". It overrides the default «unknown opponent» assumption, never computed hand strength or pot odds.
 - station: value-bet thin/big; respect raises.
 - LAG/maniac: never thin-value or bet-fold a medium hand — check-call and let them barrel.
 - passive preflop + aggressive postflop: postflop bets are bluff-catches, not value.

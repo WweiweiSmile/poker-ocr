@@ -27,7 +27,7 @@ from poker_ocr.hand_track import (  # noqa: E402
 )
 from poker_ocr.opponent_profile import (  # noqa: E402
     CLASSIFIER_VERSION, HandObservation, OpponentRead, OpponentStats, ProfileStore,
-    classify, normalize_name, observations_from_hand, parse_table_dynamics_priors,
+    classify, normalize_name, observations_from_hand,
     pool_key_from_blinds,
 )
 from poker_ocr.parse import Blinds  # noqa: E402
@@ -431,21 +431,6 @@ def test_observations_from_hand() -> None:
           f"翻前弃牌的人应有机会但无 VPIP、没看翻牌：{c}")
 
 
-def test_table_dynamics_priors() -> None:
-    text = (
-        "当前是混合桌：\n"
-        "A. 松浪/松凶（芒果与西米、葡萄牙h）：open 8–11BB\n"
-        "B. 松弱/跟注站（FatherTM、好运常在ok）：很少加注\n"
-    )
-    priors = parse_table_dynamics_priors(text)
-    check(priors.get("芒果与西米") == "maniac",
-          f"松浪/松凶组应解析成 maniac：{priors}")
-    check(priors.get("葡萄牙h") == "maniac", f"同组第二个名字：{priors}")
-    check(priors.get("FatherTM") == "station", f"跟注站组：{priors}")
-    check(priors.get("好运常在ok") == "station", f"跟注站组第二个名字：{priors}")
-    check("当前是混合桌" not in priors, "标题不应被当成玩家名")
-
-
 # ─────────────────────────── 分类与门控 ───────────────────────────
 
 def _stats(name: str, **kw) -> OpponentStats:
@@ -569,15 +554,13 @@ def test_store_update_dedupe_and_persistence() -> None:
               "clear 后同一 hand_uid 应能重新计入")
 
 
-def test_pin_beats_auto_and_prior() -> None:
+def test_pin_beats_auto() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         store = ProfileStore(Path(tmp) / "p.json", "0.5/1-9max")
-        store.set_table_dynamics("A. 松弱/跟注站（芒果与西米）：很少加注")
         for i in range(20):
             store.update_hand(_lag_hand(f"s01-h{i}"))
         auto = store.read_one("芒果与西米")
-        check(auto.source == "auto",
-              f"高置信自动画像应优先于 .table_dy 先验：{auto.source}")
+        check(auto.source == "auto", f"20 手后应是自动画像：{auto.source}")
         check(auto.archetype in ("lag", "maniac"),
               f"自动画像应是松凶/松浪：{auto.archetype}")
         store.pin("芒果与西米", "station")
@@ -591,16 +574,15 @@ def test_pin_beats_auto_and_prior() -> None:
               "清除 pin 后应回到自动结果")
 
 
-def test_prior_used_when_sample_small() -> None:
+def test_small_sample_stays_unknown() -> None:
+    """没有 pin 时 n<8 只能是 unknown：风格不再从 `.table_dy` 文本推断。"""
     with tempfile.TemporaryDirectory() as tmp:
         store = ProfileStore(Path(tmp) / "p.json", "0.5/1-9max")
         store.update_hand(_lag_hand("s01-h1"))
-        store.set_table_dynamics("A. 松浪/松凶（芒果与西米）：open 8-11BB")
         read = store.read_one("芒果与西米")
-        check(read.source == "prior" and read.archetype == "maniac",
-              f"n<8 时应用 .table_dy 先验：{read}")
-        check(read.gate == "tentative",
-              f"先验只能是 tentative，不能改硬指令：{read.gate}")
+        check(read.source == "unknown" and read.archetype == "unknown",
+              f"n<8 应是 unknown：{read}")
+        check(read.gate == "unknown", f"gate 也应是 unknown：{read.gate}")
 
 
 def test_temp_key_merged_when_name_recovered() -> None:
@@ -773,11 +755,10 @@ def run() -> int:
         test_bomb_ante_without_banner_is_detected,
         test_normalize_and_pool_key,
         test_observations_from_hand,
-        test_table_dynamics_priors,
         test_classifier_archetypes_and_gates,
         test_store_update_dedupe_and_persistence,
-        test_pin_beats_auto_and_prior,
-        test_prior_used_when_sample_small,
+        test_pin_beats_auto,
+        test_small_sample_stays_unknown,
         test_temp_key_merged_when_name_recovered,
         test_pool_keys_are_separated,
         test_advice_uses_per_opponent_read,

@@ -889,94 +889,6 @@ def classify(stats: OpponentStats) -> OpponentRead:
     )
 
 
-# ─────────────────────────── `.table_dy` 先验 ───────────────────────────
-
-_PRIOR_LABELS = (
-    ("松浪", "maniac"), ("maniac", "maniac"), ("松凶", "lag"),
-    ("loose-aggressive", "lag"), ("loose aggressive", "lag"),
-    ("跟注站", "station"), ("松弱", "station"), ("calling station", "station"),
-    ("紧弱", "nit"), ("nit", "nit"), ("紧凶", "tag"), ("tag", "tag"),
-)
-_PRIOR_NOISE = (
-    "翻前", "翻后", "下注", "加注", "跟注", "弃牌", "价值", "诈唬", "尺度",
-    "open", "bet", "raise", "call", "fold", "3bet", "all-in", "allin",
-    "这类", "他们", "不要", "建议", "玩家", "我们", "当前", "桌上",
-)
-
-
-def _prior_label(text: str) -> str | None:
-    lowered = text.lower()
-    for word, archetype in _PRIOR_LABELS:
-        if word in lowered:
-            return archetype
-    return None
-
-
-def _clean_prior_name(token: str) -> str | None:
-    token = token.strip().strip("、,，;；:：()（）[]【】-•* \t")
-    token = re.sub(r"^[A-Za-z一二三四五六七八九十0-9]+[.、)]\s*", "", token)
-    token = token.strip()
-    if not token or len(token) > 20:
-        return None
-    lowered = token.lower()
-    if any(noise in lowered for noise in _PRIOR_NOISE):
-        return None
-    # 纯数字/标点/单字不是名字
-    if len(token) < 2 or not any(ch.isalnum() for ch in token):
-        return None
-    return normalize_name(token)
-
-
-def parse_table_dynamics_priors(text: str | None) -> dict[str, str]:
-    """把 `.table_dy` 里「按名字列出的类型」解析成 name → archetype 先验。
-
-    只做很浅的结构解析：识别到类型关键词后，取同一行括号里/冒号前、以及
-    紧跟其后的分点行里的名字。解析不出名字不会报错（先验只是加分项）。
-    """
-    if not text:
-        return {}
-    priors: dict[str, str] = {}
-    current: str | None = None
-    for raw in str(text).splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        # 建议性描述（「不能按松弱=只会跟处理」「对这类人…」）里的类型词
-        # 不是新分组，别把整句当成名字。
-        if line.lstrip("-•* ").startswith(("不能", "不要", "对这类",
-                                            "这类", "他们")):
-            continue
-        label = _prior_label(line)
-        if label is not None:
-            current = label
-            # A. 松浪/松凶（名字、名字）：...
-            for group in re.findall(r"[（(]([^）)]*)[）)]", line):
-                for token in re.split(r"[、,，/|]+", group):
-                    name = _clean_prior_name(token)
-                    if name:
-                        priors[name] = label
-            # 名字在类型前面：BTN 老王紧凶，...
-            before = re.split(r"松浪|松凶|松弱|紧弱|紧凶|跟注站|maniac|lag|station|nit|tag",
-                              line, maxsplit=1, flags=re.IGNORECASE)[0]
-            for token in re.split(r"[、,，:：()（）]+", before):
-                name = _clean_prior_name(token)
-                if name:
-                    priors[name] = label
-            continue
-        if current is None:
-            continue
-        # 类型小标题后的分点行：只收名字，遇到建议性描述就停
-        if any(word in line for word in ("这类", "建议", "翻前", "翻后",
-                                         "不要", "价值", "下注", "加注")):
-            continue
-        body = line.lstrip("-•* ").split("：", 1)[0].split(":", 1)[0]
-        for token in re.split(r"[、,，/|]+", body):
-            name = _clean_prior_name(token)
-            if name:
-                priors[name] = current
-    return priors
-
-
 # ─────────────────────────── 存储 ───────────────────────────
 
 class ProfileStore:
@@ -1003,7 +915,6 @@ class ProfileStore:
         self.load_error: str | None = None
         self.last_save_error: str | None = None
         self.classifier_version = CLASSIFIER_VERSION
-        self._priors: dict[str, str] = {}
         self._dirty = False
         self._updates = 0
         self._last_save = 0.0
@@ -1175,15 +1086,7 @@ class ProfileStore:
             target.manual_pin = old.manual_pin
             target.pinned_at = old.pinned_at
 
-    # ── 先验/pin ──
-    def set_table_dynamics(self, text: str | None) -> dict[str, str]:
-        self._priors = parse_table_dynamics_priors(text)
-        return self._priors
-
-    @property
-    def priors(self) -> dict[str, str]:
-        return dict(self._priors)
-
+    # ── pin ──
     def _resolve_key(self, name: str | None) -> str | None:
         normalized = normalize_name(name)
         if not normalized:
@@ -1197,17 +1100,6 @@ class ProfileStore:
         alias = self.aliases.get(key)
         if alias and alias in self.players:
             return alias
-        return None
-
-    def _prior_for(self, name: str | None) -> str | None:
-        normalized = normalize_name(name)
-        if not normalized:
-            return None
-        if normalized in self._priors:
-            return self._priors[normalized]
-        for key, archetype in self._priors.items():
-            if key and (key in normalized or normalized in key):
-                return archetype
         return None
 
     def pin(self, key: str, archetype: str | None) -> None:
@@ -1253,17 +1145,6 @@ class ProfileStore:
                 archetype=auto.archetype, confidence=auto.confidence,
                 n=auto.n, vpip=auto.vpip, pfr=auto.pfr, af=auto.af,
                 source="auto", note=auto.note, gate=auto.gate)
-        prior = self._prior_for(stats.display_name or stats.key)
-        if prior:
-            return OpponentRead(
-                seat_id=seat_id, key=stats.key,
-                display_name=stats.display_name or stats.key,
-                archetype=prior, confidence=0.4, n=auto.n,
-                vpip=auto.vpip, pfr=auto.pfr, af=auto.af,
-                source="prior",
-                note=f"`.table_dy` 先验（自动 {auto.archetype} n={auto.n}）",
-                gate="tentative",
-            )
         return OpponentRead(
             seat_id=seat_id, key=auto.key, display_name=auto.display_name,
             archetype=auto.archetype, confidence=auto.confidence,

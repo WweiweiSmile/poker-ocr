@@ -6,14 +6,10 @@
     # 当前桌子：新手多，跟注站
     新手玩家，比较松弱，诈唬很少。
 
-**按座位匹配**：桌面上的名单每次入桌都可能换人，所以这里不做持久化的
-「昵称 → 座位」映射。每次决策时拿当前座位的 OCR 名字，去和笔记段落里的
-名字做归一化 + 模糊匹配（全角/半角、空格、大小写、OCR 少一两个字都能对上），
-由 `advice.render_table_notes()` 把「这个座位对应哪段笔记」写进事实块；
-**名单里没有的人明确标成 unknown**，不套用整桌的默认标签。
-
-匹配单位是**段落**（空行分隔）；一行一个玩家的写法（`名字: 描述`）会自动
-按行拆开。所以换桌后直接改文件即可，不需要维护任何映射表。
+**只写桌级**：这里不写玩家名字，也不写单个玩家的风格。每个对手的类型
+由画像系统按座位统计（见 `opponent_profile.py`），人工覆盖用 pin；本文件
+只描述这张桌子整体的松紧、多路程度、抽注结构和默认剥削方向。换桌后
+直接重写，不需要维护任何名单。
 
 设计口径与 `.env` 类似：
 
@@ -23,20 +19,15 @@
   · **每次决策点重新读**（按 mtime+size 缓存）。换桌/换对手后直接改文件，
     下一个决策点就生效，不必重启 worker。
 
-这里只负责「读文本 + 匹配名字」，怎么把「松弱/诈唬少」翻译成下注尺度，是
+这里只负责「读文本」，怎么把「松弱/诈唬少」翻译成下注尺度，是
 提示词里交给模型的事；确定性的 `coach.py` 不读这个文件。
 """
 
 from __future__ import annotations
 
 import os
-import re
-import unicodedata
 from dataclasses import dataclass
-from difflib import SequenceMatcher
-from functools import lru_cache
 from pathlib import Path
-from typing import Iterable
 
 from .env import PROJECT_ROOT
 
@@ -123,159 +114,6 @@ def is_aggressive_table(text: str | None) -> bool:
     if "松凶" in t:
         return not any(w in t for w in _RARELY_BLUFFS_WORDS)
     return False
-
-
-# ─────────────── 昵称 → 笔记段落：每次决策按当前座位名匹配 ───────────────
-#
-# 不做持久化的「昵称 → 座位」映射：每次入桌的人都可能不同，映射表一定会过期。
-# 这里只做无状态的文本匹配 —— 当前座位叫什么名字，就去笔记里找提到这个名字
-# 的段落；找不到就是 unknown，绝不把整桌标签套到一个陌生人身上。
-
-# 匹配分数门槛。0.8 能容纳 OCR 少一两个字，又不至于把两个无关的短名字拼上。
-NAME_MATCH_THRESHOLD = 0.8
-
-# 归一化 / 分词共用：中英文标点、括号、斜杠、空白全部当分隔符。
-_SEP_RE = re.compile(
-    r"[\s\u3000·・,，。.、;；:：!！?？'\"“”‘’()（）\[\]【】<>《》"
-    r"_\-—–~～/／\\|｜]+")
-
-
-def normalize_player_name(name: str | None) -> str:
-    """名字归一化：全角→半角、大小写、去空格/标点/符号。
-
-    OCR 经常把全角括号、空格、emoji 混进名字；笔记是人手写的，两边写法
-    不一致时**必须在比较前消掉这些差异**，否则 3 个字符的差别就匹配不上。
-    """
-    text = unicodedata.normalize("NFKC", name or "").casefold()
-    return _SEP_RE.sub("", text)
-
-
-# 段内的分组标记：`A. ` / `B) ` / `1、` / `三. `。只在句末或行首出现时才算，
-# 避免把「6.5BB」这种数字拆开。
-_LIST_MARK_RE = re.compile(
-    r"(?:(?<=[。；;！!？?\n：:])|^)\s*"
-    r"(?=(?:[A-Za-z]|[0-9]+|[一二三四五六七八九十]+)[.、)）](?=\s|$))",
-    re.MULTILINE)
-
-
-def split_table_notes(text: str | None) -> list[str]:
-    """把桌风拆成「一段 = 一个匹配单位」。
-
-    空行分段（一组玩家写一段）；同一段里出现 `A.` / `B.` 这类分组标记时
-    再按标记拆；如果某段是多行且没有项目符号（`名字: 描述` 一行一个玩家
-    的写法），按行再拆。三种写法都支持。
-    """
-    blocks: list[str] = []
-    for para in re.split(r"\n\s*\n", (text or "").strip()):
-        para = para.strip()
-        if not para:
-            continue
-        parts = [part.strip() for part in _LIST_MARK_RE.split(para)
-                 if part.strip()]
-        if len(parts) > 1:
-            blocks.extend(parts)
-            continue
-        lines = [line.strip() for line in para.splitlines() if line.strip()]
-        if len(lines) > 1 and not any(line[0] in "-*·•" for line in lines):
-            blocks.extend(lines)
-        else:
-            blocks.append(para)
-    return blocks
-
-
-_GROUP_HEADER_RE = re.compile(
-    r"^[A-Za-z0-9一二三四五六七八九十]+[.、)）]\s*(.*)$")
-
-
-def named_players(text: str | None) -> set[str]:
-    """笔记里以分组标题（`A. ...（名字、名字）：`）列出的名字，归一化后返回。
-
-    只用于判断「一段笔记是不是在说具体的人」，不参与类型分类：像
-    `C. 混合：...（伯克利丁真、阿坝干嘛）：` 这种没有统一类型标签的分组
-    也要能识别出来，否则它会被当成「桌级背景」重复注入。
-    """
-    names: set[str] = set()
-    for raw in (text or "").splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        if not _GROUP_HEADER_RE.match(line):
-            continue
-        for group in re.findall(r"[（(]([^）)]*)[）)]", line):
-            for token in re.split(r"[、,，/|]+", group):
-                normalized = normalize_player_name(token)
-                if len(normalized) >= 2:
-                    names.add(normalized)
-    return names
-
-
-@dataclass(frozen=True)
-class NoteMatch:
-    """一个座位的名字匹配到的笔记段落。"""
-
-    block: str
-    matched: str          # 段落里被匹配到的那个名字（原文写法）
-    score: float
-
-
-def _name_score(name: str, token: str) -> float:
-    """归一化后的两个写法有多像。"""
-    if name == token:
-        return 1.0
-    short, long_ = (name, token) if len(name) <= len(token) else (token, name)
-    if len(short) >= 3 and short in long_:
-        return 0.92
-    # OCR 常把长名字截断（「八六」对「八六上青山」）：前缀相同且只差 1-2 字。
-    if (len(short) >= 2 and long_.startswith(short)
-            and len(long_) - len(short) <= 2):
-        return 0.85
-    return SequenceMatcher(None, name, token).ratio()
-
-
-@lru_cache(maxsize=64)
-def _match_table_notes_cached(text: str,
-                              names: tuple[str, ...]) -> dict[str, NoteMatch]:
-    blocks = split_table_notes(text)
-    if not blocks:
-        return {}
-    # 每段的候选名字只切一次：决策点可能每街都来，别为每个名字重切全文。
-    words_by_block: list[tuple[str, list[str]]] = []
-    for block in blocks:
-        words = [w for w in _SEP_RE.split(block)
-                 if len(normalize_player_name(w)) >= 2]
-        words_by_block.append((block, words))
-
-    out: dict[str, NoteMatch] = {}
-    for raw in names:
-        normalized = normalize_player_name(raw)
-        if len(normalized) < 2:
-            continue
-        best: NoteMatch | None = None
-        for block, words in words_by_block:
-            for word in words:
-                score = _name_score(normalized, normalize_player_name(word))
-                if best is None or score > best.score:
-                    best = NoteMatch(block, word, score)
-        if best is not None and best.score >= NAME_MATCH_THRESHOLD:
-            out[raw] = best
-    return out
-
-
-def match_table_notes(text: str | None,
-                      names: Iterable[str | None]) -> dict[str, NoteMatch]:
-    """把当前在座的 OCR 名字匹配到笔记段落。
-
-    返回 `{原始名字: NoteMatch}`；**没匹配上的名字不会出现在结果里**，
-    调用方据此把它们显式标成 unknown（换桌后名单里没有的人不能套整桌标签）。
-
-    结果按（文本, 名字集合）缓存：同一桌、同一手牌会被渲染/价值指令
-    调用两三次，而桌风文本只在换桌时变。
-    """
-    key = tuple(sorted({name for name in names if name}))
-    if not key:
-        return {}
-    # 返回副本：调用方不该被缓存里的 dict 串改
-    return dict(_match_table_notes_cached(text or "", key))
 
 
 @dataclass(frozen=True)

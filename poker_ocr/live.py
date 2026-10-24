@@ -1322,10 +1322,6 @@ class LiveProcessor:
                                 self.log("  [建议] 牌桌动态已清空，"
                                          "回到「未知对手」标准线")
                             self._table_dynamics_text = dynamics
-                if self.profile_store is not None:
-                    # `.table_dy` 按名字写的类型是画像的先验；换桌/改文件后
-                    # 下一个决策点就生效，不必重启。
-                    self.profile_store.set_table_dynamics(dynamics)
                 # 本手在局对手的画像。没有画像时为空，build_situation 仍按
                 # .table_dy 的 aggressive_table 走旧口径，不会退化。
                 reads: dict = {}
@@ -2277,7 +2273,6 @@ def main(argv: list[str] | None = None) -> int:
             if profile_store.load_error:
                 _log(f"[对手] 画像读取失败，按空画像运行："
                      f"{profile_store.load_error}")
-            profile_store.set_table_dynamics(table_dynamics_text)
             if args.reset_opponents:
                 removed = profile_store.clear(
                     pool_key=initial_pool or None)

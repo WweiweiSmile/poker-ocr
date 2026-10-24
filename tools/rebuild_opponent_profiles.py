@@ -46,7 +46,6 @@ from poker_ocr.parse import Blinds  # noqa: E402
 
 DEFAULT_HANDS = Path("hands/1023.hands.json")
 DEFAULT_LIVE = Path("logs/live.states.jsonl")
-DEFAULT_DYNAMICS = Path(".table_dy")
 
 
 def load_jsonl_hands(path: Path) -> list[dict]:
@@ -278,8 +277,6 @@ def main(argv: list[str] | None = None) -> int:
                     help=f"画像输出（默认 {DEFAULT_PROFILE_PATH}）")
     ap.add_argument("--pool-key", default=None,
                     help="牌桌池键，如 0.5/1-9max；默认从手牌盲注推导")
-    ap.add_argument("--table-dynamics", type=Path, default=DEFAULT_DYNAMICS,
-                    help=f"用作先验的 .table_dy（默认 {DEFAULT_DYNAMICS}）")
     ap.add_argument("--append", action="store_true",
                     help="在现有画面上追加（默认先清空旧统计再重算，pin 保留）")
     ap.add_argument("--reset", action="store_true",
@@ -345,10 +342,6 @@ def main(argv: list[str] | None = None) -> int:
             except ValueError:
                 pass
 
-    # `.table_dy` 里的按名字标签作为先验（只影响显示/低样本，不覆盖 pin）
-    if args.table_dynamics.exists():
-        store.set_table_dynamics(args.table_dynamics.read_text(encoding="utf-8"))
-
     for raw in args.pin:
         if "=" not in raw:
             ap.error(f"--pin 需要 NAME=TYPE：{raw!r}")
@@ -388,8 +381,6 @@ def main(argv: list[str] | None = None) -> int:
               f"爆炸池被动入池 {passive} 手（不计 VPIP 分母）")
         print()
         _print_report(store, top=args.top)
-        if store.priors:
-            print(f"\n.table_dy 先验：{len(store.priors)} 人")
     else:
         store.save(force=True)
 
