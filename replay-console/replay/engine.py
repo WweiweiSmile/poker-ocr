@@ -12,8 +12,9 @@ from dataclasses import dataclass
 from typing import Any
 
 from poker_ocr.advice import (
-    AIError, Advice, AISettings, advise, build_messages, complete_json,
-    value_directive,
+    AIError, Advice, AISettings, IMPLIED_ODDS_CAP_PCT, advise, build_messages,
+    call_amount as snapshot_call_amount, complete_json, value_directive,
+    winnable_pot,
 )
 from poker_ocr.preflop_ranges import (
     hand_key, range_verdict, sb_completable,
@@ -90,11 +91,12 @@ def audit(sit, kind: str | None, amount: float | None) -> set[str]:
     if kind == "fold" and to_call > 0 \
             and sit.hand_tier in ("强听", "弱听") \
             and sit.equity_pct is not None and pot > 0:
-        call = to_call
-        if snap.hero_stack is not None and 0 < snap.hero_stack < to_call:
-            call = snap.hero_stack
-        bep = call / (pot + call) * 100 if pot + call > 0 else 0.0
-        if sit.equity_pct > bep + 2:
+        # 全下 cover 我时，牌桌底池里对手超额的那部分会退回，赔率分母只能
+        # 用可争夺底池；否则门槛被系统性低估（990036：23% vs 真实 39%）。
+        call = snapshot_call_amount(snap)
+        winnable = winnable_pot(snap)
+        bep = call / winnable * 100 if call > 0 and winnable > 0 else 0.0
+        if sit.equity_pct > bep + IMPLIED_ODDS_CAP_PCT:
             tags.add("有赔率却弃牌")
 
     if street != "preflop" and agg and amount is not None and pot > 0 \

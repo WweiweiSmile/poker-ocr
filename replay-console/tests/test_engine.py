@@ -1,6 +1,57 @@
 from __future__ import annotations
 
-from replay.engine import classify, decision_to_public, summarize_version
+from poker_ocr.advice import build_situation
+from poker_ocr.hand_track import HandSnapshot, OpponentSnapshot, StreetRecord
+from poker_ocr.parse import Blinds
+
+from replay.engine import audit, classify, decision_to_public, summarize_version
+
+BLINDS = Blinds(sb=0.5, bb=1.0, ante=None, raw="1/2")
+
+
+def snapshot(**overrides):
+    """默认是 990036 D3：AdQd 在 9d6d5s 面对 cover 我的全下。"""
+    base = dict(
+        hand_id="h1", hand_index=1, street="flop",
+        board=("9d", "6d", "5s"), hero_cards=("Ad", "Qd"),
+        hero_position="LJ", hero_stack=168.0, hero_bet=19.5,
+        hero_invested=27.0, to_call=471.5, second_bet=None, pot=569.0,
+        pot_before_street=97.5, table_size=8, blinds=BLINDS,
+        opponents=(
+            OpponentSnapshot("v", "八六上青山", "UTG+1", 498.0, 491.0, False),
+            OpponentSnapshot("bb", "jackhshdn", "BB", 168.0, 19.5, False),
+        ),
+        streets=(StreetRecord("preflop", 0.0, ()),
+                 StreetRecord("flop", 97.5, ())),
+        preflop_shapes=("single-raise",), hero_is_pfr=True, cbet_spot=False,
+        decision_key=("h1", "flop", 2, 569.0, 471.5, ("Ad", "Qd")),
+        players_dealt=8,
+    )
+    base.update(overrides)
+    return HandSnapshot(**base)
+
+
+def test_audit_covered_all_in_fold_uses_winnable_pot():
+    """990036 D3：超额 303.5 退回后门槛是 39%，36% 的听牌弃牌不该报违规。
+
+    旧口径拿牌桌底池 569 当分母，门槛只有 23%，会把正确弃牌标成
+    「有赔率却弃牌」；赔率分母必须和事实层一样用可争夺底池 433.5。
+    """
+    sit = build_situation(snapshot())
+    assert sit.hand_tier == "强听" and sit.equity_pct == 36
+    assert audit(sit, "fold", None) == set()
+
+
+def test_audit_still_flags_fold_when_price_is_actually_bad():
+    """同样的听牌，赔率真的好（门槛 25%）时仍要报违规。"""
+    sit = build_situation(snapshot(
+        hero_stack=100.0, hero_bet=0.0, hero_invested=3.0,
+        to_call=10.0, pot=30.0, pot_before_street=30.0,
+        opponents=(OpponentSnapshot("a", "v", "BB", 100.0, 10.0, False),),
+        decision_key=("h1", "flop", 0, 30.0, 10.0, ("Ad", "Qd")),
+    ))
+    assert sit.hand_tier == "强听" and sit.equity_pct == 36
+    assert audit(sit, "fold", None) == {"有赔率却弃牌"}
 
 
 def result(*, option_id, kind, amount=None, source="model", repeat=0, reason="r"):
