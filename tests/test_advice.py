@@ -1051,6 +1051,37 @@ def test_prompt_renders_implied_odds_for_pocket_pair() -> None:
           "非口袋对不该渲染抽 set 隐含赔率")
 
 
+def test_small_pair_folds_to_three_bet_no_set_mining() -> None:
+    """面对 3-bet 的小对子不抽 set：10:1/15:1 隐含赔率在这里不成立。
+
+    3-bet 范围窄到 QQ+/AK：中 set 要么撞上更大的 set（反向隐含赔率），
+    要么他没中、翻后直接弃，拿不到支付。所以小对子直接弃，不给「够深就跟」。
+    """
+    from poker_ocr.hand_track import OpponentSnapshot
+
+    def preflop(cards):
+        return build_situation(make_point(
+            street="preflop", board=(), to_call=22.0, pot=33.0,
+            hero_position="CO", hero_cards=cards, hero_bet=0.0,
+            hero_stack=101.5,
+            opponents=(OpponentSnapshot("a", "老王", "BB", 120.0, 22.0, False),),
+            preflop_shapes=("three-bet",), cbet_spot=False))
+
+    facts = render_hand_facts(preflop(("4s", "4h")))
+    check("does NOT apply" in facts and "Do not set-mine" in facts,
+          f"小对子面对 3-bet 应明确不抽 set：{facts}")
+    check("15:1 or better makes set-mining profitable" not in facts,
+          f"3-bet 局不能再给「15:1 就能抽 set」的许可：{facts}")
+
+    # QQ 是强牌，不能被这条误伤成弃牌
+    qq = render_hand_facts(preflop(("Qd", "Qh")))
+    check("Do not set-mine" not in qq, f"QQ 面对 3-bet 不该被判弃：{qq}")
+
+    system, _ = build_messages(build_situation(make_point()))
+    check("continue ONLY with QQ+/AK" in system,
+          "lean 提示词应写明：面对 3-bet 只继续 QQ+/AK")
+
+
 def test_ante_adds_bb_not_multiplies_open_size() -> None:
     """0.5BB 前注只加 0.5BB：UTG 开池 3.0-3.5，不是 5.0-6.0（h39 的 5.5）。"""
     snap = make_point(street="preflop", board=(), to_call=1.0, pot=5.5,
@@ -2578,6 +2609,7 @@ def main() -> int:
         test_straight_is_not_nuts_on_a_flush_board,
         test_prompt_renders_value_directive_and_draw_equity,
         test_prompt_renders_implied_odds_for_pocket_pair,
+        test_small_pair_folds_to_three_bet_no_set_mining,
         test_ante_adds_bb_not_multiplies_open_size,
         test_three_bet_pot_warns_random_rank_is_upper_bound,
         test_limpers_count_from_state_and_bonus_decays,

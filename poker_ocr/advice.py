@@ -1435,12 +1435,6 @@ def _position_en(pos: str | None) -> str:
     return pos or "unknown"
 
 
-def _is_pocket_pair(cards: tuple[str, ...] | list[str]) -> bool:
-    """两张底牌同点数。翻前抽 set 的隐含赔率只对口袋对有意义。"""
-    return (len(cards) == 2 and all(len(c) >= 2 for c in cards)
-            and cards[0][0] == cards[1][0])
-
-
 def _is_set_mine_pair(cards: tuple[str, ...] | list[str]) -> bool:
     """22-99：只按「买 set」看的口袋对；TT+ 才算超对价值。
 
@@ -1610,13 +1604,25 @@ def render_hand_facts(sit: Situation) -> str:
             # 让模型知道前面到底有几个人溜入，而不是只看底池猜。
             lines.append(f"Limpers before me: {limpers}")
         # 抽 set 的隐含赔率：翻前不渲染成牌胜率，但小对子需要这组数字才能
-        # 判断「跟 1BB 看翻牌」划不划算。阈值（15-20×）来自 preflop-limp.md
+        # 判断「跟 1BB 看翻牌」划不划算。阈值（15-20×）来自 preflop-limp.md。
+        # 只对 22-99 有意义：TT+ 是超对价值，根本不按抽 set 打，给这组数字
+        # 只会让模型把 JJ/TT 也当成「够赔率就跟」。
         if (to_call > 0 and effective is not None
-                and _is_pocket_pair(snap.hero_cards)):
-            lines.append(
-                f"Implied odds (pocket pair): effective stack / call = "
-                f"{effective / to_call:.0f}:1; flopping a set is 11.8% (1 in 8.5), "
-                f"so 15:1 or better makes set-mining profitable (10:1 with antes).")
+                and _is_set_mine_pair(snap.hero_cards)):
+            if "three-bet" in (snap.preflop_shapes or ()):
+                # 面对 3-bet 时不能再拿 10:1/15:1 当跟注理由：3-bet 范围窄到
+                # 大对子 + AK，中 set 要么撞更大 set，要么他直接弃、拿不到支付。
+                lines.append(
+                    "Implied odds (pocket pair): effective stack / call = "
+                    f"{effective / to_call:.0f}:1, but the 15:1 rule does NOT apply "
+                    "vs a 3-bet: his range is QQ+/AK, so a flopped set is either "
+                    "set-under-set or gets no pay-off when he whiffs. Do not set-mine "
+                    "a 3-bet with this pair.")
+            else:
+                lines.append(
+                    f"Implied odds (pocket pair): effective stack / call = "
+                    f"{effective / to_call:.0f}:1; flopping a set is 11.8% (1 in 8.5), "
+                    f"so 15:1 or better makes set-mining profitable (10:1 with antes).")
         lines.extend(render_opponent_reads(sit))
     else:
         tier_en = _TIER_EN.get(sit.hand_tier, sit.hand_tier or "unknown")
@@ -1960,8 +1966,9 @@ RFI by position (cumulative: each row adds to the previous; raise to the offered
 SB: open ~30%, raise-or-fold vs opens (not vs limps). In a limped pot, completing for 0.5BB is cheap, but **raw pot odds never justify it — you need realized equity**. Complete only hands that can flop something you can bet: suited, connected with gap 2 or less, a pocket pair, or an ace with a real kicker. FOLD offsuit trash (92o, T6o, Q6o).
 The facts may carry a «Preflop range» line computed from this chart. It is the chart DEFAULT: when it says OUT, do not open-raise — but table dynamics can widen or narrow what is playable. One exception — a small pocket pair (22-66) may over-limp for 1BB to set-mine even when the chart says OUT; a non-pair hand never qualifies. This chart is RFI (unopened pot): over limpers the isolation range is tighter, never treat "IN the open range" as an isolation license. Speculative hands over limpers (A2s-A9s, suited connectors/gappers): raise for initiative and dead money, not value isolation.
 3-bet: value QQ+/AK; bluffs A5s-A2s, KQs, KJs vs late opens; 3x IP, 4x OOP.
-Cold-call IP: 22-99, 54s-JTs, KTs, QJs; no offsuit broadways vs early opens.
+Cold-call IP (vs a single open): 22-99, 54s-JTs, KTs, QJs; no offsuit broadways vs early opens.
 BB vs late open: defend wide; 3-bet linear 55+, A9s+, KTs+, ATo+, KQo.
+**Facing a 3-bet: continue ONLY with QQ+/AK** — 4-bet for value, or flat in position to keep his bluffs in. Fold the rest: small pairs never set-mine (his range is QQ+/AK, so a flopped set is set-under-set or paid off by nothing); suited connectors/offsuit broadways never realize equity.
 At 6-8 handed, widen each early-position range by roughly one seat. Below ~25BB the chart is void: jam or fold, do not open-raise small.
 
 ## Postflop (defaults; table dynamics and opponent type override)
