@@ -31,6 +31,7 @@ class FakeImportRepo:
     def __init__(self):
         self.rows: dict[tuple[str, str], int] = {}
         self.upserts: list[tuple[str, str]] = []
+        self.saved_rows: list[dict] = []
 
     def fingerprint_map(self):
         return dict(self.rows)
@@ -38,6 +39,7 @@ class FakeImportRepo:
     def upsert(self, row, *, batch_id=None):
         key = (row["source"], row["fingerprint"])
         self.upserts.append((row["source"], row["external_id"]))
+        self.saved_rows.append(row)
         if key in self.rows:
             return self.rows[key], False
         hand_id = 1_000_000_000_000 + len(self.rows) + 1
@@ -220,3 +222,54 @@ def test_delete_hand_ids_validation():
             assert getattr(exc, "code", None) == "INVALID_HAND_IDS"
         else:  # pragma: no cover
             raise AssertionError(f"{payload} 应该校验失败")
+
+
+def live_log_with_advice() -> str:
+    """一条实时日志：advice 行 + 对应的 hand 行。"""
+    session_start = {"type": "session_start",
+                     "started_at": "2026-10-23T03:00:00+08:00"}
+    hand = {
+        "type": "hand", "ts": "2026-10-23T03:08:07+08:00",
+        "hand_id": "h4", "uid": "s01-h4",
+        "hero_cards": ["Ah", "Js"], "hero_position": "UTG+1",
+        "table_size": 9,
+        "blinds": {"sb": 0.5, "bb": 1.0, "ante": 0.5, "raw": "1/2（1）"},
+        "board": ["7c", "7h", "10d", "8c", "6h"],
+        "streets": [
+            {"street": "preflop", "pot_start": 4.0, "actions": [
+                {"seat_id": "hero", "position": "UTG+1", "action": "raise",
+                 "amount": 7.5, "is_hero": True},
+                {"seat_id": "topR", "position": "BTN", "action": "call",
+                 "amount": 7.5, "is_hero": False},
+            ]},
+            {"street": "flop", "pot_start": 20.5, "actions": [
+                {"seat_id": "hero", "position": "UTG+1", "action": "bet",
+                 "amount": 6.5, "is_hero": True},
+                {"seat_id": "topR", "position": "BTN", "action": "call",
+                 "amount": 6.5, "is_hero": False, "inferred": True},
+            ]},
+        ],
+    }
+    advice = {
+        "type": "advice", "ts": "2026-10-23T03:08:10+08:00",
+        "hand_id": "h4", "street": "preflop",
+        "option": {"id": "open-2.5", "label": "Raise to 2.5BB",
+                   "kind": "raise", "amount_bb": 2.5},
+        "reason": "open for value", "source": "model",
+    }
+    return "\n".join(json.dumps(x) for x in [session_start, advice, hand])
+
+
+def test_live_log_import_attaches_advices_to_hand():
+    service = make_service()
+    result = service.import_hands({
+        "content": live_log_with_advice(), "format": "auto", "dryRun": False,
+    })
+    assert result["source"] == "live"
+    assert result["hands"] == 1
+    assert result["advices"] == 1
+    assert len(service.import_repo.saved_rows) == 1
+    saved = service.import_repo.saved_rows[0]
+    assert saved["advices"][0]["option"]["id"] == "open-2.5"
+    # advice 没有变成第二手牌
+    assert len(service.import_repo.rows) == 1

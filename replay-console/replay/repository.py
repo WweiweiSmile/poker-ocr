@@ -230,6 +230,20 @@ class ImportedHandRepository:
         """
         return self.db.one(sql, (self.user_id, hand_id, self.user_id))
 
+    def get_payload(self, hand_id: int) -> dict:
+        """按需取导入时冻结的 payload（含 advices 这类大字段）。
+
+        列表查询刻意不 SELECT payload_json/raw_json；详情页才查这一列。
+        """
+        row = self.db.one(
+            "SELECT payload_json FROM replay_imported_hands "
+            "WHERE id=%s AND user_id=%s AND deleted_at IS NULL",
+            (int(hand_id), self.user_id))
+        if not row:
+            return {}
+        payload = json_load(row.get("payload_json"), {})
+        return payload if isinstance(payload, dict) else {}
+
     def get_by_ids(self, hand_ids: Iterable[int]) -> list[dict]:
         ids = [int(x) for x in hand_ids]
         if not ids:

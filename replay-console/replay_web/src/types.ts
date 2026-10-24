@@ -103,10 +103,31 @@ export interface StreetBlock {
   decisionSeqs: number[]
 }
 
+export interface HandAdvice {
+  ts?: string | null
+  street?: string | null
+  pot?: number | null
+  toCall?: number | null
+  option?: {
+    id?: string | null
+    label?: string | null
+    kind?: string | null
+    amount?: number | null
+  }
+  reason?: string | null
+  plan?: string | null
+  confidence?: number | null
+  source?: string | null
+  model?: string | null
+  durationMs?: number | null
+}
+
 export interface HandDetail {
   hand: HandSummary
   streets: StreetBlock[]
   decisions: DecisionMeta[]
+  // 导入实时日志时并入手牌的「当时 AI 建议」；旧记录没有该字段。
+  advices?: HandAdvice[]
   duplicates: { id: number; title: string; createdAt: string | null }[]
   mark: Mark
   reconstruction: {
@@ -459,6 +480,8 @@ export interface ImportResult {
   filename: string | null
   total: number
   hands: number
+  // 并进手牌的实时建议条数（type=advice 行不单独成手）
+  advices: number
   imported: number
   updated: number
   duplicates: number

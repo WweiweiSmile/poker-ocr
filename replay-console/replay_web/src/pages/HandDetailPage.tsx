@@ -21,6 +21,9 @@ import RunModal from '../components/RunModal'
 import { formatAmount, formatBB, formatDate } from '../lib/format'
 
 const STREET_ORDER: Record<string, number> = { preflop: 0, flop: 1, turn: 2, river: 3 }
+const STREET_NAMES: Record<string, string> = {
+  preflop: '翻前', flop: '翻牌', turn: '转牌', river: '河牌',
+}
 
 function actionText(block?: VersionBlock | null): string {
   if (!block) return '未跑'
@@ -495,6 +498,39 @@ export default function HandDetailPage() {
           ) : null}
         </Card>
       </div>
+
+      {data.advices?.length ? (
+        <Card className="advice-card" bordered={false}>
+          <div className="card-title">
+            导入时的 AI 建议 <Tag className="mini-tag">{data.advices.length}</Tag>
+            <span className="muted advice-hint">来自日志里的 advice 记录，按街顺序挂在手牌下</span>
+          </div>
+          <div className="advice-list">
+            {data.advices.map((advice, index) => (
+              <div className="advice-row" key={`${advice.street}-${advice.ts || index}`}>
+                <div className="advice-head">
+                  <span className="advice-street">
+                    {STREET_NAMES[advice.street || ''] || advice.street || '—'}
+                  </span>
+                  <span className={`option-pill kind-${advice.option?.kind || 'none'}`}>
+                    {advice.option?.label || advice.option?.id || '—'}
+                  </span>
+                  {advice.option?.amount !== null && advice.option?.amount !== undefined ? (
+                    <span className="muted">{formatAmount(advice.option.amount)} BB</span>
+                  ) : null}
+                  {advice.confidence !== null && advice.confidence !== undefined ? (
+                    <Tag className="mini-tag">置信度 {advice.confidence}</Tag>
+                  ) : null}
+                  {advice.model ? <Tag className="mini-tag">{advice.model}</Tag> : null}
+                  {advice.source ? <Tag className="mini-tag">{advice.source}</Tag> : null}
+                </div>
+                {advice.reason ? <div className="advice-reason">{advice.reason}</div> : null}
+                {advice.plan ? <div className="advice-plan">计划：{advice.plan}</div> : null}
+              </div>
+            ))}
+          </div>
+        </Card>
+      ) : null}
 
       <div className="section-head">
         <div>

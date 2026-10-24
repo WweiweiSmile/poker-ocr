@@ -509,6 +509,7 @@ class ReplayService:
             "filename": filename,
             "total": parsed.scanned,
             "hands": len(parsed.records),
+            "advices": parsed.advices,
             "imported": imported,
             "updated": updated,
             "duplicates": duplicates,
@@ -592,11 +593,45 @@ class ReplayService:
                            f"手牌 {hand_id} 不存在或已删除", 404)
         return {**result, "handId": hand_id}
 
+    @staticmethod
+    def _advice_public(advice: dict) -> dict:
+        """把导入日志里的 advice 记录转成前端 camelCase 形状。"""
+        option = advice.get("option") if isinstance(advice.get("option"), dict) else {}
+        return {
+            "ts": advice.get("ts"),
+            "street": advice.get("street"),
+            "pot": advice.get("pot"),
+            "toCall": advice.get("to_call"),
+            "option": {
+                "id": option.get("id"),
+                "label": option.get("label"),
+                "kind": option.get("kind"),
+                "amount": (option.get("amount_bb")
+                           if option.get("amount_bb") is not None
+                           else option.get("amount")),
+            },
+            "reason": advice.get("reason"),
+            "plan": advice.get("plan"),
+            "confidence": advice.get("confidence"),
+            "source": advice.get("source"),
+            "model": advice.get("model"),
+            "durationMs": advice.get("duration_ms"),
+        }
+
     def get_hand(self, hand_id: int) -> dict:
         row = self.hand_repo.get_row(hand_id)
         if row is None:
             raise ApiError("HAND_NOT_FOUND", f"手牌 {hand_id} 不存在或已删除", 404)
         analysis = self.analyze(row)
+        # 导入实时日志时，advice 行会并进手牌的 payload_json；详情页要能
+        # 看到「当时 AI 建议了什么」。大字段只在详情查询时取，不进列表。
+        advices: list[dict] = []
+        if row.get("source") in (HAND_SOURCE_LIVE, HAND_SOURCE_REVIEW):
+            payload = self.import_repo.get_payload(hand_id)
+            value = payload.get("advices") if isinstance(payload, dict) else None
+            if isinstance(value, list):
+                advices = [self._advice_public(a) for a in value
+                           if isinstance(a, dict)]
         all_rows = self.hand_repo.list_rows()
         analyses = {int(r["id"]): self.analyze(r) for r in all_rows}
         dup_groups = self._duplicate_groups(all_rows)
@@ -625,6 +660,7 @@ class ReplayService:
             "hand": item,
             "streets": streets,
             "decisions": decisions,
+            "advices": advices,
             "duplicates": dup_items,
             "mark": self._mark(row),
             "reconstruction": {

@@ -73,6 +73,8 @@ class ParseResult:
     skipped_partial: int = 0
     skipped_mid_hand: int = 0
     session_count: int = 0
+    # 已并进手牌的实时建议条数（type=advice 的行不单独成手）。
+    advices: int = 0
 
     @property
     def source_label(self) -> str:
@@ -202,8 +204,85 @@ def _detect_source(records: Iterable[tuple[int | None, dict]]) -> str:
 
 # ─────────────────────────── 实时日志 ───────────────────────────
 
+_STREET_RANK = {"preflop": 0, "flop": 1, "turn": 2, "river": 3}
+
+
+def _is_advice(rec: dict) -> bool:
+    """是否是「行动建议」记录，而不是一手牌。
+
+    `live.states.jsonl` 里 advice 是独立一行（`type=advice`），但语义上属于
+    同一手牌；导入时要把它们并进 hand，而不是各算一手。没有 `type` 的旧导出
+    也认：建议自带 option/reason/street，却没有行动线 `streets`。
+    """
+    if rec.get("type") == "advice":
+        return True
+    return (isinstance(rec.get("option"), dict)
+            and _text(rec.get("street")) in STREETS
+            and not rec.get("streets"))
+
+
+def _advice_key(advice: dict) -> tuple:
+    """同一决策的身份：街 + 选项 + 底池/需跟 + 理由。
+
+    手牌记录里内嵌的 advice 与日志里独立的 advice 行内容相同，但前者没有
+    `type`/`ts` 字段；按整段 JSON 去重会留下一份重复（实测每条建议都翻倍）。
+    这里只比「决策身份」，两边能对上。
+    """
+    option = (advice.get("option")
+              if isinstance(advice.get("option"), dict) else {})
+    return (
+        _text(advice.get("street")),
+        _text(option.get("id")),
+        option.get("amount_bb", option.get("amount")),
+        safe_float(advice.get("pot")),
+        safe_float(advice.get("to_call")),
+        _text(advice.get("reason")),
+    )
+
+
+def _advice_richness(advice: dict) -> tuple:
+    """重复时保留信息更全的一条：优先有 ts，其次字段更多。"""
+    return (bool(advice.get("ts")), len(advice))
+
+
+def _merge_advices(*groups) -> list[dict]:
+    """合并手牌内嵌的建议与日志里独立的 advice 行，按街+时间去重排序。"""
+    out: list[dict] = []
+    index: dict[tuple, int] = {}
+    for group in groups:
+        for advice in group or ():
+            if not isinstance(advice, dict):
+                continue
+            key = _advice_key(advice)
+            pos = index.get(key)
+            if pos is None:
+                index[key] = len(out)
+                out.append(advice)
+                continue
+            if _advice_richness(advice) > _advice_richness(out[pos]):
+                out[pos] = advice
+    out.sort(key=lambda a: (_STREET_RANK.get(_text(a.get("street")), 9),
+                            str(a.get("ts") or "")))
+    return out
+
+
 def _parse_live(records: list[tuple[int | None, dict]], result: ParseResult,
                 *, include_partial: bool, include_mid_hand: bool) -> None:
+    # 建议行先按 (会话, hand_id) 归组：手牌记录可能在建议之后才写出，
+    # 不能边扫边挂。会话号只在 session_start 时前进，保证 h1/h2 这种
+    # 跨会话重复的 hand_id 不会串手。
+    advices_by_hand: dict[tuple[int, str], list[dict]] = {}
+    session = 0
+    for _line, rec in records:
+        if rec.get("type") == "session_start":
+            session += 1
+            continue
+        if not _is_advice(rec):
+            continue
+        hand_id = _text(rec.get("hand_id"))
+        if hand_id:
+            advices_by_hand.setdefault((session, hand_id), []).append(rec)
+
     session = 0
     hand_seq = 0
     for index, (line, rec) in enumerate(records):
@@ -211,6 +290,10 @@ def _parse_live(records: list[tuple[int | None, dict]], result: ParseResult,
         if kind == "session_start":
             session += 1
             result.session_count += 1
+            continue
+        if _is_advice(rec):
+            # 已归到对应手牌下面，不再单独成手。
+            result.skipped_non_hand += 1
             continue
         if kind in ("state", "stream_info", "session_end"):
             result.skipped_non_hand += 1
@@ -232,6 +315,16 @@ def _parse_live(records: list[tuple[int | None, dict]], result: ParseResult,
             result.skipped_mid_hand += 1
             continue
         rec_session = safe_int(rec.get("session"), session)
+        hand_id = _text(rec.get("hand_id")) or f"h{hand_seq}"
+        # 手牌记录自己可能已经内嵌 advices（live._write_hand 会带）；与日志里
+        # 独立的 advice 行合并去重，两种来源都不丢。
+        advices = _merge_advices(
+            rec.get("advices") if isinstance(rec.get("advices"), list) else [],
+            advices_by_hand.get((rec_session, hand_id), []),
+        )
+        if advices:
+            rec = {**rec, "advices": advices}
+            result.advices += len(advices)
         try:
             row = normalize_live_hand(rec, session=rec_session,
                                       hand_seq=hand_seq)
@@ -275,7 +368,7 @@ def normalize_live_hand(rec: dict, *, session: int = 0,
     hero_net = safe_float(rec.get("hero_net"))
     result, result_amount = _result_of(hero_net)
     created = _parse_datetime(rec.get("ts") or rec.get("started_at")) or now_cn()
-    return {
+    row = {
         "id": 0,
         "source": SOURCE_LIVE,
         "external_id": external_id,
@@ -301,6 +394,13 @@ def normalize_live_hand(rec: dict, *, session: int = 0,
         "session": session,
         "hand_id": hand_id,
     }
+    # 建议跟着手牌走：写进 payload_json，详情页可直接展示；没有建议时不加
+    # 这个键，保持旧记录的 payload 形状不变。
+    advices = _merge_advices(
+        rec.get("advices") if isinstance(rec.get("advices"), list) else [])
+    if advices:
+        row["advices"] = advices
+    return row
 
 
 def _live_streets(rec: dict) -> list[dict]:

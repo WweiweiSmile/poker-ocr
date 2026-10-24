@@ -213,6 +213,92 @@ def test_raw_live_log_skips_state_partial_and_mid_hand():
     assert len(included.records) == 3
 
 
+def live_advice(hand_id="h4", street="flop",
+                ts="2026-10-23T03:08:10+08:00", **overrides):
+    data = {
+        "type": "advice",
+        "ts": ts,
+        "hand_id": hand_id,
+        "street": street,
+        "hero_cards": ["Ah", "Js"],
+        "board": ["7c", "7h", "10d"],
+        "pot": 20.5,
+        "to_call": 6.5,
+        "option": {"id": "call", "label": "Call", "kind": "call",
+                   "amount_bb": 6.5},
+        "reason": "top pair, price is right",
+        "plan": "check-call turn",
+        "confidence": 0.6,
+        "source": "model",
+        "model": "deepseek-flash",
+        "duration_ms": 900,
+    }
+    data.update(overrides)
+    return data
+
+
+def test_live_log_advices_attach_to_hand_not_new_hand():
+    """日志里的 advice 行并进同一手牌，不单独成手（按街排序）。"""
+    session_start = {"type": "session_start",
+                     "started_at": "2026-10-23T03:00:00+08:00"}
+    text = "\n".join(json.dumps(item) for item in [
+        session_start,
+        live_advice(street="flop", ts="2026-10-23T03:08:10+08:00"),
+        live_advice(street="preflop", ts="2026-10-23T03:08:07+08:00"),
+        live_hand(uid=None),
+    ])
+    response = parse_hand_text(text)
+    assert response.source == SOURCE_LIVE
+    assert len(response.records) == 1, "advice 不能单独成手"
+    assert response.advices == 2
+    row = response.records[0].row
+    assert [a["street"] for a in row["advices"]] == ["preflop", "flop"]
+    assert response.records[0].raw["advices"] == row["advices"]
+
+
+def test_embedded_and_standalone_advices_are_merged_without_duplicates():
+    """手牌内嵌的 advice 与日志独立行是同一决策：只留一条，且有 ts 的优先。"""
+    advice = live_advice()
+    embedded = {k: v for k, v in advice.items() if k not in ("type", "ts")}
+    hand = live_hand(uid=None, advices=[embedded])
+    text = "\n".join(json.dumps(item) for item in [advice, hand])
+    response = parse_hand_text(text)
+    assert response.advices == 1
+    merged = response.records[0].row["advices"]
+    assert len(merged) == 1
+    assert merged[0]["ts"] == advice["ts"], "应保留带 ts 的独立日志版本"
+
+
+def test_typeless_advice_is_not_imported_as_hand():
+    """没有 type 的旧导出：有 option/street、没有 streets，也要认成建议。"""
+    advice = live_advice()
+    advice.pop("type")
+    text = "\n".join(json.dumps(item) for item in [advice, live_hand(uid=None)])
+    response = parse_hand_text(text)
+    assert len(response.records) == 1
+    assert response.advices == 1
+    assert response.records[0].row["advices"][0]["option"]["id"] == "call"
+
+
+def test_advices_do_not_mix_across_sessions_with_same_hand_id():
+    """h1/h2 这种 hand_id 每个会话都重用，advice 必须按会话归手。"""
+    session_start = {"type": "session_start",
+                     "started_at": "2026-10-23T03:00:00+08:00"}
+    text = "\n".join(json.dumps(item) for item in [
+        session_start,
+        live_advice(hand_id="h1", street="preflop", reason="session 1"),
+        live_hand(hand_id="h1", uid=None),
+        session_start,
+        live_advice(hand_id="h1", street="preflop", reason="session 2"),
+        live_hand(hand_id="h1", uid=None),
+    ])
+    response = parse_hand_text(text)
+    assert len(response.records) == 2
+    first, second = response.records
+    assert first.row["advices"][0]["reason"] == "session 1"
+    assert second.row["advices"][0]["reason"] == "session 2"
+
+
 def test_invalid_hand_is_parsed_but_analysis_is_invalid():
     hand = review_hand(heroCards="")
     response = parse_hand_text(json.dumps(hand))

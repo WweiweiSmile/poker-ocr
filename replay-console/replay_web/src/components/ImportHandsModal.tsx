@@ -318,6 +318,7 @@ export default function ImportHandsModal({ open, onClose, onImported }: Props) {
             <Stat label="重复" value={result.duplicates} hint="已跳过" />
             <Stat label="不可重跑" value={result.invalid} hint="缺底牌/行动线" />
             <Stat label="错误" value={result.errors} hint="解析/写库失败" />
+            {result.advices ? <Stat label="建议" value={result.advices} hint="并入手牌" /> : null}
             {result.skippedPartial ? <Stat label="partial" value={result.skippedPartial} hint="已跳过" /> : null}
             {result.skippedMidHand ? <Stat label="中途接管" value={result.skippedMidHand} hint="已跳过" /> : null}
           </div>
