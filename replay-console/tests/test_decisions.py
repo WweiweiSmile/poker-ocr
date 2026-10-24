@@ -161,3 +161,32 @@ def test_call_amount_caps_to_hero_stack():
     assert call_amount(471.5, 168.0) == 168.0
     assert call_amount(4.0, 100.0) == 4.0
     assert call_amount(4.0, None) == 4.0
+
+
+def test_preflop_pot_start_adds_missing_blinds():
+    """实时日志的翻前 pbs 只记前注：6 人 × 0.5 = 3.0，要补上 1.5 盲注。
+
+    h39 的原记录是 4.5（9 人 × 0.5），同一帧的实时建议用的却是真实底池 6.0；
+    不补盲注，翻前所有决策点的底池、赔率和客户端档位都会偏小。
+    """
+    data = hand(anteBb=0.5, heroPosition="UTG", streets=[
+        {"street": "preflop", "potStartBb": 3.0, "actions": [
+            {"actor": "hero", "action": "raise", "amountBb": 2.5},
+            {"actor": "CO", "action": "call"},
+        ]},
+    ])
+    analysis = analyze_hand(data)
+    snap = analysis.decisions[0].snap
+    assert snap.pot == 4.5, snap.pot
+    assert snap.pot_before_street == 4.5, snap.pot_before_street
+
+
+def test_preflop_pot_start_with_blinds_is_not_double_counted():
+    """已经含盲注的 potStart 不能再加一次。"""
+    data = hand(anteBb=0.5, heroPosition="UTG", streets=[
+        {"street": "preflop", "potStartBb": 4.5, "actions": [
+            {"actor": "hero", "action": "raise", "amountBb": 2.5},
+            {"actor": "CO", "action": "call"},
+        ]},
+    ])
+    assert analyze_hand(data).decisions[0].snap.pot == 4.5

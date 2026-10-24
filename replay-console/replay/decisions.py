@@ -336,6 +336,13 @@ def build_decisions(h: dict) -> tuple[list[DecisionPoint], bool, list[str], int]
             continue
         if rec.get("potStartBb") is not None:
             pot = float(rec["potStartBb"])
+            # 实时日志的 `pot_before_street` 在翻前只记了前注（9 人 × 0.5 =
+            # 4.5BB），盲注那 1.5BB 没在里面 —— 同一帧的实时建议用的却是
+            # 真实底池 6.0BB。翻前不补盲注，所有翻前决策点的底池、赔率门槛
+            # 和客户端底池档位都会偏小（h39：4.5 vs 6.0）。
+            if (street == "preflop" and not bomb
+                    and pot <= ante * players + 1e-9):
+                pot += sb + bb
         pot_start = pot
 
         commit: dict[str, float] = {}
