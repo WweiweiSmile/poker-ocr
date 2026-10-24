@@ -189,6 +189,52 @@ def test_table_dynamics_outranks_chart() -> None:
           f"76o 仍在所有范围之外：{junk.render() if junk else None}")
 
 
+def test_loose_without_passive_does_not_claim_raises_are_rare() -> None:
+    """「偏松 + 3-bet 窄但强」不能写成 loose-passive / raises are rare。
+
+    旧口径只要命中「偏松」就把事实层写成 "Loose-passive (raises are rare)"。
+    但 .table_dy 现在写的是「整体偏松、桌上不全是跟注站、3-bet 范围窄但强」：
+    窄不等于少，混合桌也不等于整桌被动——这种断言会让模型错误地低估加注。
+    """
+    from poker_ocr.table_dynamics import is_passive_table
+
+    mixed = ("整体偏松，入池的人多；桌上不全是跟注站；"
+             "3-bet / 4-bet 范围窄但强，几乎没有诈唬性的 3-bet")
+    check(not is_passive_table(mixed), "混合桌（不全是跟注站）不该判被动")
+    check(not is_passive_table("整体偏松，但 3-bet 范围窄且强"), "偏松不等于被动")
+    check(is_passive_table("松弱玩家，跟注站，很少主动加注"), "松弱跟注站应判被动")
+
+    for cards in (("4h", "4s"), ("Ah", "8h")):
+        v = range_verdict("UTG", cards, table_dynamics=mixed)
+        check(v is not None and v.loose and not v.passive,
+              f"应判松、不判被动：{cards} loose={v.loose if v else None} "
+              f"passive={v.passive if v else None}")
+        text = v.render() if v else ""
+        check("loose-passive" not in text.lower(),
+              f"非被动松桌不该写 loose-passive：{text}")
+        check("raises are rare" not in text,
+              f"非被动松桌不该断言 raises are rare：{text}")
+        check("loose" in text.lower(), f"仍应保留松桌提示：{text}")
+
+    # 有 limper 的投机牌、以及 set-mine 分支，也不能写 loose-passive
+    a4s = range_verdict("CO", ("Ah", "4h"), table_dynamics=mixed, limpers=2)
+    check(a4s is not None and "loose-passive" not in a4s.render().lower(),
+          f"A4s 投机牌分支不该写 loose-passive：{a4s.render() if a4s else None}")
+    pp = range_verdict("BTN", ("9h", "9d"), table_dynamics=mixed)
+    check(pp is not None and "Loose table" in pp.render()
+          and "loose-passive" not in pp.render().lower(),
+          f"set-mine 分支应写 Loose table：{pp.render() if pp else None}")
+
+    # 明确写了松弱/跟注站的桌子，仍保留原口径
+    passive = range_verdict("UTG", ("4h", "4s"),
+                            table_dynamics="松弱玩家，跟注站，很少主动加注")
+    ptext = passive.render() if passive else ""
+    check(passive is not None and passive.loose and passive.passive,
+          "松弱跟注站应判 loose+passive")
+    check("loose-passive" in ptext.lower() and "raises are rare" in ptext,
+          f"被动桌仍应写 loose-passive / raises are rare：{ptext}")
+
+
 def test_isolation_range_tightens_over_limpers() -> None:
     """RFI 表是无人入池的表；有 limper 时要收紧，不能把「IN open range」当隔离许可证。
 
@@ -365,6 +411,7 @@ def main() -> int:
         test_known_verdicts, test_sb_bb_are_not_lists,
         test_sb_complete_requires_playability,
         test_small_pair_overlimp_exception, test_table_dynamics_outranks_chart,
+        test_loose_without_passive_does_not_claim_raises_are_rare,
         test_isolation_range_tightens_over_limpers,
         test_set_mine_pairs_below_tt,
         test_speculative_hands_not_value_isolation,

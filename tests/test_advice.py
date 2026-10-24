@@ -1121,6 +1121,9 @@ def test_loose_table_adds_open_bonus() -> None:
     check(is_loose_table("松弱玩家，跟注站，很少诈唬"), "松弱应判松桌")
     check(not is_loose_table("紧弱，尊重加注"), "紧弱不该判松桌")
     check(not is_loose_table(None), "没有桌风不该判松桌")
+    check(not is_loose_table("桌上不全是跟注站，紧弱"),
+          "否定句「不全是跟注站」不该判松桌")
+    check(is_loose_table("整体偏松，桌上不全是跟注站"), "偏松仍然是松桌")
 
     sit_loose = build_situation(point, table_dynamics="松弱玩家，跟注站")
     sit_tight = build_situation(point, table_dynamics="紧弱，尊重加注")

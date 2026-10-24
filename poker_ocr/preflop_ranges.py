@@ -29,7 +29,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .table_dynamics import is_loose_table
+from .table_dynamics import is_loose_table, is_passive_table
 
 RANKS = "23456789TJQKA"
 
@@ -308,6 +308,10 @@ class Verdict:
     「value/isolation」—— 对松弱跟注站既隔离不了，也不是价值牌。
     `is_set_mine_pair` 为真的 22-99 只给 set-mine 口径：可以小加注拿主动，
     但没中 set 的超对是中等牌，不按价值牌打光。
+
+    `loose` 与 `passive` 是两维：只有 `loose and passive` 才写
+    "Loose-passive / raises are rare"；单纯「偏松」只写「跟注宽」，
+    不能替用户断言「加注很少」。
     """
 
     hand: str
@@ -315,7 +319,8 @@ class Verdict:
     in_range: bool | None            # None = 该位置没有清单（SB/BB）
     first_position: str | None        # 最早包含它的位置
     note: str = ""
-    loose: bool = False              # 桌风明确松弱/跟注站
+    loose: bool = False              # 桌风明确「松」（入池宽，不等于被动）
+    passive: bool = False            # 桌风明确「被动/加注少」；loose+passive 才是松弱
     limpers: int = 0                 # 我行动前已经溜入的人数
     isolation_position: str | None = None   # 收紧后的参照位置
     isolation_ok: bool | None = None        # 这手牌在收紧后的范围里？
@@ -352,13 +357,23 @@ class Verdict:
                             f"not to fold them out.")
                 if self.loose:
                     if is_speculative(self.hand):
-                        text += (" Loose-passive table: they call wide and rarely "
-                                 "fold — a raise will not isolate them; it only builds "
-                                 "a pot you will often miss. Size small or over-limp.")
+                        if self.passive:
+                            text += (" Loose-passive table: they call wide and rarely "
+                                     "fold — a raise will not isolate them; it only "
+                                     "builds a pot you will often miss. Size small or "
+                                     "over-limp.")
+                        else:
+                            text += (" Loose table: calls are wide — expect calls; "
+                                     "size small or over-limp.")
                     elif not is_set_mine_pair(self.hand):
-                        text += (" Loose-passive table: they call wide — isolate the "
-                                 "hands that flop well multiway, not dominated offsuit "
-                                 "aces.")
+                        if self.passive:
+                            text += (" Loose-passive table: they call wide — isolate "
+                                     "the hands that flop well multiway, not dominated "
+                                     "offsuit aces.")
+                        else:
+                            text += (" Loose table: they call wide — raise the hands "
+                                     "that flop well multiway, not dominated offsuit "
+                                     "aces; expect calls, not folds.")
                 return text
             # 2026-10-23 h3：A8o CO、3 个 limper，模型看到「IN CO open range」
             # 就开到 11BB；4 家跟注后 A8o 变成弱牌。RFI 表是「无人入池」的表，
@@ -395,17 +410,31 @@ class Verdict:
                          "treat an unimproved overpair as a medium hand — no set, "
                          "no big pot.")
                 if self.loose:
-                    text += (" Loose-passive table: 3-4 way pots are the norm — "
-                             "expect calls and play it as a set-mine.")
+                    if self.passive:
+                        text += (" Loose-passive table: 3-4 way pots are the norm — "
+                                 "expect calls and play it as a set-mine.")
+                    else:
+                        text += (" Loose table: expect calls and play it as a "
+                                 "set-mine; do not assume a multiway pot.")
             elif self.loose:
                 if is_speculative(self.hand):
-                    text += (" Loose-passive table: the chart is a floor here — a raise "
-                             "is fine for initiative and dead money, but this is a "
-                             "speculative hand: expect a multiway pot and do not "
-                             "overplay one pair.")
+                    if self.passive:
+                        text += (" Loose-passive table: the chart is a floor here — a "
+                                 "raise is fine for initiative and dead money, but this "
+                                 "is a speculative hand: expect a multiway pot and do "
+                                 "not overplay one pair.")
+                    else:
+                        text += (" Loose table: the chart is a floor here — a raise is "
+                                 "fine for initiative and dead money, but this is a "
+                                 "speculative hand: expect calls and do not overplay "
+                                 "one pair.")
                 else:
-                    text += (" Loose-passive table: the chart is a floor here — raise "
-                             "for value/isolation and expect calls.")
+                    if self.passive:
+                        text += (" Loose-passive table: the chart is a floor here — "
+                                 "raise for value/isolation and expect calls.")
+                    else:
+                        text += (" Loose table: the chart is a floor here — raise for "
+                                 "value and expect calls.")
             return text
         if self.first_position:
             text = (f"Preflop range: {self.hand} is OUTSIDE the {self.position} open "
@@ -420,15 +449,21 @@ class Verdict:
                 if self.loose:
                     # 桌风优先：同样的牌在松弱桌和紧桌是两种默认。h13 的桌风
                     # 明确「很少主动加注」，limp 的加注税很低，弃牌反而更差。
-                    text += (" This table is loose-passive (raises are rare): "
-                             "over-limping for 1BB to set-mine is the better default "
-                             "than folding — the chart is too tight here.")
+                    if self.passive:
+                        text += (" This table is loose-passive (raises are rare): "
+                                 "over-limping for 1BB to set-mine is the better "
+                                 "default than folding — the chart is too tight here.")
+                    else:
+                        text += (" This table is loose (calls are wide, but raises "
+                                 "still happen): over-limping for 1BB to set-mine is "
+                                 "still fine — the chart is too tight here.")
                 else:
                     text += (" Check the implied-odds fact and the table dynamics "
                              "before folding.")
             elif self.loose:
                 # 松桌不等于什么都能溜：只放宽有听牌/成牌潜力的类别。
-                text += (" This table is loose-passive: the chart is a default, not a "
+                label = "loose-passive" if self.passive else "loose"
+                text += (f" This table is {label}: the chart is a default, not a "
                          "ban — but widen only with playable hands (pairs, suited, "
                          "connected), not offsuit trash.")
             return text
@@ -441,9 +476,10 @@ def range_verdict(position: str | None, cards,
                   limpers: int = 0) -> Verdict | None:
     """位置 + 两张手牌 → 范围归属。
 
-    `table_dynamics` 只影响「默认线」的渲染：桌风明确松弱时，开池表按**默认值**
+    `table_dynamics` 只影响「默认线」的渲染：桌风明确「松」时，开池表按**默认值**
     对待（放宽一档/小对子 over-limp），而不是绝对的 FOLD。它不改变 `in_range`
     本身 —— 事实和解释分开，复盘时仍然能看到「这手牌在标准表里本来不进」。
+    只有 `loose and passive` 才写 "Loose-passive / raises are rare"。
 
     `limpers` > 0 时额外算「隔离归属」：RFI 表是无人入池的表，有 N 个 limper
     就用 N 个更早位置的范围来近似（人越多，能隔离的牌越强）。h3 的 A8o 就是
@@ -452,6 +488,7 @@ def range_verdict(position: str | None, cards,
     if not position or not cards or len(cards) != 2:
         return None
     loose = is_loose_table(table_dynamics)
+    passive = is_passive_table(table_dynamics)
     limpers = max(int(limpers or 0), 0)
     pos = position.strip().upper().replace("+", "+")
     if pos not in RFI:
@@ -475,12 +512,12 @@ def range_verdict(position: str | None, cards,
                         f"potential. Completing only buys second-best one-pair hands "
                         f"out of position — the 0.5BB price does not pay for that. FOLD.")
             return Verdict(key, pos, None, None, note=note, loose=loose,
-                           limpers=limpers)
+                           passive=passive, limpers=limpers)
         if pos == "BB":
             return Verdict(hand_key(cards), pos, None, None,
                            note="BB has no open range (already posted) — this is a "
                                 "check/defend spot, not an RFI decision",
-                           loose=loose, limpers=limpers)
+                           loose=loose, passive=passive, limpers=limpers)
         return None
 
     key = hand_key(cards)
@@ -493,5 +530,6 @@ def range_verdict(position: str | None, cards,
         isolation_ok = key in RFI[isolation_position]
     return Verdict(hand=key, position=pos, in_range=key in RFI[pos],
                    first_position=first, note=NOTES.get(pos, ""), loose=loose,
-                   limpers=limpers, isolation_position=isolation_position,
+                   passive=passive, limpers=limpers,
+                   isolation_position=isolation_position,
                    isolation_ok=isolation_ok)

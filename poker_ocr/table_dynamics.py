@@ -26,6 +26,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -65,16 +66,72 @@ _LOOSE_WORDS = (
     "calling station", "新手", "鱼",
 )
 
+# 「被动」是独立于「松」的维度：松凶桌也入池很宽，但加注并不少。
+# 只有用户明确写了「松弱/跟注站/很少加注」这类描述，事实层才敢说
+# "loose-passive / raises are rare"。
+_PASSIVE_WORDS = (
+    "松弱", "紧弱", "被动", "跟注站",
+    "很少主动加注", "很少加注", "加注少", "不主动加注",
+    "loose-passive", "loose passive", "tight-passive",
+    "calling station", "nit", "rarely raises", "few raises",
+)
+
+# 整桌层面的被动描述。只写「桌上有跟注站」不等于整桌被动；「不全是跟注站」
+# 更要按混合桌处理。_TABLE_PASSIVE_WORDS 用来区分这两种情况。
+_TABLE_PASSIVE_WORDS = tuple(
+    w for w in _PASSIVE_WORDS if w not in ("跟注站", "calling station"))
+_MIXED_TABLE_RE = re.compile(
+    r"(?:不全是|不都是|不是|并非)(?:跟注站|calling station)"
+    r"|(?:not|isn't|is not|aren't|are not)\s+(?:all\s+)?(?:a\s+)?calling station"
+)
+
+# 「桌上不全是跟注站」不是跟注站：否定句不能算成松/被动/松凶的标签。
+# 只处理常见的「不是/不全是 + 标签」短语；宁可漏判，也不要把否定读成肯定。
+_NEGATED_LABEL_RE = re.compile(
+    r"(?:不全是|不都是|不完全是|不是|并非|并没有|没有)"
+    r"(?:跟注站|松弱|松凶|松浪|新手|鱼)"
+    r"|(?:not|isn't|is not|aren't|are not)\s+(?:a\s+|an\s+)?"
+    r"(?:calling station|loose-passive|loose passive|loose-aggressive|maniac|nit)"
+)
+
+
+def _positive_text(text: str | None) -> str:
+    """去掉「不是/不全是 + 标签」这类否定短语，再交给关键词判断。"""
+    t = (text or "").lower()
+    return _NEGATED_LABEL_RE.sub("", t)
+
 
 def is_loose_table(text: str | None) -> bool:
     """桌风是否明确是「松」桌（松弱/松凶/跟注站/新手鱼）。
+
+    **只表示「入池宽」，不表示「被动/加注少」**：松凶桌也是松桌。要判断
+    能不能说 "raises are rare"，必须再看 `is_passive_table()`。
 
     影响两处：翻前开池尺度（`advice.build_options` 的 `open_bonus`），以及
     `preflop_ranges.range_verdict` 对「默认线」的解释（松桌允许更宽、
     小对子可以 over-limp）。没有桌风、或写的是紧弱/尊重加注，都不算松。
     """
-    t = (text or "").lower()
+    t = _positive_text(text)
     return bool(t) and any(w in t for w in _LOOSE_WORDS)
+
+
+def is_passive_table(text: str | None) -> bool:
+    """桌风是否明确是「被动/加注少」（松弱、跟注站、很少主动加注）。
+
+    与 `is_loose_table()` 组合使用：只有 `loose and passive` 才能在事实层
+    写 "loose-passive / raises are rare"。单纯「偏松」不算——松凶桌也松，
+    但加注并不少；把这种桌写成 loose-passive 会让模型做出错误的价值/弃牌线。
+
+    「不全是跟注站」这类混合桌也不算整桌被动：只有同时写了「松弱/紧弱/
+    很少加注」这种整桌描述，才继续按被动处理。
+    """
+    t = _positive_text(text)
+    if not any(w in t for w in _PASSIVE_WORDS):
+        return False
+    if _MIXED_TABLE_RE.search((text or "").lower()) and not any(
+            w in t for w in _TABLE_PASSIVE_WORDS):
+        return False
+    return True
 
 
 def value_heavy_aggression(text: str | None) -> bool:
@@ -84,7 +141,7 @@ def value_heavy_aggression(text: str | None) -> bool:
     松弱/紧弱/很少诈唬/尊重持续下注中的任意一类，才把边际成牌从「跟注」
     改成「弃牌」。没有桌风、或写的是松凶/爱诈唬，都不触发。
     """
-    t = (text or "").lower()
+    t = _positive_text(text)
     if not t:
         return False
     if any(w in t for w in _AGGRESSIVE_WORDS) and not any(
@@ -103,7 +160,7 @@ def is_aggressive_table(text: str | None) -> bool:
     只看显式标签，不靠「爱诈唬」这类泛化词：避免把「松凶但很少诈唬」
     误判成松浪。宁可漏判，也不要把被动桌当成激进桌。
     """
-    t = (text or "").lower()
+    t = _positive_text(text)
     if not t:
         return False
     # 「松浪」是明确的爱开火标签，出现即算；「松凶」可能被用户补一句
