@@ -274,6 +274,37 @@ def test_draw_focus_hides_made_hand_nut_status() -> None:
     assert "NUT STATUS" in gt.render()
 
 
+def test_h39_river_flush_completes_and_board_pair_two_pair() -> None:
+    """h39：TdQd 在 Th4h4d7sJh。
+
+    河牌 Jh 让三张红桃成花；TT44 里的 44 是公对面，JJ/QQ/KK/AA 都用它组成
+    更大的两对。模型当时仍写「two pair beats his bluffs」——这两条事实必须
+    由程序写进提示词。
+    """
+    gt = compute_ground_truth("TdQd", "Th4h4d7sJh", opponents=1)
+    assert gt is not None
+    assert gt.made.name == "Two pair"
+    text = gt.render()
+    assert "Street change:" in text
+    assert "completes a flush" in text
+    assert "One of your two pairs is the BOARD pair" in text
+    assert "bluff-catcher" in text
+
+
+def test_turn_card_that_changes_nothing_has_no_street_change() -> None:
+    """7s 既不补花也不成对：不该硬编一条「Street change」。"""
+    gt = compute_ground_truth("TdQd", "Th4h4d7s", opponents=1)
+    assert gt is not None
+    assert gt._street_change_text() is None
+    assert "Street change:" not in gt.render()
+
+
+def test_river_pairing_card_is_called_out() -> None:
+    gt = compute_ground_truth("AsKh", "Ks7d2c2h", opponents=1)
+    assert gt is not None
+    assert "pairs the board" in gt.render()
+
+
 if __name__ == "__main__":
     import pytest
     raise SystemExit(pytest.main([__file__, "-q"]))

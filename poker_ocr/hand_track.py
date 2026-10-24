@@ -1178,6 +1178,14 @@ class LiveHandTracker:
             return None
 
         snap = self._snapshot(state, hand)
+        # 翻前非盲位、to_call=0、且自己已经在这一轮行动过：这一轮其实已经结束。
+        # 客户端按钮残留/发牌动画会让 hero_turn 多亮几帧，曾把「跟完 3-bet」
+        # 当成新的开池点，在 pot 28、to_call 0 时又给了一条 open 建议（h39）。
+        # SB/BB 补齐后的 check 是合法决策点，不能一起挡掉。
+        if (snap.street == PREFLOP and snap.to_call <= 0
+                and snap.hero_position not in ("SB", "BB")
+                and any(a.is_hero for a in snap.actions_of(PREFLOP))):
+            return None
         if snap.decision_key in self.advised:
             return None
         self.advised.add(snap.decision_key)

@@ -260,9 +260,15 @@ def build_preflop_options(snap: HandSnapshot,
     limper_bonus = (min(limpers, 2) * LIMP_BONUS_FIRST
                     + max(limpers - 2, 0) * LIMP_BONUS_EXTRA)
     base = _OPEN_BASES.get(hero_pos, (3.0, 3.25, 3.5))
-    ante_x = 2.0 if (snap.blinds and snap.blinds.ante) else 1.0
+    # 前注按「大盲的倍数」加，不能拿它去乘开池尺度：0.5BB 的前注会把 UTG 的
+    # 2.5BB 开池直接翻成 5BB（h39 的 5.5BB 就是这么来的），既偏离标准
+    # 2.5-3.5BB，也把能跟注的范围压成两极化。前注只是死钱，开池加 0.5-1BB
+    # 足够覆盖。
+    ante_bb = 0.0
+    if snap.blinds and snap.blinds.ante and snap.blinds.bb:
+        ante_bb = float(snap.blinds.ante) / float(snap.blinds.bb)
     for b in base:
-        target = b * ante_x + limper_bonus + max(open_bonus, 0.0)
+        target = b + ante_bb + limper_bonus + max(open_bonus, 0.0)
         target, note = _cap(target, hero_max, min_raise_to)
         options.append(Option(f"open-{b:g}", f"Raise to {target:g}BB (open)",
                               "raise", target, note))
@@ -1654,6 +1660,16 @@ def render_hand_facts(sit: Situation) -> str:
                         f"{n} opponent(s) in the hand, {sit.beat_at_least_pct:g}% chance at "
                         f"least one is ahead. Random hands are a LOWER bound — anyone who "
                         f"called or raised has a stronger range than random.")
+        if "three-bet" in (snap.preflop_shapes or ()):
+            lines.append(
+                "3-bet pot: the opponent's range is far narrower than random "
+                "(premium pairs, big aces, bluffs). The rank above is an UPPER "
+                "bound on your equity, NOT your equity against his actual range "
+                "— discount it heavily when he bets again.")
+        if sit.street in ("turn", "river") and owed > 0:
+            lines.append(
+                "Facing another barrel: his range has narrowed to value + draws; "
+                "the random-hand rank overstates your equity in this spot.")
         if snap.bomb_pot:
             lines.append("Bomb pot banner: YES (幸运暴击 / BOMB POT shown on screen)")
         prev_pot = previous_street_pot(snap)

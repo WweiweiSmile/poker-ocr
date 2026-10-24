@@ -319,6 +319,45 @@ class GroundTruth:
                 f"draw directive; do NOT use the made-hand rank below to veto "
                 f"a semi-bluff.")
 
+    def _street_change_text(self) -> str | None:
+        """这一街新发的牌改变了什么：成花 / 公对面成三条 / 四条 / 成对。
+
+        模型在河牌最容易漏掉「这张牌让什么牌型成了」。h39 的 Jh 让牌面三张
+        红桃成花、JJ 成葫芦、任何 Jx 反超 TT44，模型却仍写「two pair beats
+        his bluffs」—— 它只看了自己的牌型名，没看新牌。这里用「当前牌面 vs
+        去掉最后一张」的差集算，不猜。
+        """
+        b = self.board
+        if len(b) < 4:                       # 翻牌没有「上一街」可比
+            return None
+        last, prev = b[-1], b[:-1]
+        changes: list[str] = []
+
+        # 成花：最后一张让某个花色在公共牌上达到 3 张。
+        suit = last[1]
+        now = sum(1 for c in b if c[1] == suit)
+        before = sum(1 for c in prev if c[1] == suit)
+        if now >= 3 and before < 3:
+            suit_name = {"s": "spades", "h": "hearts",
+                         "d": "diamonds", "c": "clubs"}.get(suit, suit)
+            changes.append(f"the {card_text(last)} completes a flush "
+                           f"({now} {suit_name} on the board)")
+
+        # 公对面：最后一张的点数此前已经出现过。
+        rank = last[0]
+        same = sum(1 for c in b if c[0] == rank)
+        before_same = sum(1 for c in prev if c[0] == rank)
+        if same >= 4:
+            changes.append(f"the {card_text(last)} puts QUADS on the board")
+        elif same == 3 and before_same == 2:
+            changes.append(f"the {card_text(last)} puts TRIPS on the board")
+        elif same == 2 and before_same == 1:
+            changes.append(f"the {card_text(last)} pairs the board")
+
+        if not changes:
+            return None
+        return "Street change: " + "; ".join(changes) + "."
+
     def render(self, draw_focus: bool = False) -> str:
         """固定格式的事实块。提示词里的模型只允许引用，不允许改写。
 
@@ -338,6 +377,9 @@ class GroundTruth:
             f"{cards_text(m.best_five)}｜hole cards used: "
             f"{cards_text(m.hero_cards_used) if m.hero_cards_used else 'NONE (playing the board)'}",
         ]
+        street_change = self._street_change_text()
+        if street_change:
+            lines.append(street_change)
         if draw_focus:
             lines.append(self._draw_status_text())
             lines.append(
@@ -599,6 +641,15 @@ def _warnings(made: MadeHand, draws: DrawInfo, rank: RankInfo,
             out.append(
                 "The board is paired, so a full house (or quads) is possible. "
                 f"Your {made.name} loses to those hands.")
+        if board.paired and cat == TWO_PAIR:
+            # h39 的根因：TT44 里的 44 是公对面，对手的 JJ/QQ/KK/AA 同样
+            # 用 44 组成两对，而且对子更大。模型把「两对」当成强牌，其实
+            # 它只赢诈唬——必须把「公对面的第二对是大家的」写死。
+            out.append(
+                "One of your two pairs is the BOARD pair — every opponent shares "
+                "it. A higher pocket pair also makes a bigger two pair (e.g. JJ "
+                "on T-4-4 is jacks and fours, beating your tens and fours), so "
+                "this is a bluff-catcher, not a value monster.")
         if board.trips and cat < QUADS:
             out.append("There are trips on the board, so quads are possible.")
         if board.straight_possible and cat < STRAIGHT:

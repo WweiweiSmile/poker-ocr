@@ -21,7 +21,7 @@ from poker_ocr.table_dynamics import (  # noqa: E402
 )
 
 # 改动提示词、事实块、选项生成规则、价值指令或审计口径时**必须** bump。
-CURRENT_ADVICE_VERSION = "advice-2026-10-24.8"
+CURRENT_ADVICE_VERSION = "advice-2026-10-24.9"
 # 改动 decisions.py 的重建语义时 bump。
 CURRENT_RECONSTRUCT_VERSION = "recon-2"
 

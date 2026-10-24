@@ -379,6 +379,36 @@ def test_tracker_decision_point_confirmed_and_deduped() -> None:
           f"转街后的新决策点应再给一次，实际 {p2}")
 
 
+def test_tracker_does_not_advise_closed_preflop_round() -> None:
+    """跟完 3-bet 后按钮残留：to_call=0 的翻前残局不能再给 open 建议（h39）。
+
+    旧行为在 pot 28、to_call 0 时又投了一次决策点，模型于是给出第三条翻前
+    建议（open 5.5BB）——这一轮其实早已结束，应该等翻牌。
+    """
+    tr = LiveHandTracker(confirm_frames=1)
+    feed(tr, state(player("hero", position="UTG", stack=100.0),
+                   player("a", position="LJ", stack=100.0),
+                   player("b", position="BB", bet=1.0),
+                   pot=6.0, pbs=0.0), ["Td", "Qd"], [])
+    # hero 开池 5.5
+    feed(tr, state(player("hero", position="UTG", bet=5.5, action="raise"),
+                   player("a", position="LJ"),
+                   player("b", position="BB", bet=1.0),
+                   pot=11.5, pbs=0.0), ["Td", "Qd"], [])
+    # LJ 3-bet 到 11
+    feed(tr, state(player("hero", position="UTG", bet=5.5),
+                   player("a", position="LJ", bet=11.0, action="raise"),
+                   player("b", position="BB", bet=1.0),
+                   pot=22.5, pbs=0.0), ["Td", "Qd"], [])
+    # hero 跟到 11：这一轮结束；按钮再亮也不能给建议
+    point = feed(tr, state(player("hero", position="UTG", bet=11.0),
+                           player("a", position="LJ", bet=11.0),
+                           player("b", position="BB", bet=1.0),
+                           pot=28.0, pbs=0.0, hero_turn=True),
+                 ["Td", "Qd"], [])
+    check(point is None, f"翻前已结束不应再给决策点：{point}")
+
+
 def test_snapshot_to_call_and_preflop_shape() -> None:
     tr = LiveHandTracker(confirm_frames=1)
     players = (player("hero", position="BTN", stack=100.0, bet=0.0),
@@ -1021,6 +1051,36 @@ def test_prompt_renders_implied_odds_for_pocket_pair() -> None:
           "非口袋对不该渲染抽 set 隐含赔率")
 
 
+def test_ante_adds_bb_not_multiplies_open_size() -> None:
+    """0.5BB 前注只加 0.5BB：UTG 开池 3.0-3.5，不是 5.0-6.0（h39 的 5.5）。"""
+    snap = make_point(street="preflop", board=(), to_call=1.0, pot=5.5,
+                      hero_position="UTG", hero_cards=("Td", "Qd"),
+                      hero_bet=0.0, hero_stack=100.0,
+                      preflop_shapes=("unopened",), cbet_spot=False,
+                      blinds=Blinds(0.5, 1.0, 0.5, "1/2(1)"))
+    by = {o.id: o for o in build_options(snap)}
+    check(by["open-2.5"].amount == 3.0, f"UTG 开池应 3.0：{by['open-2.5']}")
+    check(by["open-2.75"].amount == 3.25, f"UTG 开池应 3.25：{by['open-2.75']}")
+    check(by["open-3"].amount == 3.5, f"UTG 开池应 3.5：{by['open-3']}")
+
+
+def test_three_bet_pot_warns_random_rank_is_upper_bound() -> None:
+    """3-bet 池的随机牌排名只是上界，不能当「对他的范围」的胜率。"""
+    snap = make_point(street="turn", board=("Th", "4h", "4d", "7s"),
+                      hero_cards=("Td", "Qd"), to_call=19.0, pot=75.0,
+                      hero_position="UTG", hero_bet=0.0, hero_stack=100.0,
+                      preflop_shapes=("three-bet",), cbet_spot=False)
+    facts = render_hand_facts(build_situation(snap))
+    check("3-bet pot" in facts and "UPPER bound" in facts, facts)
+    check("Facing another barrel" in facts, facts)
+
+    single = make_point(street="turn", board=("Th", "4h", "4d", "7s"),
+                        hero_cards=("Td", "Qd"), to_call=19.0, pot=75.0,
+                        preflop_shapes=("single-raise",), cbet_spot=False)
+    check("3-bet pot" not in render_hand_facts(build_situation(single)),
+          "单加注池不该出现 3-bet 提示")
+
+
 def test_limpers_count_from_state_and_bonus_decays() -> None:
     """3-4 个 limper：limper 从同帧下注额补数，第 3 个起每个只 +0.5BB。"""
     from poker_ocr.hand_track import OpponentSnapshot
@@ -1032,11 +1092,12 @@ def test_limpers_count_from_state_and_bonus_decays() -> None:
                       blinds=Blinds(0.5, 1.0, 0.5, "1/2(1)"),
                       opponents=opps, streets=())
     by = {o.id: o for o in build_options(snap)}
-    # HJ 基础 3.0 × 前注 2 = 6；4 个 limper = 1+1+0.5+0.5 = 3
-    check(abs(by["open-3"].amount - 9.0) < 1e-9,
-          f"4 个 limper 应开到 9.0：{by['open-3'].amount}")
-    check(abs(by["open-3.5"].amount - 10.0) < 1e-9,
-          f"4 个 limper 最大档应 10.0：{by['open-3.5'].amount}")
+    # HJ 基础 3.0 + 0.5 前注 = 3.5；4 个 limper = 1+1+0.5+0.5 = 3
+    # 前注按大盲倍数**相加**，不能乘开池尺度（否则 0.5BB 前注会把 UTG 开到 5.5）。
+    check(abs(by["open-3"].amount - 6.5) < 1e-9,
+          f"4 个 limper 应开到 6.5：{by['open-3'].amount}")
+    check(abs(by["open-3.5"].amount - 7.0) < 1e-9,
+          f"4 个 limper 最大档应 7.0：{by['open-3.5'].amount}")
     facts = render_hand_facts(build_situation(snap))
     check("Limpers before me: 4" in facts,
           f"提示词事实应写出溜入人数：{facts}")
@@ -2487,6 +2548,7 @@ def main() -> int:
         test_tracker_board_drop_needs_two_frames,
         test_tracker_ignores_turn_card_flicker,
         test_tracker_decision_point_confirmed_and_deduped,
+        test_tracker_does_not_advise_closed_preflop_round,
         test_snapshot_to_call_and_preflop_shape,
         test_snapshot_marks_limped_pot,
         test_table_size_uses_seats_not_players_in_hand,
@@ -2513,6 +2575,8 @@ def main() -> int:
         test_straight_is_not_nuts_on_a_flush_board,
         test_prompt_renders_value_directive_and_draw_equity,
         test_prompt_renders_implied_odds_for_pocket_pair,
+        test_ante_adds_bb_not_multiplies_open_size,
+        test_three_bet_pot_warns_random_rank_is_upper_bound,
         test_limpers_count_from_state_and_bonus_decays,
         test_loose_table_adds_open_bonus,
         test_options_preflop_uses_bb_sizing,
