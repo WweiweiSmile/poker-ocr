@@ -30,6 +30,7 @@ class ImportHands(APIModel):
     filename: str | None = None
     dryRun: bool = False
     dedupe: bool = True
+    onlyExact: bool = True
     allowInvalid: bool = False
     includePartial: bool = False
     includeMidHand: bool = False

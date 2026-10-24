@@ -168,7 +168,8 @@ def test_invalid_is_skipped_by_default_and_can_be_included():
 
     included = service.import_hands({
         "content": content, "format": "auto", "dryRun": True,
-        "allowInvalid": True,
+        # exact 过滤会先挡掉 invalid；这里两个闸门都显式放开。
+        "onlyExact": False, "allowInvalid": True,
     })
     assert included["invalid"] == 0
     assert included["imported"] == 1
@@ -264,6 +265,8 @@ def test_live_log_import_attaches_advices_to_hand():
     service = make_service()
     result = service.import_hands({
         "content": live_log_with_advice(), "format": "auto", "dryRun": False,
+        # 这个样本缺筹码 → approx；本用例只验证建议归手，放开 exact 过滤。
+        "onlyExact": False,
     })
     assert result["source"] == "live"
     assert result["hands"] == 1
@@ -273,3 +276,22 @@ def test_live_log_import_attaches_advices_to_hand():
     assert saved["advices"][0]["option"]["id"] == "open-2.5"
     # advice 没有变成第二手牌
     assert len(service.import_repo.rows) == 1
+
+
+def test_import_defaults_to_exact_only():
+    """默认只导入 exact：approx 手牌跳过，显式放开才进库。"""
+    service = make_service()
+    blocked = service.import_hands({
+        "content": live_log_with_advice(), "format": "auto", "dryRun": True,
+    })
+    assert blocked["onlyExact"] is True
+    assert blocked["imported"] == 0
+    assert blocked["skippedNotExact"] == 1
+    assert blocked["samples"][0]["status"] == "approx"
+
+    allowed = service.import_hands({
+        "content": live_log_with_advice(), "format": "auto", "dryRun": True,
+        "onlyExact": False,
+    })
+    assert allowed["imported"] == 1
+    assert allowed["skippedNotExact"] == 0

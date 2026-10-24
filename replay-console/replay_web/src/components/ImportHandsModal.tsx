@@ -25,6 +25,7 @@ const STATUS_META: Record<ImportStatus, { label: string; color: string }> = {
   updated: { label: '更新', color: 'blue' },
   duplicate: { label: '重复', color: 'purple' },
   invalid: { label: '不可重跑', color: 'red' },
+  approx: { label: '非精确', color: 'gold' },
   error: { label: '错误', color: 'orange' },
 }
 
@@ -42,6 +43,7 @@ export default function ImportHandsModal({ open, onClose, onImported }: Props) {
   const [fileSize, setFileSize] = useState(0)
   const [fileLoaded, setFileLoaded] = useState(false)
   const [dedupe, setDedupe] = useState(true)
+  const [onlyExact, setOnlyExact] = useState(true)
   const [allowInvalid, setAllowInvalid] = useState(false)
   const [includePartial, setIncludePartial] = useState(false)
   const [includeMidHand, setIncludeMidHand] = useState(false)
@@ -56,6 +58,7 @@ export default function ImportHandsModal({ open, onClose, onImported }: Props) {
     setFileLoaded(false)
     setResult(null)
     setDedupe(true)
+    setOnlyExact(true)
     setAllowInvalid(false)
     setIncludePartial(false)
     setIncludeMidHand(false)
@@ -66,10 +69,11 @@ export default function ImportHandsModal({ open, onClose, onImported }: Props) {
     content,
     filename: filename || undefined,
     dedupe,
+    onlyExact,
     allowInvalid,
     includePartial,
     includeMidHand,
-  }), [format, content, filename, dedupe, allowInvalid, includePartial, includeMidHand])
+  }), [format, content, filename, dedupe, onlyExact, allowInvalid, includePartial, includeMidHand])
 
   const preview = useMutation({
     mutationFn: () => api.post<ImportResult>('/hands/import', { ...payload, dryRun: true }),
@@ -264,13 +268,19 @@ export default function ImportHandsModal({ open, onClose, onImported }: Props) {
       )}
 
       <div className="import-options">
+        <Checkbox checked={onlyExact} onChange={(event) => {
+          setOnlyExact(event.target.checked)
+          setResult(null)
+        }}>
+          只导入可精确重建的（exact）
+        </Checkbox>
         <Checkbox checked={dedupe} onChange={(event) => {
           setDedupe(event.target.checked)
           setResult(null)
         }}>
           跳过库中已有内容的手牌
         </Checkbox>
-        <Checkbox checked={allowInvalid} onChange={(event) => {
+        <Checkbox checked={allowInvalid} disabled={onlyExact} onChange={(event) => {
           setAllowInvalid(event.target.checked)
           setResult(null)
         }}>
@@ -317,6 +327,7 @@ export default function ImportHandsModal({ open, onClose, onImported }: Props) {
             <Stat label="更新" value={result.updated} hint="相同内容" />
             <Stat label="重复" value={result.duplicates} hint="已跳过" />
             <Stat label="不可重跑" value={result.invalid} hint="缺底牌/行动线" />
+            {result.skippedNotExact ? <Stat label="非精确" value={result.skippedNotExact} hint="approx，已跳过" /> : null}
             <Stat label="错误" value={result.errors} hint="解析/写库失败" />
             {result.advices ? <Stat label="建议" value={result.advices} hint="并入手牌" /> : null}
             {result.skippedPartial ? <Stat label="partial" value={result.skippedPartial} hint="已跳过" /> : null}

@@ -449,7 +449,7 @@ export interface HandsPage {
 }
 
 export type ImportFormat = 'auto' | 'review' | 'live'
-export type ImportStatus = 'imported' | 'updated' | 'duplicate' | 'invalid' | 'error'
+export type ImportStatus = 'imported' | 'updated' | 'duplicate' | 'invalid' | 'approx' | 'error'
 
 export interface ImportIssue {
   index?: number
@@ -486,12 +486,15 @@ export interface ImportResult {
   updated: number
   duplicates: number
   invalid: number
+  // 因 onlyExact 跳过的 approx 手牌数
+  skippedNotExact: number
   errors: number
   skippedNonHand: number
   skippedPartial: number
   skippedMidHand: number
   sessionCount: number
   dedupe: boolean
+  onlyExact: boolean
   allowInvalid: boolean
   samples: ImportSample[]
   issues: ImportIssue[]

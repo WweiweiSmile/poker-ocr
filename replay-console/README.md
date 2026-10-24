@@ -250,6 +250,7 @@ curl -s http://127.0.0.1:8010/api/hands/import \
 
 - `dryRun=true`：只解析、分析、去重计数，不写库；
 - `dedupe=true`（默认）：同一来源 + 相同内容更新原记录；库中已有相同内容（包括 `review_hands`）时跳过；
+- `onlyExact=true`（默认）：只导入重建质量为 `exact` 的手牌；`approx` 是推算值，默认跳过（预览里计为「非精确」），需要时在导入弹窗取消勾选；
 - `allowInvalid=false`（默认）：跳过缺底牌/行动线/bb 的不可重跑手牌；
 - `includePartial` / `includeMidHand`：仅实时日志，保留截断手牌/翻后接管手牌。
 

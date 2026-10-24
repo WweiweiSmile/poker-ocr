@@ -379,6 +379,9 @@ class ReplayService:
         dedupe = payload.get("dedupe")
         dedupe = True if dedupe is None else bool(dedupe)
         allow_invalid = bool(payload.get("allowInvalid"))
+        # 默认只导入重建质量为 exact 的手牌：approx 是推算值，重跑对比不可靠。
+        only_exact = payload.get("onlyExact")
+        only_exact = True if only_exact is None else bool(only_exact)
         include_partial = bool(payload.get("includePartial"))
         include_mid_hand = bool(payload.get("includeMidHand"))
         filename = str(payload.get("filename") or "").strip()[:255] or None
@@ -392,7 +395,7 @@ class ReplayService:
         existing_fps = {fp for _source, fp in existing_map}
         review_fps = self._review_fingerprints() if dedupe else set()
 
-        imported = updated = duplicates = invalid = 0
+        imported = updated = duplicates = invalid = not_exact = 0
         written = 0
         batch_id: int | None = None
         seen_keys: set[tuple[str, str]] = set()
@@ -442,6 +445,13 @@ class ReplayService:
             if analysis.quality == INVALID and not allow_invalid:
                 invalid += 1
                 add_sample(ph, "invalid", reason=analysis.invalid_reason,
+                           **info)
+                continue
+
+            if only_exact and analysis.quality != EXACT:
+                not_exact += 1
+                add_sample(ph, "approx",
+                           reason="重建质量 approx（推算值），未达到 exact",
                            **info)
                 continue
 
@@ -514,12 +524,14 @@ class ReplayService:
             "updated": updated,
             "duplicates": duplicates,
             "invalid": invalid,
+            "skippedNotExact": not_exact,
             "errors": error_total,
             "skippedNonHand": parsed.skipped_non_hand,
             "skippedPartial": parsed.skipped_partial,
             "skippedMidHand": parsed.skipped_mid_hand,
             "sessionCount": parsed.session_count,
             "dedupe": dedupe,
+            "onlyExact": only_exact,
             "allowInvalid": allow_invalid,
             "samples": samples,
             "issues": issues[:50],
