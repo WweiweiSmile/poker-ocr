@@ -831,8 +831,10 @@ def test_jsonl_append_repairs_partial_last_line() -> None:
 
 
 def test_ai_advice_submits_on_hero_turn_once() -> None:
-    """轮到我时投一次决策点；同一个回合的后续帧不重复投。"""
+    """轮到我时投一次决策点；同一个回合的后续帧（含底池读数抖动）不重复投。"""
     class TurnStream(StubStateStream):
+        pot = 2.5
+
         def ingest(self, img, frame_id: str, t: float, *,
                    extra_signature: tuple | None = None) -> FrameOutcome:
             self.extra_signatures.append(extra_signature)
@@ -847,7 +849,7 @@ def test_ai_advice_submits_on_hero_turn_once() -> None:
                                 bet=1.0, in_hand=True),
                 ],
                 blinds=live.parse_blinds("1/2"), dealer="hero",
-                hero_seat_id="hero", hero_turn=True, pot=2.5,
+                hero_seat_id="hero", hero_turn=True, pot=self.pot,
                 pot_before_street=0.0)
             return FrameOutcome("no_change", st, [], None, 0, 0)
 
@@ -868,8 +870,9 @@ def test_ai_advice_submits_on_hero_turn_once() -> None:
     tracker = LiveHandTracker(confirm_frames=1)
     fake_cards = SimpleNamespace(hero_codes=["Ah", "Kd"], board_codes=[],
                                  warnings=[])
+    stream = TurnStream()
     with patch.object(live, "recognize_cards", lambda img, profile: fake_cards):
-        proc = LiveProcessor(TurnStream(), StubWriter(), quiet=True,
+        proc = LiveProcessor(stream, StubWriter(), quiet=True,
                              profile=SimpleNamespace(), hand_tracker=tracker,
                              advice_runner=runner,
                              table_dynamics_loader=lambda: TableDynamics(
@@ -886,6 +889,113 @@ def test_ai_advice_submits_on_hero_turn_once() -> None:
         proc.handle(packet(2))
     check(len(runner.situations) == 1,
           f"同一个决策点不应重复投：{runner.situations}")
+    # 底池读数抖了 0.1BB（盲注补齐/筹码动画）——人还没行动，不能当成新回合
+    stream.pot = 2.6
+    with patch.object(live, "recognize_cards", lambda img, profile: fake_cards):
+        proc.handle(packet(3))
+    check(len(runner.situations) == 1,
+          f"底池读数抖动不应重新请求模型：{runner.situations}")
+
+
+def _preflop_state(*, pot: float, hero_bet: float, hero_action: str | None,
+                   hero_turn: bool = True, up_bet: float = 1.0,
+                   up_action: str | None = None) -> FrameState:
+    """9 人桌翻前的一帧：hero 在 SB，BB 1.0，可随意叠加下注/动作。"""
+    return FrameState(
+        frame_id="f", table_seats=9, players_in_hand=9,
+        players=[
+            PlayerState("hero", name="me", position="SB", stack=100.0,
+                        bet=hero_bet, action=hero_action, in_hand=True),
+            PlayerState("upL", name="up", position="BB", stack=99.0,
+                        bet=up_bet, action=up_action, in_hand=True),
+            *[PlayerState(f"p{i}", name=f"p{i}", position=f"P{i}",
+                          stack=100.0, bet=0.0, in_hand=True)
+              for i in range(7)],
+        ],
+        blinds=live.parse_blinds("1/2"), dealer="upL", hero_seat_id="hero",
+        hero_turn=hero_turn, pot=pot, pot_before_street=3.5)
+
+
+def _flop_state(*, pot: float, hero_bet: float, up_bet: float,
+                hero_action: str | None = None,
+                hero_turn: bool = True) -> FrameState:
+    return FrameState(
+        frame_id="f", table_seats=3, players_in_hand=3,
+        players=[
+            PlayerState("hero", name="me", position="SB", stack=100.0,
+                        bet=hero_bet, action=hero_action, in_hand=True),
+            PlayerState("upL", name="up", position="BB", stack=99.0,
+                        bet=up_bet, in_hand=True),
+            PlayerState("p1", name="p1", position="BTN", stack=100.0,
+                        bet=0.0, in_hand=True),
+        ],
+        blinds=live.parse_blinds("1/2"), dealer="p1", hero_seat_id="hero",
+        hero_turn=hero_turn, pot=pot, pot_before_street=6.0)
+
+
+def test_decision_key_ignores_pot_jitter() -> None:
+    """底池读数抖一下不能算新决策点。
+
+    真实链路里盲注补齐、筹码动画会让 pot 抖 0.1–0.5BB。旧 key 含 pot，
+    一抖就重新投递，人还没行动也会收到一串重复的 AI 请求。
+    """
+    tracker = LiveHandTracker(confirm_frames=1)
+    points = []
+    # 同一回合：hero 还没行动，只有底池读数在抖
+    for pot in (4.0, 4.5, 4.1, 4.0):
+        point = tracker.observe(
+            _preflop_state(pot=pot, hero_bet=0.5, hero_action=None,
+                           up_bet=1.0),
+            ["Ah", "Kd"], [])
+        points.append(point)
+    check(sum(p is not None for p in points) == 1,
+          f"同一回合的读数抖动不应重复给决策点：{[bool(p) for p in points]}")
+    key = points[0].decision_key
+    check(("Ah", "Kd") in key and key[1] == "preflop",
+          f"决策点 key 应保留手牌/街：{key}")
+
+
+def test_no_second_advice_after_hero_acted_and_nothing_to_call() -> None:
+    """自己已经行动、又没人加注：按钮残留不能再触发一次建议。
+
+    实测 SB 补齐（to_call 0.5→0）后会立刻再投一次（h8/h46/h106），
+    下注被跟注后也会（h4 翻牌/转牌）。
+    """
+    tracker = LiveHandTracker(confirm_frames=1)
+    first = tracker.observe(
+        _preflop_state(pot=4.0, hero_bet=0.5, hero_action=None), ["Ah", "Kd"], [])
+    check(first is not None and first.to_call == 0.5,
+          f"SB 补齐前应是一个决策点：{first}")
+    # SB 补齐到 1.0（真实徽章），to_call 变 0，但按钮还亮着
+    for pot in (4.5, 5.0):
+        point = tracker.observe(
+            _preflop_state(pot=pot, hero_bet=1.0, hero_action="call"),
+            ["Ah", "Kd"], [])
+        check(point is None,
+              f"行动完、to_call=0 时不应再投建议：{point}")
+
+    # 有人加注 → to_call > 0，这是真正的新决策点
+    raised = tracker.observe(
+        _preflop_state(pot=11.0, hero_bet=1.0, hero_action="call",
+                       up_bet=9.0, up_action="raise"),
+        ["Ah", "Kd"], [])
+    check(raised is not None and raised.to_call == 8.0,
+          f"被加注后应重新给建议：{raised}")
+
+
+def test_no_second_advice_after_hero_bet_and_was_called() -> None:
+    """翻牌自己下注、被跟注（to_call 0）后，残留按钮不能再触发建议。"""
+    tracker = LiveHandTracker(confirm_frames=1)
+    decision = tracker.observe(
+        _flop_state(pot=6.0, hero_bet=0.0, up_bet=0.0),
+        ["Ah", "Kd"], ["2c", "7d", "Jh"])
+    check(decision is not None and decision.to_call == 0.0,
+          f"翻牌轮到我应先给决策点：{decision}")
+    point = tracker.observe(
+        _flop_state(pot=16.0, hero_bet=5.0, up_bet=5.0, hero_action="bet"),
+        ["Ah", "Kd"], ["2c", "7d", "Jh"])
+    check(point is None,
+          f"下注被跟注后不应再投建议：{point}")
 
 
 def test_auto_click_after_observe_on_next_frame() -> None:
@@ -1805,7 +1915,7 @@ def test_advice_bar_colors_by_action() -> None:
 
 
 def _start_stack_state(hero_stack, hero_bet, *, hero_turn: bool = False,
-                       opp_stack=200.0, pot=5.5, pbs=4.0,
+                       opp_stack=200.0, opp_bet=0.0, pot=5.5, pbs=4.0,
                        action: str | None = None) -> FrameState:
     """1/2(1) 两人桌：hero 大盲、a 按钮。"""
     return FrameState(
@@ -1814,7 +1924,7 @@ def _start_stack_state(hero_stack, hero_bet, *, hero_turn: bool = False,
             PlayerState("hero", name="me", position="BB", stack=hero_stack,
                         bet=hero_bet, in_hand=True, action=action),
             PlayerState("a", name="老王", position="BTN", stack=opp_stack,
-                        bet=0.0, in_hand=True),
+                        bet=opp_bet, in_hand=True),
         ],
         blinds=live.parse_blinds("1/2(1)"), dealer="a",
         hero_seat_id="hero", hero_turn=hero_turn, pot=pot,
@@ -1837,9 +1947,9 @@ def test_start_stack_backfilled_with_posted_chips() -> None:
     check(tr.hand.start_stack == 100.0,
           f"起始筹码应反推为 100，实际 {tr.hand.start_stack}")
 
-    # 第 3 帧：hero 加注到 3（后手 96.5）→ 已投入 3.5
+    # 第 3 帧：hero 加注到 3（后手 96.5）、按钮 3-bet 到 6 → 又一个决策点
     point = tr.observe(_start_stack_state(96.5, 3.0, hero_turn=True,
-                                          pot=7.5, action="raise"),
+                                          opp_bet=6.0, pot=9.5, action="raise"),
                        ["Ah", "Kd"], [])
     check(point is not None and point.hero_invested == 3.5,
           f"整手已投入应含前注+盲注+加注：{getattr(point, 'hero_invested', None)}")
@@ -2005,6 +2115,9 @@ def main() -> int:
         test_jsonl_appends_by_default,
         test_jsonl_append_repairs_partial_last_line,
         test_ai_advice_submits_on_hero_turn_once,
+        test_decision_key_ignores_pot_jitter,
+        test_no_second_advice_after_hero_acted_and_nothing_to_call,
+        test_no_second_advice_after_hero_bet_and_was_called,
         test_auto_click_after_observe_on_next_frame,
         test_ai_advice_waits_for_hero_cards,
         test_unreliable_cards_skip_advice_until_recovered,

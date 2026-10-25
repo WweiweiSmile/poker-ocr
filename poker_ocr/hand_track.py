@@ -96,10 +96,6 @@ def street_of_board(board_len: int) -> str | None:
     return STREET_BY_BOARD.get(board_len)
 
 
-def _r(v: float | None, nd: int = 2) -> float | None:
-    return None if v is None else round(v, nd)
-
-
 @dataclass(frozen=True)
 class ActionRecord:
     """一条行动。amount 是**本街加到总额**（BB），读不到为 None。"""
@@ -1154,8 +1150,9 @@ class LiveHandTracker:
 
         为什么不是「只在 hero_turn 由假变真的那一帧」：多人池里 hero 过牌后
         对手下注、又轮回 hero，预设按钮可能全程都在、中间没有假帧 —— 上升沿会
-        把第二次决策点整个吞掉。而 decision_key 里含行动条数与最高下注，
-        同一个回合内的按钮闪断反而是重复的 key，正好被它挡掉。
+        把第二次决策点整个吞掉。而 decision_key 由**已记录的动作序列**构成，
+        同一个回合内的按钮闪断只是重复的 key，正好被它挡掉；底池/最高下注是
+        OCR 读数，不进 key，否则读数一抖就会被当成新回合反复请求模型。
         """
         if state.hero_turn is not True:
             self.turn_frames = 0
@@ -1178,14 +1175,23 @@ class LiveHandTracker:
             return None
 
         snap = self._snapshot(state, hand)
-        # 翻前非盲位、to_call=0、且自己已经在这一轮行动过：这一轮其实已经结束。
-        # 客户端按钮残留/发牌动画会让 hero_turn 多亮几帧，曾把「跟完 3-bet」
-        # 当成新的开池点，在 pot 28、to_call 0 时又给了一条 open 建议（h39）。
-        # SB/BB 补齐后的 check 是合法决策点，不能一起挡掉。
-        if (snap.street == PREFLOP and snap.to_call <= 0
-                and snap.hero_position not in ("SB", "BB")
-                and any(a.is_hero for a in snap.actions_of(PREFLOP))):
-            return None
+        # 这一街自己已经行动过、又没有人把下注抬高：这一轮其实已经结束，
+        # 按钮还在只是客户端还没收走。此时再投一次就是同一条街的重复请求 ——
+        # 实测 SB 补齐（to_call 0.5→0）后立刻又投（h8/h46/h106），下注被跟注
+        # 后也会（h4 翻牌/转牌）；翻前非盲位跟完 3-bet 后同理（h39）。
+        # 有人加注时 to_call > 0，所以真正的新决策点不会被这条挡住；SB/BB 的
+        # 第一次行动（补齐/过牌）在动作线里还是空的，同样不受影响。
+        if snap.to_call <= 0:
+            # 盲注 pill 比状态晚渲染时，会被动作反推当成一次「call/raise」——
+            # 金额正好等于自己的盲注。那不是行动，不能让它吞掉 BB 的选项。
+            posted = 0.0
+            if snap.street == PREFLOP and snap.blinds is not None:
+                posted = {"SB": snap.blinds.sb,
+                          "BB": snap.blinds.bb}.get(snap.hero_position or "", 0.0)
+            if any(a.is_hero
+                   and (a.amount is None or a.amount > posted + 1e-9)
+                   for a in snap.actions_of(snap.street)):
+                return None
         if snap.decision_key in self.advised:
             return None
         self.advised.add(snap.decision_key)
@@ -1234,9 +1240,13 @@ class LiveHandTracker:
         if hand.street != PREFLOP and len(hand.board) < 3:
             warnings.append("board incomplete")
 
-        # 同一条街、同样的行动序列与下注额 = 同一个决策点
+        # 决策点身份 = 这一手、这一街到目前的**动作序列**（+ 自己的底牌）。
+        # 底池/最高下注不进 key：它们是 OCR 读数，盲注补齐、筹码动画会让它们
+        # 抖 0.1–0.5BB。同一回合里读数一抖就变成「新决策点」，人还没动、画面
+        # 自己变，AI 就被反复请求。真正的局面变化一定伴随一条新动作
+        # （下注/加注/跟注/过牌），len(actions) 会变，key 自然跟着变。
         key = (hand.hand_id, hand.street, len(hand.actions),
-               _r(state.pot), _r(max_bet), tuple(hand.hero_cards))
+               tuple(hand.hero_cards))
 
         return HandSnapshot(
             hand_id=hand.hand_id,
