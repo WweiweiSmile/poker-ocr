@@ -1083,16 +1083,103 @@ def test_small_pair_folds_to_three_bet_no_set_mining() -> None:
 
 
 def test_ante_adds_bb_not_multiplies_open_size() -> None:
-    """0.5BB 前注只加 0.5BB：UTG 开池 3.0-3.5，不是 5.0-6.0（h39 的 5.5）。"""
-    snap = make_point(street="preflop", board=(), to_call=1.0, pot=5.5,
-                      hero_position="UTG", hero_cards=("Td", "Qd"),
-                      hero_bet=0.0, hero_stack=100.0,
-                      preflop_shapes=("unopened",), cbet_spot=False,
-                      blinds=Blinds(0.5, 1.0, 0.5, "1/2(1)"))
-    by = {o.id: o for o in build_options(snap)}
-    check(by["open-2.5"].amount == 3.0, f"UTG 开池应 3.0：{by['open-2.5']}")
-    check(by["open-2.75"].amount == 3.25, f"UTG 开池应 3.25：{by['open-2.75']}")
-    check(by["open-3"].amount == 3.5, f"UTG 开池应 3.5：{by['open-3']}")
+    """0.5BB 前注只加 0.5BB，不是把开池尺度翻倍（h39 的 5.5）。
+
+    本桌 6BB 下限会把前位的小尺度全部抬到 6BB，前注的 +0.5 就看不出来了；
+    所以用「后位 + 4 个溜入者」把尺度推到 6BB 以上，单独验证前注口径。
+    """
+    from poker_ocr.hand_track import OpponentSnapshot
+    opps = tuple(OpponentSnapshot(f"o{i}", None, "UTG+1", 100.0, 1.0, False)
+                 for i in range(4))
+
+    def opens(ante: float | None) -> dict[str, float]:
+        snap = make_point(
+            street="preflop", board=(), to_call=1.0, pot=9.5,
+            hero_position="CO", hero_cards=("Td", "Qd"),
+            hero_bet=0.0, hero_stack=100.0,
+            preflop_shapes=("limped",), cbet_spot=False,
+            blinds=Blinds(0.5, 1.0, ante, "1/2(1)" if ante else "1/2"),
+            opponents=opps)
+        return {o.id: o.amount for o in build_options(snap)}
+
+    no_ante, ante = opens(None), opens(0.5)
+    check(abs(ante["open-3.5"] - no_ante["open-3.5"] - 0.5) < 1e-9,
+          f"0.5BB 前注应只 +0.5BB：{no_ante['open-3.5']} → "
+          f"{ante['open-3.5']}")
+    check(min(v for k, v in ante.items() if k.startswith("open-")) >= 6.0,
+          f"前注 + 4 个溜入者的开池仍不得低于 6BB：{ante}")
+
+
+def test_preflop_min_raise_floor_is_six_bb() -> None:
+    """翻前所有加注/再加注不得低于 6BB（本桌规则）；后手不足的全下除外。"""
+    import poker_ocr.advice as am
+    check(am.PREFLOP_MIN_RAISE_BB == 6.0,
+          f"牌桌下限应是 6BB：{am.PREFLOP_MIN_RAISE_BB}")
+
+    # 前位小尺度 2.5-3.0：全被抬到 6BB，并注明是牌桌下限而不是算错
+    unopened = make_point(street="preflop", board=(), to_call=1.0, pot=5.5,
+                          hero_position="UTG", hero_cards=("Td", "Qd"),
+                          hero_bet=0.0, hero_stack=100.0,
+                          preflop_shapes=("unopened",), cbet_spot=False,
+                          blinds=Blinds(0.5, 1.0, 0.5, "1/2(1)"))
+    by = {o.id: o for o in build_options(unopened)}
+    raises = [o for o in by.values() if o.kind == "raise"]
+    check(raises and all(o.amount >= 6.0 for o in raises),
+          f"翻前加注不得低于 6BB：{[o.amount for o in raises]}")
+    check(all("table minimum 6BB" in (o.note or "") for o in raises),
+          f"被抬额的选项应注明牌桌下限：{[(o.id, o.note) for o in raises]}")
+
+    # 面对 1.5BB 的小加注：3× = 4.5BB 非法，抬到 6BB；4× = 6BB 本来合法
+    tiny = make_point(street="preflop", board=(), to_call=1.5, pot=3.5,
+                      hero_position="BTN", hero_bet=0.0, hero_stack=100.0,
+                      preflop_shapes=("single-raise",), second_bet=1.0,
+                      cbet_spot=False)
+    by = {o.id: o for o in build_options(tiny)}
+    check(by["raise-3x"].amount == 6.0,
+          f"3× 1.5BB 应抬到 6BB：{by['raise-3x']}")
+    check(by["raise-4x"].amount == 6.0,
+          f"4× 1.5BB 是 6BB，不该变：{by['raise-4x']}")
+
+    # 后手只有 4BB：6BB 不可达，全下 4BB 是合法动作，不该硬抬到 6
+    short = make_point(street="preflop", board=(), to_call=1.0, pot=4.0,
+                       hero_position="BTN", hero_bet=0.0, hero_stack=4.0,
+                       preflop_shapes=("single-raise",), second_bet=1.0,
+                       cbet_spot=False)
+    by = {o.id: o for o in build_options(short)}
+    short_raises = [o for o in by.values() if o.kind == "raise"]
+    check(short_raises and all(o.amount == 4.0 and "all-in" in (o.note or "")
+                               for o in short_raises),
+          f"后手不足 6BB 应封顶为全下：{[(o.id, o.amount, o.note) for o in short_raises]}")
+
+
+def test_preflop_presets_respect_six_bb_floor() -> None:
+    """点击器用的翻前档位也要 ≥6BB：否则建议 6BB、却点了一个更小的档位。"""
+    point = make_point(street="preflop", board=(), to_call=0.0, pot=1.5,
+                       hero_position="BTN", hero_bet=0.0, hero_stack=100.0,
+                       preflop_shapes=("unopened",), cbet_spot=False)
+    got = preset_amounts(point)
+    check(all(amount >= 6.0 for amount in got.values()),
+          f"翻前点击档位不得低于 6BB：{got}")
+    # 翻后不受这条牌桌规则影响
+    post = preset_amounts(make_point())
+    check(post["raise-1/3"] == 2.0,
+          f"翻后 1/3 池应保持 2.0，不该被 6BB 下限影响：{post}")
+
+
+def test_prompt_states_six_bb_preflop_minimum() -> None:
+    """事实与 system 都要写明 6BB 下限，模型才不会建议更小的尺度。"""
+    point = make_point(street="preflop", board=(), to_call=1.0, pot=5.5,
+                       hero_position="UTG", hero_cards=("Td", "Qd"),
+                       hero_bet=0.0, hero_stack=100.0,
+                       preflop_shapes=("unopened",), cbet_spot=False,
+                       blinds=Blinds(0.5, 1.0, 0.5, "1/2(1)"))
+    sit = build_situation(point)
+    facts = render_hand_facts(sit)
+    check("Preflop minimum raise: 6BB" in facts,
+          f"翻前事实应写明 6BB 下限：{facts}")
+    system, _ = build_messages(sit)
+    check("6BB minimum preflop raise" in system,
+          "system 应写明本桌 6BB 最低加注")
 
 
 def test_three_bet_pot_warns_random_rank_is_upper_bound() -> None:
@@ -1137,11 +1224,16 @@ def test_limpers_count_from_state_and_bonus_decays() -> None:
 def test_loose_table_adds_open_bonus() -> None:
     """松桌开池 +0.5BB；紧桌不加（紧弱/尊重加注不是松）。"""
     from poker_ocr.advice import LOOSE_OPEN_BONUS
+    from poker_ocr.hand_track import OpponentSnapshot
     from poker_ocr.table_dynamics import is_loose_table
-    point = make_point(street="preflop", board=(), to_call=1.0, pot=5.5,
+    # 4 个溜入者把尺度推到 6BB 以上，松桌 +0.5 才不会被 6BB 下限吃掉
+    opps = tuple(OpponentSnapshot(f"o{i}", None, "UTG+1", 100.0, 1.0, False)
+                 for i in range(4))
+    point = make_point(street="preflop", board=(), to_call=1.0, pot=9.5,
                        hero_position="HJ", hero_bet=0.0, hero_stack=96.0,
                        preflop_shapes=("limped",), cbet_spot=False,
-                       blinds=Blinds(0.5, 1.0, 0.5, "1/2(1)"))
+                       blinds=Blinds(0.5, 1.0, 0.5, "1/2(1)"),
+                       opponents=opps)
     tight = {o.id: o for o in build_options(point)}
     loose = {o.id: o for o in build_options(
         point, open_bonus=LOOSE_OPEN_BONUS)}
@@ -1176,9 +1268,11 @@ def test_options_preflop_uses_bb_sizing() -> None:
     check("raise-1/3" not in by, f"翻前不该出现底池倍数选项：{list(by)}")
     check(by["call"].kind == "call" and "limp" in by["call"].label,
           f"无人加注应允许平跟：{by['call']}")
-    # 后位基础 3.5-4，无前注、无溜入者
-    check(by["open-3.5"].amount == 3.5 and by["open-4"].amount == 4.0,
-          f"后位开池尺度不对：{ {k: v.amount for k, v in by.items()} }")
+    # 后位基础 3.5-4，无前注、无溜入者；本桌 6BB 下限把它们全部抬到 6
+    check(by["open-3.5"].amount == 6.0 and by["open-4"].amount == 6.0,
+          f"后位开池应被 6BB 下限抬到 6.0：{ {k: v.amount for k, v in by.items()} }")
+    check(all(o.amount >= 6.0 for o in by.values() if o.kind == "raise"),
+          f"翻前加注不得低于 6BB：{ {k: v.amount for k, v in by.items()} }")
 
     facing = make_point(street="preflop", board=(), to_call=3.0, pot=4.5,
                         hero_position="BTN", hero_bet=0.0, hero_stack=100.0,
@@ -2611,6 +2705,9 @@ def main() -> int:
         test_prompt_renders_implied_odds_for_pocket_pair,
         test_small_pair_folds_to_three_bet_no_set_mining,
         test_ante_adds_bb_not_multiplies_open_size,
+        test_preflop_min_raise_floor_is_six_bb,
+        test_preflop_presets_respect_six_bb_floor,
+        test_prompt_states_six_bb_preflop_minimum,
         test_three_bet_pot_warns_random_rank_is_upper_bound,
         test_limpers_count_from_state_and_bonus_decays,
         test_loose_table_adds_open_bonus,

@@ -113,7 +113,9 @@ def _round_bb(v: float) -> float:
 
 # 翻前开池的基础倍数（bb），按位置分档，来自 preflop-open.md：
 # 前位 2.5-3.0 / 中位 3.0-3.5 / 后位 3.5-4.0 / 小盲 3.0。
-# 大盲在溜入池里再加注时，尺度要比开池更大（没有位置劣势补偿，直接收池）
+# 大盲在溜入池里再加注时，尺度要比开池更大（没有位置劣势补偿，直接收池）。
+# 这些只是**下限修正前**的原始尺度：低于本桌 6BB 最低加注（PREFLOP_MIN_RAISE_BB）
+# 的档位会由 `_cap()` 统一抬到 6BB。
 _OPEN_BASES: dict[str, tuple[float, ...]] = {
     "UTG": (2.5, 2.75, 3.0),
     "UTG+1": (2.5, 2.75, 3.0),
@@ -135,6 +137,12 @@ LOOSE_OPEN_BONUS = 0.5
 LIMP_BONUS_FIRST = 1.0
 LIMP_BONUS_EXTRA = 0.5
 
+# 翻前桌上规则：任何加注/开池/再加注的「加注到」总额不得低于 6BB。
+# 牌桌客户端会拒绝更小的尺度，给出 2.5BB 的开池建议等于给一个点不出来的动作。
+# 位置尺度（2.5-4BB）低于这个下限时由 `_cap()` 抬到 6BB；真正的全下不受此限
+# （后手不足 6BB 时只能全下，这是合法动作）。改牌桌规则时只改这个常量。
+PREFLOP_MIN_RAISE_BB = 6.0
+
 # 成手牌「**单个对手**能赢我」的比例超过这个值，就不再按价值牌处理。
 #
 # 为什么用单人比例、不用「全桌至少一家领先」：后者会被人数放大——同一手顶对，
@@ -149,12 +157,17 @@ LIMP_BONUS_EXTRA = 0.5
 DOMINATED_BEAT_PCT = 22.0
 
 
-def _cap(target: float, hero_max: float | None, min_raise_to: float) -> tuple[float, str]:
-    """把目标额修正到合法范围：低于最小加注抬上去，高于后手封顶为全下。"""
+def _cap(target: float, hero_max: float | None, min_raise_to: float,
+         min_note: str = "raised to the minimum raise") -> tuple[float, str]:
+    """把目标额修正到合法范围：低于最小加注抬上去，高于后手封顶为全下。
+
+    `min_note` 让翻前的牌桌下限（6BB）能和扑克本身的最小加注区分开：
+    模型看到「raised to the table minimum 6BB」才知道不是程序算错了。
+    """
     note = ""
     if target < min_raise_to:
         target = min_raise_to
-        note = "raised to the minimum raise"
+        note = min_note
     if hero_max is not None and target >= hero_max - 1e-9:
         target = hero_max
         note = "stack too short, effectively all-in"
@@ -194,7 +207,14 @@ def build_preflop_options(snap: HandSnapshot,
     max_bet = hero_bet + to_call
     second = snap.second_bet
     increment = max(max_bet - second if second is not None else max_bet, bb)
-    min_raise_to = max_bet + increment
+    legal_min_raise_to = max_bet + increment
+    # 本桌的 6BB 下限与扑克的最小加注取较严的那个：上家已经加注到 10BB 时，
+    # 合法的再加注到 20BB 比 6BB 更严，不能被 6BB 覆盖掉。
+    table_min_raise_to = bb * PREFLOP_MIN_RAISE_BB
+    min_raise_to = max(legal_min_raise_to, table_min_raise_to)
+    min_note = ("raised to the minimum raise"
+                if legal_min_raise_to >= table_min_raise_to
+                else f"raised to the table minimum {table_min_raise_to:g}BB")
     hero_max = (hero_bet + stack) if stack is not None else None
 
     # 下注/加注已经超过后手：跟注就是全下，牌桌上不存在「再加注」。
@@ -221,7 +241,7 @@ def build_preflop_options(snap: HandSnapshot,
         # 面对加注：3bet/再加注到「上家加注的 3 倍 / 4 倍」，来自
         # preflop-3bet-pot.md「有位置 3-4 倍，盲注位一律 4 倍」
         for mult in (3, 4):
-            amount, note = _cap(max_bet * mult, hero_max, min_raise_to)
+            amount, note = _cap(max_bet * mult, hero_max, min_raise_to, min_note)
             options.append(Option(
                 f"raise-{mult}x", f"Raise to {mult}× the last raise", "raise",
                 amount, note))
@@ -269,7 +289,7 @@ def build_preflop_options(snap: HandSnapshot,
         ante_bb = float(snap.blinds.ante) / float(snap.blinds.bb)
     for b in base:
         target = b + ante_bb + limper_bonus + max(open_bonus, 0.0)
-        target, note = _cap(target, hero_max, min_raise_to)
+        target, note = _cap(target, hero_max, min_raise_to, min_note)
         options.append(Option(f"open-{b:g}", f"Raise to {target:g}BB (open)",
                               "raise", target, note))
     return options
@@ -279,7 +299,8 @@ def _raise_geometry(snap: HandSnapshot) -> tuple[float, float, float, float | No
     """加注金额的公共几何：需跟额、底池、当前最高下注、后手封顶、最小加注到。
 
     `build_options()` 和 `preset_targets()` 共用，避免两处对「最小加注 / 全下
-    封顶」的算法漂移。
+    封顶」的算法漂移。翻前还要叠加本桌的 6BB 下限（`PREFLOP_MIN_RAISE_BB`）：
+    点击器按这个几何选档位，档位目标低于 6BB 就等于点出一个牌桌拒绝的动作。
     """
     to_call = max(snap.to_call or 0.0, 0.0)
     pot = snap.pot or 0.0
@@ -290,6 +311,8 @@ def _raise_geometry(snap: HandSnapshot) -> tuple[float, float, float, float | No
     second = snap.second_bet
     increment = max(max_bet - second if second is not None else max_bet, bb)
     min_raise_to = max_bet + increment
+    if snap.street == PREFLOP:
+        min_raise_to = max(min_raise_to, bb * PREFLOP_MIN_RAISE_BB)
     hero_max = (hero_bet + stack) if stack is not None else None
     return to_call, pot, max_bet, hero_max, min_raise_to
 
@@ -1603,6 +1626,12 @@ def render_hand_facts(sit: Situation) -> str:
             # 行动线可能漏掉平跟（没有动作徽章）；用同帧下注额补出来，
             # 让模型知道前面到底有几个人溜入，而不是只看底池猜。
             lines.append(f"Limpers before me: {limpers}")
+        # 本桌规则：翻前任何加注不得低于 6BB。选项生成已经按这个下限抬过；
+        # 这里再写一句，防止模型在 reason 里建议「加到 2.5-3BB」这种点不出来的尺度。
+        if any(o.kind in ("raise", "bet") for o in sit.options):
+            lines.append(
+                f"Preflop minimum raise: {PREFLOP_MIN_RAISE_BB:g}BB (table rule); "
+                "any raise option below it has already been raised to that minimum.")
         # 抽 set 的隐含赔率：翻前不渲染成牌胜率，但小对子需要这组数字才能
         # 判断「跟 1BB 看翻牌」划不划算。阈值（15-20×）来自 preflop-limp.md。
         # 只对 22-99 有意义：TT+ 是超对价值，根本不按抽 set 打，给这组数字
@@ -1953,7 +1982,7 @@ Return exactly one JSON object, no markdown fence and no other text:
 
 ## Ground rules
 1. Computed facts are authoritative for MATH: positions, stack, pot, to_call, break-even equity, SPR, hand tier, draw, texture, explosive pot. Do not recompute amounts.
-2. Preflop: choose by position and range. Do not limp as the first player in, except an SB complete or a small pocket pair (22-66) over-limping for 1BB to set-mine.
+2. Preflop: choose by position and range. Do not limp as the first player in, except an SB complete or a small pocket pair (22-66) over-limping for 1BB to set-mine. This table enforces a <<PREFLOP_MIN_RAISE>> minimum preflop raise (all-in excepted); every raise option is already at or above it — never argue for a smaller size.
 3. Postflop: judge the calling range and board texture first; then value/check/size.
 4. Call only when your equity beats the stated break-even. <<IMPLIED_ODDS_RULE>> Unquantified "implied odds" is never a reason to call.
 5. If calling covers Hero's stack, the decision is all-in or fold.
@@ -2015,6 +2044,8 @@ Table-wide context outranks the chart and generic heuristics; those never overri
 # 范围表由 preflop_ranges 生成，不再手写两份：手写一定漂移，而模型拿到
 # 和代码判定不一致的表时，会挑对自己有利的那份用。
 _LEAN_SYSTEM = _LEAN_SYSTEM.replace("<<RFI_CHART>>", chart_text())
+_LEAN_SYSTEM = _LEAN_SYSTEM.replace(
+    "<<PREFLOP_MIN_RAISE>>", f"{PREFLOP_MIN_RAISE_BB:g}BB")
 _LEAN_SYSTEM = _LEAN_SYSTEM.replace("<<IMPLIED_ODDS_RULE>>",
                                     implied_odds_rule())
 
