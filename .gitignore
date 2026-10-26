@@ -33,3 +33,9 @@ server.key
 
 # 对手画像（玩家昵称/统计，本地保存，不入库）
 data/opponents/
+
+# GTO 跑批：本地工具链 / 编译产物 / 原始数据 / 任务清单
+.toolchain/
+gto/runner/target/
+gto/data/
+gto/jobs/

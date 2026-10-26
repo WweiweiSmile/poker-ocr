@@ -1865,11 +1865,11 @@ def test_lean_prompt_is_compact_and_range_based() -> None:
     check("Break-even equity" in user or "My hand strength" in user,
           "计算事实仍应完整")
     # 6000 是 lean 正文还没有 GROUND TRUTH + 生成式 RFI 表时的预算。现在是
-    # 正文 ~9.5k + GT ~1.45k：新增了转牌/河牌/3-bet/短码四段、按座位画像的
-    # 优先级阶梯，同时删掉了重复的对手类型与牌力段。上限 11200 只留防膨胀
-    # 余量；下面还有 len(with_skills) > 2× 的相对检查，防止膨胀回 skills 版。
-    check(len(system) < 11200,
-          f"lean system 应保持紧凑（< 11200），实际 {len(system)}")
+    # 正文 ~10.6k + GT ~1.45k：新增了转牌/河牌/3-bet/短码四段、按座位画像的
+    # 优先级阶梯，以及 GTO baseline 段（约 0.4k）。上限 12600 只留防膨胀余量；
+    # 下面还有 len(with_skills) > 2× 的相对检查，防止膨胀回 skills 版。
+    check(len(system) < 12600,
+          f"lean system 应保持紧凑（< 12600），实际 {len(system)}")
 
     with_skills, _ = build_messages(sit, style="skills")
     check("Coach Skill Catalog" in with_skills, "skills 风格应保留")

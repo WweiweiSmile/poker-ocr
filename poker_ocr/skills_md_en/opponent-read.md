@@ -1,4 +1,4 @@
-> Source: "Little Green Book" methodology §3, §4 (body unmodified).
+> Source: "Little Green Book" methodology §3, §4 (body unmodified; the appendix at the end is this project's own addition, not the original text).
 
 ### 3. Opponent Types: Five Categories
 
@@ -20,7 +20,7 @@ Hard rules:
 Six exploitable betting patterns: bets when strong and checks when weak (I bet when they check) / bets when on a draw (bet big on draw-heavy boards) /
 continuation-bets after raising preflop to control the pot (call to trap when I have a strong hand in position) / **only one barrel** (they bet the flop,
 a turn bet means I'm beaten, a turn check means the pot is mine) / bets heavy when bluffing (I call heavy river bets) /
-bets small with weak hands (I raise when they bet small).
+bets small with weak hands (I raise when they bet small — loose-passive / station / unknown only; reverse it for a LAG, see the appendix).
 
 ### 4. Inferring an Opponent's Hand Range
 
@@ -50,3 +50,25 @@ played aggressive earlier then suddenly timid on the river = trap; aggressive an
 
 Forbidden: stating a range as a specific hand ("he has AA"); talking about "his range" with fewer than 3 samples;
 strong judgments from a single clue (need at least three clues pointing the same way); reverse-engineering his range from showdown results.
+
+### Appendix · A LAG's repeated small bets are a value line (project addition, not the original text)
+
+The LAG row in §3 only says he is "dangerous precisely when building small pots" without saying how to act on it,
+and exploitable pattern #6 (small bet = weak, raise it) directly contradicts it. The two must be split by opponent type:
+
+- **Loose-aggressive / maniac** (multi-street bluffs, large raises, overbets): his bluffing tool is the **big bet** —
+  only a big bet gets folds; a small bet from a player with his image is money burned. So when a LAG switches to
+  repeated small bets he does not want folds, he wants **calls**: top pair with a good kicker, two pair, an
+  overpair-ish medium made hand — hands that can stand three streets of calls but should not be played for stacks.
+  Small sizing merges his range: worse hands can call, draws pay, and he never bloats the pot. Variant: the small
+  bet is a price tag on a monster, inviting a raise or a cheap call to the river.
+  - **The tell is a deviation from his own baseline**, not "small" by itself: a player who normally bets 2/3–1 pot
+    and suddenly bets 1/3 all three streets is one of the strongest signals at the table; if he always bets small,
+    halve the signal.
+  - **How to play it**: do not bluff-raise (his range has no air, so your fold equity is negative); do not call three
+    streets with one pair — fold marginal hands on the turn, not the river; in position you may call one street, but
+    that is calling his range's bottom, not bluff-catching; with two pair or better, a small raise is fine for thin value.
+    What you *should* bluff-catch is his **big bet / overbet** — that is the polarized line.
+- **Loose-passive / station / unknown**: the original pattern #6 stands — small bet = weak, raising applies pressure.
+
+One line: **the same small bet means different things by who is betting it — a station's small bet is weakness, a LAG's small bet is value.**

@@ -695,6 +695,10 @@ class Situation:
     players_left_to_act: int | None = None
     # 上一街自己的决定（同手）。空 = 本手第一个决策点，或跨手重放。
     previous: "Advice | None" = None
+    # GTO 近似表查询结果（单挑/单加注池/翻牌或转牌才有）。None = 不覆盖或查不到。
+    gto: "object | None" = None
+    # 牌面范围权益（Monte Carlo，多人池也能用）。None = 没表/翻前/位置不明。
+    board_eq: "object | None" = None
 
     @property
     def street(self) -> str:
@@ -799,7 +803,7 @@ def build_situation(snap: HandSnapshot,
         p = read.beat_pct
         beat_pct = round(p * 100, 1)
         beat_at_least = round((1.0 - (1.0 - p) ** max(n_opp, 1)) * 100, 1)
-    return Situation(
+    sit = Situation(
         snap=snap,
         options=build_options(snap,
                               open_bonus=(LOOSE_OPEN_BONUS
@@ -840,6 +844,19 @@ def build_situation(snap: HandSnapshot,
         players_left_to_act=players_left_to_act(snap),
         previous=previous,
     )
+    # GTO 表是可选事实层：查不到/没装/多人池都静默跳过，绝不影响主链路。
+    # Situation 是 frozen 的，用 replace 带出新实例。
+    try:
+        from . import gto_lookup
+        sit = replace(sit, gto=gto_lookup.lookup(sit))
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from . import board_equity
+        sit = replace(sit, board_eq=board_equity.lookup(sit))
+    except Exception:  # noqa: BLE001
+        pass
+    return sit
 
 
 def _coach_actions(snap: HandSnapshot) -> list[dict]:
@@ -1749,6 +1766,12 @@ def render_hand_facts(sit: Situation) -> str:
         directive = value_directive(sit)
         if directive:
             lines.append(f"Value directive: {directive}")
+        if sit.board_eq is not None:
+            lines.append("")
+            lines.append(sit.board_eq.render())
+        if sit.gto is not None:
+            lines.append("")
+            lines.append(sit.gto.render())
     if snap.hero_invested is not None and snap.hero_stack:
         ratio = snap.hero_invested / max(snap.hero_stack + snap.hero_invested, 1e-6)
         lines.append(f"I have invested {round(snap.hero_invested, 2)}BB"
@@ -1955,12 +1978,18 @@ You are a Texas Hold'em cash-game advisor working in real time. Hero has a few s
 ## Priority (highest first)
 1. Legal actions and computed math (hand rank, equity, pot odds, SPR) — never violate.
 2. A reliable per-seat read — «Opponent reads» or a manual pin — outranks every table-wide statement.
-3. Table-wide context, the chart and generic heuristics — priors and defaults; never override 1–2.
+3. Table-wide context (the user's table notes).
+4. «GTO baseline» (when present) — the solved default for this exact board class and spot.
+5. The chart and generic heuristics — priors and defaults; never override 1–4.
+
+## GTO baseline (only when the facts contain that block)
+It is the solved default for this exact board class: range mix, your hand's size mix, EV per size. It outranks the generic size rules below, but computed math, a reliable read, table dynamics, multiway/explosive-pot rules and the block's caveats override it. If you pick a non-best-EV size, name the exploitative reason. Never present an «[approx]» (interpolated) size as solved.
 
 ## Who you are playing
 The pool is **mixed** — do not project one label onto the whole table. Classify each opponent from «Opponent reads» (per-seat stats or a manual pin); «tentative» is a hint. With no read, treat the opponent as unknown, not as a station. «Table context» is table-level only — it never names individual players.
 - station: calls wide, raises little; their bet/raise is value → thin value, size up, fold marginal hands to barrels.
 - LAG/maniac (loose-maniac/loose-aggressive): opens/3-bets large, barrels wide, overbets; their bet is NOT automatically value → do not thin-value OOP; check-call, let them barrel, do not bet-fold; bluff-catch more.
+- LAG/maniac, but betting SMALL on multiple streets: a LAG's bluff tool is the big bet (only big sizing gets folds); repeated small sizing is a merged VALUE line (top pair+, protection, price-setting). His range has no air → your bluff-raise has negative fold equity: do not raise it, do not pay off three streets with one pair, fold marginal hands on the turn instead of bluff-catching the river. Save the bluff-catch for his big bet / overbet.
 - passive preflop + aggressive postflop: postflop bets are not automatically value → bluff-catching spot.
 
 ## The question that decides every bet
@@ -2001,7 +2030,7 @@ BB vs late open: defend wide; 3-bet linear 55+, A9s+, KTs+, ATo+, KQo.
 At 6-8 handed, widen each early-position range by roughly one seat. Below ~25BB the chart is void: jam or fold, do not open-raise small.
 
 ## Postflop (defaults; table dynamics and opponent type override)
-**Opponent type changes the line.** The absolutes below are for a station. Against a maniac/LAG: do not thin-value OOP; check-call medium hands, let them barrel, do not bet-fold; bluff-catch more and give less credit to a single bet.
+**Opponent type changes the line.** The absolutes below are for a station. Against a maniac/LAG: do not thin-value OOP; check-call medium hands, let them barrel, do not bet-fold; bluff-catch more and give less credit to a single BIG bet — but a repeated small bet from him is his merged value line, so fold one pair to it rather than calling three streets.
 - C-bet dry A/K-high or paired boards at 1/3 pot only with equity; air is a donation.
 - Size by what worse hands call, and prefer the size named in the «Value directive»; 1/3 is never a value size vs a station, and against a LAG a small blocker bet is worse than a check.
 - Bluff only with a real draw. Heads-up, a strong draw with no bet in front is a BET. 3+ opponents: never bet/raise a draw — no fold equity; check and call only at the right price. (The program withholds those options multiway.)
@@ -2035,7 +2064,7 @@ At 6-8 handed, widen each early-position range by roughly one seat. Below ~25BB 
 ## Table context (user-provided, table-level, when present)
 Table-wide context outranks the chart and generic heuristics; those never override table dynamics or computed math. A reliable per-seat profile or a manual pin outranks it. **The table may be mixed:** apply the note to the table's overall tendency; never average individuals into "loose-passive". It overrides the default «unknown opponent» assumption, never computed hand strength or pot odds.
 - station: value-bet thin/big; respect raises.
-- LAG/maniac: never thin-value or bet-fold a medium hand — check-call and let them barrel.
+- LAG/maniac: never thin-value or bet-fold a medium hand — check-call and let them barrel. Exception: repeated small bets from them are a merged value line, so fold one pair instead of calling it down, and never bluff-raise it.
 - passive preflop + aggressive postflop: postflop bets are bluff-catches, not value.
 - nit/tight: steal more, fold marginal. TAG: straightforward.
 - If raises are rare (loose-passive), a small pair may over-limp for 1BB even OOP; "do not over-limp too much" is a frequency cap, not a ban at 1BB.
