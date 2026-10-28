@@ -114,7 +114,10 @@ worker 在**轮到我**时把这一手的完整行动线交给模型（`--no-ai-
 `plan`（下一街意图）与 `confidence`；`plan` 会在同一手的下一街回灌成
 `My previous decision`，避免翻牌说要抓诈、转牌又自己弃掉。
 旧的 2005 年《Little Green Book》技能库不再默认注入，需要对比时加
-`--advice-style skills` 切回。模型从固定选项里选一个：
+`--advice-style skills` 切回。skills 版的 system 会在技能目录之前先注入
+`Live read`（实时牌力）、`Current opponent reads`（逐座位对手画像）与
+`Current table dynamics`（桌面动态），避免 A/B 对比时旧技能层看不到当前决策
+事实。模型从固定选项里选一个：
 
 ```
 翻后：弃牌 / 跟注（没人下注时是过牌）/ 加注到底池 1/3 / 1/2 / 2/3 / 1 倍 / 1.2 倍

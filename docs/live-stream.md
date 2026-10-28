@@ -182,6 +182,9 @@ ROI 路线只裁固定槽位、只跑 rec，不跑全图检测，是实时链路
   范围框架（按位置 RFI、3-bet/冷跟、翻后纹理与尺度、MDF），约 4k 字符。
   不再注入 2005 年《Little Green Book》技能库；需要 A/B 时用
   `--advice-style skills` 切回旧版（约 20k 字符，含技能目录与选中正文）。
+  skills 版的 system 会在目录之前先注入 `Live read`（实时牌力）、
+  `Current opponent reads`（逐座位对手画像）和 `Current table dynamics`
+  （桌面动态），让旧技能层也拿到当前决策事实。
 - **牌桌动态**：项目根目录的 `.table_dy`（纯文本，`#` 开头为注释）会作为
   `Table dynamics` 注入提示词，用来描述当前桌子的整体倾向，例如
   「新手玩家，比较松弱，诈唬很少」。模型据此做剥削性调整：对松弱/跟注站少

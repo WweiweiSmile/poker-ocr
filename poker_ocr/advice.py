@@ -42,7 +42,7 @@ from .coach import (
 from .ground_truth import GroundTruth, compute_ground_truth
 from .hand_track import ActionRecord, FLOP, HandSnapshot, PREFLOP, RIVER, TURN
 from .opponent_profile import (AGGRESSIVE_ARCHETYPES, PASSIVE_ARCHETYPES,
-                               OpponentRead)
+                               OpponentRead, render_reads)
 from .positions import BB, POSITIONS_BY_TABLE_SIZE, SB
 from .preflop_ranges import chart_text, range_verdict
 from .table_dynamics import (is_aggressive_table, is_loose_table,
@@ -1527,33 +1527,14 @@ def _is_set_mine_pair(cards: tuple[str, ...] | list[str]) -> bool:
 
 
 def render_opponent_reads(sit: Situation) -> list[str]:
-    """把本手在局对手的画像写进事实块。unknown 不输出，tentative 标注。"""
+    """把本手在局对手的画像写进事实块。unknown 不输出，tentative 标注。
+
+    渲染逻辑与 skills 提示词共用 `opponent_profile.render_reads`，避免两处
+    格式漂移；这里只负责把快照里的座位映射成「在局 + 位置」。
+    """
     active = {o.seat_id: o for o in sit.snap.opponents if not o.folded}
-    rows: list[tuple[str, OpponentRead]] = []
-    for read in sit.opponent_reads:
-        if read.archetype == "unknown" or read.seat_id not in active:
-            continue
-        position = active[read.seat_id].position or read.seat_id
-        rows.append((position, read))
-    if not rows:
-        return []
-    rows.sort(key=lambda item: item[0])
-    lines = ["Opponent reads (per-seat, from local hand history — use these before "
-             "any table-wide label):"]
-    for position, read in rows:
-        name = read.display_name or read.key
-        gate = " [tentative]" if read.gate == "tentative" else ""
-        source = ""
-        if read.source == "pin":
-            source = ", manual pin"
-        elif read.source == "prior":
-            source = ", .table_dy prior"
-        af = f", AF {read.af:g}" if read.af else ""
-        lines.append(
-            f"- {position} {name}: {read.archetype.upper()} "
-            f"(n={read.n}, VPIP {read.vpip:g}%, PFR {read.pfr:g}%{af}, "
-            f"conf {read.confidence:.2f}{source}){gate}")
-    return lines
+    positions = {seat: (o.position or seat) for seat, o in active.items()}
+    return render_reads(sit.opponent_reads, positions)
 
 
 def render_hand_facts(sit: Situation) -> str:
@@ -1865,9 +1846,16 @@ DEFAULT_PROMPT_STYLE = PROMPT_STYLE_LEAN
 
 
 def _build_messages_skills(sit: Situation) -> tuple[str, str]:
-    """返回 (system, user)。system 由「角色 + 输出契约 + 技能层」拼成。"""
+    """返回 (system, user)。system 由「角色 + 输出契约 + 技能层」拼成。
+
+    技能层不是只有静态正文：当前决策点的实时牌力、逐座位对手画像与桌面动态
+    会先渲染成「Live read / Current opponent reads / Current table dynamics」，
+    再放技能目录和选中正文，避免模型读了一堆 2005 年通则却不知道这手牌/
+    这张桌/这些对手现在是什么样。
+    """
     all_ = skills.all_skills()
-    selected = skills.select_skills(_skill_context(sit), all_)
+    ctx = _skill_context(sit)
+    selected = skills.select_skills(ctx, all_)
 
     system_parts = [
         "You are a Texas Hold'em cash-game coach assisting a player **in real time**. "
@@ -1880,8 +1868,10 @@ def _build_messages_skills(sit: Situation) -> tuple[str, str]:
         "must cite a rule from the skills or the table dynamics>\"}",
         "",
         "## Hard constraints",
-        "0. «Table dynamics» (when present in the user facts) and «Explosive pot: YES» "
-        "are the highest-priority exploitative instructions. When the table notes say "
+        "0. «Current opponent reads» (per-seat) outranks «Table dynamics» / "
+        "«Current table dynamics»; together with «Explosive pot: YES» they are the "
+        "highest-priority exploitative instructions. "
+        "When the table notes say "
         "the opponent's raises or multi-street barrels are value-heavy, or the pot is "
         "explosive, fold marginal made hands (one pair, two pair) even if a «Value "
         "directive» default says to call. Pot odds only tell you the price; they do "
@@ -1898,9 +1888,13 @@ def _build_messages_skills(sit: Situation) -> tuple[str, str]:
         "5. Default order of thought: with a strong made hand, first ask «bet or raise for "
         "value»; only then ask «check or call». Checking/folding must justify itself "
         "(«an unjustifiable check is also a leak»).",
-        "6. If the user facts include a «Table dynamics» section, treat it as authoritative "
-        "exploitative context for the current table. Otherwise, treat the opponent as "
-        "«unknown» — the live pipeline has no history, so no exploitative deviation.",
+        "6. If a «Table dynamics» / «Current table dynamics» block is present (in "
+        "this prompt or in the user facts), treat it as authoritative "
+        "exploitative context for the current table. A «Current opponent reads» "
+        "block, when present, is per-seat: use the named seat's type first, and "
+        "treat «tentative» as a hint only. If neither block is present, treat the "
+        "opponent as «unknown» — the live pipeline has no history, so no "
+        "exploitative deviation.",
         "7. Do not guess the opponent's exact hand, only describe range tendencies.",
         "8. Reason in English; keep card notation in AsKh format.",
         "",
@@ -1969,7 +1963,8 @@ def _build_messages_skills(sit: Situation) -> tuple[str, str]:
         "value bet when checked to is still fine.",
         "",
         "## Table dynamics (user-provided, when present)",
-        "The user facts may include a «Table dynamics» section written by the player. "
+        "The prompt may include a «Current table dynamics» block (this prompt) or a "
+        "«Table context» block (user facts) written by the player. "
         "Treat it as authoritative for the current table and adjust exploitative choices. "
         "**The table may be mixed:** apply the note per opponent/seat, match the opponent "
         "in this hand, and never average it into one «loose-passive» profile:",
@@ -2005,6 +2000,9 @@ def _build_messages_skills(sit: Situation) -> tuple[str, str]:
         "",
     ]
     system_parts.append(_GROUND_TRUTH_RULES)
+    live = skills.render_live_read(ctx)
+    if live:
+        system_parts.append(live)
     system_parts.append(skills.render_catalog(all_, selected))
     system_parts.append(skills.render_block(selected))
 
@@ -2159,6 +2157,13 @@ def _skill_context(sit: Situation) -> skills.SkillContext:
         tier=sit.hand_tier,
         has_draw=sit.has_draw,
         plays_board=sit.plays_board,
+        # 动态事实只用于技能层渲染；技能路由仍按 tier/street 等稳定维度。
+        hand_strength=sit.hand_strength,
+        opponent_reads=tuple(sit.opponent_reads),
+        opponent_positions=tuple(
+            (o.seat_id, o.position or o.seat_id)
+            for o in snap.opponents if not o.folded),
+        table_dynamics=sit.table_dynamics,
     )
 
 

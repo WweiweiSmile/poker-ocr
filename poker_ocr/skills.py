@@ -16,12 +16,22 @@
     实时链路没有这个输入。保留在目录里只为和 call-back 的方法论保持一致。
   · 展开篇数上限沿用 call-back 的口径（常驻不占额度），但 live 每条街能命中的
     专项技能本来就少，上限只是防御性兜底。
+  · **动态事实也进技能层**：实时牌力（`HandStrengthRead`）、逐座位对手画像
+    （`OpponentRead`）和人工维护的桌面动态（`.table_dy`）会渲染成
+    「Live read / Current opponent reads / Current table dynamics」放在目录之前，
+    让模型先拿到当前决策上下文，再套技能正文。
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+from .opponent_profile import OpponentRead, render_reads
+
+if TYPE_CHECKING:
+    from .hand_strength import HandStrengthRead
 
 # ─────────────────────────── 街 / 局面常量 ───────────────────────────
 
@@ -91,9 +101,9 @@ class Skill:
 class SkillContext:
     """一次实时决策点上看技能所需的事实。
 
-    这里只放**能可靠拿到**的东西：位置、人数、底池类型、翻前形态、牌力分档。
-    对手形象默认「未知」—— live 没有跨手样本；用户可以在根目录 `.table_dy`
-    写当前桌子的整体倾向，由 advice.py 注入提示词（技能路由本身不因它变化）。
+    路由只依赖稳定事实：位置、人数、底池类型、翻前形态、牌力分档。动态事实
+    （实时牌力、逐座位对手画像、`.table_dy` 桌级动态）只用于渲染 skills 提示词，
+    不改变技能命中；`hand_strength` / `opponent_reads` 缺失时自动跳过对应段落。
     """
 
     street: str
@@ -111,6 +121,15 @@ class SkillContext:
     has_draw: bool = False
     plays_board: bool = False
     text: str = ""                        # 用户的自由文本；live 恒为空
+    # 实时牌力解析（hand_strength.HandStrengthRead）；翻前/范围缺失时为 None。
+    # 它由 hand_vs_ranges 的 behind/equity 合成，技能路由仍以 tier 为准。
+    hand_strength: HandStrengthRead | None = None
+    # 本手在局对手的逐座位画像（ProfileStore.read_for 的结果）。
+    opponent_reads: tuple[OpponentRead, ...] = ()
+    # seat_id → 位置；只含本手还在局的座位，渲染时用于过滤已弃牌并显示位置。
+    opponent_positions: tuple[tuple[str, str], ...] = ()
+    # 人工维护的桌级动态（.table_dy 解析后的文本）；没有动态时为 None。
+    table_dynamics: str | None = None
 
     @property
     def pot_type(self) -> str:
@@ -359,6 +378,53 @@ def select_skills(context: SkillContext, all_: list[Skill] | None = None) -> lis
 
 
 # ─────────────────────────── 渲染 ───────────────────────────
+
+def render_live_read(context: SkillContext) -> str:
+    """技能层里的「当前决策事实」：实时牌力 + 对手画像 + 桌面动态。
+
+    技能正文是静态方法论；这些是**这一手、这一桌**的动态输入，渲染在目录
+    之前，让模型先拿到当前牌力/逐座位画像/桌风，再读技能。只渲染拿得到的
+    部分；全都没有时返回空串，调用方不要追加空段。
+
+    顺序刻意按优先级：计算牌力 → 逐座位画像 → 桌级动态。逐座位画像必须排在
+    桌风之前，提示词里也明确它压过桌级描述。
+    """
+    sections: list[str] = []
+
+    strength = context.hand_strength
+    if strength is not None:
+        sections.append(
+            "## Live read (this decision — computed, outranks generic skill text)\n"
+            f"Hand-strength read: {strength.summary_en()}\n"
+            "- «Hand-strength read» is the synthesized verdict: \"behind now\" = "
+            "current made hand, \"equity vs field\" = by the river, \"vs N-way avg\" "
+            "= the fair-share baseline. A draw is always labeled DRAW even if its "
+            "equity is high; never quote equity alone as \"my hand is big\"."
+        )
+
+    if context.opponent_reads:
+        reads = render_reads(
+            context.opponent_reads, dict(context.opponent_positions),
+            header="## Current opponent reads (per-seat, this hand — outranks "
+                   "table-level notes)")
+        if reads:
+            reads.append(
+                "- «tentative» is only a hint; unknown reads are omitted. A reliable "
+                "per-seat read outranks «Current table dynamics».")
+            sections.append("\n".join(reads))
+
+    if context.table_dynamics:
+        sections.append(
+            "## Current table dynamics (player-maintained, table-level)\n"
+            f"{context.table_dynamics}\n"
+            "- Apply it as exploitative context for this decision; a per-seat read "
+            "outranks it, and it never overrides computed hand strength or pot odds."
+        )
+
+    if not sections:
+        return ""
+    return "\n\n".join(sections) + "\n"
+
 
 def render_catalog(all_: list[Skill], selected: list[Skill]) -> str:
     """第一层：技能目录，永远注入。★ = 本次已展开全文。"""

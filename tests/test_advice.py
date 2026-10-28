@@ -730,6 +730,96 @@ def test_catalog_marks_expanded() -> None:
     check("Coach Skill Catalog" in catalog, "目录应有标题")
 
 
+def test_skills_prompt_injects_live_read_and_table_dynamics() -> None:
+    """skills 提示词要把实时牌力和桌面动态放进 system，而不只留在 user facts。"""
+    dyn = "整体偏松，少诈唬；面对大注默认按价值线处理。"
+    sit = build_situation(make_point(hero_cards=("Ah", "Qh"),
+                                     board=("As", "Ks", "4d")),
+                          table_dynamics=dyn)
+    check(sit.hand_strength is not None, "前置：应有实时牌力")
+    ctx = advice_mod._skill_context(sit)
+    check(ctx.hand_strength is sit.hand_strength, "技能上下文应带实时牌力")
+    check(ctx.table_dynamics == dyn, "技能上下文应带桌面动态")
+
+    system, user = build_messages(sit, style="skills")
+    check("## Live read (this decision" in system,
+          f"skills system 应注入 Live read：\n{system[:400]}")
+    check(f"Hand-strength read: {sit.hand_strength.summary_en()}" in system,
+          "实时牌力结论应逐字进入 skills system")
+    check("## Current table dynamics" in system and dyn in system,
+          "桌面动态应进入 skills system")
+    check(system.index("## Live read") < system.index("## Coach Skill Catalog"),
+          "动态事实应排在技能目录之前")
+    # 用户事实仍保留，复盘只读 user 时也能看到
+    check("Hand-strength read:" in user and dyn in user,
+          "user facts 仍应保留实时牌力和桌面动态")
+
+
+def test_skills_prompt_injects_opponent_reads() -> None:
+    """skills 提示词也要带逐座位画像；unknown 不输出，tentative 标注。"""
+    from poker_ocr.hand_track import OpponentSnapshot
+    from poker_ocr.opponent_profile import OpponentRead
+
+    def read(seat: str, name: str, archetype: str, *, conf: float = 0.9,
+             n: int = 40, gate: str = "read") -> OpponentRead:
+        return OpponentRead(
+            seat_id=seat, key=name, display_name=name, archetype=archetype,
+            confidence=conf, n=n, vpip=45.0, pfr=8.0, af=0.7,
+            source="auto", note="", gate=gate)
+
+    point = make_point(opponents=(
+        OpponentSnapshot("a", "老王", "BB", 97.0, 0.0, False),
+        OpponentSnapshot("b", "小李", "CO", 97.0, 0.0, False),
+        OpponentSnapshot("c", "路人", "SB", 97.0, 0.0, False)))
+    sit = build_situation(point, table_dynamics="整体偏松，少诈唬。",
+                          opponent_reads=(
+                              read("a", "老王", "station"),
+                              read("b", "小李", "maniac", conf=0.55, n=12,
+                                   gate="tentative"),
+                              read("c", "路人", "unknown", conf=0.0, n=0,
+                                   gate="unknown")))
+    ctx = advice_mod._skill_context(sit)
+    check(len(ctx.opponent_reads) == 3, "技能上下文应带全部画像")
+    check(("a", "BB") in ctx.opponent_positions
+          and ("b", "CO") in ctx.opponent_positions,
+          f"在局座位应映射到位置：{ctx.opponent_positions}")
+
+    system, _ = build_messages(sit, style="skills")
+    check("## Current opponent reads" in system,
+          f"skills system 应注入逐座位画像：\n{system[:400]}")
+    check("BB 老王: STATION" in system, "画像应带位置、名字和类型")
+    check("CO 小李: MANIAC" in system and "[tentative]" in system,
+          "tentative 画像应保留并标注")
+    check("路人" not in system, "unknown 画像不应输出，避免噪声")
+    check(system.index("## Current opponent reads")
+          < system.index("## Current table dynamics"),
+          "逐座位画像应排在桌级动态之前")
+    check("per-seat read outranks" in system,
+          "system 应说明逐座位画像压过桌级描述")
+
+
+def test_skills_prompt_omits_live_read_without_data() -> None:
+    """翻前/无范围且无桌风：不生成空段，旧 skills 提示词保持原样。"""
+    sit = build_situation(make_point(
+        street="preflop", board=(), to_call=3.0, pot=4.5, cbet_spot=False,
+        hero_is_pfr=False, preflop_shapes=("single-raise",)))
+    check(sit.hand_strength is None, "前置：翻前无实时牌力")
+    check(sit.table_dynamics is None, "前置：没有桌面动态")
+    check(not sit.opponent_reads, "前置：没有对手画像")
+    system, _ = build_messages(sit, style="skills")
+    check("## Live read" not in system, f"无数据时不该出现 Live read：\n{system}")
+    check("## Current opponent reads" not in system,
+          "无数据时不该出现 Current opponent reads")
+    check("## Current table dynamics" not in system,
+          "无数据时不该出现 Current table dynamics")
+
+
+def test_render_live_read_is_optional() -> None:
+    """没有动态事实时返回空串，避免在 system 里留空段。"""
+    check(skills.render_live_read(context()) == "",
+          "无实时牌力/桌面动态时应返回空串")
+
+
 # ─────────────────────────── 选项 ───────────────────────────
 
 def make_point(**kw):
@@ -2767,6 +2857,10 @@ def main() -> int:
         test_skill_selection_draw_and_multiway_and_cbet,
         test_plays_board_excludes_made_hand_skills,
         test_catalog_marks_expanded,
+        test_skills_prompt_injects_live_read_and_table_dynamics,
+        test_skills_prompt_injects_opponent_reads,
+        test_skills_prompt_omits_live_read_without_data,
+        test_render_live_read_is_optional,
         test_options_checked_to_hero,
         test_options_no_bet_are_labelled_bets,
         test_value_directive_covers_strong_hands,

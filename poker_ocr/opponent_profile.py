@@ -1286,6 +1286,45 @@ def load_profile_store(path: str | Path | None = None,
     return store
 
 
+def render_reads(reads: Iterable[OpponentRead],
+                 positions: Mapping[str, str],
+                 *,
+                 header: str = ("Opponent reads (per-seat, from local hand history — "
+                                "use these before any table-wide label):")) -> list[str]:
+    """按座位渲染画像行，供事实块和 skills 提示词共用。
+
+    `positions` 只含本手还在局的座位（seat_id → 位置）：不在其中（已弃牌）或
+    archetype 为 unknown 的画像不输出。tentative 只标注、不当硬结论；排序按
+    位置，保证同一决策点的提示词稳定。
+    """
+    rows: list[tuple[str, OpponentRead]] = []
+    for read in reads:
+        if read.archetype == "unknown":
+            continue
+        seat = read.seat_id
+        if not seat or seat not in positions:
+            continue
+        rows.append((positions[seat], read))
+    if not rows:
+        return []
+    rows.sort(key=lambda item: item[0])
+    lines = [header] if header else []
+    for position, read in rows:
+        name = read.display_name or read.key
+        gate = " [tentative]" if read.gate == "tentative" else ""
+        source = ""
+        if read.source == "pin":
+            source = ", manual pin"
+        elif read.source == "prior":
+            source = ", .table_dy prior"
+        af = f", AF {read.af:g}" if read.af else ""
+        lines.append(
+            f"- {position} {name}: {read.archetype.upper()} "
+            f"(n={read.n}, VPIP {read.vpip:g}%, PFR {read.pfr:g}%{af}, "
+            f"conf {read.confidence:.2f}{source}){gate}")
+    return lines
+
+
 def format_read_line(read: OpponentRead, position: str | None = None) -> str:
     """终端/日志用的一行画像。"""
     where = f"{position} " if position else ""
