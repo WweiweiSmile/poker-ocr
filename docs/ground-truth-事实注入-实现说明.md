@@ -114,7 +114,8 @@ Warnings:
 - `Situation` 新增 `ground_truth: GroundTruth | None`，由 `build_situation` 统一构建。
 - `render_hand_facts` 用 `gt.render()` 替换原来分散的 Board texture / Made-hand rank 行；
   翻前或牌不全时退回旧渲染。
-- 新增 `_GROUND_TRUTH_RULES`，lean 与 skills 两套 system 都注入：
+- 新增 `_GROUND_TRUTH_RULES`，`lean-rules` 与 `skills` 两套 system 都注入
+  （默认 `lean` 只把 GROUND TRUTH 作为事实放进 user，不再附带服从规则）：
   - 不得推翻/重算事实；
   - 事实说「没有成花」就不得说花面；
   - 事实说 NUTS 就不得编造更大的牌，面对下注默认加注；

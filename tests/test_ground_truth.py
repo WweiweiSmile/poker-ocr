@@ -219,7 +219,7 @@ def test_prompt_contains_ground_truth_and_forced_rules() -> None:
     assert "ABSOLUTE NUTS" in directive
     assert "RAISE" in directive
 
-    system, user = build_messages(sit)
+    system, user = build_messages(sit, style="lean-rules")
     assert "GROUND TRUTH (highest priority" in system
     assert "No made flush possible" in system
     assert "GROUND TRUTH" in user

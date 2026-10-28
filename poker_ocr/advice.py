@@ -53,6 +53,15 @@ from .table_dynamics import (is_aggressive_table, is_loose_table,
 # 行动线里 hero 的标识。与 coach.advise 的 hero_position 口径一致
 HERO_ACTOR = "hero"
 
+# 提示词风格。lean 只注入「状态 + 逐座位画像 + 实时牌力 + 桌风 + 选项」，
+# 不含任何范围表/翻后规则/价值指令；旧版完整 lean 保留为 lean-rules 做 A/B。
+PROMPT_STYLE_LEAN = "lean"
+PROMPT_STYLE_LEAN_RULES = "lean-rules"
+PROMPT_STYLE_SKILLS = "skills"
+PROMPT_STYLES = (PROMPT_STYLE_LEAN, PROMPT_STYLE_LEAN_RULES,
+                 PROMPT_STYLE_SKILLS)
+DEFAULT_PROMPT_STYLE = PROMPT_STYLE_LEAN
+
 # 加注尺度：名字 → 底池倍数。「满池 1.2」是超池，用于需要施压/劝退的场合
 RAISE_FRACTIONS: dict[str, float] = {
     "1/3": 1 / 3,
@@ -750,10 +759,13 @@ def _precise_texture_en(gt: GroundTruth | None, texture: str | None) -> str | No
 def build_situation(snap: HandSnapshot,
                     table_dynamics: str | None = None,
                     opponent_reads: Iterable[OpponentRead] | None = None,
-                    previous: "Advice | None" = None
+                    previous: "Advice | None" = None,
+                    style: str = DEFAULT_PROMPT_STYLE
                     ) -> Situation:
     """把快照整理成一次决策的事实。
 
+    `style` 只影响动作空间：lean 不做「多路纯听禁下注」这类策略过滤，把
+    所有合法选项交给模型；lean-rules/skills 保留旧的过滤。
     `table_dynamics` 是根目录 `.table_dy` 的解析文本（见 table_dynamics.py）。
     由调用方显式传入，而不是在这里读文件：单测和离线重放不会因为仓库里恰好
     有一份动态文件而改变结果。
@@ -799,7 +811,9 @@ def build_situation(snap: HandSnapshot,
     # 「纯听」= 读牌分档在听牌档；已经成牌（一对以上）不在此列——
     # 那种情况是价值下注，哪怕多路也允许。
     draw_only = bool(read and read.tier in (STRONG_DRAW, WEAK_DRAW))
-    block_draw_bets = (snap.street != PREFLOP and n_opp >= 3 and draw_only)
+    # lean 把动作空间完整交给模型；旧规则版才在多路纯听时删掉下注/加注。
+    block_draw_bets = (style != PROMPT_STYLE_LEAN
+                       and snap.street != PREFLOP and n_opp >= 3 and draw_only)
     beat_pct = beat_at_least = None
     if gt is not None:
         beat_pct = round(gt.rank.beat_pct * 100, 1)
@@ -1836,15 +1850,6 @@ def render_hand_facts(sit: Situation) -> str:
     return "\n".join(lines)
 
 
-PROMPT_STYLE_LEAN = "lean"
-PROMPT_STYLE_SKILLS = "skills"
-PROMPT_STYLES = (PROMPT_STYLE_LEAN, PROMPT_STYLE_SKILLS)
-# 默认精简版：契约 + 计算事实 + 桌面动态 + 一份紧凑的现代范围框架。
-# 旧版（15 篇 2005 年《Little Green Book》技能，system 约 20k 字符）保留给
-# A/B 对比：`--advice-style skills`。lean 版不再展开技能库。
-DEFAULT_PROMPT_STYLE = PROMPT_STYLE_LEAN
-
-
 def _build_messages_skills(sit: Situation) -> tuple[str, str]:
     """返回 (system, user)。system 由「角色 + 输出契约 + 技能层」拼成。
 
@@ -2009,12 +2014,12 @@ def _build_messages_skills(sit: Situation) -> tuple[str, str]:
     return "\n".join(system_parts), render_hand_facts(sit)
 
 
-# ── lean 提示词：契约 + 事实 + 桌面动态 + 现代范围框架 ──────────────
+# ── lean-rules：契约 + 事实 + 桌面动态 + 现代范围框架 ──────────────
 # 刻意不加载 skills_md_en：那套是 2005 年《Little Green Book》的绝对化打法，
 # 没有范围表，system 约 20k 字符。这里只保留模型做「范围决策」真正需要的：
 # 输出契约、怎么用事实/赔率、按位置的 RFI/3-bet/冷跟范围、翻后纹理与尺度、
-# 爆炸底池一行、以及桌面动态的调频方式。
-_LEAN_SYSTEM = """\
+# 爆炸底池一行、以及桌面动态的调频方式。默认 lean 不再加载这段，只给事实。
+_LEAN_RULES_SYSTEM = """\
 You are a Texas Hold'em cash-game advisor working in real time. Hero has a few seconds and needs one directly executable action.
 
 ## Priority (highest first)
@@ -2114,28 +2119,204 @@ Table-wide context outranks the chart and generic heuristics; those never overri
 
 # 范围表由 preflop_ranges 生成，不再手写两份：手写一定漂移，而模型拿到
 # 和代码判定不一致的表时，会挑对自己有利的那份用。
-_LEAN_SYSTEM = _LEAN_SYSTEM.replace("<<RFI_CHART>>", chart_text())
-_LEAN_SYSTEM = _LEAN_SYSTEM.replace(
+_LEAN_RULES_SYSTEM = _LEAN_RULES_SYSTEM.replace("<<RFI_CHART>>", chart_text())
+_LEAN_RULES_SYSTEM = _LEAN_RULES_SYSTEM.replace(
     "<<PREFLOP_MIN_RAISE>>", f"{PREFLOP_MIN_RAISE_BB:g}BB")
-_LEAN_SYSTEM = _LEAN_SYSTEM.replace("<<IMPLIED_ODDS_RULE>>",
+_LEAN_RULES_SYSTEM = _LEAN_RULES_SYSTEM.replace("<<IMPLIED_ODDS_RULE>>",
                                     implied_odds_rule())
 
 
-def _build_messages_lean(sit: Situation) -> tuple[str, str]:
-    return _LEAN_SYSTEM + "\n" + _GROUND_TRUTH_RULES, render_hand_facts(sit)
+def _build_messages_lean_rules(sit: Situation) -> tuple[str, str]:
+    return _LEAN_RULES_SYSTEM + "\n" + _GROUND_TRUTH_RULES, render_hand_facts(sit)
+
+
+# ── lean：只注入状态、逐座位画像、实时牌力、桌风、选项 ──────────────
+# 不包含 RFI 表、3-bet/冷跟、翻后纹理/尺度、价值指令、Math gate、上一街
+# plan、GTO、爆炸底池等任何策略提示。模型只看事实，自己决定动作。
+_MINIMAL_SYSTEM = """\
+You are a Texas Hold'em cash-game advisor working in real time. Hero has a few seconds and needs one directly executable action.
+
+You receive the current hand state and the legal options, plus any available per-seat opponent reads, real-time hand-strength facts, and table-level notes. No chart or rule list is supplied: decide from the facts yourself.
+
+## Output
+Return exactly one JSON object, no markdown fence and no other text:
+{"option": "<id from Options>", "reason": "<one sentence, under 25 words>", "confidence": <optional 0.0-1.0>}
+- option must be exactly one id from the user's «Options» section. Never invent ids or amounts; all amounts are computed by the program.
+- reason must explain the choice using the supplied facts.
+- Do not invent cards, opponent reads, or facts that are not in the input. If a fact is missing, say so in the reason.
+"""
+
+
+def _minimal_hand_strength_lines(sit: Situation) -> list[str]:
+    """实时牌力事实：只给牌型/排名/听牌/权益，不给「该 bet 还是 check」。"""
+    snap = sit.snap
+    if snap.street == PREFLOP:
+        return []
+    lines = ["## Real-time hand strength"]
+    if sit.hand_label_en:
+        tier = _TIER_EN.get(sit.hand_tier or "", sit.hand_tier or "unknown")
+        lines.append(f"My hand strength: {sit.hand_label_en} (tier: {tier})")
+
+    gt = sit.ground_truth
+    if gt is not None:
+        data = gt.to_dict()
+        bs = data["board_structure"]
+        if bs["flush_made_possible"]:
+            flush = "made flush possible"
+        elif bs["flush_draw_possible"]:
+            flush = "flush draw only (no made flush)"
+        else:
+            flush = "no flush possible"
+        lines.append(
+            f"Board structure: {flush}; straight "
+            f"{'possible' if bs['straight_possible'] else 'not possible'}; "
+            f"paired {'yes' if bs['paired'] else 'no'}")
+        made = data["made"]
+        used = " ".join(made["hero_cards_used"]) or "none (playing the board)"
+        lines.append(
+            f"Made hand: {made['category'].upper()} ({made['detail']})｜"
+            f"best five: {' '.join(made['best_five'])}｜hole cards used: {used}")
+        rank = data["rank"]
+        lines.append(
+            f"Made-hand rank: beaten by {rank['beat_pct']:.1f}% per opponent; "
+            f"ties {rank['tie_pct']:.1f}%; equity {rank['equity_pct']:.1f}% vs "
+            f"one opponent; with {rank['opponents']} opponent(s), "
+            f"{rank['beat_at_least_pct']:.1f}% chance at least one is ahead "
+            f"(random hands are a lower bound).")
+        if rank["hero_is_nuts"]:
+            lines.append("NUT STATUS: NUTS — no opponent holding can beat you.")
+        else:
+            beaten = ", ".join(
+                f"{b['category']} ({b['combos']})" for b in rank["beaten_by"])
+            lines.append(
+                f"NUT STATUS: NOT THE NUTS — better hands exist: {beaten}.")
+        draws = data["draws"]
+        parts: list[str] = []
+        if draws["flush_draw"]:
+            parts.append(
+                f"{'nut ' if draws['nut_flush_draw'] else ''}flush draw in "
+                f"{draws['flush_suit']} ({draws['flush_outs']} outs)")
+        if draws["straight_draw"]:
+            kind = "open-ended/double-gutshot" if draws["oesd"] else "gutshot"
+            parts.append(f"{kind} straight draw ({draws['straight_outs']} outs)")
+        if parts:
+            lines.append(
+                f"Draws: {' + '.join(parts)}; total {draws['total_outs']} outs "
+                f"(rule of 4/2 equity {draws['equity_pct']:.0f}%).")
+        else:
+            lines.append("Draws: none.")
+    elif sit.outs:
+        lines.append(
+            f"Draw outs: {sit.outs} (rule of 4/2 equity "
+            f"{sit.equity_pct or 0:.0f}%).")
+
+    if sit.hand_ranges is not None:
+        lines.append("")
+        for line in sit.hand_ranges.render().splitlines():
+            if line.startswith("Read:"):
+                continue
+            lines.append(line)
+    if sit.hand_strength is not None:
+        hs = sit.hand_strength
+        lines.append(
+            f"Hand-strength read: {hs.size.upper().replace('_', ' ')} "
+            f"{hs.made_name}; behind now {hs.behind_any:.0%}, equity "
+            f"{hs.equity:.0%} vs {hs.n + 1}-way avg {hs.avg:.0%}.")
+    return lines
+
+
+def render_minimal_facts(sit: Situation) -> str:
+    """lean 的 user 消息：状态 + 实时牌力 + 逐座位画像 + 桌风 + 选项。
+
+    刻意不渲染：Preflop range、Value directive、Math gate、GTO、board equity、
+    爆炸底池、对手行动强度、上一街 plan、SPR/位置等策略标签。模型只看原始
+    事实和三个注入块，自己判断下注/跟注/弃牌。
+    """
+    snap = sit.snap
+    lines: list[str] = []
+    table = f"{snap.table_size}-handed" if snap.table_size else "unknown table"
+    lines.append(f"Table: {table}")
+    if snap.blinds:
+        ante = f" (ante {snap.blinds.ante})" if snap.blinds.ante else ""
+        lines.append(f"Blinds: {snap.blinds.sb}/{snap.blinds.bb}{ante}")
+    lines.append(
+        f"Hero: {snap.hero_position or 'unknown'}｜Cards: "
+        f"{' '.join(snap.hero_cards) or 'unknown'}｜Stack: "
+        f"{snap.hero_stack if snap.hero_stack is not None else 'unknown'}BB")
+    lines.append(
+        f"Street: {_STREET_EN.get(snap.street, snap.street)}｜Board: "
+        f"{' '.join(snap.board) or 'none'}｜Pot: "
+        f"{snap.pot if snap.pot is not None else 'unknown'}BB｜To call: "
+        f"{call_amount(snap):g}BB")
+    opps = [o for o in snap.opponents if not o.folded]
+    if opps:
+        lines.append("Opponents in hand: " + ", ".join(
+            f"{o.position or o.seat_id}"
+            f"{'(' + o.name + ')' if o.name else ''} "
+            f"{o.stack if o.stack is not None else '?'}BB"
+            for o in opps))
+    folded = [o for o in snap.opponents if o.folded]
+    if folded:
+        lines.append("Folded: " + ", ".join(
+            o.position or o.seat_id for o in folded))
+
+    lines.append("")
+    lines.append("## Action line")
+    for rec in snap.streets:
+        pot_start = f" (pot before street {rec.pot_start}BB)" \
+            if rec.pot_start is not None else ""
+        lines.append(f"{_STREET_EN.get(rec.street, rec.street)}{pot_start}: "
+                     f"{_fmt_actions(list(rec.actions))}")
+
+    strength = _minimal_hand_strength_lines(sit)
+    if strength:
+        lines.append("")
+        lines.extend(strength)
+
+    active = {o.seat_id: (o.position or o.seat_id)
+              for o in snap.opponents if not o.folded}
+    reads = render_reads(sit.opponent_reads, active,
+                         header="Opponent reads (per-seat):")
+    if reads:
+        lines.append("")
+        lines.extend(reads)
+
+    if sit.table_dynamics:
+        lines.append("")
+        lines.append("## Table dynamics")
+        lines.append(sit.table_dynamics)
+
+    if sit.warnings:
+        lines.append("")
+        lines.append("Data gaps: " + "; ".join(sit.warnings))
+
+    lines.append("")
+    lines.append("## Options (pick exactly one id)")
+    for o in sit.options:
+        amount = f", amount {o.amount}BB" if o.amount is not None else ""
+        note = f" ({o.note})" if o.note else ""
+        lines.append(f"- {o.id} — {o.label}{amount}{note}")
+    return "\n".join(lines)
+
+
+def _build_messages_minimal(sit: Situation) -> tuple[str, str]:
+    return _MINIMAL_SYSTEM, render_minimal_facts(sit)
 
 
 def build_messages(sit: Situation,
                    style: str = DEFAULT_PROMPT_STYLE) -> tuple[str, str]:
     """按风格拼 (system, user)。
 
-    lean（默认）= 契约 + 事实 + 现代范围框架；skills = 旧的技能库全量注入。
-    未知风格直接报错，避免拼写错误静默退回某个版本。
+    lean（默认）= 只注入状态 + 逐座位画像 + 实时牌力 + 桌风 + 选项；
+    lean-rules = 旧版完整 lean（范围表/翻后规则/价值指令）；
+    skills = 旧的技能库全量注入。未知风格直接报错，避免拼写错误静默退回。
     """
     if style == PROMPT_STYLE_SKILLS:
         return _build_messages_skills(sit)
+    if style == PROMPT_STYLE_LEAN_RULES:
+        return _build_messages_lean_rules(sit)
     if style == PROMPT_STYLE_LEAN:
-        return _build_messages_lean(sit)
+        return _build_messages_minimal(sit)
     raise ValueError(f"未知提示词风格：{style!r}（可选：{', '.join(PROMPT_STYLES)}）")
 
 
@@ -2580,13 +2761,9 @@ def complete_jev(settings: AISettings, system: str, user: str,
         questions={
             "option": {
                 "type": "choice",
-                "instructions": "It is Hero's turn to act. Based on the skills and the hand "
-                                "facts, choose the single most appropriate action from the "
-                                "candidates. Value-first: if the facts say Hero has a strong "
-                                "made hand, prefer the value bet/raise line unless a "
-                                "slow-play exception applies; with a strong draw, prefer "
-                                "betting/calling over folding when equity is enough. Do not "
-                                "stack off one pair against a raise or all-in.",
+                "instructions": "It is Hero's turn to act. Choose the single most "
+                                "appropriate action from the candidates based on the "
+                                "supplied state and facts.",
                 "criteria": criteria,
             },
         },
@@ -2732,7 +2909,9 @@ def advise(sit: Situation, settings: AISettings | None,
     """出一次建议。`complete` 可注入（单测用），默认走 complete_json。"""
     started = time.monotonic()
     by_id = {o.id: o for o in sit.options}
-    gate = math_gate(sit)
+    # lean 只给事实，不注入 Math gate，也不在模型弃牌后重问；旧版才做。
+    minimal = style == PROMPT_STYLE_LEAN
+    gate = None if minimal else math_gate(sit)
     # lean 不加载技能库，skill_codes 留空（它只是复盘时的元数据）。
     selected = (skills.select_skills(_skill_context(sit))
                 if style == PROMPT_STYLE_SKILLS else [])
@@ -2776,9 +2955,9 @@ def advise(sit: Situation, settings: AISettings | None,
             raise AIError(f"模型给了不在选项里的答案：{choice!r}")
         # Math gate 已经把「跟注是不是 +EV」算过了。模型仍然弃牌时给一次
         # 重问机会；只重问一次，且第一次调用已经吃掉大半超时预算就放弃，
-        # 实时链路等不起第二次。
-        violation = bool(gate and gate.verdict == "call" and choice == "fold"
-                         and "call" in by_id)
+        # 实时链路等不起第二次。lean 不注入 gate，也不重问。
+        violation = bool(not minimal and gate and gate.verdict == "call"
+                         and choice == "fold" and "call" in by_id)
         if violation and (time.monotonic() - started) < timeout * 0.6:
             hint = ("\n\n## Correction\nYour answer folded, but the computed "
                     f"«Math gate» says: {gate.text} Reconsider. Fold only if you "
@@ -2884,9 +3063,11 @@ class AdviceRunner:
                 prev = self._last.get(sit.snap.hand_id)
                 # 只回灌模型自己的决定：fallback 的理由是中文兜底文案，
                 # 喂回去既没用又会把中文带进英文提示词。
-                if (prev is not None and prev.source == "model"
+                if (self.style != PROMPT_STYLE_LEAN
+                        and prev is not None and prev.source == "model"
                         and prev.street != sit.snap.street):
-                    # 同一手、不同街：把上一街的动作和 plan 带进这一街的事实块。
+                    # 同一手、不同街：旧版把上一街动作和 plan 带进事实块。
+                    # lean 不注入 plan，避免模型被自己上一街的保守计划锚住。
                     sit = replace(sit, previous=prev)
                 try:
                     advice = advise(sit, self.settings, self.timeout,

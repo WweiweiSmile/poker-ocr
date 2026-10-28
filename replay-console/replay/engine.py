@@ -197,8 +197,10 @@ def execute_unit(
     """
     from poker_ocr.advice import build_situation
 
+    prompt_style = version.get("prompt_style") or "lean"
     sit = build_situation(decision.snap,
-                          table_dynamics=version.get("table_dynamics") or "")
+                          table_dynamics=version.get("table_dynamics") or "",
+                          style=prompt_style)
     facts = decision_facts(sit)
     actual_tags = sorted(audit(sit, decision.actual, decision.actual_amount))
     facts["actualViolationTags"] = actual_tags
@@ -230,7 +232,7 @@ def execute_unit(
     try:
         advice: Advice = advise(sit, settings, timeout=timeout,
                                 complete=complete,
-                                style=version.get("prompt_style") or "lean")
+                                style=prompt_style)
         elapsed = int((time.monotonic() - started) * 1000)
         source = advice.source
         option = advice.option

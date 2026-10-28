@@ -90,7 +90,7 @@ def main() -> int:
     assert set(row) == {"instruction", "input", "output", "system"}, row.keys()
     assert json.loads(row["output"])["option"] in got[0]["meta"]["legal"]
     assert "Options" in row["instruction"] or "option" in row["instruction"].lower()
-    assert len(row["system"]) > 1000
+    assert 500 < len(row["system"]) < 3000, len(row["system"])
 
     print("OK  2 条保留 / 1 条陈旧 / 1 条非法 id / 按手牌切分 1:1")
     return 0

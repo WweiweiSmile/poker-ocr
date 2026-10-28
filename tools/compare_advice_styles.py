@@ -60,9 +60,12 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from poker_ocr.advice import (  # noqa: E402
-    AISettings, DEFAULT_PROMPT_STYLE, PROMPT_STYLES, advise, build_situation,
+    AISettings, advise, build_situation,
     complete_json, render_hand_facts,
 )
+
+# 这个工具只做两版对照；lean-rules 用 --advice-style 在线上/回放里单独看。
+COMPARE_STYLES = ("lean", "skills")
 from poker_ocr.env import load_env  # noqa: E402
 from poker_ocr.hand_track import (  # noqa: E402
     ActionRecord, HandSnapshot, OpponentSnapshot, StreetRecord, street_of_board,
@@ -397,7 +400,7 @@ def classify(option, actual: str | None, actual_amount: float | None,
 
 def run_decision(dec: Decision, settings: AISettings, style: str,
                  timeout: float) -> dict:
-    sit = build_situation(dec.snap)
+    sit = build_situation(dec.snap, style=style)
     started = time.monotonic()
     try:
         advice = advise(sit, settings, timeout=timeout, style=style)
@@ -642,7 +645,7 @@ def main(argv: list[str] | None = None) -> int:
         except ValueError:
             timeout = 20.0
     print(f"模型 {settings.model}（{source}），超时 {timeout:g}s，"
-          f"风格 {', '.join(PROMPT_STYLES)}")
+          f"风格 {', '.join(COMPARE_STYLES)}")
 
     rng = random.Random(args.seed)
     rows: list[dict] = []
@@ -653,7 +656,7 @@ def main(argv: list[str] | None = None) -> int:
               f"pot={dec.pot:g} to_call={dec.to_call:g} …", flush=True)
         sit = build_situation(dec.snap)
         results: dict[str, dict] = {}
-        for style in PROMPT_STYLES:
+        for style in COMPARE_STYLES:
             res = run_decision(dec, settings, style, timeout)
             results[style] = res
             status = res.get("option") if res.get("ok") else "失败"
@@ -692,10 +695,10 @@ def main(argv: list[str] | None = None) -> int:
         "styles_same": same_style,
         "same_actual": {s: sum(1 for r in rows
                                if r["results"].get(s, {}).get("match") == "一致")
-                        for s in PROMPT_STYLES},
+                        for s in COMPARE_STYLES},
         "avg_ms": {s: round(sum(r["results"].get(s, {}).get("ms", 0)
                                 for r in rows) / max(len(rows), 1))
-                   for s in PROMPT_STYLES},
+                   for s in COMPARE_STYLES},
     }
     lines = [
         f"两版选择相同 {same_style}/{len(rows)}；"

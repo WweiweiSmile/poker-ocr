@@ -86,7 +86,7 @@ def iter_rows(log_path: Path, hands_path: Path, style: str):
         if is_stale(snap):
             yield adv, snap, None, "stale"
             continue
-        sit = build_situation(snap)
+        sit = build_situation(snap, style=style)
         yield adv, snap, sit, ""
 
 

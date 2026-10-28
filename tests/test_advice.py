@@ -1068,7 +1068,7 @@ def test_multiway_draw_cannot_bet() -> None:
     # h31 的牌面：转牌 8s Qh 4s 9h，76s = 8 张顺子听，4 家，没人下注
     sit = build_situation(make_point(
         street="turn", board=("8s", "Qh", "4s", "9h"), hero_cards=("7c", "6s"),
-        opponents=multiway(4), pot=10.0, to_call=0.0))
+        opponents=multiway(4), pot=10.0, to_call=0.0), style="lean-rules")
     ids = [o.id for o in sit.options]
     check(ids == ["call"], f"多路纯听牌只该有过牌：{ids}")
     check(sit.options[0].kind == "check", f"call 这个 id 应是过牌：{sit.options[0]}")
@@ -1078,7 +1078,7 @@ def test_multiway_draw_cannot_bet() -> None:
     # 同一手牌单挑：半诈唬仍然合法，选项和指令都不能被误伤
     heads_up = build_situation(make_point(
         street="turn", board=("8s", "Qh", "4s", "9h"), hero_cards=("7c", "6s"),
-        pot=10.0, to_call=0.0))
+        pot=10.0, to_call=0.0), style="lean-rules")
     check("raise-1/2" in [o.id for o in heads_up.options],
           f"单挑听牌应仍可下注：{[o.id for o in heads_up.options]}")
     check("SEMI-BLUFF" in (value_directive(heads_up) or ""),
@@ -1099,7 +1099,8 @@ def test_multiway_draw_cannot_raise() -> None:
                  for i in range(4))
     sit = build_situation(make_point(
         street="turn", board=("8s", "Qh", "4s", "9h"), hero_cards=("7c", "6s"),
-        opponents=four, pot=40.0, to_call=10.0, hero_stack=60.0))
+        opponents=four, pot=40.0, to_call=10.0, hero_stack=60.0),
+        style="lean-rules")
     ids = [o.id for o in sit.options]
     check(ids == ["fold", "call"], f"多路听牌面对下注只该有弃牌/跟注：{ids}")
     check("NO FOLD EQUITY" in (value_directive(sit) or ""),
@@ -1167,9 +1168,9 @@ def test_small_pair_folds_to_three_bet_no_set_mining() -> None:
     qq = render_hand_facts(preflop(("Qd", "Qh")))
     check("Do not set-mine" not in qq, f"QQ 面对 3-bet 不该被判弃：{qq}")
 
-    system, _ = build_messages(build_situation(make_point()))
+    system, _ = build_messages(build_situation(make_point()), style="lean-rules")
     check("continue ONLY with QQ+/AK" in system,
-          "lean 提示词应写明：面对 3-bet 只继续 QQ+/AK")
+          "lean-rules 提示词应写明：面对 3-bet 只继续 QQ+/AK")
 
 
 def test_ante_adds_bb_not_multiplies_open_size() -> None:
@@ -1267,9 +1268,9 @@ def test_prompt_states_six_bb_preflop_minimum() -> None:
     facts = render_hand_facts(sit)
     check("Preflop minimum raise: 6BB" in facts,
           f"翻前事实应写明 6BB 下限：{facts}")
-    system, _ = build_messages(sit)
+    system, _ = build_messages(sit, style="lean-rules")
     check("6BB minimum preflop raise" in system,
-          "system 应写明本桌 6BB 最低加注")
+          "lean-rules system 应写明本桌 6BB 最低加注")
 
 
 def test_three_bet_pot_warns_random_rank_is_upper_bound() -> None:
@@ -1627,7 +1628,7 @@ def test_prompt_has_zero_implied_odds() -> None:
           f"隐含赔率上限应为 0：{advice_mod.IMPLIED_ODDS_CAP_PCT}")
     point = make_point(to_call=30.0, pot=75.0, hero_stack=100.0)
     sit = build_situation(point)
-    for style in ("lean", "skills"):
+    for style in ("lean-rules", "skills"):
         system, _ = build_messages(sit, style=style)
         check("Ignore implied odds" in system,
               f"{style} 提示词应写明不计算隐含赔率：\n{system}")
@@ -1725,13 +1726,16 @@ def test_table_dynamics_in_prompt() -> None:
                           table_dynamics=dyn)
     check(sit.table_dynamics == dyn, "Situation 应保存动态原文")
     system, user = build_messages(sit)
-    check("## Table context (table-level; per-seat profiles outrank it)" in user,
-          f"user facts 应含桌级背景段：\n{user}")
+    check("## Table dynamics" in user,
+          f"lean user facts 应含桌风段：\n{user}")
     check(dyn in user, f"动态原文应进入提示词：\n{user}")
-    check("## Table context (user-provided, table-level, when present)" in system,
-          "system 应解释如何使用桌级背景")
-    check("It overrides the default «unknown opponent» assumption" in system,
-          "system 应说明桌级背景覆盖「未知对手」默认假设")
+    check("## Table context" not in user,
+          f"lean 不该再包一层策略性的 Table context：\n{user}")
+    old_system, old_user = build_messages(sit, style="lean-rules")
+    check("## Table context (table-level; per-seat profiles outrank it)" in old_user,
+          "lean-rules 仍应保留旧的 Table context 段")
+    check("It overrides the default «unknown opponent» assumption" in old_system,
+          "lean-rules system 应说明桌级背景覆盖「未知对手」默认假设")
 
     blank = build_situation(make_point(to_call=4.0, pot=10.0, hero_stack=90.0),
                             table_dynamics="  \n ")
@@ -1895,7 +1899,7 @@ def test_value_directive_aggressive_table_checks_two_pair() -> None:
 def test_lean_prompt_is_per_opponent() -> None:
     """lean 提示词不再默认「全桌松弱」，并要求按对手/座位分别套。"""
     sit = build_situation(make_point())
-    system, _ = build_messages(sit)
+    system, _ = build_messages(sit, style="lean-rules")
     check("The pool is **mixed**" in system,
           "lean 默认画像应改成 mixed")
     check("do not project one label" in system,
@@ -1927,7 +1931,10 @@ def test_advise_uses_model_choice() -> None:
     check(advice.option.amount is not None, "金额应由程序算好")
     check("Coach Skill Catalog" not in seen["system"],
           "默认 lean 不该再注入技能库")
-    check("## Preflop ranges" in seen["system"], "lean 应带范围框架")
+    check("## Preflop ranges" not in seen["system"],
+          "默认 lean 不该再带范围框架")
+    check("No chart or rule list is supplied" in seen["system"],
+          "默认 lean 应是事实-only 提示")
     check(advice.skill_codes == (), f"lean 不该记录技能码：{advice.skill_codes}")
     check(advice.to_dict()["street"] == "flop", "落库结构不对")
 
@@ -1944,22 +1951,46 @@ def test_advise_uses_model_choice() -> None:
 
 
 def test_lean_prompt_is_compact_and_range_based() -> None:
-    """lean 版：不注入技能库，但保留契约、事实和范围/纹理框架。"""
-    sit = build_situation(make_point())
+    """lean = 只给状态/画像/实时牌力/桌风/选项；范围与规则在 lean-rules。"""
+    sit = build_situation(make_point(hero_cards=("Ah", "Qh"),
+                                     board=("As", "Ks", "4d")))
     system, user = build_messages(sit)
     check("Coach Skill Catalog" not in system, "lean 不该注入技能目录")
     check("Core Stance" not in system, "lean 不该注入旧技能正文")
-    check("## Preflop ranges" in system, "lean 应给出翻前范围")
-    check("RFI by position" in system, "lean 应给出按位置 RFI")
-    check("## Postflop" in system and "C-bet" in system, "lean 应有翻后框架")
-    check("Break-even equity" in user or "My hand strength" in user,
-          "计算事实仍应完整")
-    # 6000 是 lean 正文还没有 GROUND TRUTH + 生成式 RFI 表时的预算。现在是
-    # 正文 ~10.6k + GT ~1.45k：新增了转牌/河牌/3-bet/短码四段、按座位画像的
-    # 优先级阶梯，以及 GTO baseline 段（约 0.4k）。上限 12600 只留防膨胀余量；
-    # 下面还有 len(with_skills) > 2× 的相对检查，防止膨胀回 skills 版。
-    check(len(system) < 12600,
-          f"lean system 应保持紧凑（< 12600），实际 {len(system)}")
+    check("No chart or rule list is supplied" in system,
+          "lean 应明确告诉模型没有图表/规则清单")
+    for banned in ("## Preflop ranges", "RFI by position", "## Postflop",
+                   "## Explosive pot", "## Priority (highest first)"):
+        check(banned not in system, f"lean system 不该再含策略段：{banned}")
+    for banned in ("Preflop range:", "Value directive:", "Math gate:",
+                   "My previous decision", "## Table context",
+                   "Break-even equity", "SPR "):
+        check(banned not in user, f"lean user 不该再含策略事实：{banned}")
+    check("## Real-time hand strength" in user, "lean 应注入实时牌力")
+    check("## Options" in user, "lean 仍要给合法选项")
+    check(len(system) < 3000,
+          f"lean system 应保持极简（< 3000），实际 {len(system)}")
+
+    from poker_ocr.opponent_profile import OpponentRead
+    reads = (OpponentRead("a", "老王", "老王", "station", 0.8, 20,
+                          38.0, 6.0, 1.1, "auto", "", "read"),)
+    full = build_situation(make_point(hero_cards=("Ah", "Qh"),
+                                      board=("As", "Ks", "4d")),
+                           table_dynamics="新手玩家，比较松弱，诈唬很少。",
+                           opponent_reads=reads)
+    _, full_user = build_messages(full)
+    check("## Real-time hand strength" in full_user, "lean 应注入实时牌力")
+    check("Opponent reads (per-seat)" in full_user, "lean 应注入逐座位画像")
+    check("STATION" in full_user, "画像类型应进入提示词")
+    check("## Table dynamics" in full_user, "lean 应注入桌风")
+    check("新手玩家" in full_user, "桌风原文应进入提示词")
+
+    rules_system, rules_user = build_messages(sit, style="lean-rules")
+    check("## Preflop ranges" in rules_system, "lean-rules 应保留范围框架")
+    check("RFI by position" in rules_system, "lean-rules 应保留按位置 RFI")
+    check("## Postflop" in rules_system and "C-bet" in rules_system,
+          "lean-rules 应保留翻后框架")
+    check("Value directive:" in rules_user, "lean-rules 应保留价值指令")
 
     with_skills, _ = build_messages(sit, style="skills")
     check("Coach Skill Catalog" in with_skills, "skills 风格应保留")
@@ -1990,8 +2021,8 @@ def test_hand_vs_ranges_facts_block() -> None:
         check(text.index("## Hand vs ranges") < text.index("## Board structure"),
               "Hand vs ranges 必须排在 board structure 之前")
 
-    system, _ = build_messages(sit)
-    check("Hand vs ranges" in system, "提示词优先级/规则应提到 Hand vs ranges")
+    system, _ = build_messages(sit, style="lean-rules")
+    check("Hand vs ranges" in system, "lean-rules 提示词优先级/规则应提到 Hand vs ranges")
     check("behind-now" in system, "提示词应把 behind-now 纳入计算事实")
     check("random rank is only a lower bound" in system,
           "提示词应说明随机排名的下界口径")
@@ -2037,12 +2068,15 @@ def test_hand_strength_absent_without_range() -> None:
 
 
 def test_lean_system_has_hand_strength_rule() -> None:
-    """lean 提示词要含 Hand-strength read 口径规则，且仍 < 12600。"""
-    system, _ = build_messages(build_situation(make_point()))
+    """lean-rules 保留 Hand-strength read 口径；lean 只给事实，不写规则。"""
+    system, _ = build_messages(build_situation(make_point()), style="lean-rules")
     check("Hand-strength read" in system,
-          "lean system 应含 Hand-strength read 口径规则")
+          "lean-rules system 应含 Hand-strength read 口径规则")
     check(len(system) < 12600,
-          f"lean system 仍应 < 12600，实际 {len(system)}")
+          f"lean-rules system 仍应 < 12600，实际 {len(system)}")
+    lean_system, _ = build_messages(build_situation(make_point()))
+    check("Hand-strength read" not in lean_system,
+          "lean 不该再有 Hand-strength read 口径规则")
 
 
 def test_facts_include_spot_spr_and_position() -> None:
@@ -2138,7 +2172,7 @@ def test_math_gate_retries_a_fold() -> None:
             return {"option": "fold", "reason": "the price is thin"}
         return {"option": "call", "reason": "the gate says +EV"}
 
-    adv = advise(sit, SETTINGS, complete=fake)
+    adv = advise(sit, SETTINGS, complete=fake, style="lean-rules")
     check(len(prompts) == 2, f"应重问一次，实际 {len(prompts)} 次")
     check("Math gate" in prompts[1], "重问应带上闸门结论")
     check(adv.option.id == "call", f"重问后应改成跟注：{adv.option.id}")
@@ -2151,7 +2185,7 @@ def test_math_gate_records_violation_when_fold_sticks() -> None:
     sit = build_situation(make_point(
         hero_cards=("Ah", "Qh"), board=("9h", "6h", "5s"),
         to_call=30.0, pot=75.0, hero_stack=100.0))
-    adv = advise(sit, SETTINGS,
+    adv = advise(sit, SETTINGS, style="lean-rules",
                  complete=lambda *a, **k: {"option": "fold", "reason": "still thin"})
     check(adv.option.id == "fold", "不该覆盖模型的最终答案")
     check(adv.gate_violation is True, "第二次仍弃牌应记违规")
@@ -2208,7 +2242,7 @@ def test_advice_runner_feeds_previous_street() -> None:
         seen.append(user)
         return {"option": "call", "reason": "x", "plan": "call one barrel"}
 
-    runner = AdviceRunner(SETTINGS, complete=fake)
+    runner = AdviceRunner(SETTINGS, complete=fake, style="lean-rules")
     runner.submit(flop)
     deadline = time.monotonic() + 3.0
     while time.monotonic() < deadline and not runner.poll():
@@ -2794,8 +2828,8 @@ def test_explosive_pot_prompt_and_directive() -> None:
     check("Explosive pot: YES" in user, f"事实里应标爆炸底池：\n{user}")
     check("5.00BB (30BB ÷ 6)" in user, f"事实里应写清口径：\n{user}")
 
-    system, _ = build_messages(sit)
-    check("## Explosive pot" in system, "系统提示词应有爆炸底池一节")
+    system, _ = build_messages(sit, style="lean-rules")
+    check("## Explosive pot" in system, "lean-rules 系统提示词应有爆炸底池一节")
     check("MEDIUM hand" in system, "系统提示词应说明顶对只是中等牌")
 
     # 顶对强踢、无人下注：不再默认「下注拿价值」，改成小注控池

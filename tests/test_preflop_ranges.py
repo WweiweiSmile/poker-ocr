@@ -4,7 +4,7 @@
     .venv/bin/python tests/test_preflop_ranges.py
     .venv/bin/python -m pytest tests/test_preflop_ranges.py -q
 
-背景：`_LEAN_SYSTEM` 里的 RFI 表原来只是给模型看的文本，模型是**凭记忆引用**的。
+背景：`_LEAN_RULES_SYSTEM` 里的 RFI 表原来只是给模型看的文本，模型是**凭记忆引用**的。
 2026-10-23 那局它编出「AJo is in UTG+1's RFI range」这种和表直接矛盾的理由，
 14 次翻前加注里 12 次是表外手，合计 −123。现在范围归属由代码算、作为事实注入。
 
@@ -21,7 +21,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from poker_ocr.advice import _LEAN_SYSTEM  # noqa: E402
+from poker_ocr.advice import _LEAN_RULES_SYSTEM, _MINIMAL_SYSTEM  # noqa: E402
 from poker_ocr.preflop_ranges import (  # noqa: E402
     CHART_ADDITIONS, OPEN_POSITIONS, RFI, chart_text, expand, hand_key,
     is_set_mine_pair, is_speculative, open_frequency, range_verdict,
@@ -343,9 +343,9 @@ def test_speculative_hands_not_value_isolation() -> None:
 
 def test_prompt_hierarchy_table_dynamics_first() -> None:
     """提示词必须把优先级写清楚：桌风 > 图表默认 > 通用启发。"""
-    check("Priority (highest first)" in _LEAN_SYSTEM, "提示词缺优先级段")
-    check("outranks the chart" in _LEAN_SYSTEM, "桌风应明确高于图表")
-    check("never override table dynamics" in _LEAN_SYSTEM,
+    check("Priority (highest first)" in _LEAN_RULES_SYSTEM, "提示词缺优先级段")
+    check("outranks the chart" in _LEAN_RULES_SYSTEM, "桌风应明确高于图表")
+    check("never override table dynamics" in _LEAN_RULES_SYSTEM,
           "图表应明确不能覆盖桌风")
 
 
@@ -380,11 +380,15 @@ def test_prompt_chart_matches_code() -> None:
     手写两份的代价在这次踩过：代码里改了表、prompt 里还是旧的，模型就会拿到
     一份和我们判定不一致的表，然后挑对自己有利的那份用。
     """
-    check("<<RFI_CHART>>" not in _LEAN_SYSTEM, "占位符没有被替换")
-    check(chart_text() in _LEAN_SYSTEM, "提示词里的表和 chart_text() 不一致（被手写覆盖了？）")
+    check("<<RFI_CHART>>" not in _LEAN_RULES_SYSTEM, "占位符没有被替换")
+    check(chart_text() in _LEAN_RULES_SYSTEM, "提示词里的表和 chart_text() 不一致（被手写覆盖了？）")
     for pos in OPEN_POSITIONS:
-        check(f"{pos} " in _LEAN_SYSTEM or f"{pos} add " in _LEAN_SYSTEM,
+        check(f"{pos} " in _LEAN_RULES_SYSTEM or f"{pos} add " in _LEAN_RULES_SYSTEM,
               f"提示词缺 {pos} 这一行")
+    check("RFI by position" not in _MINIMAL_SYSTEM,
+          "lean 极简提示词不该再带 RFI 表")
+    check(len(_MINIMAL_SYSTEM) < 3000,
+          f"lean 极简 system 应 < 3000，实际 {len(_MINIMAL_SYSTEM)}")
 
 
 def test_open_frequency_ramps_up_by_position() -> None:

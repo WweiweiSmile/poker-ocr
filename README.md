@@ -99,25 +99,20 @@ ROI 识别座位、筹码、下注、动作、庄位、底池和盲注，输出�
 ### AI 实时建议（默认开启）
 
 worker 在**轮到我**时把这一手的完整行动线交给模型（`--no-ai-advice` 可关闭）。
-默认用 **lean 提示词**：输出契约 + 程序算好的事实（位置/筹码/赔率/牌力/听牌）
-+ 桌面动态 + 一份紧凑的现代范围框架（按位置 RFI、3bet/冷跟、翻后纹理与尺度）。
-翻后牌力不再只给「顶对/顺子」这种名字，而是注入一段 **GROUND TRUTH**：最好的五张、
-用了哪两张底牌、精确枚举的 `beaten_by`、坚果与否、听牌 outs、牌面「成花可能 / 只是花听」。
-模型只允许引用，不允许自己重算（见 `poker_ocr/ground_truth.py`）。
-翻后还会注入一组几何事实：底池类型（单加注 / 3-bet / 溜入）、**SPR**、我在不在位置、
-身后还有几人要行动；短码 all-in 会单独标注「side pot 未建模、跟他只有这么多筹码有风险」。
-反过来，对手全下 cover 我时，超出我后手的筹码会退回，赔率分母用**可争夺底池**
-（`winnable_pot()`，已扣掉这部分）而不是牌桌显示的总池。
-听牌面对下注时，程序先算好 **Math gate**（权益 vs 赔率门槛；隐含赔率按 0，不夸大
-潜在收益）并给出 call / fold 结论；模型若在 +EV 闸门下仍弃牌，会带着结论重问一次，
-最终仍弃牌则记 `gate_violation` 供复盘。模型输出除 `option` / `reason` 外还有
-`plan`（下一街意图）与 `confidence`；`plan` 会在同一手的下一街回灌成
-`My previous decision`，避免翻牌说要抓诈、转牌又自己弃掉。
-旧的 2005 年《Little Green Book》技能库不再默认注入，需要对比时加
-`--advice-style skills` 切回。skills 版的 system 会在技能目录之前先注入
-`Live read`（实时牌力）、`Current opponent reads`（逐座位对手画像）与
-`Current table dynamics`（桌面动态），避免 A/B 对比时旧技能层看不到当前决策
-事实。模型从固定选项里选一个：
+默认用 **lean 提示词**，只注入四类内容：当前状态与合法选项、逐座位对手画像、
+实时牌力、桌面动态。**不再注入** RFI/3-bet/冷跟范围、翻后纹理与尺度、价值指令、
+Math gate、上一街 plan、GTO、爆炸底池等任何策略提示；模型只看事实，自己决定动作。
+
+实时牌力包括 **GROUND TRUTH**（最好的五张、用了哪两张底牌、精确 `beaten_by`、
+坚果与否、听牌 outs、牌面「成花可能 / 只是花听」）、**Hand vs ranges**（按对手范围
+算的 behind/equity）和 **Hand-strength read**（一行汇总）。这些只给数字和牌型，
+不再附带「该 bet 还是 check」的结论；模型只允许引用，不允许重算
+（见 `poker_ocr/ground_truth.py`、`hand_vs_ranges.py`、`hand_strength.py`）。
+
+旧版完整 lean（契约 + 事实 + 现代范围框架 + 价值指令 + Math gate + plan 回灌）保留为
+`--advice-style lean-rules`，用于 A/B；`--advice-style skills` 仍是 2005 年技能库全量注入。
+skills 版的 system 会在技能目录之前先注入 `Live read`、`Current opponent reads` 与
+`Current table dynamics`，避免 A/B 对比时旧技能层看不到当前决策事实。模型从固定选项里选一个：
 
 ```
 翻后：弃牌 / 跟注（没人下注时是过牌）/ 加注到底池 1/3 / 1/2 / 2/3 / 1 倍 / 1.2 倍
@@ -131,9 +126,9 @@ bb 说。金额由程序按现场底池/加注算好（含最小加注额与后�
 **本桌最低加注 6BB**（`advice.PREFLOP_MIN_RAISE_BB`）：翻前的开池、3-bet、4-bet
 一律不得低于 6BB；按位置算出来的 2.5-4BB 档位低于这条线时，程序会把选项金额抬到
 6BB，并在 note 里标 `raised to the table minimum 6BB`。后手不足 6BB 时只能全下，
-这是合法动作，不受 6BB 限制。翻前的事实块和 system 提示也会写明这条规则；点击器
-用的档位金额（`preset_targets()`）同样按 6BB 下限修正，避免建议 6BB、实际点了个
-更小的档位。换牌桌规则时只改这一个常量。
+这是合法动作，不受 6BB 限制。lean 的选项 note 会写明这条规则（`lean-rules` 还会在
+事实块和 system 里再写一遍）；点击器用的档位金额（`preset_targets()`）同样按 6BB
+下限修正，避免建议 6BB、实际点了个更小的档位。换牌桌规则时只改这一个常量。
 
 模型调用在后台线程跑，**不阻塞采样**；
 结果写进 JSONL 的 `advice` 记录并高亮打印（含本次耗时）。等模型期间识别会暂停，

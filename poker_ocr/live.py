@@ -1338,7 +1338,9 @@ class LiveProcessor:
                 try:
                     situation = build_situation(
                         point, table_dynamics=dynamics,
-                        opponent_reads=reads.values())
+                        opponent_reads=reads.values(),
+                        style=getattr(self.advice_runner, "style",
+                                      DEFAULT_PROMPT_STYLE))
                 except Exception as exc:      # noqa: BLE001
                     self.log(f"  [建议] 局面构建失败：{type(exc).__name__}: {exc}")
                     return
@@ -2043,7 +2045,8 @@ def build_parser() -> argparse.ArgumentParser:
                     help="启动时清空当前牌桌池的对手画像（不影响其它池）")
     ap.add_argument("--advice-style", choices=PROMPT_STYLES,
                     default=DEFAULT_PROMPT_STYLE,
-                    help="提示词风格：lean=契约+事实+现代范围框架（默认）；"
+                    help="提示词风格：lean=只注入状态/画像/实时牌力/桌风"
+                         "（默认）；lean-rules=旧版契约+事实+范围框架；"
                          "skills=旧的 2005 技能库全量注入（A/B 对比用）")
     ap.add_argument("--ai-timeout", type=float, default=None,
                     help="单次 AI 建议的超时秒数（默认读 AI_SERVER_TIMEOUT，"
@@ -2248,9 +2251,12 @@ def main(argv: list[str] | None = None) -> int:
         _log("[手牌] 没读到自己手牌时："
              + ("也记录（观察对手）" if args.record_without_hero
                 else "默认跳过换手空档（--record-without-hero 可开启）"))
-        _log(f"[建议] 提示词风格={args.advice_style}"
-             + ("（契约+事实+现代范围框架）" if args.advice_style == "lean"
-                else "（旧技能库全量注入）"))
+        _style_note = {
+            "lean": "（只注入状态/画像/实时牌力/桌风，无策略提示）",
+            "lean-rules": "（契约+事实+现代范围框架）",
+            "skills": "（旧技能库全量注入）",
+        }.get(args.advice_style, "")
+        _log(f"[建议] 提示词风格={args.advice_style}{_style_note}")
         dynamics = load_table_dynamics()
         table_dynamics_text = dynamics.text
         if dynamics.found:
