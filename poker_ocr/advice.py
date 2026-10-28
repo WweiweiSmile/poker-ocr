@@ -699,6 +699,9 @@ class Situation:
     gto: "object | None" = None
     # 牌面范围权益（Monte Carlo，多人池也能用）。None = 没表/翻前/位置不明。
     board_eq: "object | None" = None
+    # 手牌 vs 对手范围（实时牌面范围 + 精确 behind + MC equity）。
+    # None = 翻前/牌面不足/没有可确认的对手范围。
+    hand_ranges: "object | None" = None
 
     @property
     def street(self) -> str:
@@ -849,6 +852,27 @@ def build_situation(snap: HandSnapshot,
     try:
         from . import gto_lookup
         sit = replace(sit, gto=gto_lookup.lookup(sit))
+    except Exception:  # noqa: BLE001
+        pass
+    # 手牌 vs 对手范围：答案在 ground truth 之后、board structure 之前。
+    # 任何一步缺数据都 fail open，绝不影响主链路。
+    try:
+        from . import hand_vs_ranges
+        hand_ranges = hand_vs_ranges.lookup(sit)
+        if hand_ranges is not None:
+            # 对手范围缺失/短码这类缺口要进 Data gaps，模型才知道哪些座位
+            # 是 range unknown，而不是把随机牌排名当成范围。
+            merged = list(dict.fromkeys([*sit.warnings,
+                                         *hand_ranges.warnings]))
+            sit = replace(sit, hand_ranges=hand_ranges, warnings=merged)
+        elif hand_vs_ranges.enabled() and snap.street != PREFLOP \
+                and len(snap.board) >= 3:
+            # 全部座位都算不出范围时，也要把“range unknown”写进 Data gaps。
+            from . import field_ranges
+            gaps = field_ranges.resolve(snap).warnings
+            if gaps:
+                sit = replace(sit, warnings=list(dict.fromkeys(
+                    [*sit.warnings, *gaps])))
     except Exception:  # noqa: BLE001
         pass
     try:
@@ -1701,17 +1725,19 @@ def render_hand_facts(sit: Situation) -> str:
                     # 听牌时这个数只反映「还没成牌」（坚果同花听牌此刻只是 A 高，
                     # 会被算成 40%+ 已落后）。不提示清楚会把它推去弃牌。
                     lines.append(
-                        f"Made-hand rank of the CURRENT (unmade) hand: "
-                        f"{sit.beat_at_least_pct:g}% of the time someone already has "
-                        f"you beaten right now. This does NOT apply to a draw — judge "
-                        f"a draw by its outs and the pot odds, not by this number.")
+                        f"Made-hand rank vs RANDOM hands (lower bound) of the CURRENT "
+                        f"(unmade) hand: {sit.beat_at_least_pct:g}% of the time "
+                        f"someone already has you beaten right now. This does NOT "
+                        f"apply to a draw — judge a draw by its outs and the pot odds, "
+                        f"not by this number.")
                 else:
                     lines.append(
-                        f"Made-hand rank (exact count over all {n + 1}-way holdings): "
-                        f"beaten by {sit.beat_pct:g}% of random hands per opponent; with "
-                        f"{n} opponent(s) in the hand, {sit.beat_at_least_pct:g}% chance at "
-                        f"least one is ahead. Random hands are a LOWER bound — anyone who "
-                        f"called or raised has a stronger range than random.")
+                        f"Made-hand rank vs RANDOM hands (lower bound; exact count "
+                        f"over all {n + 1}-way holdings): beaten by {sit.beat_pct:g}% "
+                        f"of random hands per opponent; with {n} opponent(s) in the "
+                        f"hand, {sit.beat_at_least_pct:g}% chance at least one is "
+                        f"ahead. Random hands are a LOWER bound — anyone who called "
+                        f"or raised has a stronger range than random.")
         if "three-bet" in (snap.preflop_shapes or ()):
             lines.append(
                 "3-bet pot: the opponent's range is far narrower than random "
@@ -1766,6 +1792,9 @@ def render_hand_facts(sit: Situation) -> str:
         directive = value_directive(sit)
         if directive:
             lines.append(f"Value directive: {directive}")
+        if sit.hand_ranges is not None:
+            lines.append("")
+            lines.append(sit.hand_ranges.render())
         if sit.board_eq is not None:
             lines.append("")
             lines.append(sit.board_eq.render())
@@ -1976,11 +2005,11 @@ _LEAN_SYSTEM = """\
 You are a Texas Hold'em cash-game advisor working in real time. Hero has a few seconds and needs one directly executable action.
 
 ## Priority (highest first)
-1. Legal actions and computed math (hand rank, equity, pot odds, SPR) — never violate.
+1. Legal actions and computed math (hand rank, equity, pot odds, SPR, behind-now) — never violate.
 2. A reliable per-seat read — «Opponent reads» or a manual pin — outranks every table-wide statement.
-3. Table-wide context (the user's table notes).
-4. «GTO baseline» (when present) — the solved default for this exact board class and spot.
-5. The chart and generic heuristics — priors and defaults; never override 1–4.
+3. «Hand vs ranges» — use it for what he has: "equity vs field" decides, "behind now" is the made hand (a draw can be behind and still have equity); the random rank is only a lower bound.
+4. Table context, «Board structure» and «GTO baseline» — context, not the answer.
+5. The chart and generic heuristics — defaults; never override 1–4.
 
 ## GTO baseline (only when the facts contain that block)
 It is the solved default for this exact board class: range mix, your hand's size mix, EV per size. It outranks the generic size rules below, but computed math, a reliable read, table dynamics, multiway/explosive-pot rules and the block's caveats override it. If you pick a non-best-EV size, name the exploitative reason. Never present an «[approx]» (interpolated) size as solved.

@@ -21,7 +21,8 @@ from poker_ocr.table_dynamics import (  # noqa: E402
 )
 
 # 改动提示词、事实块、选项生成规则、价值指令或审计口径时**必须** bump。
-CURRENT_ADVICE_VERSION = "advice-2026-10-24.9"
+# 2026-10-28.1：加入实时牌面范围/手牌强度事实块与 Hand vs ranges 优先级。
+CURRENT_ADVICE_VERSION = "advice-2026-10-28.1"
 # 改动 decisions.py 的重建语义时 bump。
 # recon-3：翻前底池补上盲注（实时 pbs 只记前注，h39 4.5 → 6.0）。
 CURRENT_RECONSTRUCT_VERSION = "recon-3"

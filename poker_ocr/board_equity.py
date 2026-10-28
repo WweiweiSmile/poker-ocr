@@ -16,6 +16,7 @@ import itertools
 import json
 import os
 import random
+import zlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -32,7 +33,6 @@ GTO = Path(__file__).resolve().parents[1] / "gto"
 _cache: dict[tuple[str, str], dict] | None = None
 _specs: dict[str, Any] | None = None
 _combo_cache: dict[str, list] = {}
-_rng = random.Random(20261026)
 
 
 @dataclass(frozen=True)
@@ -157,7 +157,10 @@ def _range_combos(text: str) -> list:
             continue
         for key in expand(tok):
             out.extend(_combos_of(key))
-    return list({tuple(sorted(c)): c for c in out}.values())
+    # 去重后按牌面键排序：`expand()` 返回 set，直接取 values() 会让采样
+    # 顺序随进程 hash 变化，提示词数字跟着抖。排序不改变范围，只固定顺序。
+    unique = {tuple(sorted(c)): c for c in out}
+    return [unique[key] for key in sorted(unique)]
 
 
 def _spot_ranges(spot: str) -> tuple[list, list]:
@@ -172,9 +175,9 @@ def _spot_ranges(spot: str) -> tuple[list, list]:
     return pfr, caller
 
 
-def _sample(combos, used: set):
+def _sample(combos, used: set, rng: random.Random):
     for _ in range(200):
-        h = _rng.choice(combos)
+        h = rng.choice(combos)
         if h[0] not in used and h[1] not in used:
             used.add(h[0])
             used.add(h[1])
@@ -182,15 +185,15 @@ def _sample(combos, used: set):
     raise RuntimeError("no non-conflicting hand")
 
 
-def _equity(board_cards, pfr, caller, n, samples) -> float:
+def _equity(board_cards, pfr, caller, n, samples, rng: random.Random) -> float:
     eq = 0.0
     for _ in range(samples):
         used = set(board_cards)
-        hands = [_sample(pfr, used)]
+        hands = [_sample(pfr, used, rng)]
         for _ in range(n):
-            hands.append(_sample(caller, used))
+            hands.append(_sample(caller, used, rng))
         deck = [c for c in DECK if c not in used]
-        full = board_cards + _rng.sample(deck, 2)
+        full = board_cards + rng.sample(deck, 2)
         scores = [evaluate(list(h) + full) for h in hands]
         best = max(scores)
         winners = [i for i, s in enumerate(scores) if s == best]
@@ -223,8 +226,11 @@ def _result(board: str, spot: str) -> dict | None:
         return None
     pfr, caller = _spot_ranges(spot)
     samples = int(os.environ.get("GTO_EQUITY_SAMPLES", "600"))
+    # 局部 RNG：同一 (board, spot, samples) 的输出与调用顺序/测试顺序无关。
+    rng = random.Random(zlib.crc32(f"{board}|{spot}|{samples}".encode("utf-8")))
     row = {
-        "eq": {n: round(_equity(board_cards, pfr, caller, n, samples), 4) for n in (1, 2, 3)},
+        "eq": {n: round(_equity(board_cards, pfr, caller, n, samples, rng), 4)
+               for n in (1, 2, 3)},
         "pfr_strong": 0.0,
         "caller_strong": 0.0,
         "pfr_nuts": 0.0,

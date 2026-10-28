@@ -1882,6 +1882,42 @@ def test_lean_prompt_is_compact_and_range_based() -> None:
         check(False, "未知提示词风格应直接报错")
 
 
+def test_hand_vs_ranges_facts_block() -> None:
+    """实时牌面范围 + 手牌强度要作为主事实块出现，且排在 board structure 之前。"""
+    sit = build_situation(make_point(hero_cards=("Ah", "Qh"),
+                                     board=("As", "Ks", "4d")))
+    check(sit.hand_ranges is not None, "已知对手范围时应生成 hand_ranges")
+    text = render_hand_facts(sit)
+    check("## Hand vs ranges" in text, "事实块缺 Hand vs ranges")
+    check("Equity vs field" in text, "范围块缺 equity")
+    check("Made hand now" in text, "范围块缺 behind now")
+    # ground truth 存在时走 gt.render()；旧的随机排名只在 gt 缺失的兜底路径出现。
+    from dataclasses import replace
+    legacy = render_hand_facts(replace(sit, ground_truth=None))
+    check("Made-hand rank vs RANDOM hands" in legacy,
+          "旧的随机牌排名应降级为 RANDOM hands 下界")
+    if "## Board structure" in text:
+        check(text.index("## Hand vs ranges") < text.index("## Board structure"),
+              "Hand vs ranges 必须排在 board structure 之前")
+
+    system, _ = build_messages(sit)
+    check("Hand vs ranges" in system, "提示词优先级/规则应提到 Hand vs ranges")
+    check("behind-now" in system, "提示词应把 behind-now 纳入计算事实")
+    check("random rank is only a lower bound" in system,
+          "提示词应说明随机排名的下界口径")
+
+
+def test_hand_vs_ranges_fails_open_without_range() -> None:
+    """对手位置读不到 → range unknown，不编范围、不出事实块。"""
+    from poker_ocr.hand_track import OpponentSnapshot
+
+    sit = build_situation(make_point(
+        opponents=(OpponentSnapshot("a", "老王", None, 97.0, 0.0, False),)))
+    check(sit.hand_ranges is None, "没有可确认范围时不应生成 hand_ranges")
+    check("## Hand vs ranges" not in render_hand_facts(sit),
+          "没有范围时不应出现范围块")
+
+
 def test_facts_include_spot_spr_and_position() -> None:
     """翻后事实要直接给底池类型、SPR、位置和身后人数，别让模型自己推。"""
     from poker_ocr.hand_track import OpponentSnapshot
@@ -2740,6 +2776,8 @@ def main() -> int:
         test_explosive_pot_prompt_and_directive,
         test_advise_uses_model_choice,
         test_lean_prompt_is_compact_and_range_based,
+        test_hand_vs_ranges_facts_block,
+        test_hand_vs_ranges_fails_open_without_range,
         test_facts_include_spot_spr_and_position,
         test_short_stack_is_flagged_not_silently_effective,
         test_math_gate_for_draws,

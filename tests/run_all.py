@@ -7,6 +7,10 @@
     test_positions  位置推导（纯逻辑，最快）
     test_env        .env 解析与加载（纯逻辑）
     test_coach      翻后建议引擎（纯逻辑，不需要图）
+    test_ranges     翻前范围：169 键展开/宽度/具名与规则先验（纯逻辑）
+    test_board_range 实时牌面范围：combo 分类/动作 mode/连接度（纯逻辑）
+    test_field_ranges 快照 → 每对手范围 ID + mode（纯逻辑）
+    test_hand_vs_ranges 手牌 vs 范围：精确 behind + MC 权益（纯逻辑）
     test_advice     实时 AI 建议：行动线/技能路由/选项/模型协议（纯逻辑）
     test_gto_lookup GTO 近似表查询：同构映射/节点/插值/保守 None（纯逻辑）
     test_opponent_profile 对手画像：弃牌补全/统计/分类/pin/建议集成（纯逻辑）
@@ -39,7 +43,9 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 
-SUITES = ["test_positions.py", "test_env.py", "test_coach.py", "test_advice.py",
+SUITES = ["test_positions.py", "test_env.py", "test_coach.py",
+          "test_ranges.py", "test_board_range.py", "test_field_ranges.py",
+          "test_hand_vs_ranges.py", "test_advice.py",
           "test_gto_lookup.py",
           "test_opponent_profile.py", "test_clicker.py",
           "test_ai_advice_replay.py", "test_dealer.py", "test_roi_reader.py",
