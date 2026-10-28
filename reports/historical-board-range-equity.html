@@ -1,0 +1,921 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>历史手牌 · 牌面范围权益</title>
+<style>
+:root{--ink:#18202f;--muted:#6b7486;--line:#e3e7f0;--bg:#f4f6fb;--card:#fff;
+--green:#0f9f6e;--green-bg:#e5f8f0;--amber:#b7791f;--amber-bg:#fff5df;
+--red:#cf3f4f;--red-bg:#fdecef;--blue:#3559d4;--shadow:0 12px 34px rgba(24,32,47,.08)}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);
+font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB",sans-serif;
+line-height:1.55}
+.hero{background:radial-gradient(circle at 15% 10%,#2e4a9b 0,#16224a 48%,#0b1226 100%);
+color:#fff;padding:52px 24px 44px}
+.wrap{max-width:1280px;margin:0 auto}
+.hero h1{margin:0 0 10px;font-size:clamp(28px,4vw,46px);letter-spacing:-.02em}
+.hero p{margin:0;color:#c8d2f0;max-width:900px}
+.hero .kicker{display:inline-block;font-size:12px;letter-spacing:.16em;text-transform:uppercase;
+color:#9fb6ff;border:1px solid #3d57a3;border-radius:999px;padding:4px 11px;margin-bottom:16px}
+.method{margin-top:-24px}
+.panel{background:var(--card);border:1px solid var(--line);border-radius:18px;
+box-shadow:var(--shadow);padding:22px 24px}
+.method h2{margin:0 0 8px;font-size:18px}
+.method p{margin:6px 0;color:var(--muted);font-size:13.5px}
+.method b{color:var(--ink)}
+main{padding:26px 24px 64px}
+.section-title{display:flex;align-items:baseline;justify-content:space-between;gap:16px;
+margin:34px 0 14px}
+.section-title h2{margin:0;font-size:22px}
+.section-title span{color:var(--muted);font-size:13px}
+.table-wrap{overflow:auto;border:1px solid var(--line);border-radius:16px;background:#fff;
+box-shadow:var(--shadow)}
+table{width:100%;border-collapse:collapse;font-size:13px;min-width:960px}
+th,td{padding:10px 12px;border-bottom:1px solid var(--line);text-align:left;white-space:nowrap}
+th{background:#f8f9fd;color:var(--muted);font-weight:600;font-size:12px;letter-spacing:.02em}
+tr:last-child td{border-bottom:0}
+td.num{text-align:right;font-variant-numeric:tabular-nums}
+.hand-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px}
+.hand-card{background:#fff;border:1px solid var(--line);border-radius:20px;box-shadow:var(--shadow);
+padding:20px;scroll-margin-top:20px}
+.hand-head{display:flex;justify-content:space-between;gap:14px;align-items:flex-start;
+padding-bottom:14px;border-bottom:1px solid var(--line)}
+.hand-id{font-weight:800;font-size:18px;letter-spacing:.02em}
+.hero-line{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:7px;font-size:13px}
+.pos{background:#eef2ff;color:#3049a8;border-radius:8px;padding:1px 7px;font-size:12px;font-weight:700}
+.meta{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}
+.badge{background:#eef2ff;color:#3049a8;border-radius:999px;padding:3px 9px;font-size:11.5px;font-weight:700}
+.badge.soft{background:#f1f3f8;color:#687184;font-weight:600}
+.muted{color:var(--muted)}
+.runout{display:flex;align-items:center;gap:14px;padding:14px 0 4px}
+.runout-label{font-size:11px;color:var(--muted);letter-spacing:.12em;text-transform:uppercase}
+.runout-cards{display:flex;gap:5px;flex-wrap:wrap}
+.card{display:inline-flex;align-items:center;justify-content:center;gap:1px;min-width:30px;
+height:40px;padding:0 5px;border-radius:7px;background:#fff;border:1px solid #cfd6e4;
+box-shadow:0 1px 0 rgba(24,32,47,.06);font-weight:750;font-size:15px;color:#1b2333}
+.card .suit{font-size:13px}
+.card.red{color:#c53148;border-color:#f0c4cb;background:#fffafb}
+.card.ghost{color:#aab1c0;background:#f8f9fc;border-style:dashed;min-width:26px}
+.street-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-top:12px}
+.street-panel{background:#fbfcfe;border:1px solid var(--line);border-radius:14px;padding:12px}
+.street-head{display:flex;justify-content:space-between;gap:8px;align-items:center;min-height:42px}
+.street-head h3{margin:0;font-size:14px}
+.street-head h3 small{font-weight:500;color:var(--muted);font-size:10px;text-transform:uppercase;
+letter-spacing:.08em}
+.mini-cards{display:flex;gap:3px}
+.mini-cards .card{min-width:24px;height:30px;font-size:12px;padding:0 3px;border-radius:5px}
+.mini-cards .card .suit{font-size:10px}
+.eq-line{display:flex;align-items:baseline;gap:7px;margin-top:10px}
+.eq-line strong{font-size:30px;letter-spacing:-.03em;line-height:1}
+.eq-line span{font-size:10.5px;color:var(--muted)}
+.good{color:var(--green)}.mid{color:var(--amber)}.bad{color:var(--red)}
+.bar{height:7px;background:#edf0f6;border-radius:999px;overflow:hidden;margin:9px 0 4px}
+.bar span{display:block;height:100%;border-radius:999px}
+.bar .good{background:linear-gradient(90deg,#28b984,#0f9f6e)}
+.bar .mid{background:linear-gradient(90deg,#e2b24d,#b7791f)}
+.bar .bad{background:linear-gradient(90deg,#e66a79,#cf3f4f)}
+.sub{font-size:10.5px;color:var(--muted)}
+.multi-line{margin:2px 0 5px;font-size:11px;color:var(--muted)}
+.multi-line b{font-weight:750;margin-left:4px}
+dl{margin:10px 0 7px;display:grid;gap:4px;font-size:11.5px}
+dl>div{display:flex;justify-content:space-between;gap:8px}
+dt{color:var(--muted)}dd{margin:0;text-align:right;font-variant-numeric:tabular-nums}
+dd small{color:var(--muted)}
+.chips{display:flex;flex-wrap:wrap;gap:4px;margin-top:6px}
+.chip{background:#f1f3f8;border:1px solid #e5e9f2;border-radius:999px;padding:2px 7px;
+font-size:10px;color:#5f6879}
+.chip.muted{background:#fafbfd;color:#9aa2b1}
+.spark-wrap{display:flex;align-items:center;justify-content:space-between;gap:10px;
+margin-top:12px;border-top:1px dashed var(--line);padding-top:10px}
+.spark-title{font-size:10.5px;color:var(--muted);letter-spacing:.1em;text-transform:uppercase}
+.spark{width:260px;max-width:70%;height:auto;overflow:visible}
+.spark-line{fill:none;stroke:#3559d4;stroke-width:2.2;stroke-linecap:round;stroke-linejoin:round}
+.spark-mid{stroke:#dfe4ee;stroke-width:1;stroke-dasharray:3 4}
+.spark-label{fill:#8a93a5;font-size:8px}
+.dot.good{fill:#0f9f6e}.dot.mid{fill:#b7791f}.dot.bad{fill:#cf3f4f}
+.actions{margin-top:10px;font-size:11.5px;color:var(--muted)}
+.actions summary{cursor:pointer;color:#52607a;font-weight:600}
+.actions div{margin-top:4px}
+footer{padding:0 24px 40px;color:#8a93a5;font-size:11.5px;text-align:center}
+@media(max-width:980px){.hand-grid{grid-template-columns:1fr}}
+@media(max-width:720px){
+  .hero{padding:38px 18px 36px}main{padding:20px 14px 50px}
+  .method{margin-top:-18px}.panel{padding:18px}
+  .street-grid{grid-template-columns:1fr}
+  .spark-wrap{align-items:flex-start;flex-direction:column}
+  .spark{max-width:100%}
+}
+@media print{
+  body{background:#fff}.hero{background:#fff;color:#000;padding:20px 0}
+  .hero p,.hero .kicker{color:#333}.panel,.hand-card,.table-wrap{box-shadow:none}
+  .hand-card{break-inside:avoid}
+}
+</style>
+</head>
+<body>
+<header class="hero"><div class="wrap">
+  <div class="kicker">Historical hand library · board-only ranges</div>
+  <h1>牌面范围权益</h1>
+  <p>从 <b>1023.hands.json</b> 挑选 9 手有完整 5 张公共牌的手牌，
+  逐街展示 Hero 手牌对「牌面范围」的权益。主指标为单挑(N=1)，多路权益并列展示，
+  避免成牌被多人底池摊薄后误判成弱牌。翻前范围不参与：范围只由公共牌生成。</p>
+</div></header>
+<main class="wrap">
+  <section class="panel method">
+    <h2>口径</h2>
+    <p><b>牌面范围：</b>每个对手的范围 = 与当前公共牌连接度 ≥ 0.30 的 combo
+    （<code>board_range</code> 的 call mode），不乘任何 RFI / BB 防守 / 冷跟先验。</p>
+    <p><b>单挑权益（主指标）：</b>Hero 手牌对 1 个牌面范围的权益，用于判断
+    这手牌本身强不强，与历史人数无关。</p>
+    <p><b>多路权益（参考）：</b>Hero 对历史实际人数 N 个独立牌面范围的权益，
+    Monte Carlo 发完剩余公共牌、平局按赢家数分池。N 家各自独立抽同一个牌面范围
+    会把成牌摊薄，所以只作稀释参考，不单独当强弱判断。</p>
+    <p><b>Behind now：</b>范围里当前成手牌严格大于 Hero 的加权比例，和「打到河牌的权益」不是同一个数。</p>
+    <p><b>对手数：</b>只从历史行动里的非 hero 在局座位取人数（最多 4 家），
+    不做翻前范围推断。N=1 表示单挑口径。</p>
+    <p><b>0% 说明：</b>Monte Carlo 里 Hero 没有赢过任何一手；当 Behind now
+    接近 100% 时这是正常结果，不是计算失败。</p>
+  </section>
+
+  <div class="section-title"><h2>总览</h2><span>权益按街对比（单挑口径）；「河牌 N路」列示历史人数稀释后的权益</span></div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>手牌</th><th>Hero</th><th>位置</th><th>公共牌</th><th>对手</th>
+      <th>翻牌(单挑)</th><th>转牌(单挑)</th><th>河牌(单挑)</th><th>河牌 N路</th><th>河牌范围宽度</th><th>河牌读牌</th></tr></thead>
+      <tbody><tr><td><a href="#h4"><b>h4</b></a></td><td><span class="card red"><span class="rank">A</span><span class="suit">♥</span></span><span class="card"><span class="rank">J</span><span class="suit">♠</span></span></td><td>UTG+1</td><td><span class="card"><span class="rank">7</span><span class="suit">♣</span></span><span class="card red"><span class="rank">7</span><span class="suit">♥</span></span><span class="card red"><span class="rank">10</span><span class="suit">♦</span></span><span class="card"><span class="rank">8</span><span class="suit">♣</span></span><span class="card red"><span class="rank">6</span><span class="suit">♥</span></span></td><td class="num">1</td><td class="num bad">35%</td><td class="num bad">35%</td><td class="num bad">0%</td><td class="num bad">0%</td><td class="num">49%</td><td>一对(打牌面)</td></tr><tr><td><a href="#h29"><b>h29</b></a></td><td><span class="card red"><span class="rank">2</span><span class="suit">♥</span></span><span class="card red"><span class="rank">7</span><span class="suit">♦</span></span></td><td>BTN</td><td><span class="card red"><span class="rank">3</span><span class="suit">♥</span></span><span class="card red"><span class="rank">4</span><span class="suit">♥</span></span><span class="card"><span class="rank">7</span><span class="suit">♠</span></span><span class="card"><span class="rank">8</span><span class="suit">♣</span></span><span class="card"><span class="rank">7</span><span class="suit">♣</span></span></td><td class="num">3</td><td class="num mid">53%</td><td class="num mid">47%</td><td class="num good">82%</td><td class="num mid">53%</td><td class="num">39%</td><td>明三条(trips)</td></tr><tr><td><a href="#h31"><b>h31</b></a></td><td><span class="card"><span class="rank">7</span><span class="suit">♣</span></span><span class="card"><span class="rank">6</span><span class="suit">♠</span></span></td><td>CO</td><td><span class="card"><span class="rank">8</span><span class="suit">♠</span></span><span class="card red"><span class="rank">Q</span><span class="suit">♥</span></span><span class="card"><span class="rank">4</span><span class="suit">♠</span></span><span class="card red"><span class="rank">9</span><span class="suit">♥</span></span><span class="card red"><span class="rank">10</span><span class="suit">♦</span></span></td><td class="num">3</td><td class="num bad">27%</td><td class="num bad">20%</td><td class="num good">62%</td><td class="num bad">22%</td><td class="num">57%</td><td>顺子</td></tr><tr><td><a href="#h55"><b>h55</b></a></td><td><span class="card"><span class="rank">4</span><span class="suit">♣</span></span><span class="card"><span class="rank">Q</span><span class="suit">♠</span></span></td><td>LJ</td><td><span class="card red"><span class="rank">Q</span><span class="suit">♥</span></span><span class="card red"><span class="rank">4</span><span class="suit">♦</span></span><span class="card"><span class="rank">6</span><span class="suit">♣</span></span><span class="card"><span class="rank">J</span><span class="suit">♣</span></span><span class="card red"><span class="rank">4</span><span class="suit">♥</span></span></td><td class="num">4</td><td class="num good">80%</td><td class="num good">85%</td><td class="num good">97%</td><td class="num good">91%</td><td class="num">38%</td><td>葫芦</td></tr><tr><td><a href="#h71"><b>h71</b></a></td><td><span class="card red"><span class="rank">J</span><span class="suit">♦</span></span><span class="card"><span class="rank">J</span><span class="suit">♣</span></span></td><td>UTG+1</td><td><span class="card red"><span class="rank">3</span><span class="suit">♥</span></span><span class="card"><span class="rank">2</span><span class="suit">♣</span></span><span class="card"><span class="rank">7</span><span class="suit">♠</span></span><span class="card red"><span class="rank">4</span><span class="suit">♦</span></span><span class="card"><span class="rank">3</span><span class="suit">♠</span></span></td><td class="num">3</td><td class="num good">69%</td><td class="num good">67%</td><td class="num good">68%</td><td class="num bad">28%</td><td class="num">40%</td><td>两对</td></tr><tr><td><a href="#h73"><b>h73</b></a></td><td><span class="card"><span class="rank">7</span><span class="suit">♣</span></span><span class="card red"><span class="rank">3</span><span class="suit">♥</span></span></td><td>UTG</td><td><span class="card red"><span class="rank">5</span><span class="suit">♥</span></span><span class="card"><span class="rank">9</span><span class="suit">♠</span></span><span class="card red"><span class="rank">10</span><span class="suit">♥</span></span><span class="card red"><span class="rank">Q</span><span class="suit">♥</span></span><span class="card"><span class="rank">A</span><span class="suit">♠</span></span></td><td class="num">4</td><td class="num bad">12%</td><td class="num bad">16%</td><td class="num bad">0%</td><td class="num bad">0%</td><td class="num">52%</td><td>高牌/空气</td></tr><tr><td><a href="#h86"><b>h86</b></a></td><td><span class="card red"><span class="rank">2</span><span class="suit">♦</span></span><span class="card red"><span class="rank">7</span><span class="suit">♥</span></span></td><td>UTG</td><td><span class="card"><span class="rank">9</span><span class="suit">♣</span></span><span class="card"><span class="rank">4</span><span class="suit">♣</span></span><span class="card"><span class="rank">5</span><span class="suit">♣</span></span><span class="card red"><span class="rank">8</span><span class="suit">♥</span></span><span class="card red"><span class="rank">6</span><span class="suit">♦</span></span></td><td class="num">3</td><td class="num bad">11%</td><td class="num bad">12%</td><td class="num good">76%</td><td class="num mid">43%</td><td class="num">59%</td><td>顺子</td></tr><tr><td><a href="#h113"><b>h113</b></a></td><td><span class="card red"><span class="rank">8</span><span class="suit">♥</span></span><span class="card red"><span class="rank">Q</span><span class="suit">♥</span></span></td><td>LJ</td><td><span class="card red"><span class="rank">4</span><span class="suit">♥</span></span><span class="card red"><span class="rank">6</span><span class="suit">♥</span></span><span class="card red"><span class="rank">10</span><span class="suit">♦</span></span><span class="card"><span class="rank">Q</span><span class="suit">♣</span></span><span class="card"><span class="rank">7</span><span class="suit">♠</span></span></td><td class="num">4</td><td class="num mid">50%</td><td class="num good">79%</td><td class="num mid">58%</td><td class="num bad">12%</td><td class="num">51%</td><td>顶对8踢</td></tr><tr><td><a href="#h119"><b>h119</b></a></td><td><span class="card red"><span class="rank">Q</span><span class="suit">♥</span></span><span class="card red"><span class="rank">A</span><span class="suit">♦</span></span></td><td>BB</td><td><span class="card"><span class="rank">2</span><span class="suit">♣</span></span><span class="card"><span class="rank">8</span><span class="suit">♣</span></span><span class="card"><span class="rank">Q</span><span class="suit">♠</span></span><span class="card"><span class="rank">J</span><span class="suit">♠</span></span><span class="card red"><span class="rank">7</span><span class="suit">♦</span></span></td><td class="num">1</td><td class="num good">70%</td><td class="num good">70%</td><td class="num good">68%</td><td class="num good">67%</td><td class="num">49%</td><td>顶对A踢</td></tr></tbody>
+    </table>
+  </div>
+
+  <div class="section-title"><h2>逐手明细</h2><span>翻牌 → 转牌 → 河牌</span></div>
+  <div class="hand-grid">
+    <article class="hand-card" id="h4">
+      <header class="hand-head">
+        <div>
+          <div class="hand-id">h4</div>
+          <div class="hero-line"><span class="card red"><span class="rank">A</span><span class="suit">♥</span></span><span class="card"><span class="rank">J</span><span class="suit">♠</span></span>
+            <span class="pos">UTG+1</span>
+            <span class="muted">· 一对(打牌面)</span>
+          </div>
+        </div>
+        <div class="meta">
+          <span class="badge">对手 1</span>
+          <span class="badge soft">无翻前范围</span>
+        </div>
+      </header>
+      <div class="runout">
+        <div class="runout-label">公共牌</div>
+        <div class="runout-cards"><span class="card"><span class="rank">7</span><span class="suit">♣</span></span><span class="card red"><span class="rank">7</span><span class="suit">♥</span></span><span class="card red"><span class="rank">10</span><span class="suit">♦</span></span><span class="card"><span class="rank">8</span><span class="suit">♣</span></span><span class="card red"><span class="rank">6</span><span class="suit">♥</span></span></div>
+      </div>
+      <div class="street-grid">
+      <section class="street-panel">
+        <div class="street-head">
+          <h3>翻牌 <small>Flop</small></h3>
+          <div class="mini-cards"><span class="card"><span class="rank">7</span><span class="suit">♣</span></span><span class="card red"><span class="rank">7</span><span class="suit">♥</span></span><span class="card red"><span class="rank">10</span><span class="suit">♦</span></span></div>
+        </div>
+        <div class="eq-line"><strong class="bad">35%</strong>
+          <span>单挑权益(N=1)</span></div>
+        <div class="bar"><span class="bad" style="width:35.2%"></span></div>
+        <div class="sub">±0.8% · 4000 次抽样</div>
+        <div class="multi-line">多路权益（N=1）<b class="bad">33%</b></div>
+        <dl>
+          <div><dt>Behind now（多路）</dt><dd class="bad">69.6%</dd></div>
+          <div><dt>单挑 Behind</dt><dd class="bad">68.0%</dd></div>
+          <div><dt>Tie</dt><dd>0.5%</dd></div>
+          <div><dt>牌面范围宽度</dt><dd>57.2% <small>(759 combos)</small></dd></div>
+          <div><dt>当前读牌</dt><dd>一对(打牌面)</dd></div>
+        </dl>
+        <div class="chips"><span class="chip">two pair 42.3%</span><span class="chip">trips 21.4%</span><span class="chip">full house 2.8%</span></div>
+      </section>
+      <section class="street-panel">
+        <div class="street-head">
+          <h3>转牌 <small>Turn</small></h3>
+          <div class="mini-cards"><span class="card"><span class="rank">7</span><span class="suit">♣</span></span><span class="card red"><span class="rank">7</span><span class="suit">♥</span></span><span class="card red"><span class="rank">10</span><span class="suit">♦</span></span><span class="card"><span class="rank">8</span><span class="suit">♣</span></span></div>
+        </div>
+        <div class="eq-line"><strong class="bad">35%</strong>
+          <span>单挑权益(N=1)</span></div>
+        <div class="bar"><span class="bad" style="width:35.0%"></span></div>
+        <div class="sub">±0.8% · 4000 次抽样</div>
+        <div class="multi-line">多路权益（N=1）<b class="bad">34%</b></div>
+        <dl>
+          <div><dt>Behind now（多路）</dt><dd class="bad">67.5%</dd></div>
+          <div><dt>单挑 Behind</dt><dd class="bad">68.4%</dd></div>
+          <div><dt>Tie</dt><dd>0.8%</dd></div>
+          <div><dt>牌面范围宽度</dt><dd>62.4% <small>(827 combos)</small></dd></div>
+          <div><dt>当前读牌</dt><dd>打牌面+弱听(4 outs)</dd></div>
+        </dl>
+        <div class="chips"><span class="chip">two pair 46.4%</span><span class="chip">trips 13.2%</span><span class="chip">straight 4.9%</span></div>
+      </section>
+      <section class="street-panel">
+        <div class="street-head">
+          <h3>河牌 <small>River</small></h3>
+          <div class="mini-cards"><span class="card"><span class="rank">7</span><span class="suit">♣</span></span><span class="card red"><span class="rank">7</span><span class="suit">♥</span></span><span class="card red"><span class="rank">10</span><span class="suit">♦</span></span><span class="card"><span class="rank">8</span><span class="suit">♣</span></span><span class="card red"><span class="rank">6</span><span class="suit">♥</span></span></div>
+        </div>
+        <div class="eq-line"><strong class="bad">0%</strong>
+          <span>单挑权益(N=1)</span></div>
+        <div class="bar"><span class="bad" style="width:0.0%"></span></div>
+        <div class="sub">±0.1% · 4000 次抽样</div>
+        <div class="multi-line">多路权益（N=1）<b class="bad">0%</b></div>
+        <dl>
+          <div><dt>Behind now（多路）</dt><dd class="bad">100.0%</dd></div>
+          <div><dt>单挑 Behind</dt><dd class="bad">100.0%</dd></div>
+          <div><dt>Tie</dt><dd>0.0%</dd></div>
+          <div><dt>牌面范围宽度</dt><dd>48.9% <small>(648 combos)</small></dd></div>
+          <div><dt>当前读牌</dt><dd>一对(打牌面)</dd></div>
+        </dl>
+        <div class="chips"><span class="chip">two pair 50.9%</span><span class="chip">straight 33.5%</span><span class="chip">trips 10.1%</span></div>
+      </section></div>
+      <div class="spark-wrap">
+        <div class="spark-title">权益走势</div>
+        <svg class="spark" viewBox="0 0 260 72" role="img" aria-label="权益走势"><line x1="16" y1="36.0" x2="248" y2="36.0" class="spark-mid"/><polyline points="24,42.5 130,42.6 236,58.0" class="spark-line"/><circle cx="24" cy="42.5" r="4" class="dot bad"/><circle cx="130" cy="42.6" r="4" class="dot bad"/><circle cx="236" cy="58.0" r="4" class="dot bad"/><text x="24" y="71" text-anchor="middle" class="spark-label">翻牌</text><text x="130" y="71" text-anchor="middle" class="spark-label">转牌</text><text x="236" y="71" text-anchor="middle" class="spark-label">河牌</text></svg>
+      </div>
+      <details class="actions">
+        <summary>历史行动线</summary>
+        <div><b>preflop</b> UTG+1 raise to 7.5BB · BTN call 7.5BB</div><div><b>flop</b> UTG+1 bet 6.5BB · BTN call 6.5BB</div><div><b>turn</b> UTG+1 bet 16.5BB · BTN call 16.5BB</div>
+      </details>
+    </article>
+    <article class="hand-card" id="h29">
+      <header class="hand-head">
+        <div>
+          <div class="hand-id">h29</div>
+          <div class="hero-line"><span class="card red"><span class="rank">2</span><span class="suit">♥</span></span><span class="card red"><span class="rank">7</span><span class="suit">♦</span></span>
+            <span class="pos">BTN</span>
+            <span class="muted">· 明三条(trips)</span>
+          </div>
+        </div>
+        <div class="meta">
+          <span class="badge">对手 3</span>
+          <span class="badge soft">无翻前范围</span>
+        </div>
+      </header>
+      <div class="runout">
+        <div class="runout-label">公共牌</div>
+        <div class="runout-cards"><span class="card red"><span class="rank">3</span><span class="suit">♥</span></span><span class="card red"><span class="rank">4</span><span class="suit">♥</span></span><span class="card"><span class="rank">7</span><span class="suit">♠</span></span><span class="card"><span class="rank">8</span><span class="suit">♣</span></span><span class="card"><span class="rank">7</span><span class="suit">♣</span></span></div>
+      </div>
+      <div class="street-grid">
+      <section class="street-panel">
+        <div class="street-head">
+          <h3>翻牌 <small>Flop</small></h3>
+          <div class="mini-cards"><span class="card red"><span class="rank">3</span><span class="suit">♥</span></span><span class="card red"><span class="rank">4</span><span class="suit">♥</span></span><span class="card"><span class="rank">7</span><span class="suit">♠</span></span></div>
+        </div>
+        <div class="eq-line"><strong class="mid">53%</strong>
+          <span>单挑权益(N=1)</span></div>
+        <div class="bar"><span class="mid" style="width:52.9%"></span></div>
+        <div class="sub">±0.8% · 4000 次抽样</div>
+        <div class="multi-line">多路权益（N=3）<b class="bad">17%</b></div>
+        <dl>
+          <div><dt>Behind now（多路）</dt><dd class="bad">74.0%</dd></div>
+          <div><dt>单挑 Behind</dt><dd class="good">33.8%</dd></div>
+          <div><dt>Tie</dt><dd>1.3%</dd></div>
+          <div><dt>牌面范围宽度</dt><dd>61.3% <small>(813 combos)</small></dd></div>
+          <div><dt>当前读牌</dt><dd>顶对2踢</dd></div>
+        </dl>
+        <div class="chips"><span class="chip">top pair 14.3%</span><span class="chip">overpair 8.0%</span><span class="chip">two pair 5.0%</span></div>
+      </section>
+      <section class="street-panel">
+        <div class="street-head">
+          <h3>转牌 <small>Turn</small></h3>
+          <div class="mini-cards"><span class="card red"><span class="rank">3</span><span class="suit">♥</span></span><span class="card red"><span class="rank">4</span><span class="suit">♥</span></span><span class="card"><span class="rank">7</span><span class="suit">♠</span></span><span class="card"><span class="rank">8</span><span class="suit">♣</span></span></div>
+        </div>
+        <div class="eq-line"><strong class="mid">47%</strong>
+          <span>单挑权益(N=1)</span></div>
+        <div class="bar"><span class="mid" style="width:46.7%"></span></div>
+        <div class="sub">±0.8% · 4000 次抽样</div>
+        <div class="multi-line">多路权益（N=3）<b class="bad">12%</b></div>
+        <dl>
+          <div><dt>Behind now（多路）</dt><dd class="bad">87.2%</dd></div>
+          <div><dt>单挑 Behind</dt><dd class="mid">48.1%</dd></div>
+          <div><dt>Tie</dt><dd>0.6%</dd></div>
+          <div><dt>牌面范围宽度</dt><dd>65.8% <small>(873 combos)</small></dd></div>
+          <div><dt>当前读牌</dt><dd>中对</dd></div>
+        </dl>
+        <div class="chips"><span class="chip">top pair 16.6%</span><span class="chip">second pair 10.1%</span><span class="chip">two pair 9.5%</span></div>
+      </section>
+      <section class="street-panel">
+        <div class="street-head">
+          <h3>河牌 <small>River</small></h3>
+          <div class="mini-cards"><span class="card red"><span class="rank">3</span><span class="suit">♥</span></span><span class="card red"><span class="rank">4</span><span class="suit">♥</span></span><span class="card"><span class="rank">7</span><span class="suit">♠</span></span><span class="card"><span class="rank">8</span><span class="suit">♣</span></span><span class="card"><span class="rank">7</span><span class="suit">♣</span></span></div>
+        </div>
+        <div class="eq-line"><strong class="good">82%</strong>
+          <span>单挑权益(N=1)</span></div>
+        <div class="bar"><span class="good" style="width:82.3%"></span></div>
+        <div class="sub">±0.6% · 4000 次抽样</div>
+        <div class="multi-line">多路权益（N=3）<b class="mid">53%</b></div>
+        <dl>
+          <div><dt>Behind now（多路）</dt><dd class="mid">45.5%</dd></div>
+          <div><dt>单挑 Behind</dt><dd class="good">16.7%</dd></div>
+          <div><dt>Tie</dt><dd>2.0%</dd></div>
+          <div><dt>牌面范围宽度</dt><dd>39.2% <small>(520 combos)</small></dd></div>
+          <div><dt>当前读牌</dt><dd>明三条(trips)</dd></div>
+        </dl>
+        <div class="chips"><span class="chip">trips 7.5%</span><span class="chip">full house 5.1%</span><span class="chip">straight 4.0%</span></div>
+      </section></div>
+      <div class="spark-wrap">
+        <div class="spark-title">权益走势</div>
+        <svg class="spark" viewBox="0 0 260 72" role="img" aria-label="权益走势"><line x1="16" y1="36.0" x2="248" y2="36.0" class="spark-mid"/><polyline points="24,34.7 130,37.4 236,21.8" class="spark-line"/><circle cx="24" cy="34.7" r="4" class="dot mid"/><circle cx="130" cy="37.4" r="4" class="dot mid"/><circle cx="236" cy="21.8" r="4" class="dot good"/><text x="24" y="71" text-anchor="middle" class="spark-label">翻牌</text><text x="130" y="71" text-anchor="middle" class="spark-label">转牌</text><text x="236" y="71" text-anchor="middle" class="spark-label">河牌</text></svg>
+      </div>
+      <details class="actions">
+        <summary>历史行动线</summary>
+        <div><b>preflop</b> UTG+1 call 1BB · LJ raise to 9BB · HJ call 9BB</div><div><b>flop</b> LJ bet 16.5BB · HJ call 8.5BB · LJ raise to 38.5BB</div><div><b>river</b> LJ bet 37BB</div>
+      </details>
+    </article>
+    <article class="hand-card" id="h31">
+      <header class="hand-head">
+        <div>
+          <div class="hand-id">h31</div>
+          <div class="hero-line"><span class="card"><span class="rank">7</span><span class="suit">♣</span></span><span class="card"><span class="rank">6</span><span class="suit">♠</span></span>
+            <span class="pos">CO</span>
+            <span class="muted">· 顺子</span>
+          </div>
+        </div>
+        <div class="meta">
+          <span class="badge">对手 3</span>
+          <span class="badge soft">无翻前范围</span>
+        </div>
+      </header>
+      <div class="runout">
+        <div class="runout-label">公共牌</div>
+        <div class="runout-cards"><span class="card"><span class="rank">8</span><span class="suit">♠</span></span><span class="card red"><span class="rank">Q</span><span class="suit">♥</span></span><span class="card"><span class="rank">4</span><span class="suit">♠</span></span><span class="card red"><span class="rank">9</span><span class="suit">♥</span></span><span class="card red"><span class="rank">10</span><span class="suit">♦</span></span></div>
+      </div>
+      <div class="street-grid">
+      <section class="street-panel">
+        <div class="street-head">
+          <h3>翻牌 <small>Flop</small></h3>
+          <div class="mini-cards"><span class="card"><span class="rank">8</span><span class="suit">♠</span></span><span class="card red"><span class="rank">Q</span><span class="suit">♥</span></span><span class="card"><span class="rank">4</span><span class="suit">♠</span></span></div>
+        </div>
+        <div class="eq-line"><strong class="bad">27%</strong>
+          <span>单挑权益(N=1)</span></div>
+        <div class="bar"><span class="bad" style="width:26.7%"></span></div>
+        <div class="sub">±0.7% · 4000 次抽样</div>
+        <div class="multi-line">多路权益（N=3）<b class="bad">16%</b></div>
+        <dl>
+          <div><dt>Behind now（多路）</dt><dd class="bad">100.0%</dd></div>
+          <div><dt>单挑 Behind</dt><dd class="bad">96.1%</dd></div>
+          <div><dt>Tie</dt><dd>0.0%</dd></div>
+          <div><dt>牌面范围宽度</dt><dd>45.1% <small>(598 combos)</small></dd></div>
+          <div><dt>当前读牌</dt><dd>弱听(4 outs)</dd></div>
+        </dl>
+        <div class="chips"><span class="chip">top pair 25.6%</span><span class="chip">second pair 22.8%</span><span class="chip">bottom pair 17.9%</span></div>
+      </section>
+      <section class="street-panel">
+        <div class="street-head">
+          <h3>转牌 <small>Turn</small></h3>
+          <div class="mini-cards"><span class="card"><span class="rank">8</span><span class="suit">♠</span></span><span class="card red"><span class="rank">Q</span><span class="suit">♥</span></span><span class="card"><span class="rank">4</span><span class="suit">♠</span></span><span class="card red"><span class="rank">9</span><span class="suit">♥</span></span></div>
+        </div>
+        <div class="eq-line"><strong class="bad">20%</strong>
+          <span>单挑权益(N=1)</span></div>
+        <div class="bar"><span class="bad" style="width:19.9%"></span></div>
+        <div class="sub">±0.6% · 4000 次抽样</div>
+        <div class="multi-line">多路权益（N=3）<b class="bad">10%</b></div>
+        <dl>
+          <div><dt>Behind now（多路）</dt><dd class="bad">100.0%</dd></div>
+          <div><dt>单挑 Behind</dt><dd class="bad">95.7%</dd></div>
+          <div><dt>Tie</dt><dd>0.0%</dd></div>
+          <div><dt>牌面范围宽度</dt><dd>66.1% <small>(876 combos)</small></dd></div>
+          <div><dt>当前读牌</dt><dd>强听(8 outs)</dd></div>
+        </dl>
+        <div class="chips"><span class="chip">high card / air 17.8%</span><span class="chip">top pair 15.2%</span><span class="chip">second pair 14.4%</span></div>
+      </section>
+      <section class="street-panel">
+        <div class="street-head">
+          <h3>河牌 <small>River</small></h3>
+          <div class="mini-cards"><span class="card"><span class="rank">8</span><span class="suit">♠</span></span><span class="card red"><span class="rank">Q</span><span class="suit">♥</span></span><span class="card"><span class="rank">4</span><span class="suit">♠</span></span><span class="card red"><span class="rank">9</span><span class="suit">♥</span></span><span class="card red"><span class="rank">10</span><span class="suit">♦</span></span></div>
+        </div>
+        <div class="eq-line"><strong class="good">62%</strong>
+          <span>单挑权益(N=1)</span></div>
+        <div class="bar"><span class="good" style="width:61.9%"></span></div>
+        <div class="sub">±0.8% · 4000 次抽样</div>
+        <div class="multi-line">多路权益（N=3）<b class="bad">22%</b></div>
+        <dl>
+          <div><dt>Behind now（多路）</dt><dd class="bad">77.3%</dd></div>
+          <div><dt>单挑 Behind</dt><dd class="mid">36.4%</dd></div>
+          <div><dt>Tie</dt><dd>1.9%</dd></div>
+          <div><dt>牌面范围宽度</dt><dd>57.4% <small>(761 combos)</small></dd></div>
+          <div><dt>当前读牌</dt><dd>顺子</dd></div>
+        </dl>
+        <div class="chips"><span class="chip">straight 36.4%</span></div>
+      </section></div>
+      <div class="spark-wrap">
+        <div class="spark-title">权益走势</div>
+        <svg class="spark" viewBox="0 0 260 72" role="img" aria-label="权益走势"><line x1="16" y1="36.0" x2="248" y2="36.0" class="spark-mid"/><polyline points="24,46.3 130,49.2 236,30.8" class="spark-line"/><circle cx="24" cy="46.3" r="4" class="dot bad"/><circle cx="130" cy="49.2" r="4" class="dot bad"/><circle cx="236" cy="30.8" r="4" class="dot good"/><text x="24" y="71" text-anchor="middle" class="spark-label">翻牌</text><text x="130" y="71" text-anchor="middle" class="spark-label">转牌</text><text x="236" y="71" text-anchor="middle" class="spark-label">河牌</text></svg>
+      </div>
+      <details class="actions">
+        <summary>历史行动线</summary>
+        <div><b>preflop</b> UTG call 1BB · UTG+2 call 1BB · LJ call 1BB · CO call 1BB</div><div><b>turn</b> CO bet 5BB · UTG+2 call 5BB</div><div><b>river</b> CO bet 13BB</div>
+      </details>
+    </article>
+    <article class="hand-card" id="h55">
+      <header class="hand-head">
+        <div>
+          <div class="hand-id">h55</div>
+          <div class="hero-line"><span class="card"><span class="rank">4</span><span class="suit">♣</span></span><span class="card"><span class="rank">Q</span><span class="suit">♠</span></span>
+            <span class="pos">LJ</span>
+            <span class="muted">· 葫芦</span>
+          </div>
+        </div>
+        <div class="meta">
+          <span class="badge">对手 4</span>
+          <span class="badge soft">无翻前范围</span>
+        </div>
+      </header>
+      <div class="runout">
+        <div class="runout-label">公共牌</div>
+        <div class="runout-cards"><span class="card red"><span class="rank">Q</span><span class="suit">♥</span></span><span class="card red"><span class="rank">4</span><span class="suit">♦</span></span><span class="card"><span class="rank">6</span><span class="suit">♣</span></span><span class="card"><span class="rank">J</span><span class="suit">♣</span></span><span class="card red"><span class="rank">4</span><span class="suit">♥</span></span></div>
+      </div>
+      <div class="street-grid">
+      <section class="street-panel">
+        <div class="street-head">
+          <h3>翻牌 <small>Flop</small></h3>
+          <div class="mini-cards"><span class="card red"><span class="rank">Q</span><span class="suit">♥</span></span><span class="card red"><span class="rank">4</span><span class="suit">♦</span></span><span class="card"><span class="rank">6</span><span class="suit">♣</span></span></div>
+        </div>
+        <div class="eq-line"><strong class="good">80%</strong>
+          <span>单挑权益(N=1)</span></div>
+        <div class="bar"><span class="good" style="width:80.3%"></span></div>
+        <div class="sub">±0.6% · 4000 次抽样</div>
+        <div class="multi-line">多路权益（N=4）<b class="mid">49%</b></div>
+        <dl>
+          <div><dt>Behind now（多路）</dt><dd class="good">14.1%</dd></div>
+          <div><dt>单挑 Behind</dt><dd class="good">4.3%</dd></div>
+          <div><dt>Tie</dt><dd>4.1%</dd></div>
+          <div><dt>牌面范围宽度</dt><dd>43.1% <small>(571 combos)</small></dd></div>
+          <div><dt>当前读牌</dt><dd>两对</dd></div>
+        </dl>
+        <div class="chips"><span class="chip">two pair 2.2%</span><span class="chip">sets 2.1%</span></div>
+      </section>
+      <section class="street-panel">
+        <div class="street-head">
+          <h3>转牌 <small>Turn</small></h3>
+          <div class="mini-cards"><span class="card red"><span class="rank">Q</span><span class="suit">♥</span></span><span class="card red"><span class="rank">4</span><span class="suit">♦</span></span><span class="card"><span class="rank">6</span><span class="suit">♣</span></span><span class="card"><span class="rank">J</span><span class="suit">♣</span></span></div>
+        </div>
+        <div class="eq-line"><strong class="good">85%</strong>
+          <span>单挑权益(N=1)</span></div>
+        <div class="bar"><span class="good" style="width:84.7%"></span></div>
+        <div class="sub">±0.6% · 4000 次抽样</div>
+        <div class="multi-line">多路权益（N=4）<b class="mid">56%</b></div>
+        <dl>
+          <div><dt>Behind now（多路）</dt><dd class="good">19.1%</dd></div>
+          <div><dt>单挑 Behind</dt><dd class="good">5.5%</dd></div>
+          <div><dt>Tie</dt><dd>3.1%</dd></div>
+          <div><dt>牌面范围宽度</dt><dd>60.2% <small>(798 combos)</small></dd></div>
+          <div><dt>当前读牌</dt><dd>两对</dd></div>
+        </dl>
+        <div class="chips"><span class="chip">two pair 3.1%</span><span class="chip">sets 2.3%</span></div>
+      </section>
+      <section class="street-panel">
+        <div class="street-head">
+          <h3>河牌 <small>River</small></h3>
+          <div class="mini-cards"><span class="card red"><span class="rank">Q</span><span class="suit">♥</span></span><span class="card red"><span class="rank">4</span><span class="suit">♦</span></span><span class="card"><span class="rank">6</span><span class="suit">♣</span></span><span class="card"><span class="rank">J</span><span class="suit">♣</span></span><span class="card red"><span class="rank">4</span><span class="suit">♥</span></span></div>
+        </div>
+        <div class="eq-line"><strong class="good">97%</strong>
+          <span>单挑权益(N=1)</span></div>
+        <div class="bar"><span class="good" style="width:97.4%"></span></div>
+        <div class="sub">±0.3% · 4000 次抽样</div>
+        <div class="multi-line">多路权益（N=4）<b class="good">91%</b></div>
+        <dl>
+          <div><dt>Behind now（多路）</dt><dd class="good">8.1%</dd></div>
+          <div><dt>单挑 Behind</dt><dd class="good">2.2%</dd></div>
+          <div><dt>Tie</dt><dd>1.7%</dd></div>
+          <div><dt>牌面范围宽度</dt><dd>38.0% <small>(504 combos)</small></dd></div>
+          <div><dt>当前读牌</dt><dd>葫芦</dd></div>
+        </dl>
+        <div class="chips"><span class="chip">full house 2.2%</span></div>
+      </section></div>
+      <div class="spark-wrap">
+        <div class="spark-title">权益走势</div>
+        <svg class="spark" viewBox="0 0 260 72" role="img" aria-label="权益走势"><line x1="16" y1="36.0" x2="248" y2="36.0" class="spark-mid"/><polyline points="24,22.7 130,20.7 236,15.1" class="spark-line"/><circle cx="24" cy="22.7" r="4" class="dot good"/><circle cx="130" cy="20.7" r="4" class="dot good"/><circle cx="236" cy="15.1" r="4" class="dot good"/><text x="24" y="71" text-anchor="middle" class="spark-label">翻牌</text><text x="130" y="71" text-anchor="middle" class="spark-label">转牌</text><text x="236" y="71" text-anchor="middle" class="spark-label">河牌</text></svg>
+      </div>
+      <details class="actions">
+        <summary>历史行动线</summary>
+        <div><b>preflop</b> UTG raise to 5BB · HJ call 5BB · SB call 5BB</div><div><b>flop</b> BB bet 12BB · UTG call 12BB · HJ call 12BB</div><div><b>turn</b> BB bet 20BB · UTG call 20BB · HJ raise to 60.5BB</div>
+      </details>
+    </article>
+    <article class="hand-card" id="h71">
+      <header class="hand-head">
+        <div>
+          <div class="hand-id">h71</div>
+          <div class="hero-line"><span class="card red"><span class="rank">J</span><span class="suit">♦</span></span><span class="card"><span class="rank">J</span><span class="suit">♣</span></span>
+            <span class="pos">UTG+1</span>
+            <span class="muted">· 两对</span>
+          </div>
+        </div>
+        <div class="meta">
+          <span class="badge">对手 3</span>
+          <span class="badge soft">无翻前范围</span>
+        </div>
+      </header>
+      <div class="runout">
+        <div class="runout-label">公共牌</div>
+        <div class="runout-cards"><span class="card red"><span class="rank">3</span><span class="suit">♥</span></span><span class="card"><span class="rank">2</span><span class="suit">♣</span></span><span class="card"><span class="rank">7</span><span class="suit">♠</span></span><span class="card red"><span class="rank">4</span><span class="suit">♦</span></span><span class="card"><span class="rank">3</span><span class="suit">♠</span></span></div>
+      </div>
+      <div class="street-grid">
+      <section class="street-panel">
+        <div class="street-head">
+          <h3>翻牌 <small>Flop</small></h3>
+          <div class="mini-cards"><span class="card red"><span class="rank">3</span><span class="suit">♥</span></span><span class="card"><span class="rank">2</span><span class="suit">♣</span></span><span class="card"><span class="rank">7</span><span class="suit">♠</span></span></div>
+        </div>
+        <div class="eq-line"><strong class="good">69%</strong>
+          <span>单挑权益(N=1)</span></div>
+        <div class="bar"><span class="good" style="width:69.2%"></span></div>
+        <div class="sub">±0.7% · 4000 次抽样</div>
+        <div class="multi-line">多路权益（N=3）<b class="bad">36%</b></div>
+        <dl>
+          <div><dt>Behind now（多路）</dt><dd class="mid">40.7%</dd></div>
+          <div><dt>单挑 Behind</dt><dd class="good">15.9%</dd></div>
+          <div><dt>Tie</dt><dd>0.5%</dd></div>
+          <div><dt>牌面范围宽度</dt><dd>41.8% <small>(554 combos)</small></dd></div>
+          <div><dt>当前读牌</dt><dd>超对</dd></div>
+        </dl>
+        <div class="chips"><span class="chip">two pair 8.5%</span><span class="chip">overpair 4.2%</span><span class="chip">sets 3.2%</span></div>
+      </section>
+      <section class="street-panel">
+        <div class="street-head">
+          <h3>转牌 <small>Turn</small></h3>
+          <div class="mini-cards"><span class="card red"><span class="rank">3</span><span class="suit">♥</span></span><span class="card"><span class="rank">2</span><span class="suit">♣</span></span><span class="card"><span class="rank">7</span><span class="suit">♠</span></span><span class="card red"><span class="rank">4</span><span class="suit">♦</span></span></div>
+        </div>
+        <div class="eq-line"><strong class="good">67%</strong>
+          <span>单挑权益(N=1)</span></div>
+        <div class="bar"><span class="good" style="width:66.5%"></span></div>
+        <div class="sub">±0.7% · 4000 次抽样</div>
+        <div class="multi-line">多路权益（N=3）<b class="bad">32%</b></div>
+        <dl>
+          <div><dt>Behind now（多路）</dt><dd class="mid">52.6%</dd></div>
+          <div><dt>单挑 Behind</dt><dd class="good">22.6%</dd></div>
+          <div><dt>Tie</dt><dd>0.4%</dd></div>
+          <div><dt>牌面范围宽度</dt><dd>67.0% <small>(888 combos)</small></dd></div>
+          <div><dt>当前读牌</dt><dd>超对</dd></div>
+        </dl>
+        <div class="chips"><span class="chip">two pair 10.1%</span><span class="chip">straight 7.2%</span><span class="chip">overpair 2.7%</span></div>
+      </section>
+      <section class="street-panel">
+        <div class="street-head">
+          <h3>河牌 <small>River</small></h3>
+          <div class="mini-cards"><span class="card red"><span class="rank">3</span><span class="suit">♥</span></span><span class="card"><span class="rank">2</span><span class="suit">♣</span></span><span class="card"><span class="rank">7</span><span class="suit">♠</span></span><span class="card red"><span class="rank">4</span><span class="suit">♦</span></span><span class="card"><span class="rank">3</span><span class="suit">♠</span></span></div>
+        </div>
+        <div class="eq-line"><strong class="good">68%</strong>
+          <span>单挑权益(N=1)</span></div>
+        <div class="bar"><span class="good" style="width:68.0%"></span></div>
+        <div class="sub">±0.7% · 4000 次抽样</div>
+        <div class="multi-line">多路权益（N=3）<b class="bad">28%</b></div>
+        <dl>
+          <div><dt>Behind now（多路）</dt><dd class="bad">71.5%</dd></div>
+          <div><dt>单挑 Behind</dt><dd class="good">31.7%</dd></div>
+          <div><dt>Tie</dt><dd>0.2%</dd></div>
+          <div><dt>牌面范围宽度</dt><dd>40.4% <small>(536 combos)</small></dd></div>
+          <div><dt>当前读牌</dt><dd>两对</dd></div>
+        </dl>
+        <div class="chips"><span class="chip">trips 14.3%</span><span class="chip">straight 7.2%</span><span class="chip">full house 6.9%</span></div>
+      </section></div>
+      <div class="spark-wrap">
+        <div class="spark-title">权益走势</div>
+        <svg class="spark" viewBox="0 0 260 72" role="img" aria-label="权益走势"><line x1="16" y1="36.0" x2="248" y2="36.0" class="spark-mid"/><polyline points="24,27.6 130,28.7 236,28.1" class="spark-line"/><circle cx="24" cy="27.6" r="4" class="dot good"/><circle cx="130" cy="28.7" r="4" class="dot good"/><circle cx="236" cy="28.1" r="4" class="dot good"/><text x="24" y="71" text-anchor="middle" class="spark-label">翻牌</text><text x="130" y="71" text-anchor="middle" class="spark-label">转牌</text><text x="236" y="71" text-anchor="middle" class="spark-label">河牌</text></svg>
+      </div>
+      <details class="actions">
+        <summary>历史行动线</summary>
+        <div><b>preflop</b> UTG+1 raise to 5BB · LJ call 5BB · HJ raise to 25.5BB · SB call 25.5BB · LJ call 25.5BB</div>
+      </details>
+    </article>
+    <article class="hand-card" id="h73">
+      <header class="hand-head">
+        <div>
+          <div class="hand-id">h73</div>
+          <div class="hero-line"><span class="card"><span class="rank">7</span><span class="suit">♣</span></span><span class="card red"><span class="rank">3</span><span class="suit">♥</span></span>
+            <span class="pos">UTG</span>
+            <span class="muted">· 高牌/空气</span>
+          </div>
+        </div>
+        <div class="meta">
+          <span class="badge">对手 4</span>
+          <span class="badge soft">无翻前范围</span>
+        </div>
+      </header>
+      <div class="runout">
+        <div class="runout-label">公共牌</div>
+        <div class="runout-cards"><span class="card red"><span class="rank">5</span><span class="suit">♥</span></span><span class="card"><span class="rank">9</span><span class="suit">♠</span></span><span class="card red"><span class="rank">10</span><span class="suit">♥</span></span><span class="card red"><span class="rank">Q</span><span class="suit">♥</span></span><span class="card"><span class="rank">A</span><span class="suit">♠</span></span></div>
+      </div>
+      <div class="street-grid">
+      <section class="street-panel">
+        <div class="street-head">
+          <h3>翻牌 <small>Flop</small></h3>
+          <div class="mini-cards"><span class="card red"><span class="rank">5</span><span class="suit">♥</span></span><span class="card"><span class="rank">9</span><span class="suit">♠</span></span><span class="card red"><span class="rank">10</span><span class="suit">♥</span></span></div>
+        </div>
+        <div class="eq-line"><strong class="bad">12%</strong>
+          <span>单挑权益(N=1)</span></div>
+        <div class="bar"><span class="bad" style="width:12.1%"></span></div>
+        <div class="sub">±0.5% · 4000 次抽样</div>
+        <div class="multi-line">多路权益（N=4）<b class="bad">4%</b></div>
+        <dl>
+          <div><dt>Behind now（多路）</dt><dd class="bad">100.0%</dd></div>
+          <div><dt>单挑 Behind</dt><dd class="bad">99.2%</dd></div>
+          <div><dt>Tie</dt><dd>0.0%</dd></div>
+          <div><dt>牌面范围宽度</dt><dd>49.5% <small>(657 combos)</small></dd></div>
+          <div><dt>当前读牌</dt><dd>高牌/空气</dd></div>
+        </dl>
+        <div class="chips"><span class="chip">second pair 22.3%</span><span class="chip">top pair 21.7%</span><span class="chip">high card / air 20.6%</span></div>
+      </section>
+      <section class="street-panel">
+        <div class="street-head">
+          <h3>转牌 <small>Turn</small></h3>
+          <div class="mini-cards"><span class="card red"><span class="rank">5</span><span class="suit">♥</span></span><span class="card"><span class="rank">9</span><span class="suit">♠</span></span><span class="card red"><span class="rank">10</span><span class="suit">♥</span></span><span class="card red"><span class="rank">Q</span><span class="suit">♥</span></span></div>
+        </div>
+        <div class="eq-line"><strong class="bad">16%</strong>
+          <span>单挑权益(N=1)</span></div>
+        <div class="bar"><span class="bad" style="width:16.1%"></span></div>
+        <div class="sub">±0.6% · 4000 次抽样</div>
+        <div class="multi-line">多路权益（N=4）<b class="bad">1%</b></div>
+        <dl>
+          <div><dt>Behind now（多路）</dt><dd class="bad">100.0%</dd></div>
+          <div><dt>单挑 Behind</dt><dd class="bad">96.1%</dd></div>
+          <div><dt>Tie</dt><dd>0.0%</dd></div>
+          <div><dt>牌面范围宽度</dt><dd>75.6% <small>(1002 combos)</small></dd></div>
+          <div><dt>当前读牌</dt><dd>强听(9 outs)</dd></div>
+        </dl>
+        <div class="chips"><span class="chip">high card / air 21.9%</span><span class="chip">top pair 12.6%</span><span class="chip">middle pair 12.2%</span></div>
+      </section>
+      <section class="street-panel">
+        <div class="street-head">
+          <h3>河牌 <small>River</small></h3>
+          <div class="mini-cards"><span class="card red"><span class="rank">5</span><span class="suit">♥</span></span><span class="card"><span class="rank">9</span><span class="suit">♠</span></span><span class="card red"><span class="rank">10</span><span class="suit">♥</span></span><span class="card red"><span class="rank">Q</span><span class="suit">♥</span></span><span class="card"><span class="rank">A</span><span class="suit">♠</span></span></div>
+        </div>
+        <div class="eq-line"><strong class="bad">0%</strong>
+          <span>单挑权益(N=1)</span></div>
+        <div class="bar"><span class="bad" style="width:0.0%"></span></div>
+        <div class="sub">±0.1% · 4000 次抽样</div>
+        <div class="multi-line">多路权益（N=4）<b class="bad">0%</b></div>
+        <dl>
+          <div><dt>Behind now（多路）</dt><dd class="bad">100.0%</dd></div>
+          <div><dt>单挑 Behind</dt><dd class="bad">100.0%</dd></div>
+          <div><dt>Tie</dt><dd>0.0%</dd></div>
+          <div><dt>牌面范围宽度</dt><dd>52.1% <small>(691 combos)</small></dd></div>
+          <div><dt>当前读牌</dt><dd>高牌/空气</dd></div>
+        </dl>
+        <div class="chips"><span class="chip">middle pair 21.5%</span><span class="chip">two pair 19.8%</span><span class="chip">second pair 12.0%</span></div>
+      </section></div>
+      <div class="spark-wrap">
+        <div class="spark-title">权益走势</div>
+        <svg class="spark" viewBox="0 0 260 72" role="img" aria-label="权益走势"><line x1="16" y1="36.0" x2="248" y2="36.0" class="spark-mid"/><polyline points="24,52.7 130,50.9 236,58.0" class="spark-line"/><circle cx="24" cy="52.7" r="4" class="dot bad"/><circle cx="130" cy="50.9" r="4" class="dot bad"/><circle cx="236" cy="58.0" r="4" class="dot bad"/><text x="24" y="71" text-anchor="middle" class="spark-label">翻牌</text><text x="130" y="71" text-anchor="middle" class="spark-label">转牌</text><text x="236" y="71" text-anchor="middle" class="spark-label">河牌</text></svg>
+      </div>
+      <details class="actions">
+        <summary>历史行动线</summary>
+        <div><b>preflop</b> LJ call 1BB · HJ call 1BB · CO call 1BB · BTN call 1BB</div><div><b>flop</b> HJ bet 9.5BB · CO raise to 19BB · BTN raise to 76.5BB · HJ raise to 266BB</div>
+      </details>
+    </article>
+    <article class="hand-card" id="h86">
+      <header class="hand-head">
+        <div>
+          <div class="hand-id">h86</div>
+          <div class="hero-line"><span class="card red"><span class="rank">2</span><span class="suit">♦</span></span><span class="card red"><span class="rank">7</span><span class="suit">♥</span></span>
+            <span class="pos">UTG</span>
+            <span class="muted">· 顺子</span>
+          </div>
+        </div>
+        <div class="meta">
+          <span class="badge">对手 3</span>
+          <span class="badge soft">无翻前范围</span>
+        </div>
+      </header>
+      <div class="runout">
+        <div class="runout-label">公共牌</div>
+        <div class="runout-cards"><span class="card"><span class="rank">9</span><span class="suit">♣</span></span><span class="card"><span class="rank">4</span><span class="suit">♣</span></span><span class="card"><span class="rank">5</span><span class="suit">♣</span></span><span class="card red"><span class="rank">8</span><span class="suit">♥</span></span><span class="card red"><span class="rank">6</span><span class="suit">♦</span></span></div>
+      </div>
+      <div class="street-grid">
+      <section class="street-panel">
+        <div class="street-head">
+          <h3>翻牌 <small>Flop</small></h3>
+          <div class="mini-cards"><span class="card"><span class="rank">9</span><span class="suit">♣</span></span><span class="card"><span class="rank">4</span><span class="suit">♣</span></span><span class="card"><span class="rank">5</span><span class="suit">♣</span></span></div>
+        </div>
+        <div class="eq-line"><strong class="bad">11%</strong>
+          <span>单挑权益(N=1)</span></div>
+        <div class="bar"><span class="bad" style="width:11.1%"></span></div>
+        <div class="sub">±0.5% · 4000 次抽样</div>
+        <div class="multi-line">多路权益（N=3）<b class="bad">3%</b></div>
+        <dl>
+          <div><dt>Behind now（多路）</dt><dd class="bad">100.0%</dd></div>
+          <div><dt>单挑 Behind</dt><dd class="bad">96.1%</dd></div>
+          <div><dt>Tie</dt><dd>0.0%</dd></div>
+          <div><dt>牌面范围宽度</dt><dd>64.3% <small>(852 combos)</small></dd></div>
+          <div><dt>当前读牌</dt><dd>高牌/空气</dd></div>
+        </dl>
+        <div class="chips"><span class="chip">high card / air 29.6%</span><span class="chip">top pair 15.4%</span><span class="chip">second pair 15.0%</span></div>
+      </section>
+      <section class="street-panel">
+        <div class="street-head">
+          <h3>转牌 <small>Turn</small></h3>
+          <div class="mini-cards"><span class="card"><span class="rank">9</span><span class="suit">♣</span></span><span class="card"><span class="rank">4</span><span class="suit">♣</span></span><span class="card"><span class="rank">5</span><span class="suit">♣</span></span><span class="card red"><span class="rank">8</span><span class="suit">♥</span></span></div>
+        </div>
+        <div class="eq-line"><strong class="bad">12%</strong>
+          <span>单挑权益(N=1)</span></div>
+        <div class="bar"><span class="bad" style="width:11.7%"></span></div>
+        <div class="sub">±0.5% · 4000 次抽样</div>
+        <div class="multi-line">多路权益（N=3）<b class="bad">5%</b></div>
+        <dl>
+          <div><dt>Behind now（多路）</dt><dd class="bad">100.0%</dd></div>
+          <div><dt>单挑 Behind</dt><dd class="bad">95.5%</dd></div>
+          <div><dt>Tie</dt><dd>0.0%</dd></div>
+          <div><dt>牌面范围宽度</dt><dd>74.9% <small>(993 combos)</small></dd></div>
+          <div><dt>当前读牌</dt><dd>弱听(4 outs)</dd></div>
+        </dl>
+        <div class="chips"><span class="chip">high card / air 22.5%</span><span class="chip">second pair 12.5%</span><span class="chip">top pair 12.4%</span></div>
+      </section>
+      <section class="street-panel">
+        <div class="street-head">
+          <h3>河牌 <small>River</small></h3>
+          <div class="mini-cards"><span class="card"><span class="rank">9</span><span class="suit">♣</span></span><span class="card"><span class="rank">4</span><span class="suit">♣</span></span><span class="card"><span class="rank">5</span><span class="suit">♣</span></span><span class="card red"><span class="rank">8</span><span class="suit">♥</span></span><span class="card red"><span class="rank">6</span><span class="suit">♦</span></span></div>
+        </div>
+        <div class="eq-line"><strong class="good">76%</strong>
+          <span>单挑权益(N=1)</span></div>
+        <div class="bar"><span class="good" style="width:75.7%"></span></div>
+        <div class="sub">±0.7% · 4000 次抽样</div>
+        <div class="multi-line">多路权益（N=3）<b class="mid">43%</b></div>
+        <dl>
+          <div><dt>Behind now（多路）</dt><dd class="good">33.6%</dd></div>
+          <div><dt>单挑 Behind</dt><dd class="good">12.5%</dd></div>
+          <div><dt>Tie</dt><dd>43.2%</dd></div>
+          <div><dt>牌面范围宽度</dt><dd>58.9% <small>(781 combos)</small></dd></div>
+          <div><dt>当前读牌</dt><dd>顺子</dd></div>
+        </dl>
+        <div class="chips"><span class="chip">flush 10.2%</span><span class="chip">straight 2.3%</span></div>
+      </section></div>
+      <div class="spark-wrap">
+        <div class="spark-title">权益走势</div>
+        <svg class="spark" viewBox="0 0 260 72" role="img" aria-label="权益走势"><line x1="16" y1="36.0" x2="248" y2="36.0" class="spark-mid"/><polyline points="24,53.1 130,52.9 236,24.7" class="spark-line"/><circle cx="24" cy="53.1" r="4" class="dot bad"/><circle cx="130" cy="52.9" r="4" class="dot bad"/><circle cx="236" cy="24.7" r="4" class="dot good"/><text x="24" y="71" text-anchor="middle" class="spark-label">翻牌</text><text x="130" y="71" text-anchor="middle" class="spark-label">转牌</text><text x="236" y="71" text-anchor="middle" class="spark-label">河牌</text></svg>
+      </div>
+      <details class="actions">
+        <summary>历史行动线</summary>
+        <div><b>preflop</b> UTG+1 call 1BB · HJ call 1BB · CO raise to 6.5BB · UTG+1 call 6.5BB</div><div><b>turn</b> UTG+1 bet 13BB</div><div><b>river</b> UTG+1 bet 15BB</div>
+      </details>
+    </article>
+    <article class="hand-card" id="h113">
+      <header class="hand-head">
+        <div>
+          <div class="hand-id">h113</div>
+          <div class="hero-line"><span class="card red"><span class="rank">8</span><span class="suit">♥</span></span><span class="card red"><span class="rank">Q</span><span class="suit">♥</span></span>
+            <span class="pos">LJ</span>
+            <span class="muted">· 顶对8踢</span>
+          </div>
+        </div>
+        <div class="meta">
+          <span class="badge">对手 4</span>
+          <span class="badge soft">无翻前范围</span>
+        </div>
+      </header>
+      <div class="runout">
+        <div class="runout-label">公共牌</div>
+        <div class="runout-cards"><span class="card red"><span class="rank">4</span><span class="suit">♥</span></span><span class="card red"><span class="rank">6</span><span class="suit">♥</span></span><span class="card red"><span class="rank">10</span><span class="suit">♦</span></span><span class="card"><span class="rank">Q</span><span class="suit">♣</span></span><span class="card"><span class="rank">7</span><span class="suit">♠</span></span></div>
+      </div>
+      <div class="street-grid">
+      <section class="street-panel">
+        <div class="street-head">
+          <h3>翻牌 <small>Flop</small></h3>
+          <div class="mini-cards"><span class="card red"><span class="rank">4</span><span class="suit">♥</span></span><span class="card red"><span class="rank">6</span><span class="suit">♥</span></span><span class="card red"><span class="rank">10</span><span class="suit">♦</span></span></div>
+        </div>
+        <div class="eq-line"><strong class="mid">50%</strong>
+          <span>单挑权益(N=1)</span></div>
+        <div class="bar"><span class="mid" style="width:50.3%"></span></div>
+        <div class="sub">±0.8% · 4000 次抽样</div>
+        <div class="multi-line">多路权益（N=4）<b class="bad">33%</b></div>
+        <dl>
+          <div><dt>Behind now（多路）</dt><dd class="bad">100.0%</dd></div>
+          <div><dt>单挑 Behind</dt><dd class="bad">84.5%</dd></div>
+          <div><dt>Tie</dt><dd>0.0%</dd></div>
+          <div><dt>牌面范围宽度</dt><dd>51.1% <small>(678 combos)</small></dd></div>
+          <div><dt>当前读牌</dt><dd>强听(9 outs)</dd></div>
+        </dl>
+        <div class="chips"><span class="chip">top pair 23.2%</span><span class="chip">second pair 20.8%</span><span class="chip">bottom pair 16.9%</span></div>
+      </section>
+      <section class="street-panel">
+        <div class="street-head">
+          <h3>转牌 <small>Turn</small></h3>
+          <div class="mini-cards"><span class="card red"><span class="rank">4</span><span class="suit">♥</span></span><span class="card red"><span class="rank">6</span><span class="suit">♥</span></span><span class="card red"><span class="rank">10</span><span class="suit">♦</span></span><span class="card"><span class="rank">Q</span><span class="suit">♣</span></span></div>
+        </div>
+        <div class="eq-line"><strong class="good">79%</strong>
+          <span>单挑权益(N=1)</span></div>
+        <div class="bar"><span class="good" style="width:78.6%"></span></div>
+        <div class="sub">±0.6% · 4000 次抽样</div>
+        <div class="multi-line">多路权益（N=4）<b class="bad">38%</b></div>
+        <dl>
+          <div><dt>Behind now（多路）</dt><dd class="bad">61.1%</dd></div>
+          <div><dt>单挑 Behind</dt><dd class="good">21.1%</dd></div>
+          <div><dt>Tie</dt><dd>1.9%</dd></div>
+          <div><dt>牌面范围宽度</dt><dd>61.3% <small>(813 combos)</small></dd></div>
+          <div><dt>当前读牌</dt><dd>顶对8踢</dd></div>
+        </dl>
+        <div class="chips"><span class="chip">two pair 11.1%</span><span class="chip">top pair 5.1%</span><span class="chip">sets 2.8%</span></div>
+      </section>
+      <section class="street-panel">
+        <div class="street-head">
+          <h3>河牌 <small>River</small></h3>
+          <div class="mini-cards"><span class="card red"><span class="rank">4</span><span class="suit">♥</span></span><span class="card red"><span class="rank">6</span><span class="suit">♥</span></span><span class="card red"><span class="rank">10</span><span class="suit">♦</span></span><span class="card"><span class="rank">Q</span><span class="suit">♣</span></span><span class="card"><span class="rank">7</span><span class="suit">♠</span></span></div>
+        </div>
+        <div class="eq-line"><strong class="mid">58%</strong>
+          <span>单挑权益(N=1)</span></div>
+        <div class="bar"><span class="mid" style="width:58.3%"></span></div>
+        <div class="sub">±0.8% · 4000 次抽样</div>
+        <div class="multi-line">多路权益（N=4）<b class="bad">12%</b></div>
+        <dl>
+          <div><dt>Behind now（多路）</dt><dd class="bad">87.4%</dd></div>
+          <div><dt>单挑 Behind</dt><dd class="mid">41.9%</dd></div>
+          <div><dt>Tie</dt><dd>0.7%</dd></div>
+          <div><dt>牌面范围宽度</dt><dd>51.4% <small>(681 combos)</small></dd></div>
+          <div><dt>当前读牌</dt><dd>顶对8踢</dd></div>
+        </dl>
+        <div class="chips"><span class="chip">two pair 19.2%</span><span class="chip">straight 11.8%</span><span class="chip">top pair 5.1%</span></div>
+      </section></div>
+      <div class="spark-wrap">
+        <div class="spark-title">权益走势</div>
+        <svg class="spark" viewBox="0 0 260 72" role="img" aria-label="权益走势"><line x1="16" y1="36.0" x2="248" y2="36.0" class="spark-mid"/><polyline points="24,35.9 130,23.4 236,32.3" class="spark-line"/><circle cx="24" cy="35.9" r="4" class="dot mid"/><circle cx="130" cy="23.4" r="4" class="dot good"/><circle cx="236" cy="32.3" r="4" class="dot mid"/><text x="24" y="71" text-anchor="middle" class="spark-label">翻牌</text><text x="130" y="71" text-anchor="middle" class="spark-label">转牌</text><text x="236" y="71" text-anchor="middle" class="spark-label">河牌</text></svg>
+      </div>
+      <details class="actions">
+        <summary>历史行动线</summary>
+        <div><b>preflop</b> BTN call 1BB · SB call 1BB</div><div><b>flop</b> BB bet 3.5BB</div><div><b>turn</b> BB bet 7BB</div><div><b>river</b> BB bet 14BB · UTG call 1BB</div>
+      </details>
+    </article>
+    <article class="hand-card" id="h119">
+      <header class="hand-head">
+        <div>
+          <div class="hand-id">h119</div>
+          <div class="hero-line"><span class="card red"><span class="rank">Q</span><span class="suit">♥</span></span><span class="card red"><span class="rank">A</span><span class="suit">♦</span></span>
+            <span class="pos">BB</span>
+            <span class="muted">· 顶对A踢</span>
+          </div>
+        </div>
+        <div class="meta">
+          <span class="badge">对手 1</span>
+          <span class="badge soft">无翻前范围</span>
+        </div>
+      </header>
+      <div class="runout">
+        <div class="runout-label">公共牌</div>
+        <div class="runout-cards"><span class="card"><span class="rank">2</span><span class="suit">♣</span></span><span class="card"><span class="rank">8</span><span class="suit">♣</span></span><span class="card"><span class="rank">Q</span><span class="suit">♠</span></span><span class="card"><span class="rank">J</span><span class="suit">♠</span></span><span class="card red"><span class="rank">7</span><span class="suit">♦</span></span></div>
+      </div>
+      <div class="street-grid">
+      <section class="street-panel">
+        <div class="street-head">
+          <h3>翻牌 <small>Flop</small></h3>
+          <div class="mini-cards"><span class="card"><span class="rank">2</span><span class="suit">♣</span></span><span class="card"><span class="rank">8</span><span class="suit">♣</span></span><span class="card"><span class="rank">Q</span><span class="suit">♠</span></span></div>
+        </div>
+        <div class="eq-line"><strong class="good">70%</strong>
+          <span>单挑权益(N=1)</span></div>
+        <div class="bar"><span class="good" style="width:70.5%"></span></div>
+        <div class="sub">±0.7% · 4000 次抽样</div>
+        <div class="multi-line">多路权益（N=1）<b class="good">71%</b></div>
+        <dl>
+          <div><dt>Behind now（多路）</dt><dd class="good">11.7%</dd></div>
+          <div><dt>单挑 Behind</dt><dd class="good">11.7%</dd></div>
+          <div><dt>Tie</dt><dd>1.7%</dd></div>
+          <div><dt>牌面范围宽度</dt><dd>41.7% <small>(553 combos)</small></dd></div>
+          <div><dt>当前读牌</dt><dd>顶对A踢</dd></div>
+        </dl>
+        <div class="chips"><span class="chip">two pair 6.8%</span><span class="chip">sets 2.6%</span><span class="chip">overpair 2.3%</span></div>
+      </section>
+      <section class="street-panel">
+        <div class="street-head">
+          <h3>转牌 <small>Turn</small></h3>
+          <div class="mini-cards"><span class="card"><span class="rank">2</span><span class="suit">♣</span></span><span class="card"><span class="rank">8</span><span class="suit">♣</span></span><span class="card"><span class="rank">Q</span><span class="suit">♠</span></span><span class="card"><span class="rank">J</span><span class="suit">♠</span></span></div>
+        </div>
+        <div class="eq-line"><strong class="good">70%</strong>
+          <span>单挑权益(N=1)</span></div>
+        <div class="bar"><span class="good" style="width:70.2%"></span></div>
+        <div class="sub">±0.7% · 4000 次抽样</div>
+        <div class="multi-line">多路权益（N=1）<b class="good">70%</b></div>
+        <dl>
+          <div><dt>Behind now（多路）</dt><dd class="good">17.5%</dd></div>
+          <div><dt>单挑 Behind</dt><dd class="good">17.4%</dd></div>
+          <div><dt>Tie</dt><dd>1.0%</dd></div>
+          <div><dt>牌面范围宽度</dt><dd>64.0% <small>(848 combos)</small></dd></div>
+          <div><dt>当前读牌</dt><dd>顶对A踢</dd></div>
+        </dl>
+        <div class="chips"><span class="chip">two pair 9.6%</span><span class="chip">straight 4.1%</span><span class="chip">sets 2.3%</span></div>
+      </section>
+      <section class="street-panel">
+        <div class="street-head">
+          <h3>河牌 <small>River</small></h3>
+          <div class="mini-cards"><span class="card"><span class="rank">2</span><span class="suit">♣</span></span><span class="card"><span class="rank">8</span><span class="suit">♣</span></span><span class="card"><span class="rank">Q</span><span class="suit">♠</span></span><span class="card"><span class="rank">J</span><span class="suit">♠</span></span><span class="card red"><span class="rank">7</span><span class="suit">♦</span></span></div>
+        </div>
+        <div class="eq-line"><strong class="good">68%</strong>
+          <span>单挑权益(N=1)</span></div>
+        <div class="bar"><span class="good" style="width:68.1%"></span></div>
+        <div class="sub">±0.7% · 4000 次抽样</div>
+        <div class="multi-line">多路权益（N=1）<b class="good">67%</b></div>
+        <dl>
+          <div><dt>Behind now（多路）</dt><dd class="good">32.5%</dd></div>
+          <div><dt>单挑 Behind</dt><dd class="good">31.5%</dd></div>
+          <div><dt>Tie</dt><dd>1.1%</dd></div>
+          <div><dt>牌面范围宽度</dt><dd>48.9% <small>(649 combos)</small></dd></div>
+          <div><dt>当前读牌</dt><dd>顶对A踢</dd></div>
+        </dl>
+        <div class="chips"><span class="chip">two pair 20.8%</span><span class="chip">straight 5.1%</span><span class="chip">sets 3.9%</span></div>
+      </section></div>
+      <div class="spark-wrap">
+        <div class="spark-title">权益走势</div>
+        <svg class="spark" viewBox="0 0 260 72" role="img" aria-label="权益走势"><line x1="16" y1="36.0" x2="248" y2="36.0" class="spark-mid"/><polyline points="24,27.0 130,27.1 236,28.1" class="spark-line"/><circle cx="24" cy="27.0" r="4" class="dot good"/><circle cx="130" cy="27.1" r="4" class="dot good"/><circle cx="236" cy="28.1" r="4" class="dot good"/><text x="24" y="71" text-anchor="middle" class="spark-label">翻牌</text><text x="130" y="71" text-anchor="middle" class="spark-label">转牌</text><text x="236" y="71" text-anchor="middle" class="spark-label">河牌</text></svg>
+      </div>
+      <details class="actions">
+        <summary>历史行动线</summary>
+        <div><b>preflop</b> LJ raise to 5BB · BB raise to 19.5BB · LJ call 19.5BB</div><div><b>flop</b> BB bet 14.5BB · LJ call 14.5BB</div>
+      </details>
+    </article></div>
+</main>
+<footer>生成时间 2026-10-28 17:07 CST · 数据源 1023.hands.json · 仅使用公共牌范围，不使用翻前范围</footer>
+</body>
+</html>
