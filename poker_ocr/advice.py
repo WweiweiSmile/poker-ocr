@@ -702,6 +702,9 @@ class Situation:
     # 手牌 vs 对手范围（实时牌面范围 + 精确 behind + MC equity）。
     # None = 翻前/牌面不足/没有可确认的对手范围。
     hand_ranges: "object | None" = None
+    # 牌力解析结论：把 hand_ranges 的 behind_any / equity 翻译成
+    # 「大/中/小 + 程度 + 价值/听牌」的一行事实。None = 无 hand_ranges。
+    hand_strength: "object | None" = None
 
     @property
     def street(self) -> str:
@@ -878,6 +881,14 @@ def build_situation(snap: HandSnapshot,
     try:
         from . import board_equity
         sit = replace(sit, board_eq=board_equity.lookup(sit))
+    except Exception:  # noqa: BLE001
+        pass
+    # 牌力解析：在 hand_ranges 之上再加一层纯判定，输出一行 Hand-strength read。
+    # 依赖 hand_ranges；缺失时静默跳过，绝不猜。任何异常 fail open。
+    try:
+        from . import hand_strength
+        if hand_strength.enabled():
+            sit = replace(sit, hand_strength=hand_strength.compute_hand_strength(sit))
     except Exception:  # noqa: BLE001
         pass
     return sit
@@ -1795,6 +1806,10 @@ def render_hand_facts(sit: Situation) -> str:
         if sit.hand_ranges is not None:
             lines.append("")
             lines.append(sit.hand_ranges.render())
+        if sit.hand_strength is not None:
+            # 牌力解析是「主答案」：behind/equity 三个正交数合成的一行结论。
+            # 位置刻意放在 Hand vs ranges 之后、Board structure 之前。
+            lines.append(f"Hand-strength read: {sit.hand_strength.summary_en()}")
         if sit.board_eq is not None:
             lines.append("")
             lines.append(sit.board_eq.render())
@@ -2007,7 +2022,7 @@ You are a Texas Hold'em cash-game advisor working in real time. Hero has a few s
 ## Priority (highest first)
 1. Legal actions and computed math (hand rank, equity, pot odds, SPR, behind-now) — never violate.
 2. A reliable per-seat read — «Opponent reads» or a manual pin — outranks every table-wide statement.
-3. «Hand vs ranges» — use it for what he has: "equity vs field" decides, "behind now" is the made hand (a draw can be behind and still have equity); the random rank is only a lower bound.
+3. «Hand vs ranges» & «Hand-strength read»: "behind now" = made hand, "equity vs field" = by river, "vs N-way avg" = fair share; random rank is only a lower bound. A draw is always DRAW.
 4. Table context, «Board structure» and «GTO baseline» — context, not the answer.
 5. The chart and generic heuristics — defaults; never override 1–4.
 

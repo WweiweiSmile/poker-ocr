@@ -1918,6 +1918,43 @@ def test_hand_vs_ranges_fails_open_without_range() -> None:
           "没有范围时不应出现范围块")
 
 
+def test_hand_strength_read_line() -> None:
+    """hand_ranges 存在 → hand_strength 非空、出一行 Hand-strength read，位置正确。"""
+    sit = build_situation(make_point(hero_cards=("Ah", "Qh"),
+                                     board=("As", "Ks", "4d")))
+    check(sit.hand_ranges is not None, "前置：应有 hand_ranges")
+    check(sit.hand_strength is not None, "有 hand_ranges 时应有 hand_strength")
+    text = render_hand_facts(sit)
+    check("Hand-strength read: " in text,
+          f"事实里应有 Hand-strength read：\n{text}")
+    check(text.index("## Hand vs ranges") < text.index("Hand-strength read:"),
+          "Hand-strength read 必须在 Hand vs ranges 之后")
+    if "## Board structure" in text:
+        check(text.index("Hand-strength read:") < text.index("## Board structure"),
+              "Hand-strength read 必须在 Board structure 之前")
+
+
+def test_hand_strength_absent_without_range() -> None:
+    """没有范围 → hand_strength 为 None、不出现该行。"""
+    from poker_ocr.hand_track import OpponentSnapshot
+
+    sit = build_situation(make_point(
+        opponents=(OpponentSnapshot("a", "老王", None, 97.0, 0.0, False),)))
+    check(sit.hand_ranges is None, "前置：无范围")
+    check(sit.hand_strength is None, "无范围时 hand_strength 应为 None")
+    check("Hand-strength read:" not in render_hand_facts(sit),
+          "无范围时不应出现 Hand-strength read 行")
+
+
+def test_lean_system_has_hand_strength_rule() -> None:
+    """lean 提示词要含 Hand-strength read 口径规则，且仍 < 12600。"""
+    system, _ = build_messages(build_situation(make_point()))
+    check("Hand-strength read" in system,
+          "lean system 应含 Hand-strength read 口径规则")
+    check(len(system) < 12600,
+          f"lean system 仍应 < 12600，实际 {len(system)}")
+
+
 def test_facts_include_spot_spr_and_position() -> None:
     """翻后事实要直接给底池类型、SPR、位置和身后人数，别让模型自己推。"""
     from poker_ocr.hand_track import OpponentSnapshot
@@ -2778,6 +2815,9 @@ def main() -> int:
         test_lean_prompt_is_compact_and_range_based,
         test_hand_vs_ranges_facts_block,
         test_hand_vs_ranges_fails_open_without_range,
+        test_hand_strength_read_line,
+        test_hand_strength_absent_without_range,
+        test_lean_system_has_hand_strength_rule,
         test_facts_include_spot_spr_and_position,
         test_short_stack_is_flagged_not_silently_effective,
         test_math_gate_for_draws,
