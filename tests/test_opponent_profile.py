@@ -844,6 +844,37 @@ def test_tendency_render_and_exploit_hints() -> None:
     check(exploit_hint_zh(thin) == "", "没有倾向数据时不该给建议")
 
 
+def test_street_actions_are_reordered_chronologically() -> None:
+    """推断出来的 check/fold 是街末统一追加的，顺序不是行动顺序。
+
+    依赖顺序的线路统计（被过牌后下注、过牌-加注）必须先把行动线重排，
+    否则「前面有没有人过牌/下注」全是错的 —— 实测一手翻牌被记成
+    BB、UTG、SB 的乱序，stab 频率被压到 3%。
+    """
+    from poker_ocr.opponent_profile import _ordered_street_actions, _position_rank
+
+    rank = _position_rank(9)
+    scrambled = [
+        {"seat_id": "c", "position": "UTG+1", "action": "bet"},
+        {"seat_id": "a", "position": "SB", "action": "check"},
+        {"seat_id": "b", "position": "BB", "action": "check"},
+    ]
+    got = [a["seat_id"] for a in _ordered_street_actions(scrambled, rank)]
+    check(got == ["a", "b", "c"], f"应还原成 SB→BB→UTG+1：{got}")
+
+    # check-raise：A 先过牌、B 下注、A 再加注。
+    # A 的加注属于第二轮，必须排在 B 的下注之后。
+    check_raise = [
+        {"seat_id": "a", "position": "SB", "action": "check"},
+        {"seat_id": "a", "position": "SB", "action": "raise"},
+        {"seat_id": "b", "position": "BB", "action": "bet"},
+    ]
+    got = [(x["seat_id"], x["action"])
+           for x in _ordered_street_actions(check_raise, rank)]
+    check(got == [("a", "check"), ("b", "bet"), ("a", "raise")],
+          f"check-raise 顺序错：{got}")
+
+
 def run() -> int:
     tests = [
         test_fold_and_check_are_inferred_at_street_end,
@@ -865,6 +896,7 @@ def run() -> int:
         test_prompt_renders_opponent_reads,
         test_postflop_sequence_observations,
         test_tendency_render_and_exploit_hints,
+        test_street_actions_are_reordered_chronologically,
     ]
     for t in tests:
         before = len(FAILS)

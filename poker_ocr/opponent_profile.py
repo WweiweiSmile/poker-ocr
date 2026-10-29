@@ -33,6 +33,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Iterable, Mapping, Sequence
 
+from .positions import POSITIONS_BY_TABLE_SIZE
+
 # 分类器版本：规则/阈值改动时递增，画像文件里会记录，重建时能看出差异。
 CLASSIFIER_VERSION = "rules-2026-10-30"
 
@@ -319,6 +321,38 @@ def position_bucket(position: str | None) -> str:
     return "盲注" if pos in ("SB", "BB") else "?"
 
 
+def _position_rank(table_size: int | None) -> dict[str, int]:
+    """位置 → 行动顺序（SB 先说话，BTN 最后）。"""
+    order = (POSITIONS_BY_TABLE_SIZE.get(int(table_size or 9))
+             or POSITIONS_BY_TABLE_SIZE[9])
+    return {pos: i for i, pos in enumerate(order)}
+
+
+def _ordered_street_actions(actions: list[dict],
+                            rank: Mapping[str, int]) -> list[dict]:
+    """把一条街的行动按**真实下注顺序**重排。
+
+    推断出来的 check/fold 是街末统一追加的，追加顺序不是行动顺序（实测
+    一手翻牌记成 BB、UTG、SB… 的乱序）。依赖顺序的线路统计（stab、
+    过牌-加注）必须先还原顺序，否则「前面有没有人过牌/下注」全是错的。
+
+    还原办法：按「每个座在这条街的第几次行动」分轮，轮内按位置序排。
+    check-raise 也能覆盖：A 的 check 在轮 1、B 的 bet 在轮 1、A 的 raise
+    在轮 2 —— 排序后 B 的 bet 会正确落在 A 的 raise 之前。
+    """
+    seen: dict[str, int] = {}
+    keyed = []
+    for index, action in enumerate(actions):
+        seat = str(action.get("seat_id") or "")
+        position = str(action.get("position") or "")
+        round_index = seen.get(seat, 0)
+        seen[seat] = round_index + 1
+        keyed.append(((round_index, rank.get(position, len(rank)), index),
+                      action))
+    keyed.sort(key=lambda item: item[0])
+    return [action for _, action in keyed]
+
+
 def _preflop_aggressor(actions: list[dict]) -> str | None:
     """翻前最后一个加注者；没有加注返回 None。"""
     last = None
@@ -452,6 +486,11 @@ def observations_from_hand(hand: Mapping, *,
     hero = _hero_seat(hand, meta)
     preflop, flop = _dealt_seats(hand, active, meta, hero)
     actions = _actions_by_street(hand)
+    # 推断出来的 check/fold 是街末追加的，顺序不是行动顺序；线路统计必须用
+    # 还原过顺序的版本（见 _ordered_street_actions 的说明）。
+    rank = _position_rank(hand.get("table_size"))
+    ordered = {street: _ordered_street_actions(actions.get(street) or [], rank)
+               for street in _STREET_ORDER}
     preflop_actions = actions.get(_PREFLOP) or []
     bomb_pot, passive_entry = _bomb_pot_entry(hand, preflop_actions)
     board = [str(c) for c in (hand.get("board") or [])]
@@ -568,7 +607,7 @@ def observations_from_hand(hand: Mapping, *,
         cbet_opp = cbet = False
         barrel_opp = barrel = False
         if aggressor == seat_id and flop and seat_id in flop:
-            flop_acts = actions.get("flop") or []
+            flop_acts = ordered.get("flop") or []
             first_bet = next((a for a in flop_acts
                               if a.get("action") in ("bet", "raise")), None)
             cbet_opp = True
@@ -576,7 +615,7 @@ def observations_from_hand(hand: Mapping, *,
                         and str(first_bet.get("seat_id")) == seat_id)
             if cbet:
                 # 续打只在「翻牌下注后真的看到转牌」时才有机会
-                turn_acts = actions.get("turn") or []
+                turn_acts = ordered.get("turn") or []
                 if turn_acts:
                     barrel_opp = True
                     barrel = any(
@@ -588,7 +627,7 @@ def observations_from_hand(hand: Mapping, *,
         stab_opp = stab = False
         check_raise_opp = check_raise = False
         for street in _POSTFLOP:
-            seq = actions.get(street) or []
+            seq = ordered.get(street) or []
             mine = next((i for i, a in enumerate(seq)
                          if str(a.get("seat_id")) == seat_id), None)
             if mine is None:
