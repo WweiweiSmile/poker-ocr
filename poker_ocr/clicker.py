@@ -7,6 +7,7 @@
   · 跟注 / 过牌 / 跟全下 → 点 `call`（同一个右侧按钮）
   · 下注 / 加注 → 直接点五个底池档位之一（`raise-1/3` … `raise-1.2`）；
     客户端在点档位时就完成了下注，不再点蓝色「下注/加注」确认按钮
+  · 全下 → 点可选的 `allin` 按钮；配置里没标定时 skip，绝不拿档位冒充
 
 每次点击都在矩形内缩一圈的范围里取**随机点**，并给按下时长和两步之间的间隔
 加一点抖动，避免永远点同一个像素。翻前建议（`open-2.5` / `raise-3x`）没有
@@ -36,7 +37,8 @@ DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config" / "clicker_local.json"
 
 # 与 advice.OPTION_ORDER / RAISE_FRACTIONS 的档位名字一致
 PRESET_IDS = ("raise-1/3", "raise-1/2", "raise-2/3", "raise-1", "raise-1.2")
-BUTTON_IDS = ("fold", "call", *PRESET_IDS)
+# allin 是**可选**按钮：旧配置没有它也能启动，只是 all-in 建议不会自动点。
+BUTTON_IDS = ("fold", "call", *PRESET_IDS, "allin")
 REQUIRED_BUTTONS = ("fold", "call")
 BUTTON_LABELS = {
     "fold": "弃牌（左）",
@@ -46,6 +48,7 @@ BUTTON_LABELS = {
     "raise-2/3": "快捷加注：底池 2/3",
     "raise-1": "快捷加注：底池 1",
     "raise-1.2": "快捷加注：底池 1.2",
+    "allin": "全下（可选）",
 }
 PRESET_ORDER = {pid: i for i, pid in enumerate(PRESET_IDS)}
 
@@ -413,6 +416,13 @@ def plan_clicks(advice: "Advice", config: ClickerConfig,
         if step is None:
             return ClickPlan(kind, skip_reason="missing_button:call")
         return ClickPlan(kind, (step,))
+
+    if kind == "allin":
+        # 可选按钮：没标定时建议照常显示，但绝不拿别的按钮代替全下。
+        step = _step("allin", config, rng)
+        if step is None:
+            return ClickPlan("allin", skip_reason="missing_button:allin")
+        return ClickPlan("allin", (step,))
 
     if kind not in ("raise", "bet"):
         return ClickPlan(kind, skip_reason=f"unknown_action:{kind}")

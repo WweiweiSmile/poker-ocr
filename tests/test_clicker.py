@@ -283,6 +283,22 @@ def test_plan_unknown_amount_skips() -> None:
 
 # ─────────────────────────── 执行 ───────────────────────────
 
+def test_plan_allin_is_optional_button() -> None:
+    """all-in 没有标定按钮时 skip，绝不拿别的档位冒充全下。"""
+    advice = Advice("h1", "flop", Option("all-in", "全下 94BB", "allin", 94.0),
+                    "test", "model")
+    plan = plan_clicks(advice, cfg_all())
+    check(plan.skip_reason == "missing_button:allin",
+          f"缺 allin 按钮应 skip：{plan}")
+    check(not plan.steps, "缺按钮时不能有点击步骤")
+
+    configured = cfg_all(buttons={"allin": Rect(200, 0, 80, 40)})
+    plan = plan_clicks(advice, configured, rng=random.Random(3))
+    check(len(plan.steps) == 1 and plan.steps[0].button == "allin",
+          f"有按钮时应点 allin：{plan}")
+    check(plan.action == "allin", f"action 应为 allin：{plan.action}")
+
+
 def test_clicker_executes_move_down_up() -> None:
     cfg = cfg_all(Rect(10, 20, 80, 40))
     backend = FakeBackend()
@@ -362,6 +378,7 @@ def main() -> int:
         test_plan_raise_is_preset_only,
         test_plan_missing_preset_skips,
         test_plan_unknown_amount_skips,
+        test_plan_allin_is_optional_button,
         test_clicker_executes_move_down_up,
         test_clicker_dry_run_sends_no_events,
         test_clicker_blocks_without_accessibility,
