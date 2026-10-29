@@ -32,14 +32,17 @@
   - `size`：当前成手牌大小（very_big / big / medium / small / very_small）；
   - `equity_tier`：权益档次（strong / above_average / neutral / weak）；
   - `kind`：价值牌 / 听牌 / 弱牌（空气）；
-  - `summary_en`：一句话结论，直接进提示词。
-- 作为事实注入 AI 建议，让模型在事实之上选动作。
+  - `summary_en`：英文一句话结论（**legacy offline only**）。
+- 中文 lean 由 `advice.render_hand_strength_zh` 把 `kind/size/behind_any/equity`
+  渲染成「牌力 / 对范围权益 / 当前成牌落后至少一家 / 多人池」等中文事实；
+  听牌永远按「听牌」渲染，不写 `VERY SMALL`。
 
 ### 非目标
 
 - 不重算 `behind_now / equity`——那由 `hand_vs_ranges` / `ground_truth` 负责；
 - 不输出频率表、不做范围构建、不碰 solver；
-- 不替代「Value directive / Math gate」——它是**牌力摘要**，不是赔率/价值指令。
+- 不替代 `Value directive / Math gate`（两者已从 live 删除，只留离线审计）——
+  它是**牌力摘要**，不是赔率/价值指令。
 
 ---
 

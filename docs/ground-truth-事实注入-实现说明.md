@@ -112,17 +112,15 @@ Warnings:
 ### 2.3 `poker_ocr/advice.py`：注入与强制服从
 
 - `Situation` 新增 `ground_truth: GroundTruth | None`，由 `build_situation` 统一构建。
-- `render_hand_facts` 用 `gt.render()` 替换原来分散的 Board texture / Made-hand rank 行；
-  翻前或牌不全时退回旧渲染。
-- 新增 `_GROUND_TRUTH_RULES`，`lean-rules` 与 `skills` 两套 system 都注入
-  （默认 `lean` 只把 GROUND TRUTH 作为事实放进 user，不再附带服从规则）：
-  - 不得推翻/重算事实；
-  - 事实说「没有成花」就不得说花面；
-  - 事实说 NUTS 就不得编造更大的牌，面对下注默认加注；
-  - `beaten_by` 是精确清单；
-  - 三同花面的顺子「不是坚果，但仍是强牌」，不得说成弱牌。
-- `value_directive` 增加 **ABSOLUTE NUTS** 分支：精确坚果 + 面对下注 → 明确
-  `RAISE`，并禁止用「可能有更大的牌」当理由。990010 的转牌会走到这里。
+- `render_facts_zh`（中文 lean）直接使用 `GroundTruth` 的字段渲染：
+  `当前牌型`、`最好五张`、`坚果`（听牌时注明“指当前成牌”）、`听牌`、`四二法则权益`、
+  `牌面结构`、`转河变化`、`牌面警告`。翻前或牌不全时不渲染该段。
+- `render_gt_warnings_zh` 把英文 warning 映射成中文；`draw_focus=True` 时丢弃
+  「你不是坚果」这类只描述当前未成牌的警告，避免否决半诈唬。没覆盖的原文标 `[EN]`。
+- 旧 `render_hand_facts` / `_GROUND_TRUTH_RULES` 已从 live 删除；`render_hand_facts`
+  仍保留，标 **legacy offline only**，只给 tools/replay 审计历史记录。
+- `value_directive` 的 **ABSOLUTE NUTS** 分支也只保留在离线审计里，
+  `build_messages` / `advise` 不再调用。
 - `/coach/advice`（规则引擎，不走模型）也返回同一份 `ground_truth`，单手提牌分析
   与实时 session 分析共用一份事实。
 
@@ -224,6 +222,8 @@ gt = compute_ground_truth("AsTh", "Jc8dKdQc", opponents=3)
   `NO FOLD EQUITY`，不能是「我不是坚果」；3 家以上听牌默认过牌。
 - `advice.render_hand_facts` 在 `hand_tier in (STRONG_DRAW, WEAK_DRAW)` 时传
   `draw_focus=True`；system prompt 的 `_GROUND_TRUTH_RULES` 同步补了 DRAW 例外。
+  （2026-10-29：两者已从 live 删除；中文 lean 由 `render_gt_warnings_zh(draw_focus=True)`
+  过滤「你不是坚果」，`render_hand_strength_zh` 直接按听牌渲染。）
 
 对应测试：
 

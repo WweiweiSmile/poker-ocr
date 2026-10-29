@@ -31,7 +31,7 @@
 | G1 一个入口看全部可重跑手牌 | 手牌库：底牌/公共牌/位置/筹码/结果/决策点数/最近重跑/爆炸底池标记；筛选、分页、排序、URL 可分享 |
 | G2 任意一手牌逐街看多版本建议 | 手牌详情：行动街时间线、D1/D2 锚点、每决策点实际动作 + N 个版本的 option/amount/reason/重复分布 |
 | G3 收藏典型手牌并一键全部重跑 | 星标收藏、标签、结论、状态；收藏夹一键重跑；选中多手/当前筛选批量重跑 |
-| G4 结果永久可追溯 | 每条结果关联版本快照（模型、采样参数、prompt style、advice_version、桌风 sha、engine commit）与任务快照 |
+| G4 结果永久可追溯 | 每条结果关联版本快照（模型、采样参数、中文 lean prompt_version、advice_version、桌风 sha、engine commit）与任务快照；旧 `skills`/`lean-rules` 版本只读 |
 | G5 重跑不污染生产 | 代码中没有任何 `review_hands` 写入；收藏/标签/结论只写 `replay_marks` |
 | G6 失败可恢复 | DB 队列 + 唯一键断点；取消、失败重试、服务重启后 `running` 任务标记失败且已落库结果保留 |
 
@@ -347,7 +347,7 @@ CI=true pnpm build
 | --- | --- |
 | `tools/replay_hand_repeat.py --hand ...` | 手牌详情 → 重跑这手 |
 | `tools/compare_review_hands.py /tmp/review30.jsonl --model` | 手牌库筛选 → 批量重跑 → 对比视图 |
-| `tools/compare_advice_styles.py` | 两个版本（lean / skills）跑同一批手牌 |
+| 控制台版本 A/B | 两个版本（都是中文 lean，可改模型/采样/桌风）跑同一批手牌；`compare_advice_styles.py` 已删除 |
 | `tools/export_hands.sql` | 不再需要手写；控制台直接读 `review_hands` |
 
 CLI 仍是可用的；控制台不改变它们的输入/输出格式。

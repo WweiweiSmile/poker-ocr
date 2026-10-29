@@ -178,24 +178,24 @@ ROI 路线只裁固定槽位、只跑 rec，不跑全图检测，是实时链路
   `inferred: true`）。金额是底池精确反解出来的，但加注者身份只能按行动顺序取
   「最后一个已记录动作之后最早能行动的人」，无法由底池唯一确定。专门覆盖最后
   位置预设动作、视频流没抓到那一帧就换街的情况；两种模型都对不上账就不猜。
-- **提示词（默认 lean）**：只注入当前状态与合法选项、逐座位对手画像、实时牌力
-  （GROUND TRUTH / Hand vs ranges / Hand-strength read）和桌面动态。**不含**
-  RFI/3-bet/冷跟范围、翻后纹理与尺度、价值指令、Math gate、上一街 plan、GTO、
-  爆炸底池等策略提示；模型只看事实，自己决定动作。
-  旧版完整 lean 保留为 `--advice-style lean-rules`（含范围框架、价值指令、
-  Math gate、plan 回灌）；`--advice-style skills` 仍是 2005 年 《Little Green
-  Book》技能库全量注入（约 20k 字符，含技能目录与选中正文）。
-  skills 版的 system 会在目录之前先注入 `Live read`（实时牌力）、
-  `Current opponent reads`（逐座位对手画像）和 `Current table dynamics`
-  （桌面动态），让旧技能层也拿到当前决策事实。
+- **提示词（只有一套中文 lean，`PROMPT_VERSION=lean-zh-2026-10-29.1`）**：
+  system 给输出契约、事实优先级、决策顺序与常见错误；user 给中文事实块：
+  当前局面（含有效筹码/SPR/底池类型/赔率门槛/可争夺底池/短码/本手已投入/
+  爆炸底池）、翻前信息、实时牌力、逐座位画像、桌级桌风、数据缺口、行动线、
+  带实际金额的中文选项。**不含** RFI/3-bet/冷跟范围、翻后纹理与尺度、
+  `Value directive`、`Math gate`、上一街 plan、GTO、board equity、技能库；
+  `--advice-style` 与 `lean-rules`/`skills` 已从 live 链路删除。
+  听牌永远按「听牌」渲染（不写 `VERY SMALL`），「坚果：否」与「当前成牌落后
+  至少一家」都带「指当前成牌 / 不代表最终胜率」的说明；多人池写实际人数、
+  建模对手数与公平份额。
 - **牌桌动态**：项目根目录的 `.table_dy`（纯文本，`#` 开头为注释）会作为
   `Table dynamics` 注入提示词，用来描述当前桌子的整体倾向，例如
   「新手玩家，比较松弱，诈唬很少」。模型据此做剥削性调整：对松弱/跟注站少
   诈唬、薄价值更宽，但他们连续下注/加注时以价值为主，边际抓诈牌要弃；对
   紧弱/很少诈唬的对手少抓诈；对松凶多用强牌设陷阱。
-  在默认 lean 里，桌风只作为原始文本注入，模型自己决定怎么用；不再由程序
-  生成 `TABLE DYNAMICS OVERRIDE` 或 `Value directive`。旧的硬覆盖规则只在
-  `--advice-style lean-rules` 下生效。
+  桌风只作为原始文本注入，模型自己决定怎么用；不再由程序生成
+  `TABLE DYNAMICS OVERRIDE` 或 `Value directive`。system 明确逐座位画像
+  优先于桌级桌风，桌风不能覆盖计算事实。
   每次决策点按 mtime 缓存重读，改完下一手生效；文件不存在时按「未知对手」
   标准线，不影响启动。`TABLE_DY_FILE` 可显式指定路径。
 - **爆炸底池**：两条线索任一成立即判定（提示词写 `Explosive pot: YES`）：
@@ -212,7 +212,7 @@ ROI 路线只裁固定槽位、只跑 rec，不跑全图检测，是实时链路
   1.2 倍；翻前换成 bb 口径 —— 平跟/过牌 + 开池到 2.5~4BB（按位置档、前注额外
   +前注BB、前两个溜入者每个 +1BB、第 3 个起每个 +0.5BB、**松桌再 +0.5BB**），
   面对加注时是 3×/4× 上家加注。**本桌最低加注 6BB**：任何加注/再加注的「加注到」
-  总额低于 6BB 时由程序抬到 6BB（note 标 `raised to the table minimum 6BB`）；
+  总额低于 6BB 时由程序抬到 6BB（note 标 `已抬到本桌最低加注 6BB`）；
   后手不足 6BB 只能全下，不受此限。点击器用的档位金额同样按 6BB 下限修正。
   溜入者优先看行动线；limper 平跟 1BB 往往
   不生成动作徽章，会按「同帧各家下注额 == 1BB 且不是盲注位」补数。
@@ -276,7 +276,6 @@ ROI 路线只裁固定槽位、只跑 rec，不跑全图检测，是实时链路
 | `tools/calibrate_clicker.py` | 全屏拖框标定自动点击按钮，生成 `config/clicker_local.json` |
 | `tools/video_to_states.py` | 离线视频 → 状态 JSON（不经过 OBS/RTSP） |
 | `tools/export_live_hands.py` | 从 `live.states.jsonl` 筛出完整手牌 → `hands.json` |
-| `tools/compare_advice_styles.py` | 筛出大幅盈亏手牌，回放对比 lean / skills 提示词 |
 
 ---
 
@@ -655,6 +654,7 @@ cd ~/codes/poker-ocr
  "url":"cam:auto","profile":"table_wpk_live.json",
  "recognizer":"roi","full_config":null,"every":0.5,
  "stable":{"frames":2,"seconds":0.0,"reset_on_discard":true},
+ "ai_advice":true,"prompt_version":"lean-zh-2026-10-29.1","prompt_lang":"zh",
  "resolution":null}
 ```
 
@@ -662,6 +662,8 @@ cd ~/codes/poker-ocr
   打断）。复盘时据此判断「少记/晚记」是配置还是识别问题。
 - `table_dynamics`：仅当启动时读到非空的 `.table_dy` 才出现，值是解析后的原文。
   没有这个键表示本次会话按「未知对手」标准线。
+- `prompt_version` / `prompt_lang`：仅 `--ai-advice` 时出现；当前固定为
+  `lean-zh-2026-10-29.1` / `zh`。旧日志里的 `advice_style` 保留只读。
 - `record_without_hero`：仅 `--ai-advice` 时出现，表示是否会记录没有 hero 手牌
   的手牌（`--record-without-hero` / `RECORD_WITHOUT_HERO`）；默认 `false`。
 
@@ -751,11 +753,12 @@ cd ~/codes/poker-ocr
 {"type":"advice","ts":"...","hand_id":"h7","street":"flop",
  "hero_cards":["Ah","Kd"],"board":["Ks","7d","2c"],
  "pot":19.5,"to_call":8.0,
- "option":{"id":"raise-1/2","label":"加注到底池 1/2","kind":"raise",
-           "amount_bb":25.75},
- "reason":"顶对顶踢被加注，牌面干燥，按成牌打法加注求价值",
+ "option":{"id":"raise-1/2","label":"加注到 25.75BB（1/2 池加注）",
+           "kind":"raise","amount_bb":25.75},
+ "reason":"顶对顶踢，牌面干燥，加注拿价值",
  "source":"model","model":"deepseek-chat",
- "skill_codes":["core-stance","odds-table","opponent-read","postflop-made-hand"],
+ "prompt_version":"lean-zh-2026-10-29.1","prompt_lang":"zh",
+ "skill_codes":[],
  "duration_ms":1840,
  "click":{"status":"clicked","action":"raise","preset":"raise-1/2",
           "mapping":"direct",
@@ -782,10 +785,11 @@ cd ~/codes/poker-ocr
 | 字段 | 含义 |
 |---|---|
 | `hand_id` | 第几手（换手时 +1） |
-| `option.id` | 模型选的选项。翻后：`fold` / `call` / `raise-1/3` / `raise-1/2` / `raise-2/3` / `raise-1` / `raise-1.2`（没人下注时 `call` 表示**过牌**）；翻前：`fold` / `call` / `open-2.5`…`open-4` / `raise-3x` / `raise-4x` |
+| `option.id` | 模型选的选项。翻后：`fold` / `call` / `raise-1/3` / `raise-1/2` / `raise-2/3` / `raise-1` / `raise-1.2` / `all-in`（没人下注时 `call` 表示**过牌**）；翻前：`fold` / `call` / `open-2.5`…`open-4` / `raise-3x` / `raise-4x` / `all-in` |
 | `option.amount_bb` | 加注后的**本街总额**；跟注为需跟额 |
+| `prompt_version` | 生成建议时的中文 lean 版本（`lean-zh-2026-10-29.1`） |
 | `source` | `model` = 模型选的；`fallback` = 超时/报错/非法选项，按最保守动作 |
-| `skill_codes` | 本次展开的技能（lean/lean-rules 为空，skills 风格记录技能码） |
+| `skill_codes` | 兼容字段，恒为空数组（旧技能库已删除） |
 | `error` | 仅 `fallback` 时出现，说明原因 |
 | `duration_ms` | 模型调用耗时（后台，不影响采样） |
 | `click` | 自动点击结果（仅 `--auto-click`）：`status / steps / mapping / reason` |
@@ -837,7 +841,7 @@ cd ~/codes/poker-ocr
     "board":["Ks","7d","2c"],"pot":19.5,"to_call":22.0,
     "option":{"id":"call","label":"Call 22BB","kind":"call"},
     "reason":"...","source":"model","model":"typesafe/jev-1.14",
-    "skill_codes":["..."],"duration_ms":1840}
+    "prompt_version":"lean-zh-2026-10-29.1","skill_codes":[],"duration_ms":1840}
  ]}
 ```
 
@@ -939,7 +943,6 @@ All-in 文本）会立即收掉当前手牌，不依赖牌面/庄位变化。
 | `--dump-frames` | 无 | 采样帧存 JPEG |
 | `--max-frames` | `0` | 最多处理多少帧（0 = 不限） |
 | `--ai-advice` / `--no-ai-advice` | 开 | 轮到我时拼提示词并调用 AI 选一个选项（仅 roi 模式） |
-| `--advice-style` | `lean` | `lean`=只注入状态/画像/实时牌力/桌风；`lean-rules`=旧版范围框架+价值指令；`skills`=2005 技能库全量注入（A/B） |
 | `--ai-timeout` | `20` | 单次 AI 建议超时（秒）；后台线程，不阻塞采样 |
 | `--ai-confirm` | `1` | `hero_turn` 连续几帧才认定轮到我（蓝色下注按钮下第一帧即可） |
 | `--record-without-hero` | 关 | 没读到自己手牌时也写入手牌记录（默认跳过换手空档；观察对手用） |

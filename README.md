@@ -99,36 +99,37 @@ ROI 识别座位、筹码、下注、动作、庄位、底池和盲注，输出�
 ### AI 实时建议（默认开启）
 
 worker 在**轮到我**时把这一手的完整行动线交给模型（`--no-ai-advice` 可关闭）。
-默认用 **lean 提示词**，只注入四类内容：当前状态与合法选项、逐座位对手画像、
-实时牌力、桌面动态。**不再注入** RFI/3-bet/冷跟范围、翻后纹理与尺度、价值指令、
-Math gate、上一街 plan、GTO、爆炸底池等任何策略提示；模型只看事实，自己决定动作。
+现在只有一套**中文 lean** 提示词（`advice.PROMPT_VERSION = lean-zh-2026-10-29.1`）：
 
-实时牌力包括 **GROUND TRUTH**（最好的五张、用了哪两张底牌、精确 `beaten_by`、
-坚果与否、听牌 outs、牌面「成花可能 / 只是花听」）、**Hand vs ranges**（按对手范围
-算的 behind/equity）和 **Hand-strength read**（一行汇总）。这些只给数字和牌型，
-不再附带「该 bet 还是 check」的结论；模型只允许引用，不允许重算
-（见 `poker_ocr/ground_truth.py`、`hand_vs_ranges.py`、`hand_strength.py`）。
+- system：输出契约、事实优先级、翻前/翻后决策顺序、常见错误；不写“永远/绝不”。
+- user：当前局面（桌况/盲注/位置/底牌/后手/街道/公共牌/底池/需跟/有效筹码/SPR/
+  底池类型/赔率门槛/可争夺底池/短码/本手已投入/爆炸底池）、翻前信息、实时牌力、
+  逐座位对手画像、桌级桌风、数据缺口、中文行动线、带实际金额的中文选项。
+- **不再注入** RFI/3-bet 范围表、翻后纹理/尺度、`Value directive`、`Math gate`、
+  上一街 plan、GTO、board equity、技能库。旧 `lean-rules` / `skills` 与
+  `--advice-style` 已从 live 链路删除。
 
-旧版完整 lean（契约 + 事实 + 现代范围框架 + 价值指令 + Math gate + plan 回灌）保留为
-`--advice-style lean-rules`，用于 A/B；`--advice-style skills` 仍是 2005 年技能库全量注入。
-skills 版的 system 会在技能目录之前先注入 `Live read`、`Current opponent reads` 与
-`Current table dynamics`，避免 A/B 对比时旧技能层看不到当前决策事实。模型从固定选项里选一个：
+实时牌力仍由 `ground_truth.py` / `hand_ranges.py` / `hand_strength.py` 计算，但
+以中文事实呈现：当前牌型、最好五张、坚果（注明“指当前成牌”）、听牌 outs、
+四二法则权益、对范围权益、当前成牌落后至少一家、多人池实际/建模人数。
+听牌不再被标成 `VERY SMALL`，也不再用 `NUT STATUS: NOT THE NUTS` 单独否决半诈唬。
+
+模型从固定选项里选一个（中文标签 + 程序算好的实际金额）：
 
 ```
-翻后：弃牌 / 跟注（没人下注时是过牌）/ 加注到底池 1/3 / 1/2 / 2/3 / 1 倍 / 1.2 倍
-翻前：弃牌 / 平跟（或过牌）/ 开池到 2.5-4BB（按位置档；前注额外 +前注BB、前两个溜入者各 +1BB、第 3 个起每个 +0.5BB、松桌再 +0.5BB；低于本桌 6BB 下限的档位一律抬到 6BB）/ 面对加注时 3× 或 4× 上家加注（同样不低于 6BB）
+翻后：弃牌 / 跟注（没人下注时是过牌）/ 下注或加注到 1/3、1/2、2/3、1、1.2 倍池 / all-in
+翻前：弃牌 / 平跟（或过牌）/ 开池到 6-11.5BB（按位置档；低于本桌 6BB 下限的档位一律抬到 6BB）/ 面对加注时 3× 或 4× 上家加注 / all-in（后手 ≤40BB 或面对 3-bet）
 ```
 
-翻前不用底池倍数：底池只有盲注那么大，而且 `preflop-open.md` 明确要求尺度用
-bb 说。金额由程序按现场底池/加注算好（含最小加注额与后手封顶），模型只返回
-选项 id，所以它不可能给出做不出来的尺度。
+`all-in` 是可选选项（id 仍为 `all-in`，kind 为 `allin`）：深码翻后金额 = 后手；
+翻前 100BB 普通开池不追加，避免诱导。点击器配置里可以没有 `allin` 矩形：没有时
+建议照常显示，但 `plan_clicks` 返回 `missing_button:allin`，不会误点别的按钮。
 
-**本桌最低加注 6BB**（`advice.PREFLOP_MIN_RAISE_BB`）：翻前的开池、3-bet、4-bet
-一律不得低于 6BB；按位置算出来的 2.5-4BB 档位低于这条线时，程序会把选项金额抬到
-6BB，并在 note 里标 `raised to the table minimum 6BB`。后手不足 6BB 时只能全下，
-这是合法动作，不受 6BB 限制。lean 的选项 note 会写明这条规则（`lean-rules` 还会在
-事实块和 system 里再写一遍）；点击器用的档位金额（`preset_targets()`）同样按 6BB
-下限修正，避免建议 6BB、实际点了个更小的档位。换牌桌规则时只改这一个常量。
+翻前不用底池倍数：底池只有盲注那么大。金额由程序按现场底池/加注算好（含最小
+加注额、6BB 桌规与后手封顶），模型只返回选项 id，所以它不可能给出做不出来的尺度。
+**本桌最低加注 6BB**（`advice.PREFLOP_MIN_RAISE_BB`）：低于这条线的档位会被抬到
+6BB，并在 note 里标 `已抬到本桌最低加注 6BB`；点击器用的档位金额
+（`preset_targets()`）同样按 6BB 修正。换牌桌规则时只改这一个常量。
 
 模型调用在后台线程跑，**不阻塞采样**；
 结果写进 JSONL 的 `advice` 记录并高亮打印（含本次耗时）。等模型期间识别会暂停，
@@ -878,14 +879,12 @@ tests/
   test_stable_cards.py    # 跨帧牌面稳定闸（回退/张数/牌背/2 帧确认/多帧投票）
   test_doubt_window.py    # 疑惑帧时间窗仲裁（低置信度/牌背/无多数/提前解除）
   test_export_live_hands.py  # 从 live.states.jsonl 导出完整手牌
-  test_compare_advice_styles.py # 回放对比脚本的筛选/决策点/对比口径
   test_card_replay.py     # 真实样张回放：一手牌只落一条记录、牌面只前进
   test_extract.py         # 端到端回归测试
   test_api.py             # HTTP 接口测试
   golden/*.expected.json
 tools/
   export_live_hands.py    # 从 live.states.jsonl 筛出完整手牌 → hands.json
-  compare_advice_styles.py # 大幅盈亏手牌回放，对比 lean / skills 提示词
   build_card_templates.py # 从标注样本重建点数模板图集
   card_probe.py           # 单图读牌 CLI
 scan.py                   # 旧的第 0 步验证脚本，已冻结

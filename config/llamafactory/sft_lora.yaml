@@ -4,7 +4,9 @@
 ###
 ### 超参对齐 SpinGPT 论文（LoRA r=8 / alpha=16 / 4 epoch / lr 5e-5 cosine），
 ### 只把 seq 从 128 拉到 2048，因为你的事实层比论文的紧凑编码长得多。
-### 注意：推理时 advice.build_messages() 的 system 必须与 data/sft/system.txt 一致。
+### 注意：data/sft 目前是旧英文 prompt 的 stale 数据（见 data/sft/STALE.md），
+### 不要直接训练。先用 tools/build_sft_dataset.py 按当前中文 lean 重新生成；
+### 推理时 advice.SYSTEM_ZH 必须与 data/sft/system.txt 逐字节一致。
 
 ### model
 model_name_or_path: Qwen/Qwen3-8B
