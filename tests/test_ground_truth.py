@@ -21,7 +21,8 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from poker_ocr.advice import (  # noqa: E402
-    build_messages, build_situation, render_hand_facts, value_directive,
+    build_messages, build_situation, render_facts_zh, render_hand_facts,
+    value_directive,
 )
 from poker_ocr.coach import CATEGORY_NAMES, parse_cards  # noqa: E402
 from poker_ocr.ground_truth import card_text, compute_ground_truth  # noqa: E402
@@ -209,29 +210,33 @@ def test_prompt_contains_ground_truth_and_forced_rules() -> None:
                                n_opp=3, pot=72.0, to_call=36.0))
     assert sit.ground_truth is not None
 
-    facts = render_hand_facts(sit)
-    assert "GROUND TRUTH" in facts
-    assert "no made flush possible" in facts
-    assert "NUT STATUS: NUTS" in facts
-    assert "My hand strength" in facts
+    facts = render_facts_zh(sit)
+    assert "## 实时牌力" in facts
+    assert "花听面（未成花）" in facts
+    assert "坚果：是" in facts
+    assert "当前牌型：顺子" in facts
+
+    # 旧英文事实层保留给离线审计。
+    legacy = render_hand_facts(sit)
+    assert "GROUND TRUTH" in legacy
+    assert "no made flush possible" in legacy
 
     directive = value_directive(sit) or ""
     assert "ABSOLUTE NUTS" in directive
     assert "RAISE" in directive
 
-    system, user = build_messages(sit, style="lean-rules")
-    assert "GROUND TRUTH (highest priority" in system
-    assert "No made flush possible" in system
-    assert "GROUND TRUTH" in user
+    system, user = build_messages(sit)
+    assert "事实优先级" in system
+    assert "坚果：是" in user
 
 
 def test_river_prompt_says_flush_beats_straight() -> None:
     sit = build_situation(snap(board=("Jc", "8d", "Kd", "Qc", "Ad"),
                                hero_cards=("As", "Th"), street="river",
                                n_opp=1, pot=358.0, to_call=144.5))
-    facts = render_hand_facts(sit)
-    assert "NOT THE NUTS" in facts
-    assert "Flush" in facts
+    facts = render_facts_zh(sit)
+    assert "坚果：否" in facts
+    assert "同花" in facts
     directive = value_directive(sit) or ""
     assert "VALUE CAUTION" in directive
     assert "Do NOT raise" in directive

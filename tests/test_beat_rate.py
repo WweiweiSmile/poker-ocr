@@ -25,7 +25,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from poker_ocr.advice import (  # noqa: E402
-    DOMINATED_BEAT_PCT, build_situation, render_hand_facts, value_directive,
+    DOMINATED_BEAT_PCT, build_situation, render_facts_zh, value_directive,
 )
 from poker_ocr.coach import (  # noqa: E402
     FLUSH, FULL_HOUSE, ONE_PAIR, STRAIGHT, beat_rate, board_ceiling, parse_cards,
@@ -220,13 +220,16 @@ def test_gate_uses_per_opponent_not_field() -> None:
 
 
 def test_prompt_renders_made_hand_rank() -> None:
-    """这句必须进 prompt —— 否则模型还是只看得到「两对 = 强成牌」。"""
-    text = render_hand_facts(build_situation(
-        snap(board=("8d", "8h", "10h"), hero_cards=("2d", "2c"),
-             n_opp=7, pot=40.0)))
-    check("Made-hand rank" in text, "提示词缺 Made-hand rank 一行")
-    check("LOWER bound" in text, "要说明随机手牌是下界")
-    check("87.7%" in text or "87." in text, f"要带具体百分比：{text[-400:]}")
+    """中文事实要带「当前成牌落后至少一家」的具体比例。"""
+    sit = build_situation(snap(board=("8d", "8h", "10h"),
+                               hero_cards=("2d", "2c"),
+                               n_opp=7, pot=40.0))
+    text = render_facts_zh(sit)
+    check("## 实时牌力" in text, "提示词缺实时牌力")
+    check("当前牌型：两对" in text, f"应标两对：{text[-400:]}")
+    check(sit.beat_at_least_pct is not None
+          and f"{sit.beat_at_least_pct:.1f}%" in text,
+          f"要带具体百分比：{text[-400:]}")
 
 
 def main() -> int:

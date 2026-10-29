@@ -197,7 +197,7 @@ def is_small_pair(key: str) -> bool:
     """'44' → True；'77' / 'AJo' → False。
 
     「小对子」按提示词里的例外定义：22–66。它们不在靠前位置的开池表里，
-    但允许为 1BB 的 over-limp 抽三条（见 `_LEAN_SYSTEM` 的 Preflop 段）。
+    但允许为 1BB 的 over-limp 抽三条（见中文 lean 的「翻前信息」事实段）。
     """
     return len(key) == 2 and key[0] == key[1] and key[0] in "23456"
 

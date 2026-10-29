@@ -4,13 +4,10 @@
     .venv/bin/python tests/test_preflop_ranges.py
     .venv/bin/python -m pytest tests/test_preflop_ranges.py -q
 
-背景：`_LEAN_RULES_SYSTEM` 里的 RFI 表原来只是给模型看的文本，模型是**凭记忆引用**的。
-2026-10-23 那局它编出「AJo is in UTG+1's RFI range」这种和表直接矛盾的理由，
-14 次翻前加注里 12 次是表外手，合计 −123。现在范围归属由代码算、作为事实注入。
-
-这个文件守两件事：
-  1. 代码里的表和提示词里的表**不能漂移**（改一边忘了另一边就会互相矛盾）；
-  2. 判定本身要对（AJo 从 UTG+1 是 OUT、JJ 从 UTG 是 IN 等等）。
+背景：旧 `lean-rules` 提示词里的 RFI 表曾经是手写文本，模型会凭记忆引用、编出
+「AJo is in UTG+1's RFI range」这种和表矛盾的理由。中文 lean 已不再注入 RFI 表；
+翻前范围结论由代码算成一句中文事实。这个文件只守**判定本身**：
+AJo 从 UTG+1 是 OUT、JJ 从 UTG 是 IN、溜入者会收紧隔离范围等等。
 """
 
 from __future__ import annotations
@@ -21,9 +18,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from poker_ocr.advice import _LEAN_RULES_SYSTEM, _MINIMAL_SYSTEM  # noqa: E402
 from poker_ocr.preflop_ranges import (  # noqa: E402
-    CHART_ADDITIONS, OPEN_POSITIONS, RFI, chart_text, expand, hand_key,
+    CHART_ADDITIONS, OPEN_POSITIONS, RFI, expand, hand_key,
     is_set_mine_pair, is_speculative, open_frequency, range_verdict,
     sb_completable,
 )
@@ -341,14 +337,6 @@ def test_speculative_hands_not_value_isolation() -> None:
           "JJ 是价值牌，不该走投机牌文案")
 
 
-def test_prompt_hierarchy_table_dynamics_first() -> None:
-    """提示词必须把优先级写清楚：桌风 > 图表默认 > 通用启发。"""
-    check("Priority (highest first)" in _LEAN_RULES_SYSTEM, "提示词缺优先级段")
-    check("outranks the chart" in _LEAN_RULES_SYSTEM, "桌风应明确高于图表")
-    check("never override table dynamics" in _LEAN_RULES_SYSTEM,
-          "图表应明确不能覆盖桌风")
-
-
 def test_sb_low_straight_note() -> None:
     """43o 有顺子结构，弃牌理由不能说「没有顺子潜力」。
 
@@ -372,23 +360,6 @@ def test_utg2_exists() -> None:
     check("UTG+2" in RFI, "UTG+2 缺失")
     check(RFI["UTG+1"] < RFI["UTG+2"] < RFI["LJ"],
           "UTG+2 应严格介于 UTG+1 与 LJ 之间")
-
-
-def test_prompt_chart_matches_code() -> None:
-    """提示词里的表**由代码生成**，所以两边不可能漂移 —— 这里守的是「别改回手写」。
-
-    手写两份的代价在这次踩过：代码里改了表、prompt 里还是旧的，模型就会拿到
-    一份和我们判定不一致的表，然后挑对自己有利的那份用。
-    """
-    check("<<RFI_CHART>>" not in _LEAN_RULES_SYSTEM, "占位符没有被替换")
-    check(chart_text() in _LEAN_RULES_SYSTEM, "提示词里的表和 chart_text() 不一致（被手写覆盖了？）")
-    for pos in OPEN_POSITIONS:
-        check(f"{pos} " in _LEAN_RULES_SYSTEM or f"{pos} add " in _LEAN_RULES_SYSTEM,
-              f"提示词缺 {pos} 这一行")
-    check("RFI by position" not in _MINIMAL_SYSTEM,
-          "lean 极简提示词不该再带 RFI 表")
-    check(len(_MINIMAL_SYSTEM) < 3000,
-          f"lean 极简 system 应 < 3000，实际 {len(_MINIMAL_SYSTEM)}")
 
 
 def test_open_frequency_ramps_up_by_position() -> None:
@@ -420,8 +391,8 @@ def main() -> int:
         test_set_mine_pairs_below_tt,
         test_speculative_hands_not_value_isolation,
         test_sb_low_straight_note,
-        test_prompt_hierarchy_table_dynamics_first, test_utg2_exists,
-        test_prompt_chart_matches_code, test_open_frequency_ramps_up_by_position,
+        test_utg2_exists,
+        test_open_frequency_ramps_up_by_position,
     ]
     for t in tests:
         before = len(FAILS)

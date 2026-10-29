@@ -19,7 +19,7 @@ sys.path.insert(0, str(ROOT))
 from poker_ocr import advice as advice_mod  # noqa: E402
 from poker_ocr.advice import (  # noqa: E402
     _aggressive_context, advise, build_situation, decision_read,
-    render_hand_facts, value_directive,
+    render_facts_zh, value_directive,
 )
 from poker_ocr.frame_state import FrameState, PlayerState  # noqa: E402
 from poker_ocr.hand_track import (  # noqa: E402
@@ -736,11 +736,12 @@ def test_prompt_renders_opponent_reads() -> None:
         _read("midR", "芒果与西米", "maniac"), tentative,
         _read("x", "路人", "unknown", confidence=0.0, n=0,
               source="unknown", gate="unknown")))
-    facts = render_hand_facts(sit)
-    check("Opponent reads" in facts, f"事实块应含对手画像：\n{facts}")
-    check("BTN 芒果与西米: MANIAC" in facts,
+    facts = render_facts_zh(sit)
+    check("## 对手画像（逐座位，优先于桌级桌风）" in facts,
+          f"事实块应含对手画像：\n{facts}")
+    check("BTN 芒果与西米：MANIAC" in facts,
           f"画像应带位置和类型：\n{facts}")
-    check("好运常在ok: STATION" in facts and "[tentative]" in facts,
+    check("好运常在ok：STATION" in facts and "[tentative]" in facts,
           f"tentative 应标注：\n{facts}")
     check("路人" not in facts, "unknown 不应输出，避免噪声")
 

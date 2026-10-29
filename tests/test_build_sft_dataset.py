@@ -77,7 +77,7 @@ def main() -> int:
         hands.write_text("[]", encoding="utf-8")
 
         got, train, evals, stats = build(
-            log, hands, "lean", with_reason=False, eval_frac=0.5, seed=1)
+            log, hands, with_reason=False, eval_frac=0.5, seed=1)
 
     assert len(got) == 2, f"应保留 2 条，实际 {len(got)}"
     assert stats["stale"] == 1, f"陈旧帧应跳过 1 条：{dict(stats)}"
@@ -89,7 +89,8 @@ def main() -> int:
     row = got[0]["row"]
     assert set(row) == {"instruction", "input", "output", "system"}, row.keys()
     assert json.loads(row["output"])["option"] in got[0]["meta"]["legal"]
-    assert "Options" in row["instruction"] or "option" in row["instruction"].lower()
+    assert "## 可选动作" in row["instruction"]
+    assert "fold" in row["instruction"]
     assert 500 < len(row["system"]) < 3000, len(row["system"])
 
     print("OK  2 条保留 / 1 条陈旧 / 1 条非法 id / 按手牌切分 1:1")

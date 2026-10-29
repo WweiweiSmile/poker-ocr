@@ -12,9 +12,10 @@
 
 ## 为什么用「当时的提示词」而不是另写一套
 
-训练集和线上推理必须**逐字节同构**：同一个 system（含 RFI 表）、同一份事实渲染。
+训练集和线上推理必须**逐字节同构**：同一个中文 system、同一份中文事实渲染。
 只要有一处漂移，模型学到的就是另一个任务的解，线上立刻掉点。所以这里直接调
-`advice.build_messages()`，不自己拼 prompt。
+`advice.build_messages()`，不自己拼 prompt。旧 `data/sft` 是英文旧 prompt 的
+产物，已经 stale，不能混用。
 
 ## 标签是什么
 
@@ -63,7 +64,7 @@ def is_stale(snap) -> bool:
                  or (snap.pot or 0) > 12 * bb))
 
 
-def iter_rows(log_path: Path, hands_path: Path, style: str):
+def iter_rows(log_path: Path, hands_path: Path):
     """逐条产出 (advice, snapshot, situation)，口径与线上完全一致。"""
     records = load(log_path)
     states = [r for r in records
@@ -86,16 +87,16 @@ def iter_rows(log_path: Path, hands_path: Path, style: str):
         if is_stale(snap):
             yield adv, snap, None, "stale"
             continue
-        sit = build_situation(snap, style=style)
+        sit = build_situation(snap)
         yield adv, snap, sit, ""
 
 
-def build(log_path: Path, hands_path: Path, style: str,
+def build(log_path: Path, hands_path: Path,
           with_reason: bool, eval_frac: float, seed: int):
     rows, stats = [], Counter()
     seen = set()
 
-    for adv, snap, sit, skip in iter_rows(log_path, hands_path, style):
+    for adv, snap, sit, skip in iter_rows(log_path, hands_path):
         if skip:
             stats[skip] += 1
             continue
@@ -117,7 +118,7 @@ def build(log_path: Path, hands_path: Path, style: str,
             continue
         seen.add(key)
 
-        system, user = build_messages(sit, style)
+        system, user = build_messages(sit)
         reason = (adv.get("reason") or "").strip().replace("\n", " ")
         target = {"option": label}
         if with_reason and reason:
@@ -163,7 +164,6 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--log", type=Path, default=Path("logs/live.states.jsonl"))
     ap.add_argument("--hands", type=Path, default=Path("hands.json"))
     ap.add_argument("--out", type=Path, default=Path("data/sft"))
-    ap.add_argument("--style", default="lean", help="lean | skills（与线上一致）")
     ap.add_argument("--with-reason", action="store_true",
                     help="输出 {\"option\",\"reason\"}；默认只输出 option")
     ap.add_argument("--eval-frac", type=float, default=0.15,
@@ -177,8 +177,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     rows, train, evals, stats = build(
-        args.log, args.hands, args.style, args.with_reason,
-        args.eval_frac, args.seed)
+        args.log, args.hands, args.with_reason, args.eval_frac, args.seed)
 
     if not rows:
         print("一条都没转出来。检查日志里有没有 advice 记录。", file=sys.stderr)
@@ -198,10 +197,10 @@ def main(argv: list[str] | None = None) -> int:
     system = rows[0]["system"]
     print(f"\nsystem {len(system)} 字符；平均 facts "
           f"{sum(len(r['row']['instruction']) for r in rows) // len(rows)} 字符")
-    # 提示词几乎全是英文，按 3.5 字符/token 估；中文事实行会偏少，够用了。
+    # 中文按约 1.5 字符/token 粗估。
     print(f"粗估 token/条 ≈ "
           f"{(len(system) + sum(len(r['row']['instruction']) for r in rows) // len(rows)
-              + 24) * 2 // 7}（英文按 3.5 字符/token）")
+              + 24) * 2 // 3}（中文按 1.5 字符/token）")
 
     if args.dry_run:
         return 0

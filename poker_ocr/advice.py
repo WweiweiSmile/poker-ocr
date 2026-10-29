@@ -1,15 +1,19 @@
-"""实时 AI 决策建议：按当前行动街加载技能，把完整行动线交给模型，只回一个选项。
+"""实时 AI 决策建议：把算好的中文事实交给模型，只回一个选项。
 
-与 call-back 复盘的关系：**同一套方法论、同一种「目录 + 展开正文」的注入方式**
-（见 skills.py），但输入是 `HandSnapshot`（实时链路逐帧累积出来的），不是
-ReviewHand；输出也不是长篇点评，而是从固定选项里**选一个**。
+现在只保留一套中文 `lean` 提示词：system 给决策顺序与输出契约，user 给状态、
+几何/价格/牌力/牌面/对手事实、桌风、行动线与**带实际金额的中文选项**。
+不再加载技能库、范围表、价值指令、Math gate 或 GTO；模型只看事实自己做选择。
 
 为什么输出是「选项编号」而不是自由文本：
 
   · 实时场景下人要的是一秒内能执行的动作，不是分析文章。
-  · 选项把尺度约束死了（1/3、1/2、2/3、1、1.2 倍池），模型不可能编出不存在的尺度。
+  · 选项把尺度约束死了（1/3、1/2、2/3、1、1.2 倍池、all-in），模型不可能
+    编出不存在的尺度。
   · 选项由本模块按现场底池算好金额，模型只做选择 —— 它不需要会算底池，
     也就不会算错。这一点和 coach.py「确定性规则不交给模型」是同一条原则。
+
+`value_directive` / `math_gate` / `render_hand_facts` 等旧规则层保留在本文件，
+**只供 tools/replay 离线审计**，`build_messages` 与 `advise` 不再调用它们。
 
 调用协议：OpenAI 兼容的 /chat/completions（与 call-back 的 AIClient 同口径），
 凭据来自环境变量 AI_SERVER_API_KEY / AI_SERVER_BASE_URL / AI_SERVER_MODEL。
@@ -34,17 +38,17 @@ from collections import Counter
 from dataclasses import dataclass, field, replace
 from typing import Iterable
 
-from . import skills
 from .coach import (
-    DRY, MID_BOTTOM, OVERPAIR, STRONG_DRAW, STRONG_MADE, TPTK, TP_WEAK, TWO_PAIR,
+    DRY, HIGH_CARD, MID_BOTTOM, OVERPAIR, STRONG_DRAW, STRONG_MADE, TPTK, TP_WEAK,
+    TWO_PAIR,
     WEAK_DRAW, board_texture, opponent_strength, parse_cards, read_hand,
 )
-from .ground_truth import GroundTruth, compute_ground_truth
+from .ground_truth import GroundTruth, card_text, compute_ground_truth
 from .hand_track import ActionRecord, FLOP, HandSnapshot, PREFLOP, RIVER, TURN
 from .opponent_profile import (AGGRESSIVE_ARCHETYPES, PASSIVE_ARCHETYPES,
-                               OpponentRead, render_reads)
+                               OpponentRead, render_reads, render_reads_zh)
 from .positions import BB, POSITIONS_BY_TABLE_SIZE, SB
-from .preflop_ranges import chart_text, range_verdict
+from .preflop_ranges import range_verdict, sb_completable
 from .table_dynamics import (is_aggressive_table, is_loose_table,
                              value_heavy_aggression)
 
@@ -53,14 +57,10 @@ from .table_dynamics import (is_aggressive_table, is_loose_table,
 # 行动线里 hero 的标识。与 coach.advise 的 hero_position 口径一致
 HERO_ACTOR = "hero"
 
-# 提示词风格。lean 只注入「状态 + 逐座位画像 + 实时牌力 + 桌风 + 选项」，
-# 不含任何范围表/翻后规则/价值指令；旧版完整 lean 保留为 lean-rules 做 A/B。
-PROMPT_STYLE_LEAN = "lean"
-PROMPT_STYLE_LEAN_RULES = "lean-rules"
-PROMPT_STYLE_SKILLS = "skills"
-PROMPT_STYLES = (PROMPT_STYLE_LEAN, PROMPT_STYLE_LEAN_RULES,
-                 PROMPT_STYLE_SKILLS)
-DEFAULT_PROMPT_STYLE = PROMPT_STYLE_LEAN
+# 当前唯一的中文 lean 提示词版本。写入 session_start / advice JSONL，
+# 复盘归因用；改动 system 或事实块时 bump。
+PROMPT_VERSION = "lean-zh-2026-10-29.1"
+PROMPT_LANGUAGE = "zh"
 
 # 加注尺度：名字 → 底池倍数。「满池 1.2」是超池，用于需要施压/劝退的场合
 RAISE_FRACTIONS: dict[str, float] = {
@@ -71,29 +71,17 @@ RAISE_FRACTIONS: dict[str, float] = {
     "1.2": 1.2,
 }
 
-# 用户指定的选项顺序。AI 只能返回这里的 id
+# 用户指定的选项顺序。AI 只能返回这里的 id；all-in 永远是最后一个。
 OPTION_ORDER = ("fold", "call", "raise-1/3", "raise-1/2", "raise-2/3",
-                "raise-1", "raise-1.2")
+                "raise-1", "raise-1.2", "all-in")
 
-OPTION_LABELS = {
-    "fold": "Fold",
-    "call": "Call",
-    "raise-1/3": "Raise to 1/3 pot",
-    "raise-1/2": "Raise to 1/2 pot",
-    "raise-2/3": "Raise to 2/3 pot",
-    "raise-1": "Raise to full pot",
-    "raise-1.2": "Raise to 1.2× pot",
-}
-
-# 没有人下注时这些档位是**下注**，不是加注。id 沿用 raise-*（对外契约不变），
-# 但标签必须说 Bet —— 给模型看「Raise to 1/2 pot」会让它以为需要先有一个下注，
-# 反而更容易选 Check。kind 也随之改成 bet，复盘对比时口径才对得上。
-BET_LABELS = {
-    "raise-1/3": "Bet 1/3 pot",
-    "raise-1/2": "Bet 1/2 pot",
-    "raise-2/3": "Bet 2/3 pot",
-    "raise-1": "Bet full pot",
-    "raise-1.2": "Bet 1.2× pot",
+# 尺度后缀（中文标签用）。option id 保持不变，避免点击器/日志契约漂移。
+_SIZE_ZH = {
+    "1/3": "1/3 池",
+    "1/2": "1/2 池",
+    "2/3": "2/3 池",
+    "1": "满池",
+    "1.2": "1.2 池",
 }
 
 
@@ -103,7 +91,7 @@ class Option:
 
     id: str
     label: str
-    kind: str                     # check | call | fold | raise
+    kind: str                     # check | call | fold | raise | bet | allin
     amount: float | None = None
     note: str = ""
 
@@ -118,6 +106,34 @@ class Option:
 
 def _round_bb(v: float) -> float:
     return round(v, 2)
+
+
+def _all_in_option(snap: HandSnapshot) -> Option | None:
+    """按 §5.2 生成 all-in 选项；不满足条件时返回 None。
+
+    翻后：后手能被完整投入、且金额高于现有最大档位时追加。
+    翻前：只有后手 ≤ 40BB 或已经面对 3-bet 时才追加 —— 100BB 的普通开池
+    也挂一个 all-in，会诱导模型把它当默认尺度。
+    `to_call >= hero_stack` 时走「跟全下/弃牌」分支，不重复生成。
+    """
+    stack = snap.hero_stack
+    if stack is None or stack <= 0:
+        return None
+    to_call = max(snap.to_call or 0.0, 0.0)
+    if to_call >= stack:
+        return None
+    hero_max = _round_bb((snap.hero_bet or 0.0) + stack)
+    if hero_max <= 0:
+        return None
+    if snap.street == PREFLOP:
+        if not (stack <= 40 or "three-bet" in (snap.preflop_shapes or ())):
+            return None
+    else:
+        presets = preset_targets(snap)
+        if presets and hero_max <= max(a for a, _ in presets.values()) + 1e-9:
+            return None
+    return Option("all-in", f"全下 {hero_max:g}BB", "allin", hero_max,
+                  "剩余后手全部投入")
 
 
 # 翻前开池的基础倍数（bb），按位置分档，来自 preflop-open.md：
@@ -167,11 +183,11 @@ DOMINATED_BEAT_PCT = 22.0
 
 
 def _cap(target: float, hero_max: float | None, min_raise_to: float,
-         min_note: str = "raised to the minimum raise") -> tuple[float, str]:
+         min_note: str = "已抬到最小加注") -> tuple[float, str]:
     """把目标额修正到合法范围：低于最小加注抬上去，高于后手封顶为全下。
 
     `min_note` 让翻前的牌桌下限（6BB）能和扑克本身的最小加注区分开：
-    模型看到「raised to the table minimum 6BB」才知道不是程序算错了。
+    模型看到「已抬到本桌最低加注 6BB」才知道不是程序算错了。
     """
     note = ""
     if target < min_raise_to:
@@ -179,7 +195,7 @@ def _cap(target: float, hero_max: float | None, min_raise_to: float,
         note = min_note
     if hero_max is not None and target >= hero_max - 1e-9:
         target = hero_max
-        note = "stack too short, effectively all-in"
+        note = "后手不足，等同全下"
     return _round_bb(target), note
 
 
@@ -221,9 +237,9 @@ def build_preflop_options(snap: HandSnapshot,
     # 合法的再加注到 20BB 比 6BB 更严，不能被 6BB 覆盖掉。
     table_min_raise_to = bb * PREFLOP_MIN_RAISE_BB
     min_raise_to = max(legal_min_raise_to, table_min_raise_to)
-    min_note = ("raised to the minimum raise"
+    min_note = ("已抬到最小加注"
                 if legal_min_raise_to >= table_min_raise_to
-                else f"raised to the table minimum {table_min_raise_to:g}BB")
+                else f"已抬到本桌最低加注 {table_min_raise_to:g}BB")
     hero_max = (hero_bet + stack) if stack is not None else None
 
     # 下注/加注已经超过后手：跟注就是全下，牌桌上不存在「再加注」。
@@ -231,9 +247,9 @@ def build_preflop_options(snap: HandSnapshot,
     call_all_in = (stack is not None and stack > 0 and to_call >= stack)
     if call_all_in:
         options = [
-            Option("call", "Call all-in", "call", _round_bb(stack),
-                   "the bet covers my stack; calling puts me all-in"),
-            Option("fold", "Fold", "fold"),
+            Option("call", f"跟全下 {_round_bb(stack):g}BB", "call",
+                   _round_bb(stack), "对手下注已覆盖我的后手，跟注即全下"),
+            Option("fold", "弃牌", "fold"),
         ]
         by_id = {o.id: o for o in options}
         return [by_id[i] for i in OPTION_ORDER if i in by_id]
@@ -245,15 +261,19 @@ def build_preflop_options(snap: HandSnapshot,
 
     options: list[Option] = []
     if facing_raise and to_call > 0:
-        options.append(Option("call", "Call", "call", _round_bb(to_call)))
-        options.append(Option("fold", "Fold", "fold"))
+        options.append(Option("call", f"跟注 {_round_bb(to_call):g}BB", "call",
+                              _round_bb(to_call)))
+        options.append(Option("fold", "弃牌", "fold"))
         # 面对加注：3bet/再加注到「上家加注的 3 倍 / 4 倍」，来自
         # preflop-3bet-pot.md「有位置 3-4 倍，盲注位一律 4 倍」
         for mult in (3, 4):
             amount, note = _cap(max_bet * mult, hero_max, min_raise_to, min_note)
             options.append(Option(
-                f"raise-{mult}x", f"Raise to {mult}× the last raise", "raise",
+                f"raise-{mult}x", f"{mult}-bet 到 {amount:g}BB", "raise",
                 amount, note))
+        extra = _all_in_option(snap)
+        if extra is not None:
+            options.append(extra)
         return options
 
     # 没人加注：平跟（limp）/ 补齐盲注 / 大盲过牌，然后按位置倍数开池。
@@ -261,29 +281,29 @@ def build_preflop_options(snap: HandSnapshot,
     # 会让模型以为这是小盲的补盲动作，看不到溜入池里抽 set 的线路
     hero_pos = snap.hero_position or ""
     if to_call > 0:
-        label = ("Complete the blind" if hero_pos == "SB"
-                 else f"Call {to_call:g}BB (over-limp)")
+        label = ("补齐盲注" if hero_pos == "SB"
+                 else f"平跟 {to_call:g}BB（溜入）")
         options.append(Option("call", label, "call", _round_bb(to_call)))
     elif hero_pos == "SB":
         # SB 已经补齐盲注（to_call=0）时，这是 check/raise 点，不是 limp。
         # h60 的第二条 preflop 建议把这里标成 "limp in"，模型只能选
         # 「最便宜的退出」；标签错了，动作空间也就错了。
         if (snap.hero_bet or 0.0) >= bb:
-            options.append(Option("call", "Check", "check", None,
-                                  "SB has matched the blind; check or raise"))
+            options.append(Option("call", "过牌", "check", None,
+                                  "小盲已补齐盲注，可以过牌或加注"))
         else:
             need = max(bb - (snap.hero_bet or 0.0), 0.0)
-            options.append(Option("call", "Complete the blind", "call",
+            options.append(Option("call", "补齐盲注", "call",
                                   _round_bb(need) if need else None,
-                                  "SB still needs to match the big blind"))
+                                  "小盲还需要补齐大盲"))
     elif hero_pos == "BB":
-        options.append(Option("call", "Check", "check", None,
-                              "Big blind sees the flop free"))
+        options.append(Option("call", "过牌", "check", None,
+                              "大盲可以免费看翻牌"))
     else:
-        options.append(Option("call", "limp in", "call", None,
-                              "the first to enter should usually raise"))
+        options.append(Option("call", "平跟进池", "call", None,
+                              "第一个入池通常应该加注"))
     if to_call > 0:
-        options.append(Option("fold", "Fold", "fold"))
+        options.append(Option("fold", "弃牌", "fold"))
 
     limpers = count_limpers(snap)
     limper_bonus = (min(limpers, 2) * LIMP_BONUS_FIRST
@@ -299,8 +319,14 @@ def build_preflop_options(snap: HandSnapshot,
     for b in base:
         target = b + ante_bb + limper_bonus + max(open_bonus, 0.0)
         target, note = _cap(target, hero_max, min_raise_to, min_note)
-        options.append(Option(f"open-{b:g}", f"Raise to {target:g}BB (open)",
+        table_min = "（本桌最低加注）" if target >= table_min_raise_to \
+            and target == table_min_raise_to else ""
+        options.append(Option(f"open-{b:g}",
+                              f"开池到 {target:g}BB{table_min}",
                               "raise", target, note))
+    extra = _all_in_option(snap)
+    if extra is not None:
+        options.append(extra)
     return options
 
 
@@ -351,16 +377,10 @@ def preset_amounts(snap: HandSnapshot) -> dict[str, float]:
 
 
 def build_options(snap: HandSnapshot,
-                  open_bonus: float = 0.0,
-                  block_draw_bets: bool = False) -> list[Option]:
+                  open_bonus: float = 0.0) -> list[Option]:
     """按现场底池与下注算出全部可执行选项。
 
     `open_bonus` 只加在翻前开池上（松桌 +1BB），翻后按底池倍数的选项不动。
-
-    `block_draw_bets=True` 用于「只有听牌 + 3 家以上」：这种局面没有弃牌率，
-    主动下注/加注是白送（h31：4 家池里 8 张顺子听、没人下注，模型挑了下注 1/2）。
-    提示词管不住它把下注重新解释成「为权益而打」，所以干脆把这几档从动作空间里
-    拿掉：模型只选档位，不给它选错的机会。
 
     `to_call == 0` 是「轮到我、没人下注」：没有可跟的注，选项是过牌 + 各种下注。
     `to_call > 0` 是面对下注/加注：跟注 + 弃牌 + 各种加注。
@@ -373,7 +393,7 @@ def build_options(snap: HandSnapshot,
 
     金额全部由本模块算好，模型只选档位。两处**必须**的修正：
     低于最小加注额的档位要抬到合法值（否则给出一个牌桌上做不出来的动作），
-    超过后手的要封顶并注明等同全下。
+    超过后手的要封顶并注明等同全下。深码/短码场景在末尾追加 `all-in`。
     """
     if snap.street == PREFLOP:
         return build_preflop_options(snap, open_bonus=open_bonus)
@@ -383,33 +403,36 @@ def build_options(snap: HandSnapshot,
 
     options: list[Option] = []
     if to_call <= 0:
-        options.append(Option("call", "Check", "check",
-                              note="no bet yet, check"))
+        options.append(Option("call", "过牌", "check",
+                              note="还没人下注，可以过牌"))
     else:
         # 下注超过后手：跟注即全下，且不能再加注。客户端此时只给
         # Fold / All in 两个按钮，选项必须与牌桌一致。
         if stack is not None and stack > 0 and to_call >= stack:
-            options.append(Option("call", "Call all-in", "call", _round_bb(stack),
-                                  "the bet covers my stack; calling puts me all-in"))
-            options.append(Option("fold", "Fold", "fold"))
+            options.append(Option("call", f"跟全下 {_round_bb(stack):g}BB",
+                                  "call", _round_bb(stack),
+                                  "对手下注已覆盖我的后手，跟注即全下"))
+            options.append(Option("fold", "弃牌", "fold"))
             by_id = {o.id: o for o in options}
             return [by_id[i] for i in OPTION_ORDER if i in by_id]
-        options.append(Option("call", "Call", "call", _round_bb(to_call)))
-        options.append(Option("fold", "Fold", "fold"))
+        options.append(Option("call", f"跟注 {_round_bb(to_call):g}BB", "call",
+                              _round_bb(to_call)))
+        options.append(Option("fold", "弃牌", "fold"))
 
-    if block_draw_bets:
-        # 只剩过牌/跟注（必要时还有弃牌）：多路听牌没有弃牌率，下注/加注不是选项。
-        by_id = {o.id: o for o in options}
-        return [by_id[i] for i in OPTION_ORDER if i in by_id]
     presets = preset_targets(snap)
     for name in ("1/3", "1/2", "2/3", "1", "1.2"):
         option_id = f"raise-{name}"
-        if to_call > 0:
-            label, kind = OPTION_LABELS[option_id], "raise"
-        else:
-            label, kind = BET_LABELS[option_id], "bet"
         amount, note = presets[option_id]
+        if to_call > 0:
+            label, kind = (f"加注到 {amount:g}BB（{_SIZE_ZH[name]}加注）",
+                           "raise")
+        else:
+            label, kind = f"下注 {amount:g}BB（{_SIZE_ZH[name]}）", "bet"
         options.append(Option(option_id, label, kind, amount, note))
+
+    extra = _all_in_option(snap)
+    if extra is not None:
+        options.append(extra)
 
     by_id = {o.id: o for o in options}
     return [by_id[i] for i in OPTION_ORDER if i in by_id]
@@ -420,7 +443,7 @@ def build_options(snap: HandSnapshot,
 def call_amount(snap: HandSnapshot) -> float:
     """跟注实际要付的筹码：后手不足时只能跟到全下。
 
-    赔率门槛、Math gate、事实渲染必须用同一个口径，否则「后手 5BB 面对
+    赔率门槛、离线审计、事实渲染必须用同一个口径，否则「后手 5BB 面对
     20BB 下注」会被算成 20/25 = 80% 这种牌桌上不存在的门槛。
     """
     to_call = round(snap.to_call, 2)
@@ -565,34 +588,29 @@ def pot_type(snap: HandSnapshot) -> str | None:
 
 
 def spr(snap: HandSnapshot) -> float | None:
-    """SPR = 有效筹码 ÷ 当前底池（翻后才有意义）。"""
+    """SPR = 有效筹码 ÷ 跟注前的可争夺底池（翻后才有意义）。
+
+    分母与赔率同口径：先扣掉对手无人能跟的超额下注（`winnable_pot - call`），
+    但不把「我的跟注」算进去 —— 与牌桌语言的 SPR 一致（94 / 10.5 = 9.0）。
+    """
     if snap.street == PREFLOP or not snap.pot or snap.hero_stack is None:
         return None
+    pot_before_call = winnable_pot(snap) - call_amount(snap)
+    if pot_before_call <= 0:
+        pot_before_call = snap.pot
     stacks = [o.stack for o in snap.opponents
               if not o.folded and o.stack is not None]
     if not stacks:
-        return round(snap.hero_stack / snap.pot, 1)
+        return round(snap.hero_stack / pot_before_call, 1)
     effective = min([*stacks, snap.hero_stack])
-    return round(effective / snap.pot, 1)
+    return round(effective / pot_before_call, 1)
 
 
-# 听牌跟注的隐含赔率上限：提示词、Math gate、单测三处必须是同一个数。
+# 听牌跟注的隐含赔率上限（离线审计口径）：Math gate 与单测共用同一个数。
 # 2026-10-24 用户口径：隐含赔率按 0 算，只用即时赔率。
 IMPLIED_ODDS_CAP_PCT = 0.0
 # 权益与门槛差在这个范围内算「边界」，不给硬结论。
 GATE_MARGIN_PCT = 2.0
-
-
-def implied_odds_rule() -> str:
-    """提示词里的听牌赔率口径；与 IMPLIED_ODDS_CAP_PCT 保持同一个数。"""
-    if IMPLIED_ODDS_CAP_PCT <= 0:
-        return ("Ignore implied odds: for draws, call only when equity >= the "
-                "break-even equity; otherwise FOLD — do not pay to chase.")
-    points = "point" if IMPLIED_ODDS_CAP_PCT == 1 else "points"
-    return (f"For draws, count implied odds as AT MOST "
-            f"{IMPLIED_ODDS_CAP_PCT:g} percentage {points}: call only when "
-            f"(equity + {IMPLIED_ODDS_CAP_PCT:g}%) >= the break-even equity; "
-            "otherwise FOLD — do not pay to chase.")
 
 
 @dataclass(frozen=True)
@@ -760,12 +778,12 @@ def build_situation(snap: HandSnapshot,
                     table_dynamics: str | None = None,
                     opponent_reads: Iterable[OpponentRead] | None = None,
                     previous: "Advice | None" = None,
-                    style: str = DEFAULT_PROMPT_STYLE
+                    include_advanced: bool = False
                     ) -> Situation:
     """把快照整理成一次决策的事实。
 
-    `style` 只影响动作空间：lean 不做「多路纯听禁下注」这类策略过滤，把
-    所有合法选项交给模型；lean-rules/skills 保留旧的过滤。
+    `include_advanced=True` 才计算 GTO 近似表与 board equity（离线审计/实验
+    用）；实时 lean 只需要 hand_ranges / hand_strength 这些进入中文事实块的数据。
     `table_dynamics` 是根目录 `.table_dy` 的解析文本（见 table_dynamics.py）。
     由调用方显式传入，而不是在这里读文件：单测和离线重放不会因为仓库里恰好
     有一份动态文件而改变结果。
@@ -807,13 +825,6 @@ def build_situation(snap: HandSnapshot,
                   "reason": opp_read.reason_en}
 
     per_player = pot_per_player(snap)
-    # 纯听牌 + 3 家以上：没有弃牌率，主动下注/加注不该出现在选项里（h31）。
-    # 「纯听」= 读牌分档在听牌档；已经成牌（一对以上）不在此列——
-    # 那种情况是价值下注，哪怕多路也允许。
-    draw_only = bool(read and read.tier in (STRONG_DRAW, WEAK_DRAW))
-    # lean 把动作空间完整交给模型；旧规则版才在多路纯听时删掉下注/加注。
-    block_draw_bets = (style != PROMPT_STYLE_LEAN
-                       and snap.street != PREFLOP and n_opp >= 3 and draw_only)
     beat_pct = beat_at_least = None
     if gt is not None:
         beat_pct = round(gt.rank.beat_pct * 100, 1)
@@ -828,8 +839,7 @@ def build_situation(snap: HandSnapshot,
         options=build_options(snap,
                               open_bonus=(LOOSE_OPEN_BONUS
                                           if is_loose_table(table_dynamics)
-                                          else 0.0),
-                              block_draw_bets=block_draw_bets),
+                                          else 0.0)),
         hand_label=read.label if read else None,
         hand_tier=read.tier if read else None,
         category=read.category if read else None,
@@ -848,12 +858,13 @@ def build_situation(snap: HandSnapshot,
         beat_pct=beat_pct,
         beat_at_least_pct=beat_at_least,
         opponents_in_hand=n_opp,
+        # 翻前范围结论只在无人入池/溜入时渲染；面对加注不给 RFI 结论，
+        # 否则模型会把「开池范围」当成「跟注/3-bet 范围」。
         range_verdict=(
-            (lambda v: v.render() if v else None)(
-                range_verdict(snap.hero_position, snap.hero_cards,
-                              table_dynamics=table_dynamics,
-                              limpers=count_limpers(snap)))
-            if snap.street == PREFLOP else None),
+            _range_conclusion_zh(snap, table_dynamics)
+            if snap.street == PREFLOP and snap.preflop_shapes
+            and set(snap.preflop_shapes) <= {"unopened", "limped"}
+            else None),
         ground_truth=gt,
         aggressive_table=is_aggressive_table(table_dynamics),
         outs=read.outs if read else None,
@@ -864,13 +875,14 @@ def build_situation(snap: HandSnapshot,
         players_left_to_act=players_left_to_act(snap),
         previous=previous,
     )
-    # GTO 表是可选事实层：查不到/没装/多人池都静默跳过，绝不影响主链路。
-    # Situation 是 frozen 的，用 replace 带出新实例。
-    try:
-        from . import gto_lookup
-        sit = replace(sit, gto=gto_lookup.lookup(sit))
-    except Exception:  # noqa: BLE001
-        pass
+    # GTO 表/board equity 是旧实验事实层，不再进入中文 lean 提示词。
+    # 只有离线工具显式要 include_advanced=True 时才计算，且失败静默跳过。
+    if include_advanced:
+        try:
+            from . import gto_lookup
+            sit = replace(sit, gto=gto_lookup.lookup(sit))
+        except Exception:  # noqa: BLE001
+            pass
     # 手牌 vs 对手范围：答案在 ground truth 之后、board structure 之前。
     # 任何一步缺数据都 fail open，绝不影响主链路。
     try:
@@ -892,11 +904,12 @@ def build_situation(snap: HandSnapshot,
                     [*sit.warnings, *gaps])))
     except Exception:  # noqa: BLE001
         pass
-    try:
-        from . import board_equity
-        sit = replace(sit, board_eq=board_equity.lookup(sit))
-    except Exception:  # noqa: BLE001
-        pass
+    if include_advanced:
+        try:
+            from . import board_equity
+            sit = replace(sit, board_eq=board_equity.lookup(sit))
+        except Exception:  # noqa: BLE001
+            pass
     # 牌力解析：在 hand_ranges 之上再加一层纯判定，输出一行 Hand-strength read。
     # 依赖 hand_ranges；缺失时静默跳过，绝不猜。任何异常 fail open。
     try:
@@ -1200,6 +1213,9 @@ def _no_fold_equity(sit: Situation) -> bool:
 def value_directive(sit: Situation) -> str | None:
     """把「强牌默认拿价值」写成一句贴着当前分档的硬指令。
 
+    **legacy offline only**：`build_messages` / `advise` 不再调用；只给
+    tools/compare_review_hands 与 replay 审计历史决策用。
+
     为什么放在 user 事实里、而不是只写在 system 技能里：JEV 是选择题，
     技能目录很长，模型容易只抓到最近的一条「对手弱可以过牌」；一条紧跟
     「My hand strength」的具体指令，比让它自己翻方法论可靠得多。
@@ -1447,30 +1463,6 @@ def value_directive(sit: Situation) -> str | None:
 
 # ─────────────────────────── 提示词 ───────────────────────────
 
-# 事实块的最高优先规则。两套提示词都注入同一段：牌力事实只能引用，不能重算。
-_GROUND_TRUTH_RULES = """\
-## GROUND TRUTH (highest priority)
-The facts include a «GROUND TRUTH» block from a deterministic evaluator: exact hand,
-best five, nut status, every hand class that beats you, board flush/straight possibility,
-draws. It is the only source for these; never contradict or recompute it.
-- "No made flush possible (at most 2 of any suit)" → no flush exists yet; do not call
-  the board a flush board.
-- "NUTS" (made hand) → no opponent holding beats you; facing a bet, RAISE. Never
-  invent a higher hand.
-- "Beaten by" is exact: only those classes beat you.
-- A non-nut straight or flush is still strong, but call — do not raise as if unbeatable.
-- The rank's "equity" is vs ONE opponent. For multiway decisions use the
-  "Multiway: with N opponents, X% chance at least one is ahead" line, not that equity.
-- If a «Math gate» line is present, it is the binding price verdict: the program
-  already compared draw equity (+2% cap) with the break-even. Do not re-judge the
-  same two numbers, and do not call a positive-gate fold "thin".
-- If this is a DRAW (Strong draw / Weak draw), the made-hand rank/NUT/"Beaten by" lines
-  describe the CURRENT unmade hand only — they must NOT veto the draw directive.
-  Heads-up with no bet in front, a semi-bluff is the baseline; against a station that
-  never folds you may check, but the reason must be NO FOLD EQUITY — never "I am not
-  the nuts". With 3+ opponents, check. Judge a draw by its outs and pot odds.
-"""
-
 _STREET_EN = {"preflop": "Preflop", "flop": "Flop", "turn": "Turn", "river": "River"}
 
 # coach 的中文分档/质地/牌力 → 英文，只用于给模型的提示词渲染。
@@ -1543,8 +1535,9 @@ def _is_set_mine_pair(cards: tuple[str, ...] | list[str]) -> bool:
 def render_opponent_reads(sit: Situation) -> list[str]:
     """把本手在局对手的画像写进事实块。unknown 不输出，tentative 标注。
 
-    渲染逻辑与 skills 提示词共用 `opponent_profile.render_reads`，避免两处
-    格式漂移；这里只负责把快照里的座位映射成「在局 + 位置」。
+    渲染逻辑与 `opponent_profile.render_reads` 共用，避免两处格式漂移；
+    这里只负责把快照里的座位映射成「在局 + 位置」。**legacy offline only**：
+    中文 lean 用的是 `render_reads_zh`。
     """
     active = {o.seat_id: o for o in sit.snap.opponents if not o.folded}
     positions = {seat: (o.position or seat) for seat, o in active.items()}
@@ -1552,7 +1545,11 @@ def render_opponent_reads(sit: Situation) -> list[str]:
 
 
 def render_hand_facts(sit: Situation) -> str:
-    """把当前局面写成紧凑的手牌历史式文本 —— 模型对这套写法先验最强。"""
+    """英文旧事实块。**legacy offline only**：只给 tools/replay 审计历史用。
+
+    实时链路已经改用 `render_facts_zh`；这里保留是为了复跑旧记录时仍能看到
+    当时的英文事实 + Value directive / Math gate。
+    """
     snap = sit.snap
     blinds = snap.blinds
     lines: list[str] = []
@@ -1618,7 +1615,7 @@ def render_hand_facts(sit: Situation) -> str:
         spot.append(f"{n} player{'s' if n != 1 else ''} left to act")
     if sit.spr is not None:
         # 短码全下时 SPR 可能只有 0.03：写成 0 会看起来像「没有筹码」。
-        spr_text = "<0.1" if 0 < sit.spr < 0.1 else f"{sit.spr:g}"
+        spr_text = "<0.1" if 0 < sit.spr < 0.1 else f"{sit.spr:.1f}"
         spot.append(f"SPR {spr_text}")
     if spot:
         lines.append("Spot: " + "｜".join(spot))
@@ -1850,502 +1847,628 @@ def render_hand_facts(sit: Situation) -> str:
     return "\n".join(lines)
 
 
-def _build_messages_skills(sit: Situation) -> tuple[str, str]:
-    """返回 (system, user)。system 由「角色 + 输出契约 + 技能层」拼成。
+# ─────────────────── 离线审计（legacy offline only） ───────────────────
 
-    技能层不是只有静态正文：当前决策点的实时牌力、逐座位对手画像与桌面动态
-    会先渲染成「Live read / Current opponent reads / Current table dynamics」，
-    再放技能目录和选中正文，避免模型读了一堆 2005 年通则却不知道这手牌/
-    这张桌/这些对手现在是什么样。
-    """
-    all_ = skills.all_skills()
-    ctx = _skill_context(sit)
-    selected = skills.select_skills(ctx, all_)
-
-    system_parts = [
-        "You are a Texas Hold'em cash-game coach assisting a player **in real time**. "
-        "The player will review the hand later, but right now they have only a few seconds "
-        "and need a directly executable action.",
-        "",
-        "## Output format",
-        "Output a single JSON object, no markdown code fence, no explanatory text:",
-        '{"option": "<option id>", "reason": "<one-sentence reason in English, under 30 words, '
-        "must cite a rule from the skills or the table dynamics>\"}",
-        "",
-        "## Hard constraints",
-        "0. «Current opponent reads» (per-seat) outranks «Table dynamics» / "
-        "«Current table dynamics»; together with «Explosive pot: YES» they are the "
-        "highest-priority exploitative instructions. "
-        "When the table notes say "
-        "the opponent's raises or multi-street barrels are value-heavy, or the pot is "
-        "explosive, fold marginal made hands (one pair, two pair) even if a «Value "
-        "directive» default says to call. Pot odds only tell you the price; they do "
-        "not create bluffs in a value-heavy range.",
-        "1. option must come strictly from the ids in the user message's «Options» section; "
-        "no extras, no rewrites.",
-        "2. All amounts are computed by the program. Do **not** compute the pot yourself, do not "
-        "output any amount — output only the id.",
-        "3. When facing a bet, actually compare pot odds: the equity needed to call comes from "
-        "«Odds & Probability Quick Reference»; compare it against your hand strength / draw "
-        f"equity — fold if short, call or raise if enough. {implied_odds_rule()}",
-        "4. Preflop there is no made-hand equity to compare: use the sizing tables in the "
-        "«Preflop» skills, by position, number of prior raises, and number of opponents.",
-        "5. Default order of thought: with a strong made hand, first ask «bet or raise for "
-        "value»; only then ask «check or call». Checking/folding must justify itself "
-        "(«an unjustifiable check is also a leak»).",
-        "6. If a «Table dynamics» / «Current table dynamics» block is present (in "
-        "this prompt or in the user facts), treat it as authoritative "
-        "exploitative context for the current table. A «Current opponent reads» "
-        "block, when present, is per-seat: use the named seat's type first, and "
-        "treat «tentative» as a hint only. If neither block is present, treat the "
-        "opponent as «unknown» — the live pipeline has no history, so no "
-        "exploitative deviation.",
-        "7. Do not guess the opponent's exact hand, only describe range tendencies.",
-        "8. Reason in English; keep card notation in AsKh format.",
-        "",
-        "## Value-first rules (read before choosing)",
-        "A strong made hand is any hand whose computed tier is «Strong made hand» "
-        "(two pair, set/trips, straight, flush, full house), «Overpair», or "
-        "«Top pair, strong kicker».",
-        "1. Strong made hand + no bet in front → BET for value by default. "
-        "«Opponent checked» / «no opponent action yet» is a reason to bet, not a reason to "
-        "check: charge draws and get paid by worse hands.",
-        "2. Strong made hand + facing a bet → RAISE for value by default. Call only if the "
-        "board is four-to-a-straight/flush, a paired board makes a full house likely, or "
-        "the opponent's line clearly says you are beaten.",
-        "3. Slow-play exceptions — checking a strong hand is correct only when one of these "
-        "is true: (a) you hold the absolute nuts (nut straight/flush/full house) on a dry, "
-        "uncoordinated board and expect the opponent to bluff; (b) a bet would fold out "
-        "every worse hand and only get called by better; (c) the board is so coordinated "
-        "that your made hand is likely beaten.",
-        "4. Never slow-play two pair, a set, or top pair. Slow-play only the nut flush or a "
-        "full house on a dry board against an aggressive opponent.",
-        "5. Size for value: 1/2–2/3 pot on a dry board, 2/3–full pot on a wet/draw-heavy "
-        "board. Do not default to the smallest size.",
-        "6. Strong draw (8+ outs) with no bet in front → betting (semi-bluff) is preferred — "
-        "**heads-up only**: with 3+ opponents in the pot, check instead, because a draw has "
-        "no fold equity against a calling field. Facing a bet, use the pot-odds "
-        "gate from rule 3: call only if it clears the break-even; otherwise fold.",
-        "7. The user facts include an explicit «Value directive» when one of these rules "
-        "applies. It is a default for strong made hands; the «Table dynamics» section "
-        "overrides it when it describes the opponent's aggression as value-heavy. In "
-        "particular, a Value directive that says «call a normal-sized bet» does NOT bind "
-        "you to call a turn/river barrel with one pair or two pair when the table notes "
-        "say that line is value-heavy.",
-        "8. One pair is not a stack-off hand, but do not auto-fold it: heads-up on the "
-        "flop, an overpair (TT+) facing a single raise is a CALL — the raise range still "
-        "contains top pair and draws. Fold top pair / marginal one pair, and fold an "
-        "overpair to multiway aggression, a turn/river barrel, or a raise that gives bad "
-        "odds.",
-        "9. Before raising a strong hand, check whether the board allows a better hand: "
-        "three or more of one suit → a flush is possible; a paired board → a full house "
-        "or quads are possible. A straight/two pair/set is NOT the nuts then. On such a "
-        "board, call for showdown instead of raising — a raise only gets called by better.",
-        "",
-        "## Explosive pot (multiway / big preflop pot)",
-        "«Explosive pot: YES» in the user facts has two triggers: (a) the client "
-        "displayed the «幸运暴击 / BOMB POT» banner at the start of the hand — a "
-        "forced-ante bomb pot where the whole table sees the flop; or (b) the pot "
-        "entering this street is exactly 5BB per player (previous-street pot ÷ "
-        "players dealt = 5BB — the fixed bomb ante; ordinary big pots do not divide "
-        "out exactly). In both cases everyone is in the pot, so the field is "
-        "wide and full of «weird» two "
-        "pair / trips from hands that would normally fold. Loose-passive players do not "
-        "put chips in this pot with nothing, and their bet/raise sizes here will not be "
-        "small. Be especially careful:",
-        "- One pair (overpair or top pair) is only a MEDIUM hand in an explosive pot. Do "
-        "not raise it, do not stack off with it, and do not call down multiple streets. "
-        "Call at most one small bet; fold to a raise, a large bet, or a turn/river "
-        "barrel.",
-        "- Do not assume top pair is good just because the board looks dry — in a "
-        "multiway limped/raised pot, random two pair and trips are exactly what the "
-        "field holds.",
-        "- Value-bet strong made hands (two pair, set, straight, flush), but pot-control "
-        "medium hands. Do not bloat the pot with one pair.",
-        "- Explosive pot overrides the default «VALUE DEFAULT: bet/call with top pair» "
-        "directives: top pair is a medium hand / bluff-catcher here, so do not raise or "
-        "stack off with it even though the table notes say to value-bet thin. A small "
-        "value bet when checked to is still fine.",
-        "",
-        "## Table dynamics (user-provided, when present)",
-        "The prompt may include a «Current table dynamics» block (this prompt) or a "
-        "«Table context» block (user facts) written by the player. "
-        "Treat it as authoritative for the current table and adjust exploitative choices. "
-        "**The table may be mixed:** apply the note per opponent/seat, match the opponent "
-        "in this hand, and never average it into one «loose-passive» profile:",
-        "- loose-passive / calling station / novice: bluff less, value-bet thinner "
-        "(more marginal hands) and size up, and never slow-play strong hands. Their "
-        "raises and multi-street barrels are value-heavy: fold marginal made hands "
-        "(including two pair on a paired board) instead of paying them off, unless you "
-        "have a set/straight/flush or a strong draw with the right price. A heads-up "
-        "flop overpair is not marginal — call one raise;",
-        "- tight / rarely bluffs / nit: fold marginal bluff-catchers, do not pay off, "
-        "value-bet tighter (fewer marginal value hands), respect raises, and bluff more "
-        "selectively;",
-        "- loose-aggressive / maniac (LAG, loose-maniac/loose-aggressive): do NOT "
-        "assume their bet/raise is value. Trap with strong hands, call down lighter, "
-        "avoid thin value and bluffing wars; do not bet-fold a medium hand. Let them "
-        "barrel into your bluff-catchers;",
-        "- passive preflop + aggressive postflop: preflop calls are wide, but postflop "
-        "bets are not automatically value — treat it as a bluff-catching spot;",
-        "- tight-aggressive / solid: play straightforwardly, avoid fancy plays, and give "
-        "credit to aggression.",
-        "- in an explosive pot (bomb pot or exactly 5BB per player, everyone in), "
-        "these tendencies "
-        "amplify: a loose-passive player's bet or raise is value and will not be small, "
-        "top pair is only medium, and bluffing a field this wide is burning money;",
-        "Example: on 55 2 T 8, hero has JJ (two pair) and a loose-passive opponent bets "
-        "flop, turn and river. Their line is value-heavy (5x trips, boats); fold the "
-        "turn/river even though the small sizes give a low break-even equity.",
-        "It overrides the default «unknown opponent» assumption and may justify deviating "
-        "from a default call/fold/check line when the hand is marginal (bluff-catcher or "
-        "medium strength). It never overrides computed hand strength or pot odds: with a "
-        "strong made hand still bet/raise for value; with a strong draw still compare "
-        "equity. When the dynamics change the line, say which tendency drove it.",
-        "",
-    ]
-    system_parts.append(_GROUND_TRUTH_RULES)
-    live = skills.render_live_read(ctx)
-    if live:
-        system_parts.append(live)
-    system_parts.append(skills.render_catalog(all_, selected))
-    system_parts.append(skills.render_block(selected))
-
-    return "\n".join(system_parts), render_hand_facts(sit)
+# 与 replay / compare_review_hands 共用的硬规则审计。新 prompt 不依赖这些标签，
+# 它们只用于复盘时回答「这次下注是否与事实矛盾」。口径只看可证伪的事实：
+# 牌力解析、坚果校验、牌面结构、赔率，不再读 Value directive。
+_ONE_PAIR_TIERS = (OVERPAIR, TPTK, TP_WEAK, MID_BOTTOM)
 
 
-# ── lean-rules：契约 + 事实 + 桌面动态 + 现代范围框架 ──────────────
-# 刻意不加载 skills_md_en：那套是 2005 年《Little Green Book》的绝对化打法，
-# 没有范围表，system 约 20k 字符。这里只保留模型做「范围决策」真正需要的：
-# 输出契约、怎么用事实/赔率、按位置的 RFI/3-bet/冷跟范围、翻后纹理与尺度、
-# 爆炸底池一行、以及桌面动态的调频方式。默认 lean 不再加载这段，只给事实。
-_LEAN_RULES_SYSTEM = """\
-You are a Texas Hold'em cash-game advisor working in real time. Hero has a few seconds and needs one directly executable action.
-
-## Priority (highest first)
-1. Legal actions and computed math (hand rank, equity, pot odds, SPR, behind-now) — never violate.
-2. A reliable per-seat read — «Opponent reads» or a manual pin — outranks every table-wide statement.
-3. «Hand vs ranges» & «Hand-strength read»: "behind now" = made hand, "equity vs field" = by river, "vs N-way avg" = fair share; random rank is only a lower bound. A draw is always DRAW.
-4. Table context, «Board structure» and «GTO baseline» — context, not the answer.
-5. The chart and generic heuristics — defaults; never override 1–4.
-
-## GTO baseline (only when the facts contain that block)
-It is the solved default for this exact board class: range mix, your hand's size mix, EV per size. It outranks the generic size rules below, but computed math, a reliable read, table dynamics, multiway/explosive-pot rules and the block's caveats override it. If you pick a non-best-EV size, name the exploitative reason. Never present an «[approx]» (interpolated) size as solved.
-
-## Who you are playing
-The pool is **mixed** — do not project one label onto the whole table. Classify each opponent from «Opponent reads» (per-seat stats or a manual pin); «tentative» is a hint. With no read, treat the opponent as unknown, not as a station. «Table context» is table-level only — it never names individual players.
-- station: calls wide, raises little; their bet/raise is value → thin value, size up, fold marginal hands to barrels.
-- LAG/maniac (loose-maniac/loose-aggressive): opens/3-bets large, barrels wide, overbets; their bet is NOT automatically value → do not thin-value OOP; check-call, let them barrel, do not bet-fold; bluff-catch more.
-- LAG/maniac, but betting SMALL on multiple streets: a LAG's bluff tool is the big bet (only big sizing gets folds); repeated small sizing is a merged VALUE line (top pair+, protection, price-setting). His range has no air → your bluff-raise has negative fold equity: do not raise it, do not pay off three streets with one pair, fold marginal hands on the turn instead of bluff-catching the river. Save the bluff-catch for his big bet / overbet.
-- passive preflop + aggressive postflop: postflop bets are not automatically value → bluff-catching spot.
-
-## The question that decides every bet
-Ask two questions, in order:
-1. **Which worse hands actually CALL me?** (value)
-2. **Which better hands RAISE me, and who is left to act?** (risk)
-- Two or more worse callers and no better raiser → bet 2/3 to full pot (the «Value directive» may name another size; it wins).
-- "Only better hands call, worse hands fold" → check.
-- Against a station, Q1 dominates. Against a maniac/LAG, Q2 dominates: a "value" bet that folds worse and gets raised by better is a check.
-- Raising a non-nut hand narrows their range to its top: value-raise a station, but do not bluff-raise a maniac.
-
-## Output
-Return exactly one JSON object, no markdown fence and no other text:
-{"option": "<id from Options>", "reason": "<one sentence, under 25 words>", "plan": "<optional next-street intent, under 10 words>", "confidence": <optional 0.0-1.0>}
-- option must be exactly one id from the user's «Options» section. Never invent ids or amounts; all amounts are computed by the program.
-- reason must cite the range, computed fact, or table tendency that decided it.
-- plan (optional) is what you will do next street if the action goes as expected.
-- confidence (optional) is your certainty in the option; it is logged, never used to click.
-
-## Ground rules
-1. Computed facts are authoritative for MATH: positions, stack, pot, to_call, break-even equity, SPR, hand tier, draw, texture, explosive pot. Do not recompute amounts.
-2. Preflop: choose by position and range. Do not limp as the first player in, except an SB complete or a small pocket pair (22-66) over-limping for 1BB to set-mine. This table enforces a <<PREFLOP_MIN_RAISE>> minimum preflop raise (all-in excepted); every raise option is already at or above it — never argue for a smaller size.
-3. Postflop: judge the calling range and board texture first; then value/check/size.
-4. Call only when your equity beats the stated break-even. <<IMPLIED_ODDS_RULE>> Unquantified "implied odds" is never a reason to call.
-5. If calling covers Hero's stack, the decision is all-in or fold.
-6. A «Value directive» in the facts is a coarse default; when a «Math gate» line is present, it is the binding price verdict. Overrule either only with a concrete read from the facts.
-7. Keep your own previous plan (facts: «My previous decision») unless a computed fact contradicts it. Do not reverse a line you chose last street without a reason.
-
-## Preflop ranges (9-handed, ~100BB, ante) — DEFAULTS for an unknown opponent
-RFI by position (cumulative: each row adds to the previous; raise to the offered size, fold the rest). «Table dynamics» outranks this table: loose → widen by roughly one seat and let small pairs over-limp for 1BB; tight → do not widen.
-<<RFI_CHART>>
-SB: open ~30%, raise-or-fold vs opens (not vs limps). In a limped pot, completing for 0.5BB is cheap, but **raw pot odds never justify it — you need realized equity**. Complete only hands that can flop something you can bet: suited, connected with gap 2 or less, a pocket pair, or an ace with a real kicker. FOLD offsuit trash (92o, T6o, Q6o).
-The facts may carry a «Preflop range» line computed from this chart. It is the chart DEFAULT: when it says OUT, do not open-raise — but table dynamics can widen or narrow what is playable. One exception — a small pocket pair (22-66) may over-limp for 1BB to set-mine even when the chart says OUT; a non-pair hand never qualifies. This chart is RFI (unopened pot): over limpers the isolation range is tighter, never treat "IN the open range" as an isolation license. Speculative hands over limpers (A2s-A9s, suited connectors/gappers): raise for initiative and dead money, not value isolation.
-3-bet: value QQ+/AK; bluffs A5s-A2s, KQs, KJs vs late opens; 3x IP, 4x OOP.
-Cold-call IP (vs a single open): 22-99, 54s-JTs, KTs, QJs; no offsuit broadways vs early opens.
-BB vs late open: defend wide; 3-bet linear 55+, A9s+, KTs+, ATo+, KQo.
-**Facing a 3-bet: continue ONLY with QQ+/AK** — 4-bet for value, or flat in position to keep his bluffs in. Fold the rest: small pairs never set-mine (his range is QQ+/AK, so a flopped set is set-under-set or paid off by nothing); suited connectors/offsuit broadways never realize equity.
-At 6-8 handed, widen each early-position range by roughly one seat. Below ~25BB the chart is void: jam or fold, do not open-raise small.
-
-## Postflop (defaults; table dynamics and opponent type override)
-**Opponent type changes the line.** The absolutes below are for a station. Against a maniac/LAG: do not thin-value OOP; check-call medium hands, let them barrel, do not bet-fold; bluff-catch more and give less credit to a single BIG bet — but a repeated small bet from him is his merged value line, so fold one pair to it rather than calling three streets.
-- C-bet dry A/K-high or paired boards at 1/3 pot only with equity; air is a donation.
-- Size by what worse hands call, and prefer the size named in the «Value directive»; 1/3 is never a value size vs a station, and against a LAG a small blocker bet is worse than a check.
-- Bluff only with a real draw. Heads-up, a strong draw with no bet in front is a BET. 3+ opponents: never bet/raise a draw — no fold equity; check and call only at the right price. (The program withholds those options multiway.)
-- One pair: one bet, then pot-control. At SPR ≤ 2 with top pair top kicker or better, stack off; at SPR ≥ 6 one pair is not a stack-off hand.
-- 22-99 unimproved are MEDIUM set-mines — bet small/check, never stack off, especially 3+ way.
-- Facing a raise or a multi-street barrel from a station: FOLD marginal one pair and non-nut made hands; a heads-up flop overpair calls one raise.
-- MDF assumes a bluffer. vs a station, fold more than MDF; vs a LAG, do not over-fold to a single barrel — call more, fold to the raise/overbet or multi-street barrel.
-- Multiway (3+): bluffing is off the table; raise less, call more; top pair is medium.
-
-## Turn
-- One card to come: draw equity = outs × 2, not × 4. Do not pay a turn bet with a weak draw (4-7 outs); a strong draw needs the price.
-- Second barrel only if the turn improves your range or you had a real draw; give up with air.
-- Medium made hands: check behind or call one bet, do not build the pot.
-- A turn raise from a passive player is value: fold one pair and two pair.
-
-## River
-- No more cards: a draw is air. Check/fold it; never call "for the draw".
-- Value bet only if a worse hand calls; one pair checks behind for showdown.
-- A 2/3+ river bet from a passive player is under-bluffed: fold one pair and two pair without a read; call with a set, straight or flush.
-- Do not bluff a station or a multiway field on the river: no fold equity.
-- Bluff-catch only with a good price AND a credible line (a missed draw that would have bet earlier).
-
-## 3-bet / 4-bet pots
-- SPR is low (often < 3): top pair top kicker and overpairs are stack-off hands; do not fold them to a single raise.
-- 4-bet value QQ+/AK, bluff A5s-A2s. Do not cold-call a 3-bet with offsuit broadways.
-- C-bet smaller and more often; ranges are narrow, so "who calls" is sharper.
-
-## Explosive pot
-«Explosive pot: YES» (bomb banner, or 5BB per player) means wide ranges and many two pair/trips. Top pair/overpair is a MEDIUM hand — pot-control it.
-
-## Table context (user-provided, table-level, when present)
-Table-wide context outranks the chart and generic heuristics; those never override table dynamics or computed math. A reliable per-seat profile or a manual pin outranks it. **The table may be mixed:** apply the note to the table's overall tendency; never average individuals into "loose-passive". It overrides the default «unknown opponent» assumption, never computed hand strength or pot odds.
-- station: value-bet thin/big; respect raises.
-- LAG/maniac: never thin-value or bet-fold a medium hand — check-call and let them barrel. Exception: repeated small bets from them are a merged value line, so fold one pair instead of calling it down, and never bluff-raise it.
-- passive preflop + aggressive postflop: postflop bets are bluff-catches, not value.
-- nit/tight: steal more, fold marginal. TAG: straightforward.
-- If raises are rare (loose-passive), a small pair may over-limp for 1BB even OOP; "do not over-limp too much" is a frequency cap, not a ban at 1BB.
-"""
-
-# 范围表由 preflop_ranges 生成，不再手写两份：手写一定漂移，而模型拿到
-# 和代码判定不一致的表时，会挑对自己有利的那份用。
-_LEAN_RULES_SYSTEM = _LEAN_RULES_SYSTEM.replace("<<RFI_CHART>>", chart_text())
-_LEAN_RULES_SYSTEM = _LEAN_RULES_SYSTEM.replace(
-    "<<PREFLOP_MIN_RAISE>>", f"{PREFLOP_MIN_RAISE_BB:g}BB")
-_LEAN_RULES_SYSTEM = _LEAN_RULES_SYSTEM.replace("<<IMPLIED_ODDS_RULE>>",
-                                    implied_odds_rule())
-
-
-def _build_messages_lean_rules(sit: Situation) -> tuple[str, str]:
-    return _LEAN_RULES_SYSTEM + "\n" + _GROUND_TRUTH_RULES, render_hand_facts(sit)
-
-
-# ── lean：只注入状态、逐座位画像、实时牌力、桌风、选项 ──────────────
-# 不包含 RFI 表、3-bet/冷跟、翻后纹理/尺度、价值指令、Math gate、上一街
-# plan、GTO、爆炸底池等任何策略提示。模型只看事实，自己决定动作。
-_MINIMAL_SYSTEM = """\
-You are a Texas Hold'em cash-game advisor working in real time. Hero has a few seconds and needs one directly executable action.
-
-You receive the current hand state and the legal options, plus any available per-seat opponent reads, real-time hand-strength facts, and table-level notes. No chart or rule list is supplied: decide from the facts yourself.
-
-## Output
-Return exactly one JSON object, no markdown fence and no other text:
-{"option": "<id from Options>", "reason": "<one sentence, under 25 words>", "confidence": <optional 0.0-1.0>}
-- option must be exactly one id from the user's «Options» section. Never invent ids or amounts; all amounts are computed by the program.
-- reason must explain the choice using the supplied facts.
-- Do not invent cards, opponent reads, or facts that are not in the input. If a fact is missing, say so in the reason.
-"""
-
-
-def _minimal_hand_strength_lines(sit: Situation) -> list[str]:
-    """实时牌力事实：只给牌型/排名/听牌/权益，不给「该 bet 还是 check」。"""
+def audit_advice_tags(sit: Situation, kind: str | None,
+                      amount: float | None) -> set[str]:
+    """返回建议的违规标签集合（空集 = 没抓到硬错）。"""
+    tags: set[str] = set()
     snap = sit.snap
-    if snap.street == PREFLOP:
-        return []
-    lines = ["## Real-time hand strength"]
-    if sit.hand_label_en:
-        tier = _TIER_EN.get(sit.hand_tier or "", sit.hand_tier or "unknown")
-        lines.append(f"My hand strength: {sit.hand_label_en} (tier: {tier})")
-
+    street = snap.street
+    pos = (snap.hero_position or "").upper()
+    cards = snap.hero_cards
+    to_call = float(snap.to_call or 0.0)
+    pot = float(snap.pot or 0.0)
+    agg = kind in ("bet", "raise", "allin")
+    tier = sit.hand_tier
     gt = sit.ground_truth
-    if gt is not None:
-        data = gt.to_dict()
-        bs = data["board_structure"]
-        if bs["flush_made_possible"]:
-            flush = "made flush possible"
-        elif bs["flush_draw_possible"]:
-            flush = "flush draw only (no made flush)"
-        else:
-            flush = "no flush possible"
-        lines.append(
-            f"Board structure: {flush}; straight "
-            f"{'possible' if bs['straight_possible'] else 'not possible'}; "
-            f"paired {'yes' if bs['paired'] else 'no'}")
-        made = data["made"]
-        used = " ".join(made["hero_cards_used"]) or "none (playing the board)"
-        lines.append(
-            f"Made hand: {made['category'].upper()} ({made['detail']})｜"
-            f"best five: {' '.join(made['best_five'])}｜hole cards used: {used}")
-        rank = data["rank"]
-        lines.append(
-            f"Made-hand rank: beaten by {rank['beat_pct']:.1f}% per opponent; "
-            f"ties {rank['tie_pct']:.1f}%; equity {rank['equity_pct']:.1f}% vs "
-            f"one opponent; with {rank['opponents']} opponent(s), "
-            f"{rank['beat_at_least_pct']:.1f}% chance at least one is ahead "
-            f"(random hands are a lower bound).")
-        if rank["hero_is_nuts"]:
-            lines.append("NUT STATUS: NUTS — no opponent holding can beat you.")
-        else:
-            beaten = ", ".join(
-                f"{b['category']} ({b['combos']})" for b in rank["beaten_by"])
-            lines.append(
-                f"NUT STATUS: NOT THE NUTS — better hands exist: {beaten}.")
-        draws = data["draws"]
-        parts: list[str] = []
-        if draws["flush_draw"]:
-            parts.append(
-                f"{'nut ' if draws['nut_flush_draw'] else ''}flush draw in "
-                f"{draws['flush_suit']} ({draws['flush_outs']} outs)")
-        if draws["straight_draw"]:
-            kind = "open-ended/double-gutshot" if draws["oesd"] else "gutshot"
-            parts.append(f"{kind} straight draw ({draws['straight_outs']} outs)")
-        if parts:
-            lines.append(
-                f"Draws: {' + '.join(parts)}; total {draws['total_outs']} outs "
-                f"(rule of 4/2 equity {draws['equity_pct']:.0f}%).")
-        else:
-            lines.append("Draws: none.")
-    elif sit.outs:
-        lines.append(
-            f"Draw outs: {sit.outs} (rule of 4/2 equity "
-            f"{sit.equity_pct or 0:.0f}%).")
+    hs = sit.hand_strength
+    hs_kind = getattr(hs, "kind", None)
+    hs_size = getattr(hs, "size", None)
+    multiway = (sit.opponents_in_hand or 0) >= 3
 
-    if sit.hand_ranges is not None:
-        lines.append("")
-        for line in sit.hand_ranges.render().splitlines():
-            if line.startswith("Read:"):
-                continue
-            lines.append(line)
-    if sit.hand_strength is not None:
-        hs = sit.hand_strength
-        lines.append(
-            f"Hand-strength read: {hs.size.upper().replace('_', ' ')} "
-            f"{hs.made_name}; behind now {hs.behind_any:.0%}, equity "
-            f"{hs.equity:.0%} vs {hs.n + 1}-way avg {hs.avg:.0%}.")
+    # 翻后：事实说明这不是价值牌（空气/打牌面/多路听牌）却主动下注。
+    if agg and (hs_kind in ("weak", "board_play")
+                or (hs_kind == "draw" and multiway)):
+        tags.add("非价值下注")
+    if agg and sit.plays_board:
+        if street != "flop" or (amount is not None and pot and amount > 0.5 * pot):
+            tags.add("打牌面下注")
+    # 非坚果/一对主动加注：只有坚果或牌面明显安全时才不算错。
+    if kind == "raise" and tier == STRONG_MADE and gt is not None:
+        if not gt.hero_is_nuts and (gt.board_info.paired
+                                    or gt.board_info.flush_made_possible):
+            tags.add("非坚果加注")
+    if kind == "raise" and tier in _ONE_PAIR_TIERS:
+        tags.add("一对加注")
+    if agg and multiway and tier in (STRONG_DRAW, WEAK_DRAW):
+        tags.add("多路听牌下注")
+
+    # 翻前范围。
+    if street == PREFLOP and len(cards) == 2:
+        verdict = range_verdict(pos, cards)
+        if verdict is not None:
+            if pos not in ("SB", "BB") and verdict.in_range is False:
+                if agg and to_call <= 1.0:
+                    tags.add("翻前表外加注")
+                if kind == "call" and to_call <= 1.0 and not _is_set_mine_pair(cards):
+                    tags.add("翻前表外溜入")
+            if (pos not in ("SB", "BB") and verdict.in_range is True
+                    and kind == "fold" and to_call <= 1.0):
+                tags.add("范围内却弃牌")
+        if (pos == "SB" and kind == "call" and to_call <= 1.5
+                and not sb_completable(cards)):
+            tags.add("SB补盲垃圾牌")
+        if (pos not in ("SB", "BB") and kind == "call" and to_call <= 1.0
+                and tuple(snap.preflop_shapes) == ("unopened",)):
+            tags.add("开池平跟")
+
+    # 听牌在有即时赔率时弃牌。
+    if (kind == "fold" and to_call > 0 and tier in (STRONG_DRAW, WEAK_DRAW)
+            and sit.equity_pct is not None and pot > 0):
+        owed = call_amount(snap)
+        winnable = winnable_pot(snap)
+        bep = owed / winnable * 100 if owed > 0 and winnable > 0 else 0.0
+        if sit.equity_pct > bep + IMPLIED_ODDS_CAP_PCT:
+            tags.add("有赔率却弃牌")
+
+    # 强价值牌下注过小。
+    if (street != PREFLOP and agg and amount is not None and pot > 0
+            and hs_kind == "value" and hs_size in ("big", "very_big")
+            and amount < 0.4 * pot):
+        tags.add("价值下注过小")
+    return tags
+
+
+# ─────────────────────── 中文 lean 提示词 ───────────────────────
+
+# 唯一保留的 system。风格与旧 lean-rules 的区别：只给决策顺序和常见错误，
+# 不写「永远/绝不」，不注入任何具体牌表或价值指令。
+SYSTEM_ZH = """\
+你是一名德州扑克现金局实时教练。Hero 只有几秒钟，需要你从「可选动作」中选一个能直接执行的动作。
+
+## 输出
+只输出一个 JSON 对象，不要 Markdown，不要前后解释：
+{"option": "<选项 id>", "reason": "<中文一句话，不超过 30 字>", "confidence": <可选 0-1>}
+- option 必须严格来自「可选动作」，不得编造选项 id 或金额。
+- reason 必须引用输入中的具体事实（牌力、赔率、位置、对手画像、桌风）；不要引用未提供的规则、图表、概率或“价值指令”。
+- 关键事实缺失时，选最保守的合法动作，并在 reason 里说明缺什么。
+
+## 事实优先级
+1. 程序计算的事实：底池、需跟、有效筹码、SPR、赔率门槛、牌型/坚果/听牌、多人池人数。它们是权威，不要重算或矛盾。
+2. 逐座位对手画像 > 桌级桌风；桌风不能覆盖计算事实。
+3. 通用扑克经验只在事实不足时兜底。
+
+## 决策顺序
+- 翻前：看位置、前面行动（无人入池/溜入/单加注/3-bet）、有效筹码和范围。不要因为“便宜”用垃圾牌入池；面对加注看价格、位置和对手范围。
+- 翻后：先问“哪些更差的牌会跟、哪些更好的牌会加”，再决定价值、诈唬、过牌或弃牌；然后比较权益与赔率门槛。
+- 听牌：按 outs、价格、弃牌率、公对面/成花风险判断；不要因为“当前未成牌不是坚果”就否决半诈唬。
+- 多人池：顶对/超对降级；没有弃牌率时不要用听牌硬下注。
+- 河牌：没有未来牌，听牌等同空气；跟注看赔率和对手线路，价值下注看更差的牌会不会跟。
+- 尺度只能从「可选动作」里选，金额由程序算好，不要自己算。
+- all-in 是最后手段：只有赔率、筹码深度和底池几何都合理时才用，不要用它代替正常的价值下注。
+
+## 常见错误
+- 牌型名字不等于牌型排名；两对、三条、顺子都要看牌面和对手范围。
+- 不要因为“已经投入”而跟注；不要因为“怕被反超”而弃掉明显领先的牌。
+- 不要编造对手手牌，不要给不存在的范围表/规则找理由。
+"""
+
+_STREET_ZH = {"preflop": "翻前", "flop": "翻牌", "turn": "转牌", "river": "河牌"}
+_POT_TYPE_ZH = {
+    "3-bet+ pot": "3-bet+ 池",
+    "single-raised pot": "单加注池",
+    "limped pot": "溜入池",
+    "unopened pot": "无人入池",
+}
+_PREFLOP_SHAPE_ZH = {
+    "unopened": "无人入池",
+    "limped": "溜入",
+    "single-raise": "单加注",
+    "three-bet": "3-bet",
+}
+_SIZE_ZH_LABEL = {
+    "very_big": "很大",
+    "big": "大",
+    "medium": "中",
+    "small": "小",
+    "very_small": "很小",
+}
+_SUIT_ZH = {"s": "黑桃", "h": "红桃", "d": "方块", "c": "梅花"}
+_RANK_ZH = {"T": "10", "J": "J", "Q": "Q", "K": "K", "A": "A"}
+_CATEGORY_EN_ZH = {
+    "High card": "高牌", "One pair": "一对", "Two pair": "两对",
+    "Trips": "三条", "Straight": "顺子", "Flush": "同花",
+    "Full house": "葫芦", "Quads": "四条", "Straight flush": "同花顺",
+}
+
+
+def _fmt_num(value: float | None) -> str:
+    """BB 数字：整数不带小数点，其余保留两位。"""
+    if value is None:
+        return "未知"
+    value = float(value)
+    if abs(value - round(value)) < 1e-9:
+        return f"{int(round(value))}"
+    return f"{value:.2f}".rstrip("0").rstrip(".")
+
+
+def _effective_stack(snap: HandSnapshot) -> float | None:
+    """有效筹码 = min(Hero 后手, 所有未弃牌对手后手)。"""
+    if snap.hero_stack is None:
+        return None
+    stacks = [o.stack for o in snap.opponents
+              if not o.folded and o.stack is not None]
+    return min([snap.hero_stack, *stacks]) if stacks else snap.hero_stack
+
+
+def _range_conclusion_zh(snap: HandSnapshot,
+                         table_dynamics: str | None) -> str | None:
+    """翻前开池归属的一句话中文结论（只在无人入池/溜入时使用）。
+
+    `preflop_ranges.Verdict.render()` 是英文长句；模型只需要「在/不在 +
+    有溜入者时收紧后的归属」，这里只取结构化字段重新拼。
+    """
+    verdict = range_verdict(snap.hero_position, snap.hero_cards,
+                            table_dynamics=table_dynamics,
+                            limpers=count_limpers(snap))
+    if verdict is None:
+        return None
+    if verdict.in_range is None:
+        return f"{verdict.hand} 在 {verdict.position} 没有开池范围（盲注位不是开池点）"
+    head = ("在开池范围内，默认加注"
+            if verdict.in_range else "不在开池范围内，默认弃牌")
+    text = f"{verdict.hand} 在 {verdict.position} {head}"
+    if verdict.limpers > 0 and verdict.isolation_ok is not None:
+        iso = ("仍在收紧后的范围内" if verdict.isolation_ok
+               else "已不在收紧后的范围内")
+        text += (f"；前面有 {verdict.limpers} 个溜入者，"
+                 f"按 {verdict.isolation_position} 的更紧范围看{iso}")
+    return text
+
+
+def _action_zh(action: ActionRecord) -> str:
+    if action.action == "check":
+        return "过牌"
+    if action.action == "fold":
+        return "弃牌"
+    if action.action == "call":
+        return "跟注" + (f" {_fmt_num(action.amount)}BB"
+                         if action.amount is not None else "")
+    if action.action == "bet":
+        return "下注" + (f" {_fmt_num(action.amount)}BB"
+                         if action.amount is not None else "")
+    if action.action == "raise":
+        return "加注到" + (f" {_fmt_num(action.amount)}BB"
+                           if action.amount is not None else " ?")
+    if action.action == "allin":
+        return "全下" + (f" {_fmt_num(action.amount)}BB"
+                         if action.amount is not None else "")
+    return action.action
+
+
+def _fmt_actions_zh(actions: list[ActionRecord]) -> str:
+    if not actions:
+        return "（无行动）"
+    parts = []
+    for action in actions:
+        who = ("Hero" if action.is_hero
+               else (action.position or action.name or action.seat_id))
+        tags = [name for name, on in (("全下", action.all_in),
+                                      ("推断", action.inferred)) if on]
+        extra = f"（{'、'.join(tags)}）" if tags else ""
+        parts.append(f"{who} {_action_zh(action)}{extra}")
+    return " → ".join(parts)
+
+
+def _board_structure_zh(gt: GroundTruth) -> str:
+    b = gt.board_info
+    if b.flush_made_possible:
+        flush = "成花面（同花已可能）"
+    elif b.flush_draw_possible:
+        flush = "花听面（未成花）"
+    else:
+        flush = "彩虹面（无同花可能）"
+    straight = "顺子可能" if b.straight_possible else "顺子不可能"
+    paired = "公对面：是" if b.paired else "公对面：否"
+    return "｜".join((flush, straight, paired))
+
+
+def _street_change_zh(gt: GroundTruth) -> str:
+    """这一街新发的牌改变了什么（成花 / 公对面成三条 / 成对）。"""
+    board = gt.board
+    if len(board) < 4:
+        return "无（翻牌没有上一街可比）"
+    last, prev = board[-1], board[:-1]
+    changes: list[str] = []
+    suit = last[1]
+    now = sum(1 for card in board if card[1] == suit)
+    before = sum(1 for card in prev if card[1] == suit)
+    if now >= 3 and before < 3:
+        changes.append(f"{card_text(last)} 让牌面成花"
+                       f"（{now} 张{_SUIT_ZH.get(suit, suit)}）")
+    rank = last[0]
+    same = sum(1 for card in board if card[0] == rank)
+    before_same = sum(1 for card in prev if card[0] == rank)
+    if same >= 4:
+        changes.append(f"{card_text(last)} 让牌面出现四条")
+    elif same == 3 and before_same == 2:
+        changes.append(f"{card_text(last)} 让牌面出现三条")
+    elif same == 2 and before_same == 1:
+        changes.append(f"{card_text(last)} 让牌面成对")
+    return "；".join(changes) + "。" if changes else "无"
+
+
+def _draws_zh(gt: GroundTruth) -> str:
+    d = gt.draws
+    parts: list[str] = []
+    if d.flush_draw:
+        parts.append(("坚果同花听牌" if d.nut_flush_draw else "同花听牌")
+                     + f"（{d.flush_suit}，{d.flush_outs} outs）")
+    if d.straight_draw:
+        kind = "两头顺/双卡顺听牌" if d.oesd else "卡顺听牌"
+        parts.append(f"{kind}（{d.straight_outs} outs）")
+    return "；".join(parts) if parts else "无"
+
+
+def render_gt_warnings_zh(gt: GroundTruth | None,
+                          draw_focus: bool = False) -> list[str]:
+    """把 ground_truth 的英文警告映射成中文；没覆盖的保留原文并标 `[EN]`。
+
+    `draw_focus=True` 时丢掉「你不是坚果」这类只描述当前未成牌的警告，
+    避免模型用「当前不是坚果」否决半诈唬（§4.4）。
+    """
+    if gt is None:
+        return []
+    skip = ("You are NOT the nuts",) if draw_focus else ()
+    out: list[str] = []
+    for warning in gt.warnings:
+        if warning.startswith(skip):
+            continue
+        if warning.startswith("You are the ABSOLUTE NUTS"):
+            text = ("你是绝对坚果：没有任何对手持牌能打败你，也没有平局。"
+                    "不要把更大的牌说成可能；不要弃牌。")
+        elif warning.startswith("You are the NUTS"):
+            text = ("你是坚果：没有对手持牌能打败你，但部分持牌与你平局（分池）。"
+                    "不要把更大的牌说成可能；不要弃牌。")
+        elif warning.startswith("You are NOT the nuts. Hands that beat you:"):
+            raw = warning.split(":", 1)[-1].strip().rstrip(".")
+            names = "、".join(
+                _CATEGORY_EN_ZH.get(name.strip(), name.strip())
+                for name in raw.split(",") if name.strip())
+            text = f"你不是坚果；能打败你的牌型：{names}。"
+        elif warning.startswith("A flush is ALREADY possible"):
+            text = ("牌面已成花：任何同花都打败你的当前成牌；不要把它当坚果，"
+                    "也不要当作不可打败而加注。")
+        elif warning.startswith("The board is paired"):
+            text = "牌面成对：葫芦或四条可能，当前成牌打不过这些牌。"
+        elif warning.startswith("One of your two pairs is the BOARD pair"):
+            text = ("你的一对来自公对面，所有人共享；更大的口袋对也能组成更大的两对，"
+                    "这是抓诈牌，不是价值怪兽。")
+        elif warning.startswith("There are trips on the board"):
+            text = "牌面有三条：四条可能。"
+        elif warning.startswith("An opponent can complete a straight"):
+            text = "对手可以用两张牌补成顺子；当前成牌不是坚果。"
+        elif warning.startswith("At most 2 of any suit are on the river board"):
+            text = "河牌最多两张同花：不存在同花；不要称其为花面。"
+        elif warning.startswith("Only a flush DRAW is possible"):
+            text = "牌面最多两张同花：没有成花，只是花听；不要称其为花面。"
+        elif warning.startswith("You are the nuts NOW"):
+            text = ("你现在是坚果，但后续街的第三张同花可以成花；"
+                    "如果花牌能让价值被价格劝退，不要慢玩。")
+        elif warning.startswith("This is a DRAW, not a made hand"):
+            text = ("这是听牌，不是成牌；上面的排名描述的是当前未成牌，"
+                    "请按 outs 和赔率判断。")
+        elif warning.startswith("Your flush draw is on a paired board"):
+            text = "花听在公对面上：葫芦可能已经存在，中花也未必是坚果。"
+        elif warning.startswith("River: no more cards"):
+            text = "河牌：没有后续牌，牌力已定。"
+        else:
+            text = f"[EN] {warning}"
+        out.append(text)
+    return out
+
+
+def _gap_zh(text: str) -> str:
+    """数据缺口：中文原样，纯英文技术告警标 `[EN]`。"""
+    if any("\u4e00" <= ch <= "\u9fff" for ch in text):
+        return text
+    return f"[EN] {text}"
+
+
+def render_options_zh(sit: Situation) -> list[str]:
+    """「可选动作」：`- id｜中文标签（实际金额已在标签里）`。"""
+    lines = ["## 可选动作"]
+    for option in sit.options:
+        note = f"（{option.note}）" if option.note and option.note not in option.label else ""
+        lines.append(f"- {option.id}｜{option.label}{note}")
     return lines
 
 
-def render_minimal_facts(sit: Situation) -> str:
-    """lean 的 user 消息：状态 + 实时牌力 + 逐座位画像 + 桌风 + 选项。
+def render_ranges_zh(sit: Situation) -> list[str]:
+    """`Hand vs ranges` 的中文事实：范围宽度 + 逐家领先比例。"""
+    hr = sit.hand_ranges
+    if hr is None:
+        return []
+    modeled = len(hr.opponents)
+    actual = (sit.opponents_in_hand
+              if sit.opponents_in_hand is not None
+              else sit.snap.opponents_in_hand)
+    shown = hr.opponents
+    more = 0
+    if len(shown) > 3:
+        shown = tuple(sorted(shown, key=lambda e: -e.behind)[:3])
+        more = len(hr.opponents) - 3
+    ranges = "｜".join(
+        f"{o.label} {o.range_id} {o.width_pct:.1f}%"
+        f"（{o.combos_after_removal} 个可用组合）" for o in shown)
+    if more:
+        ranges += f"｜另有 {more} 家只计入权益"
+    lines = [f"范围：{ranges}"]
+    for edge in shown:
+        lines.append(f"- {edge.label}：当前成牌领先我 {edge.behind:.1%}"
+                     f"（平局 {edge.tie:.1%}）")
+    if modeled < actual:
+        lines.append(f"- 建模 {modeled} 家，实际 {actual} 家；未建模对手按随机牌处理")
+    return lines
 
-    刻意不渲染：Preflop range、Value directive、Math gate、GTO、board equity、
-    爆炸底池、对手行动强度、上一街 plan、SPR/位置等策略标签。模型只看原始
-    事实和三个注入块，自己判断下注/跟注/弃牌。
+
+def render_hand_strength_zh(sit: Situation) -> list[str]:
+    """「实时牌力」中文事实块；翻前返回空列表。
+
+    听牌永远按「听牌」渲染，不降级成 VERY SMALL，也不让「当前未成牌不是坚果」
+    单独否决半诈唬（§4.4）。
     """
     snap = sit.snap
-    lines: list[str] = []
-    table = f"{snap.table_size}-handed" if snap.table_size else "unknown table"
-    lines.append(f"Table: {table}")
+    if snap.street == PREFLOP:
+        return []
+    lines = ["## 实时牌力"]
+    tier = sit.hand_tier
+    is_draw = tier in (STRONG_DRAW, WEAK_DRAW)
+    hs = sit.hand_strength
+
+    if is_draw:
+        kind = "强听牌" if tier == STRONG_DRAW else "弱听牌"
+        outs = sit.outs or (sit.ground_truth.draws.total_outs
+                            if sit.ground_truth is not None else None)
+        lines.append(f"牌力：{kind}" + (f"（{outs} outs）" if outs else ""))
+    elif tier == "打牌面":
+        lines.append("牌力：打牌面（最好的五张全部来自公共牌）")
+    elif tier == "空气":
+        lines.append("牌力：空气（无成牌、无听牌）")
+    elif sit.hand_label:
+        size = _SIZE_ZH_LABEL.get(getattr(hs, "size", ""), "")
+        nuts = sit.ground_truth is not None and sit.ground_truth.hero_is_nuts
+        if nuts:
+            size = "坚果级"
+        label = f"{size}（{sit.hand_label}）" if size else sit.hand_label
+        lines.append(f"牌力：{label}")
+
+    gt = sit.ground_truth
+    if gt is not None:
+        made = gt.made.name_cn
+        if gt.made.category == HIGH_CARD:
+            rank = card_text(gt.made.best_five[0])[0] if gt.made.best_five else ""
+            made = f"{_RANK_ZH.get(rank, rank)} 高" if rank else made
+        if is_draw:
+            made += "（未成牌）"
+        elif sit.plays_board:
+            made += "（打牌面）"
+        lines.append(f"当前牌型：{made}")
+        best = " ".join(card_text(c) for c in gt.made.best_five)
+        lines.append(f"最好五张：{best}")
+        if gt.hero_is_nuts:
+            nuts = "是（没有任何对手持牌能打败你）"
+            if gt.rank.tie_pct > 0:
+                nuts += f"；平局 {gt.rank.tie_pct:.1%} 分池"
+        elif is_draw:
+            nuts = "否（指当前成牌；听牌不代表最终输）"
+        else:
+            nuts = "否（有更好的成牌存在）"
+        lines.append(f"坚果：{nuts}")
+        lines.append(f"听牌：{_draws_zh(gt)}")
+        if gt.draws.total_outs:
+            lines.append(f"四二法则权益：{gt.draws.equity_pct:.0f}%")
+        lines.append(f"牌面结构：{_board_structure_zh(gt)}")
+        lines.append(f"转河变化：{_street_change_zh(gt)}")
+        warnings = [w.rstrip("。；")
+                    for w in render_gt_warnings_zh(gt, draw_focus=is_draw)]
+        lines.append("牌面警告：" + ("；".join(warnings) + "。" if warnings else "无"))
+    elif sit.equity_pct is not None and is_draw:
+        lines.append(f"四二法则权益：{sit.equity_pct:.0f}%")
+
+    hr = sit.hand_ranges
+    if hr is None and gt is not None:
+        behind = (f"当前成牌落后至少一家："
+                  f"{gt.rank.beat_at_least_pct:.1%}（按随机牌下界")
+        if is_draw:
+            behind += "；当前未成牌，不代表最终胜率"
+        lines.append(behind + "）")
+    if hr is not None:
+        modeled_players = len(hr.opponents) + 1
+        opponents = (sit.opponents_in_hand
+                     if sit.opponents_in_hand is not None
+                     else snap.opponents_in_hand)
+        actual_players = opponents + 1
+        equity_note = f"按河牌，{modeled_players} 人池"
+        if actual_players > modeled_players:
+            equity_note += f"；按建模 {len(hr.opponents)} 名对手"
+        lines.append(f"对范围权益：{hr.equity:.0%}（{equity_note}）")
+        behind = f"当前成牌落后至少一家：{hr.behind_any:.1%}"
+        if is_draw:
+            behind += "（当前未成牌，不代表最终胜率）"
+        lines.append(behind)
+        # 「范围建模」按 §4.3 的口径 = len(hand_ranges.opponents)，最多 4；
+        # 公平份额按桌上的实际总人数（含 Hero）算。
+        lines.append(f"多人池：实际 {actual_players} 人 / "
+                     f"范围建模 {len(hr.opponents)} 人 / "
+                     f"公平份额 {1.0 / actual_players:.1%}")
+        lines.extend(render_ranges_zh(sit))
+
+    return lines
+
+
+def render_preflop_zh(sit: Situation) -> list[str]:
+    """「翻前信息」；只在翻前渲染。面对加注不渲染 RFI 结论。"""
+    if sit.street != PREFLOP:
+        return []
+    snap = sit.snap
+    lines = ["## 翻前信息"]
+    shapes = [ _PREFLOP_SHAPE_ZH.get(s, s) for s in (snap.preflop_shapes or ())]
+    lines.append("翻前形态：" + ("、".join(shapes) if shapes else "未知"))
+    lines.append("Hero 是否翻前加注者：" + ("是" if snap.hero_is_pfr else "否"))
+    if sit.range_verdict:
+        lines.append(f"翻前范围结论：{sit.range_verdict}")
+    limpers = count_limpers(snap)
+    if limpers:
+        lines.append(f"前面溜入人数：{limpers}")
+    if any(o.kind in ("raise", "bet") for o in sit.options):
+        lines.append(f"本桌翻前最低加注：{PREFLOP_MIN_RAISE_BB:g}BB；"
+                     "所有加注选项已不低于该值")
+    return lines
+
+
+def render_facts_zh(sit: Situation) -> str:
+    """中文 lean 的 user 事实块（§4.1）。所有金额/概率来自程序计算。"""
+    snap = sit.snap
+    lines: list[str] = ["## 当前局面"]
+
+    table = f"{snap.table_size} 人桌" if snap.table_size else "人数未知"
     if snap.blinds:
-        ante = f" (ante {snap.blinds.ante})" if snap.blinds.ante else ""
-        lines.append(f"Blinds: {snap.blinds.sb}/{snap.blinds.bb}{ante}")
-    lines.append(
-        f"Hero: {snap.hero_position or 'unknown'}｜Cards: "
-        f"{' '.join(snap.hero_cards) or 'unknown'}｜Stack: "
-        f"{snap.hero_stack if snap.hero_stack is not None else 'unknown'}BB")
-    lines.append(
-        f"Street: {_STREET_EN.get(snap.street, snap.street)}｜Board: "
-        f"{' '.join(snap.board) or 'none'}｜Pot: "
-        f"{snap.pot if snap.pot is not None else 'unknown'}BB｜To call: "
-        f"{call_amount(snap):g}BB")
-    opps = [o for o in snap.opponents if not o.folded]
-    if opps:
-        lines.append("Opponents in hand: " + ", ".join(
-            f"{o.position or o.seat_id}"
-            f"{'(' + o.name + ')' if o.name else ''} "
-            f"{o.stack if o.stack is not None else '?'}BB"
-            for o in opps))
-    folded = [o for o in snap.opponents if o.folded]
-    if folded:
-        lines.append("Folded: " + ", ".join(
-            o.position or o.seat_id for o in folded))
+        blinds = f"{_fmt_num(snap.blinds.sb)}/{_fmt_num(snap.blinds.bb)}"
+        if snap.blinds.ante:
+            blinds += f"（前注 {_fmt_num(snap.blinds.ante)}）"
+    else:
+        blinds = "未知"
+    lines.append(f"桌况：{table}｜盲注 {blinds}")
+    hero_cards = " ".join(snap.hero_cards) or "未知"
+    lines.append(f"Hero：{snap.hero_position or '位置未知'}｜底牌 {hero_cards}｜"
+                 f"后手 {_fmt_num(snap.hero_stack)}BB")
+    board = " ".join(snap.board) or "无"
+    lines.append(f"街道：{_STREET_ZH.get(snap.street, snap.street)}｜"
+                 f"公共牌 {board}｜底池 {_fmt_num(snap.pot)}BB｜"
+                 f"需跟 {_fmt_num(call_amount(snap))}BB")
 
-    lines.append("")
-    lines.append("## Action line")
-    for rec in snap.streets:
-        pot_start = f" (pot before street {rec.pot_start}BB)" \
-            if rec.pot_start is not None else ""
-        lines.append(f"{_STREET_EN.get(rec.street, rec.street)}{pot_start}: "
-                     f"{_fmt_actions(list(rec.actions))}")
+    geometry: list[str] = []
+    effective = _effective_stack(snap)
+    if effective is not None:
+        geometry.append(f"有效筹码：{_fmt_num(effective)}BB")
+    if sit.spr is not None:
+        spr_text = "<0.1" if 0 < sit.spr < 0.1 else f"{sit.spr:.1f}"
+        geometry.append(f"SPR {spr_text}")
+    if sit.pot_type:
+        geometry.append("底池类型：" + _POT_TYPE_ZH.get(sit.pot_type, sit.pot_type))
+    if geometry:
+        lines.append("｜".join(geometry))
 
-    strength = _minimal_hand_strength_lines(sit)
+    position: list[str] = []
+    if sit.in_position is not None:
+        position.append("Hero 有位置" if sit.in_position else "Hero 无位置")
+    if sit.players_left_to_act is not None:
+        position.append(f"身后行动：{sit.players_left_to_act} 人")
+    if position:
+        lines.append("｜".join(position))
+
+    owed = call_amount(snap)
+    winnable = winnable_pot(snap)
+    if owed > 0 and winnable > 0:
+        lines.append(f"赔率门槛：{_fmt_num(owed)}BB / 可争夺底池 "
+                     f"{_fmt_num(winnable)}BB = {owed / winnable * 100:.1f}%")
+    if snap.pot is not None:
+        excess = uncalled_excess(snap)
+        pot_line = f"可争夺底池：{_fmt_num(winnable)}BB（含我的跟注）"
+        if excess > 0:
+            pot_line += (f"；牌桌底池 {_fmt_num(snap.pot)}BB 含对手超额 "
+                         f"{_fmt_num(excess)}BB，已扣除")
+        lines.append(pot_line)
+
+    short = [o for o in snap.opponents if not o.folded and o.stack is not None
+             and snap.hero_stack is not None
+             and o.stack < snap.hero_stack * 0.95]
+    if short:
+        detail = "、".join(f"{o.position or o.seat_id} {_fmt_num(o.stack)}BB"
+                          for o in short)
+        lines.append(f"短码/side pot：{detail}（side pot 未建模；"
+                     "只能与他们争夺各自的后手）")
+    else:
+        lines.append("短码/side pot：无")
+    if snap.hero_invested is not None:
+        lines.append(f"本手已投入：{_fmt_num(snap.hero_invested)}BB")
+
+    explosive = "是" if sit.explosive_pot else "否"
+    if snap.bomb_pot:
+        explosive += "（屏幕出现「幸运暴击 / BOMB POT」横幅）"
+    elif sit.explosive_pot and sit.pot_per_player is not None:
+        prev_pot = previous_street_pot(snap)
+        count = snap.players_dealt or snap.table_size
+        explosive += (f"（上一街底池 {_fmt_num(prev_pot)}BB ÷ {count} 人 = "
+                      f"{sit.pot_per_player:.2f}BB/人，炸弹前注固定 5BB/人）")
+    lines.append(f"爆炸底池：{explosive}")
+
+    preflop = render_preflop_zh(sit)
+    if preflop:
+        lines.append("")
+        lines.extend(preflop)
+
+    strength = render_hand_strength_zh(sit)
     if strength:
         lines.append("")
         lines.extend(strength)
 
     active = {o.seat_id: (o.position or o.seat_id)
               for o in snap.opponents if not o.folded}
-    reads = render_reads(sit.opponent_reads, active,
-                         header="Opponent reads (per-seat):")
+    reads = render_reads_zh(sit.opponent_reads, active,
+                            header="## 对手画像（逐座位，优先于桌级桌风）")
     if reads:
         lines.append("")
         lines.extend(reads)
 
     if sit.table_dynamics:
         lines.append("")
-        lines.append("## Table dynamics")
+        lines.append("## 桌面动态（桌级；逐座位画像优先）")
         lines.append(sit.table_dynamics)
 
-    if sit.warnings:
-        lines.append("")
-        lines.append("Data gaps: " + "; ".join(sit.warnings))
+    gaps = [_gap_zh(w) for w in sit.warnings]
+    if sit.hand_ranges is not None:
+        actual = (sit.opponents_in_hand
+                  if sit.opponents_in_hand is not None
+                  else snap.opponents_in_hand)
+        modeled = len(sit.hand_ranges.opponents)
+        if actual > modeled:
+            gaps.append(f"只建模前 {modeled} 名对手；其余对手按随机牌计入 "
+                        "equity 之外")
+    lines.append("")
+    lines.append("## 数据缺口")
+    if gaps:
+        lines.extend(f"- {gap}" for gap in gaps)
+    else:
+        lines.append("无")
 
     lines.append("")
-    lines.append("## Options (pick exactly one id)")
-    for o in sit.options:
-        amount = f", amount {o.amount}BB" if o.amount is not None else ""
-        note = f" ({o.note})" if o.note else ""
-        lines.append(f"- {o.id} — {o.label}{amount}{note}")
+    lines.append("## 行动线")
+    if any(a.inferred for rec in snap.streets for a in rec.actions):
+        lines.append("标注「推断」的动作是视频漏抓后按底池对账补出来的；"
+                     "金额是「本街加到总额」。")
+    for rec in snap.streets:
+        pot_start = (f"（街前底池 {_fmt_num(rec.pot_start)}BB）"
+                     if rec.pot_start is not None else "")
+        lines.append(f"{_STREET_ZH.get(rec.street, rec.street)}{pot_start}："
+                     f"{_fmt_actions_zh(list(rec.actions))}")
+
+    lines.append("")
+    lines.extend(render_options_zh(sit))
     return "\n".join(lines)
 
 
-def _build_messages_minimal(sit: Situation) -> tuple[str, str]:
-    return _MINIMAL_SYSTEM, render_minimal_facts(sit)
-
-
-def build_messages(sit: Situation,
-                   style: str = DEFAULT_PROMPT_STYLE) -> tuple[str, str]:
-    """按风格拼 (system, user)。
-
-    lean（默认）= 只注入状态 + 逐座位画像 + 实时牌力 + 桌风 + 选项；
-    lean-rules = 旧版完整 lean（范围表/翻后规则/价值指令）；
-    skills = 旧的技能库全量注入。未知风格直接报错，避免拼写错误静默退回。
-    """
-    if style == PROMPT_STYLE_SKILLS:
-        return _build_messages_skills(sit)
-    if style == PROMPT_STYLE_LEAN_RULES:
-        return _build_messages_lean_rules(sit)
-    if style == PROMPT_STYLE_LEAN:
-        return _build_messages_minimal(sit)
-    raise ValueError(f"未知提示词风格：{style!r}（可选：{', '.join(PROMPT_STYLES)}）")
-
-
-def _skill_context(sit: Situation) -> skills.SkillContext:
-    snap = sit.snap
-    known = sum(1 for o in snap.opponents if o.name or o.position)
-    return skills.SkillContext(
-        street=snap.street,
-        board="".join(snap.board),
-        hero_cards="".join(snap.hero_cards),
-        hero_position=snap.hero_position,
-        table_size=snap.table_size,
-        opponents=snap.opponents_in_hand,
-        preflop_shapes=snap.preflop_shapes,
-        hero_is_pfr=snap.hero_is_pfr,
-        cbet_spot=snap.cbet_spot,
-        villains_known=known,
-        category=sit.category,
-        tier=sit.hand_tier,
-        has_draw=sit.has_draw,
-        plays_board=sit.plays_board,
-        # 动态事实只用于技能层渲染；技能路由仍按 tier/street 等稳定维度。
-        hand_strength=sit.hand_strength,
-        opponent_reads=tuple(sit.opponent_reads),
-        opponent_positions=tuple(
-            (o.seat_id, o.position or o.seat_id)
-            for o in snap.opponents if not o.folded),
-        table_dynamics=sit.table_dynamics,
-    )
+def build_messages(sit: Situation) -> tuple[str, str]:
+    """返回唯一的中文 lean `(system, user facts)`。"""
+    return SYSTEM_ZH, render_facts_zh(sit)
 
 
 # ─────────────────────────── 模型调用 ───────────────────────────
@@ -2849,6 +2972,7 @@ class Advice:
     reason: str
     source: str                      # model | fallback
     model: str | None = None
+    # 旧字段保留一版，恒为空：避免旧 JSONL 消费者读不到键而报错。
     skill_codes: tuple[str, ...] = ()
     duration_ms: int = 0
     error: str | None = None
@@ -2862,14 +2986,11 @@ class Advice:
     preset_amounts: tuple[tuple[str, float], ...] = ()
     # 出这条建议时用到的对手画像快照（seat/type/conf/n/source）。空 = 没有画像。
     opponent_reads: tuple[OpponentRead, ...] = ()
-    # 模型给的下一街意图与自评置信度。plan 会回灌到下一街的事实块里，
-    # 避免「翻牌说要抓诈、转牌又弃牌」这种跨街自相矛盾。
+    # 模型给的下一街意图与自评置信度。新 prompt 不再要求 plan，通常为空。
     plan: str = ""
     confidence: float | None = None
-    # Math gate 的判定（call/fold/borderline）与「弃牌但闸门说 +EV」标记。
-    # 只用于复盘与日志，不改变点击行为。
-    gate: str | None = None
-    gate_violation: bool = False
+    # 生成这条建议时的中文 lean 提示词版本，复盘归因用。
+    prompt_version: str = PROMPT_VERSION
 
     def to_dict(self) -> dict:
         reads = [
@@ -2890,6 +3011,8 @@ class Advice:
             "reason": self.reason,
             "source": self.source,
             "model": self.model,
+            "prompt_version": self.prompt_version,
+            "prompt_lang": PROMPT_LANGUAGE,
             "skill_codes": list(self.skill_codes),
             "duration_ms": self.duration_ms,
             **({"error": self.error} if self.error else {}),
@@ -2898,32 +3021,25 @@ class Advice:
             **({"plan": self.plan} if self.plan else {}),
             **({"confidence": round(self.confidence, 3)}
                if self.confidence is not None else {}),
-            **({"math_gate": self.gate} if self.gate else {}),
-            **({"gate_violation": True} if self.gate_violation else {}),
         }
 
 
 def advise(sit: Situation, settings: AISettings | None,
-           timeout: float = 20.0, complete=None,
-           style: str = DEFAULT_PROMPT_STYLE) -> Advice:
-    """出一次建议。`complete` 可注入（单测用），默认走 complete_json。"""
+           timeout: float = 20.0, complete=None) -> Advice:
+    """出一次建议。`complete` 可注入（单测用），默认走 complete_json。
+
+    只有一套中文 lean：不注入 Math gate，不做弃牌重问，不加载技能库。
+    """
     started = time.monotonic()
     by_id = {o.id: o for o in sit.options}
-    # lean 只给事实，不注入 Math gate，也不在模型弃牌后重问；旧版才做。
-    minimal = style == PROMPT_STYLE_LEAN
-    gate = None if minimal else math_gate(sit)
-    # lean 不加载技能库，skill_codes 留空（它只是复盘时的元数据）。
-    selected = (skills.select_skills(_skill_context(sit))
-                if style == PROMPT_STYLE_SKILLS else [])
 
     def make(option: Option, reason: str, source: str,
              error: str | None = None, *, plan: str = "",
-             confidence: float | None = None,
-             gate_violation: bool = False) -> Advice:
+             confidence: float | None = None) -> Advice:
         snap = sit.snap
         return Advice(snap.hand_id, snap.street, option, reason, source,
                       settings.model if settings else None,
-                      tuple(s.code for s in selected),
+                      (),
                       int((time.monotonic() - started) * 1000),
                       error, snap.pot, snap.to_call,
                       snap.hero_cards, snap.board,
@@ -2931,15 +3047,14 @@ def advise(sit: Situation, settings: AISettings | None,
                       preset_amounts=tuple(preset_amounts(snap).items()),
                       opponent_reads=tuple(sit.opponent_reads),
                       plan=plan, confidence=confidence,
-                      gate=(gate.verdict if gate else None),
-                      gate_violation=gate_violation)
+                      prompt_version=PROMPT_VERSION)
 
     if settings is None:
         return make(by_id[fallback_option(sit)],
                     "未配置 AI_SERVER_*，按最保守的默认动作",
                     "fallback", "未配置模型凭据")
 
-    system, user = build_messages(sit, style)
+    system, user = build_messages(sit)
     caller = complete or complete_json
 
     def ask(prompt: str) -> dict:
@@ -2953,27 +3068,10 @@ def advise(sit: Situation, settings: AISettings | None,
         choice = str(data.get("option", "")).strip()
         if choice not in by_id:
             raise AIError(f"模型给了不在选项里的答案：{choice!r}")
-        # Math gate 已经把「跟注是不是 +EV」算过了。模型仍然弃牌时给一次
-        # 重问机会；只重问一次，且第一次调用已经吃掉大半超时预算就放弃，
-        # 实时链路等不起第二次。lean 不注入 gate，也不重问。
-        violation = bool(not minimal and gate and gate.verdict == "call"
-                         and choice == "fold" and "call" in by_id)
-        if violation and (time.monotonic() - started) < timeout * 0.6:
-            hint = ("\n\n## Correction\nYour answer folded, but the computed "
-                    f"«Math gate» says: {gate.text} Reconsider. Fold only if you "
-                    "can name a concrete read that makes the gate wrong.\n")
-            try:
-                retry = ask(user + hint)
-                retry_choice = str(retry.get("option", "")).strip()
-                if retry_choice in by_id:
-                    data, choice = retry, retry_choice
-            except AIError:
-                pass                     # 重问失败就保留第一份答案
         reason = str(data.get("reason", "")).strip() or "（模型未给理由）"
         plan = str(data.get("plan", "") or "").strip()[:160]
         return make(by_id[choice], reason, "model", plan=plan,
-                    confidence=_confidence(data.get("confidence")),
-                    gate_violation=violation and choice == "fold")
+                    confidence=_confidence(data.get("confidence")))
     except AIError as exc:
         return make(by_id[fallback_option(sit)],
                     "模型不可用，按最保守的默认动作",
@@ -2991,15 +3089,13 @@ class AdviceRunner:
     """
 
     def __init__(self, settings: AISettings | None, *, timeout: float = 20.0,
-                 complete=None, log=None,
-                 style: str = DEFAULT_PROMPT_STYLE) -> None:
+                 complete=None, log=None) -> None:
         import queue
         import threading
 
         self.settings = settings
         self.timeout = timeout
         self._complete = complete
-        self.style = style
         self._log = log or (lambda _msg: None)
         self._queue: queue.Queue = queue.Queue(maxsize=1)
         self._done: queue.Queue = queue.Queue()
@@ -3008,9 +3104,6 @@ class AdviceRunner:
         self._busy = threading.Event()
         self._busy_since: float | None = None
         self._dropped = 0
-        # 上一街自己的决定（只留最近一手）。下一街投递时回灌进事实块，
-        # 否则每街都是独立调用，模型会把自己的陷阱线推翻。
-        self._last: dict[str, Advice] = {}
         self._thread = threading.Thread(target=self._loop, name="advice",
                                         daemon=True)
         self._thread.start()
@@ -3060,22 +3153,12 @@ class AdviceRunner:
             self._busy_since = time.monotonic()
             self._busy.set()
             try:
-                prev = self._last.get(sit.snap.hand_id)
-                # 只回灌模型自己的决定：fallback 的理由是中文兜底文案，
-                # 喂回去既没用又会把中文带进英文提示词。
-                if (self.style != PROMPT_STYLE_LEAN
-                        and prev is not None and prev.source == "model"
-                        and prev.street != sit.snap.street):
-                    # 同一手、不同街：旧版把上一街动作和 plan 带进事实块。
-                    # lean 不注入 plan，避免模型被自己上一街的保守计划锚住。
-                    sit = replace(sit, previous=prev)
                 try:
                     advice = advise(sit, self.settings, self.timeout,
-                                    self._complete, style=self.style)
+                                    self._complete)
                 except Exception as exc:  # noqa: BLE001 — 后台线程不能死
                     self._log(f"[建议] 生成失败：{type(exc).__name__}: {exc}")
                     continue
-                self._last = {advice.hand_id: advice}
                 self._done.put(advice)
             finally:
                 self._busy_since = None

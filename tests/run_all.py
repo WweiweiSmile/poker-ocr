@@ -12,7 +12,7 @@
     test_field_ranges 快照 → 每对手范围 ID + mode（纯逻辑）
     test_hand_vs_ranges 手牌 vs 范围：精确 behind + MC 权益（纯逻辑）
     test_hand_strength 实时牌力解析：behind/equity 合成一行结论（纯逻辑）
-    test_advice     实时 AI 建议：行动线/技能路由/选项/模型协议（纯逻辑）
+    test_advice     实时 AI 建议：行动线/中文事实/选项/模型协议（纯逻辑）
     test_gto_lookup GTO 近似表查询：同构映射/节点/插值/保守 None（纯逻辑）
     test_opponent_profile 对手画像：弃牌补全/统计/分类/pin/建议集成（纯逻辑）
     test_clicker    桌面自动点击：坐标/配置/档位映射/安全闸（纯逻辑，不点鼠标）
@@ -29,7 +29,6 @@
     test_stable_cards 跨帧牌面稳定闸（纯逻辑，不读图）
     test_doubt_window 疑惑帧时间窗仲裁（纯逻辑，不读图）
     test_export_live_hands 从 live.states.jsonl 导出完整手牌（纯逻辑）
-    test_compare_advice_styles 大幅盈亏手牌回放对比的筛选/决策点/口径（纯逻辑）
     test_cards      公共牌 / hero 手牌识别（需要 images/card 标注样本）
     test_card_replay 真实样张回放：一手牌只落一条记录、牌面只前进
     test_extract    端到端提取（需要 table.jpg）
@@ -54,7 +53,7 @@ SUITES = ["test_positions.py", "test_env.py", "test_coach.py",
           "test_state_stream.py", "test_live.py", "test_full_table.py",
           "test_runtime_profile.py", "test_stable_cards.py",
           "test_doubt_window.py", "test_export_live_hands.py",
-          "test_compare_advice_styles.py", "test_beat_rate.py",
+          "test_beat_rate.py",
           "test_ground_truth.py",
           "test_build_sft_dataset.py",
           "test_preflop_ranges.py", "test_cards.py",

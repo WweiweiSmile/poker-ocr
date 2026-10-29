@@ -1291,7 +1291,7 @@ def render_reads(reads: Iterable[OpponentRead],
                  *,
                  header: str = ("Opponent reads (per-seat, from local hand history — "
                                 "use these before any table-wide label):")) -> list[str]:
-    """按座位渲染画像行，供事实块和 skills 提示词共用。
+    """按座位渲染画像行（英文）；中文 lean 用 `render_reads_zh`。
 
     `positions` 只含本手还在局的座位（seat_id → 位置）：不在其中（已弃牌）或
     archetype 为 unknown 的画像不输出。tentative 只标注、不当硬结论；排序按
@@ -1322,6 +1322,43 @@ def render_reads(reads: Iterable[OpponentRead],
             f"- {position} {name}: {read.archetype.upper()} "
             f"(n={read.n}, VPIP {read.vpip:g}%, PFR {read.pfr:g}%{af}, "
             f"conf {read.confidence:.2f}{source}){gate}")
+    return lines
+
+
+def render_reads_zh(reads: Iterable[OpponentRead],
+                    positions: Mapping[str, str],
+                    *,
+                    header: str = "## 对手画像（逐座位，优先于桌级桌风）") -> list[str]:
+    """按座位渲染中文画像行，供中文 lean 事实块使用。
+
+    `positions` 只含本手还在局的座位（seat_id → 位置）：不在其中（已弃牌）或
+    archetype 为 unknown 的画像不输出。tentative 只标注、不当硬结论。
+    """
+    rows: list[tuple[str, OpponentRead]] = []
+    for read in reads:
+        if read.archetype == "unknown":
+            continue
+        seat = read.seat_id
+        if not seat or seat not in positions:
+            continue
+        rows.append((positions[seat], read))
+    if not rows:
+        return []
+    rows.sort(key=lambda item: item[0])
+    lines = [header] if header else []
+    for position, read in rows:
+        name = read.display_name or read.key
+        gate = " [tentative]" if read.gate == "tentative" else ""
+        source = ""
+        if read.source == "pin":
+            source = "，人工 pin"
+        elif read.source == "prior":
+            source = "，.table_dy 先验"
+        af = f"，AF {read.af:g}" if read.af else ""
+        lines.append(
+            f"- {position} {name}：{read.archetype.upper()}"
+            f"（n={read.n}，VPIP {read.vpip:g}%，PFR {read.pfr:g}%{af}，"
+            f"置信 {read.confidence:.2f}{source}）{gate}")
     return lines
 
 

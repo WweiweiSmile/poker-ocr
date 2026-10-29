@@ -113,7 +113,7 @@ def make_sit(board=BOARD, hero=HERO, *, hero_pos="BB", ip=False, actions=(),
         preflop_shapes=("single-raise",), hero_is_pfr=(hero_pos == "BTN"),
         cbet_spot=True, decision_key=("h1", street, 0, pot, to_call, hero),
     )
-    return build_situation(snap)
+    return build_situation(snap, include_advanced=True)
 
 
 def test_canonical_roundtrip() -> None:
