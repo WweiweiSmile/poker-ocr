@@ -146,6 +146,33 @@ def test_vanished_seat_needs_max_vanish_frames() -> None:
               f"vanished 计数应为 3：{s.summary()['discarded_reasons']}")
 
 
+def test_departed_seat_with_chip_garbage_recovers() -> None:
+    """人走后空座的 chip 槽读成乱码时，也要在 max_vanish 帧后恢复识别。
+
+    之前的失败形态：空座乱码让 NameTracker 沿用旧名字 → 每帧都判在场，
+    vanished 永远不计数，质量闸报 `stack:<seat>` 无限丢帧。
+    """
+    with stub_env():
+        s = new_stream(max_vanish=3)
+        feed(s, make_frame())
+        rows = {k: dict(v) for k, v in BASE.items()}
+        rows["lowL"] = {"name": "", "chip": "--", "bet": ""}
+        gone = make_frame(rows)
+        outs = [feed(s, gone, t=0.5 * (i + 1)) for i in range(5)]
+        check([o.kind for o in outs[:3]] == ["discard"] * 3,
+              f"前 3 帧应因 vanished 丢弃：{[o.kind for o in outs]}")
+        check(all("stack:lowL" not in o.errors for o in outs),
+              f"空座乱码不能报 stack：{[o.errors for o in outs]}")
+        check(outs[3].kind == "no_change", f"第 4 帧应接受，实际 {outs[3].kind}")
+        check(outs[4].kind == "record", f"第 5 帧应记录，实际 {outs[4].kind}")
+        check(outs[4].state.players_in_hand == 8,
+              f"在场人数应为 8，实际 {outs[4].state.players_in_hand}")
+        check(outs[4].state.player("lowL").name is None,
+              "退出的座位不能留下旧名字")
+        check(s.summary()["discarded_reasons"].get("vanished") == 3,
+              f"vanished 计数应为 3：{s.summary()['discarded_reasons']}")
+
+
 def test_dead_button_dealer_left_keeps_recording() -> None:
     """庄家中途退出：按钮留在他身上时不能整段丢帧（2026-10-23 实盘）。"""
     with stub_env():
@@ -438,6 +465,7 @@ def main() -> int:
         test_discard_breaks_consecutive_stability,
         test_stable_seconds_floor,
         test_vanished_seat_needs_max_vanish_frames,
+        test_departed_seat_with_chip_garbage_recovers,
         test_dead_button_dealer_left_keeps_recording,
         test_initial_blinds_carried_when_banner_unreadable,
         test_reset_makes_next_frame_a_new_baseline,

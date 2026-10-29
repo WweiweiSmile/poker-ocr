@@ -299,6 +299,11 @@ class NameTracker:
     def current(self) -> dict[str, str]:
         return dict(self._names)
 
+    def forget(self, seat_id: str) -> None:
+        """整座没人时清掉这桌记的名字，避免换人后继续沿用上一位的名字。"""
+        self._names.pop(seat_id, None)
+        self._clear(seat_id)
+
     def resolve(self, seat_id: str, raw: str | None,
                 action: str | None = None) -> str | None:
         cur = self._names.get(seat_id)

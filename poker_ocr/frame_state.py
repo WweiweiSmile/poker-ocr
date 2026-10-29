@@ -256,17 +256,6 @@ def build_state(frame: RoiFrame, profile: Profile,
             # （上一帧被接受的状态）；没有历史就保持未知。
             fold = True if action == "fold" else (prev_fold or {}).get(sid)
 
-        # 名字粘性只在**这一座还有读数**时生效。整座空白（人走了 / 被面板盖住）
-        # 必须能被看见：否则旧名字会把这个座位永远钉在「在场」，人走了也清不掉。
-        has_evidence = bool(name_raw or chip_raw or bet_raw)
-        if name_tracker is not None:
-            name = (None if not has_evidence else
-                    name_tracker.resolve(sid, name_raw or None, action))
-        else:
-            prev_name = prev_names.get(sid)
-            name = (None if not has_evidence else
-                    prev_name if action else sticky_name(prev_name, name_raw or None))
-
         avatar_text, avatar_score = avatar_reads.get(sid, ("", 0.0))
         all_in_badge = is_all_in_badge(avatar_text, avatar_score)
 
@@ -305,6 +294,33 @@ def build_state(frame: RoiFrame, profile: Profile,
                0.0 if not bet_raw.strip() else
                (bet_a.value if bet_a.ok else None))
         stack = None if chip_equity is not None else (chip.value if chip.ok else None)
+
+        # 名字粘性只在**这一座还有人的证据**时生效。不能拿「文本非空」当证据：
+        # 人走后的空座位，筹码/下注槽也常被 rec 读成 `--`/`·` 之类乱码；
+        # 若因此沿用上一手的名字，这个座位会被永远钉在「在场」，每帧报
+        # `stack:<seat>`、整场丢帧（2026-10-29 实盘）。筹码、下注、动作、
+        # 手牌图标、亮牌、All-in、胜率任一成立才算还有人；只剩名字槽本身
+        # 有字时也算（人还在、筹码暂时被挡住）。
+        name_text = (name_raw or "").strip()
+        present = bool(
+            (name_text and action is None)
+            or action is not None
+            or stack is not None
+            or (bet or 0) > 0
+            or icon is True or shown_here
+            or all_in_badge is True or equity is not None)
+        if name_tracker is not None:
+            if present:
+                name = name_tracker.resolve(sid, name_text or None, action)
+            else:
+                # 整座没人：连同名字缓存一起清掉，换人坐下时不能继承旧名字。
+                name_tracker.forget(sid)
+                name = None
+        else:
+            prev_name = prev_names.get(sid)
+            name = (None if not present else
+                    prev_name if action else sticky_name(prev_name,
+                                                         name_text or None))
 
         # 「正在带入」：头像上写着带入 + 筹码为 0 → 人坐在桌边但没被发牌。
         #

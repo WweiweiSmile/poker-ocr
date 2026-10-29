@@ -274,6 +274,39 @@ def test_zero_stack_without_cards_is_not_in_hand() -> None:
           f"All-in 的 0 筹码玩家仍应在池：{allin.player('lowR').to_debug()}")
 
 
+def test_leaving_seat_does_not_keep_old_name() -> None:
+    """人走后空座的筹码槽常带乱码：旧名字不能把座位永远钉在「在场」。
+
+    实盘 2026-10-29：中途有人退出，空座的 chip 槽读成 `--`，NameTracker
+    沿用上一帧的名字 → in_hand=True、stack=None，每帧报 `stack:<seat>`，
+    整场丢帧；因为每帧都判「还在场」，vanished 也永远不会触发。
+    """
+    rows = {k: dict(v) for k, v in BASE.items()}
+    tracker = NameTracker(confirm=3)
+    first = build_state(make_frame(rows), PROFILE, name_tracker=tracker)
+    check(first.player("lowL").name == "YKY", "基线应记住 lowL 的名字")
+
+    gone_rows = {k: dict(v) for k, v in BASE.items()}
+    gone_rows["lowL"] = {"name": "", "chip": "--", "bet": ""}
+    for _ in range(4):
+        s = build_state(make_frame(gone_rows), PROFILE, name_tracker=tracker)
+        low = s.player("lowL")
+        check(low.name is None,
+              f"整座没人时不能沿用旧名字：{low.to_debug()}")
+        check(not low.in_hand and low.status == "away",
+              f"空座应判 away：{low.to_debug()}")
+        check(not s.errors, f"空座乱码不该触发质量闸：{s.errors}")
+        check(s.players_in_hand == 8, f"在场人数应为 8，实际 {s.players_in_hand}")
+    check("lowL" not in tracker.current(), "空座应同时清掉名字缓存")
+
+    # 换人坐下：新名字直接生效，不会先显示上一位的名字
+    new_rows = {k: dict(v) for k, v in BASE.items()}
+    new_rows["lowL"] = {"name": "新玩家", "chip": "100BB", "bet": ""}
+    s = build_state(make_frame(new_rows), PROFILE, name_tracker=tracker)
+    check(s.player("lowL").name == "新玩家",
+          f"新玩家应直接用自己的名字：{s.player('lowL').to_debug()}")
+
+
 def test_card_icons_on_real_samples() -> None:
     """真实样张回归：no_fold 全在池；fold 样张只有 4 家没弃牌。"""
     import cv2
@@ -565,6 +598,7 @@ def main() -> int:
         test_bare_equity_slot_number_is_not_all_in,
         test_buying_in_by_avatar,
         test_name_tracker_used_when_given,
+        test_leaving_seat_does_not_keep_old_name,
         test_missing_dealer,
         test_pot_label_without_number,
         test_unreadable_bet_is_an_error,
