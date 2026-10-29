@@ -320,13 +320,13 @@ fold / call / raise-1/3 / raise-1/2 / raise-2/3 / raise-1 / raise-1.2 / all-in
 - `REQUIRED_BUTTONS` 不强制包含 `allin`，旧配置继续可用。
 - `allin` 不进入 `PRESET_IDS`/`preset_amounts`；`plan_clicks` 单独处理。
 
-### 5.3 翻前 6BB 下限
+### 5.3 翻前 5.5BB 下限
 
-- 保留 `PREFLOP_MIN_RAISE_BB = 6`。
+- 保留 `PREFLOP_MIN_RAISE_BB = 5.5`。
 - 选项 id 继续用 `open-2.5` 等旧 id，但标签显示实际金额：
-  - `开池到 6BB（本桌最低加注）`
+  - `开池到 5.5BB（本桌最低加注）`
 - 新增事实行：
-  - `本桌翻前最低加注：6BB；所有加注选项已不低于该值`
+  - `本桌翻前最低加注：5.5BB；所有加注选项已不低于该值`
 - 避免模型在 reason 里建议“加到 2.5–3BB”。
 
 ---

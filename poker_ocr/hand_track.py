@@ -1419,8 +1419,15 @@ class LiveHandTracker:
             out["cards_warnings"] = list(hand.cards_warnings)
         if hand.cards_unreliable:
             out["cards_unreliable"] = True
-        # 只在是爆炸底池时写键，普通手牌的落库内容保持原样
-        if hand.bomb_pot:
+        # 只在是爆炸底池时写键，普通手牌的落库内容保持原样。
+        #
+        # 横幅会串到下一手：炸弹池的「幸运暴击」动画在发下一手牌时还没消失，
+        # 下一手的前几帧仍读到 banner，`observe` 就把它latch到了新手上。实测
+        # 19 个标记里有 6 个其实是普通翻前手牌（街前底池 4.5、有 4-11 个翻前
+        # 行动）。炸弹池的翻前只有每人 5BB 前注、按构造**没有任何行动**（见
+        # `_finalize_street` 的同一条口径），所以有翻前行动就说明标记串了。
+        preflop_actions = [a for a in hand.actions if a.street == PREFLOP]
+        if hand.bomb_pot and not preflop_actions:
             out["bomb_pot"] = True
         return out
 

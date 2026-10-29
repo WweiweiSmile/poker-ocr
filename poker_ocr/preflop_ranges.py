@@ -22,7 +22,10 @@
   `in_range=None`，提示词里如实说明「不是清单，别当成范围检查」。
 - **面对加注时的 3-bet 范围**：只做一档粗判（价值 QQ+/AK），不覆盖原文里的
   诈唬 3-bet（A5s-A2s、KQs、KJs 对晚位开池）。
-- 这张表是「~100BB 带 ante」的默认线，不是 GTO；有效筹码短到 20BB 以下时会偏宽。
+- 这张表是「~100BB 带 ante」的默认线，不是 GTO。深度差异由 `depth_ranges`
+  单独叠加（见 DEPTH_DEEP_BB / DEPTH_SHORT_BB）：深码 EP 收掉被支配的非同花
+  高张、后位补同花连张；短码切掉最小的同花连张。调整只动边缘类别，幅度保守 ——
+  真要按 300BB 重新标定，需要那一段的 solver 数据，不是靠改几行常量能替代的。
 """
 
 from __future__ import annotations
@@ -67,6 +70,30 @@ CHART_ADDITIONS: dict[str, tuple[str, ...]] = {
 NOTES = {
     "UTG+2": "原文 RFI 表没有 UTG+2 这一行，这里按 UTG+1 与 LJ 的中点插值",
 }
+
+# ── 筹码深度 ──────────────────────────────────────────────────────
+# RFI 表按 ~100BB 标定。深度只动**边缘类别**，不动核心牌：
+#   · 深码（>150BB）：EP 切掉被支配的非同花高张 —— 深码把「被支配」的代价
+#     从一条街放大到三条街；后位补进同花连张/隔张 —— 隐含赔率随深度上涨。
+#   · 短码（<40BB）：切掉最小的同花连张/隔张 —— 没有足够后手兑现听牌。
+#
+# 为什么用「类别」而不是逐个手牌调：这张表本身是松弱桌的加宽版，不是 GTO；
+# 按类别调可以在没有 300BB solver 数据的前提下，保证方向正确、幅度保守。
+DEPTH_DEEP_BB = 150.0
+DEPTH_SHORT_BB = 40.0
+EARLY_POSITIONS = ("UTG", "UTG+1", "UTG+2")
+
+# 深码下 EP 不再开池：被支配的非同花高张。
+DEEP_DROP = frozenset({"AJo", "ATo", "KJo", "KQo", "QJo", "KTo"})
+
+# 深码下后位额外收：同花连张/隔张，靠隐含赔率，需要位置兑现。
+DEEP_ADD: dict[str, tuple[str, ...]] = {
+    "CO": ("64s", "53s"),
+    "BTN": ("64s", "42s", "32s"),
+}
+
+# 短码下切掉：最小的同花连张/隔张。
+SHORT_DROP = frozenset({"54s", "65s", "76s", "86s", "97s", "87s"})
 
 # 原文「3-bet: value QQ+/AK; bluffs A5s-A2s, KQs, KJs vs late opens」
 THREE_BET_VALUE = ("QQ+", "AK")
@@ -157,6 +184,46 @@ def _build() -> dict[str, frozenset[str]]:
 
 
 RFI: dict[str, frozenset[str]] = _build()
+
+
+def _expand_many(tokens) -> set[str]:
+    out: set[str] = set()
+    for tok in tokens:
+        out |= expand(tok)
+    return out
+
+
+def depth_ranges(stack_bb: float | None) -> dict[str, frozenset[str]]:
+    """按筹码深度把整张 RFI 表调整一次。
+
+    返回的字典和 `RFI` 同构，`range_verdict` 用它同时算 `in_range` 和
+    `first_position` —— 两处必须用同一张表，否则会出现「在范围内但最早
+    进入的位置是空」这种自相矛盾的事实。
+    """
+    if stack_bb is None or DEPTH_SHORT_BB <= stack_bb <= DEPTH_DEEP_BB:
+        return RFI
+    if stack_bb > DEPTH_DEEP_BB:
+        out: dict[str, frozenset[str]] = {}
+        for pos, base in RFI.items():
+            adjusted = set(base)
+            if pos in EARLY_POSITIONS:
+                adjusted -= DEEP_DROP
+            adjusted |= _expand_many(DEEP_ADD.get(pos, ()))
+            out[pos] = frozenset(adjusted)
+        return out
+    return {pos: frozenset(base - SHORT_DROP) for pos, base in RFI.items()}
+
+
+def depth_note(stack_bb: float | None) -> str:
+    """给模型看的一句深度口径；没有调整时返回空串。"""
+    if stack_bb is None:
+        return ""
+    if stack_bb > DEPTH_DEEP_BB:
+        return (f"按深码 {stack_bb:.0f}BB 调整过：前位切掉被支配的非同花高张，"
+                f"后位补进同花连张")
+    if stack_bb < DEPTH_SHORT_BB:
+        return f"按短码 {stack_bb:.0f}BB 调整过：切掉最小的同花连张"
+    return ""
 
 
 def chart_text(width: int = 86) -> str:
@@ -324,6 +391,7 @@ class Verdict:
     limpers: int = 0                 # 我行动前已经溜入的人数
     isolation_position: str | None = None   # 收紧后的参照位置
     isolation_ok: bool | None = None        # 这手牌在收紧后的范围里？
+    depth_note: str = ""             # 按筹码深度调过范围时的口径
 
     def render(self) -> str:
         if self.in_range is None:
@@ -473,7 +541,8 @@ class Verdict:
 
 def range_verdict(position: str | None, cards,
                   table_dynamics: str | None = None,
-                  limpers: int = 0) -> Verdict | None:
+                  limpers: int = 0,
+                  stack_bb: float | None = None) -> Verdict | None:
     """位置 + 两张手牌 → 范围归属。
 
     `table_dynamics` 只影响「默认线」的渲染：桌风明确「松」时，开池表按**默认值**
@@ -521,15 +590,19 @@ def range_verdict(position: str | None, cards,
         return None
 
     key = hand_key(cards)
-    first = next((p for p in OPEN_POSITIONS if key in RFI[p]), None)
+    # 深度调整后的表：`in_range` 与 `first_position` 必须来自同一张表，
+    # 否则会出现「在范围内，但最早进入的位置是空」。
+    ranges = depth_ranges(stack_bb)
+    first = next((p for p in OPEN_POSITIONS if key in ranges[p]), None)
     isolation_position = None
     isolation_ok = None
     if limpers > 0:
         idx = OPEN_POSITIONS.index(pos)
         isolation_position = OPEN_POSITIONS[max(0, idx - limpers)]
-        isolation_ok = key in RFI[isolation_position]
-    return Verdict(hand=key, position=pos, in_range=key in RFI[pos],
+        isolation_ok = key in ranges[isolation_position]
+    return Verdict(hand=key, position=pos, in_range=key in ranges[pos],
                    first_position=first, note=NOTES.get(pos, ""), loose=loose,
                    passive=passive, limpers=limpers,
                    isolation_position=isolation_position,
-                   isolation_ok=isolation_ok)
+                   isolation_ok=isolation_ok,
+                   depth_note=depth_note(stack_bb))

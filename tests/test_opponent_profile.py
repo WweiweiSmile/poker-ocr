@@ -746,6 +746,104 @@ def test_prompt_renders_opponent_reads() -> None:
     check("路人" not in facts, "unknown 不应输出，避免噪声")
 
 
+def test_postflop_sequence_observations() -> None:
+    """c-bet / stab / 过牌-加注要从行动线里拆出来，不只看 bet_raise 计数。"""
+    # a 在 BTN 翻前开池；翻牌英雄过牌、a 也过牌 → 有 c-bet 机会但没打，
+    # 同时这是一次「被过牌后」的机会，也没有下注。
+    passive = make_hand(
+        uid="s01-t1",
+        preflop=[
+            act("a", "raise", 8.0, name="芒果与西米", position="BTN"),
+            act("b", "fold", None, name="好运常在ok", position="SB"),
+            act("c", "fold", None, name="短码", position="CO"),
+            act("hero", "call", 8.0, is_hero=True),
+        ],
+        flop=[
+            act("hero", "check", None, is_hero=True),
+            act("a", "check", None, name="芒果与西米"),
+        ],
+        board=("Ad", "7s", "2c"))
+    got = next(o for o in observations_from_hand(passive)
+               if o.opponent_key == "芒果与西米")
+    check(got.open_opp and got.opened, f"BTN 首入应是开池机会且已开池：{got}")
+    check(got.cbet_opp and not got.cbet, f"翻前加注者过牌：有 c-bet 机会未打：{got}")
+    check(got.stab_opp and not got.stab, f"被过牌后应有 stab 机会且未下注：{got}")
+
+    # 同样的线，但 a 在翻牌下注 → c-bet 与 stab 都命中
+    aggressive = make_hand(
+        uid="s01-t2",
+        preflop=[
+            act("a", "raise", 8.0, name="芒果与西米", position="BTN"),
+            act("b", "fold", None, name="好运常在ok", position="SB"),
+            act("c", "fold", None, name="短码", position="CO"),
+            act("hero", "call", 8.0, is_hero=True),
+        ],
+        flop=[
+            act("hero", "check", None, is_hero=True),
+            act("a", "bet", 10.0, name="芒果与西米"),
+        ],
+        board=("Ad", "7s", "2c"))
+    got = next(o for o in observations_from_hand(aggressive)
+               if o.opponent_key == "芒果与西米")
+    check(got.cbet and got.stab, f"下注应同时算 c-bet 与 stab：{got}")
+
+    # 过牌-加注：a 在 SB 先过牌，英雄下注，a 加注
+    check_raise = make_hand(
+        uid="s01-t3",
+        preflop=[
+            act("a", "call", 1.0, name="芒果与西米", position="SB"),
+            act("hero", "raise", 8.0, is_hero=True),
+            act("b", "fold", None, name="好运常在ok", position="BB"),
+            act("c", "fold", None, name="短码", position="CO"),
+            act("a", "call", 8.0, name="芒果与西米"),
+        ],
+        flop=[
+            act("a", "check", None, name="芒果与西米"),
+            act("hero", "bet", 10.0, is_hero=True),
+            act("a", "raise", 30.0, name="芒果与西米"),
+        ],
+        board=("Ad", "7s", "2c"))
+    got = next(o for o in observations_from_hand(check_raise)
+               if o.opponent_key == "芒果与西米")
+    check(got.check_raise_opp and got.check_raise,
+          f"先过牌后被下注再加注应算 check-raise：{got}")
+
+
+def test_tendency_render_and_exploit_hints() -> None:
+    """倾向一行 + 可剥削方向：只在偏离明显时给建议。"""
+    from poker_ocr.opponent_profile import exploit_hint_zh, render_tendencies_zh
+
+    passive = OpponentRead(
+        seat_id="a", key="k", display_name="芒果与西米", archetype="station",
+        confidence=0.8, n=40, vpip=45.0, pfr=8.0, af=0.6,
+        source="auto", note="", gate="stable",
+        open_lp_pct=45.0, open_ep_pct=12.0, threebet_pct=3.0,
+        cbet_pct=45.0, barrel_pct=40.0, stab_pct=12.0, check_raise_pct=5.0)
+    text = render_tendencies_zh(passive)
+    check("开池 EP 12% / LP 45%" in text, f"位置开池应渲染：{text}")
+    check("被过牌后下注 12%" in text, f"stab 应渲染：{text}")
+    hints = exploit_hint_zh(passive)
+    check("偷池" in hints, f"低 stab 应给偷池建议：{hints}")
+    check("挤压" in hints, f"宽开池 + 低 3-bet 应给挤压建议：{hints}")
+
+    # 中间值：不给任何建议（两边都不站）
+    neutral = OpponentRead(
+        seat_id="b", key="k2", display_name="某甲", archetype="tag",
+        confidence=0.8, n=40, vpip=24.0, pfr=20.0, af=1.6,
+        source="auto", note="", gate="stable",
+        open_lp_pct=30.0, open_ep_pct=18.0, threebet_pct=9.0,
+        cbet_pct=60.0, barrel_pct=55.0, stab_pct=45.0, check_raise_pct=8.0)
+    check(exploit_hint_zh(neutral) == "", "中间值不该给剥削建议")
+
+    # 样本不足：指标为 None 时不渲染、不建议
+    thin = OpponentRead(
+        seat_id="c", key="k3", display_name="某乙", archetype="unknown",
+        confidence=0.2, n=5, vpip=40.0, pfr=10.0, af=1.0,
+        source="auto", note="", gate="unknown")
+    check(render_tendencies_zh(thin) == "", "没有倾向数据时不该渲染打法行")
+    check(exploit_hint_zh(thin) == "", "没有倾向数据时不该给建议")
+
+
 def run() -> int:
     tests = [
         test_fold_and_check_are_inferred_at_street_end,
@@ -765,6 +863,8 @@ def run() -> int:
         test_advice_uses_per_opponent_read,
         test_advice_records_read_snapshot,
         test_prompt_renders_opponent_reads,
+        test_postflop_sequence_observations,
+        test_tendency_render_and_exploit_hints,
     ]
     for t in tests:
         before = len(FAILS)

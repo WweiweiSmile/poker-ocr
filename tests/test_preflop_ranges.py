@@ -20,7 +20,8 @@ sys.path.insert(0, str(ROOT))
 
 from poker_ocr.preflop_ranges import (  # noqa: E402
     CHART_ADDITIONS, OPEN_POSITIONS, RFI, expand, hand_key,
-    is_set_mine_pair, is_speculative, open_frequency, range_verdict,
+    depth_ranges, is_set_mine_pair, is_speculative, open_frequency,
+    range_verdict,
     sb_completable,
 )
 
@@ -380,6 +381,50 @@ def test_open_frequency_ramps_up_by_position() -> None:
         check(junk not in RFI["BTN"], f"{junk} 不该出现在 BTN 开池范围里")
 
 
+def test_depth_deep_tightens_early_position() -> None:
+    """深码：EP 切掉被支配的非同花高张，first_position 跟着后移。
+
+    KQo 在 100BB 从 UTG 就开；300BB 时 UTG 不再开它，最早进入点变 LJ。
+    in_range 和 first_position 必须来自同一张调整后的表，否则会出现
+    「不在范围内，但最早进入的位置是 UTG」这种自相矛盾的事实。
+    """
+    shallow = range_verdict("UTG", ("Ks", "Qd"), stack_bb=100)
+    deep = range_verdict("UTG", ("Ks", "Qd"), stack_bb=300)
+    check(shallow is not None and shallow.in_range, "100BB 的 KQo UTG 应在范围内")
+    check(deep is not None and not deep.in_range, "300BB 的 KQo UTG 应被切掉")
+    check(deep.first_position == "LJ",
+          f"深码下 KQo 最早进入点应是 LJ：{deep.first_position}")
+    check(bool(deep.depth_note), "深码调整应带一句口径")
+    check(not shallow.depth_note, "100BB 不该有深度口径")
+
+
+def test_depth_deep_widens_late_position() -> None:
+    """深码：后位补进同花连张/隔张（隐含赔率随深度上升）。"""
+    shallow = range_verdict("BTN", ("3s", "2s"), stack_bb=100)
+    deep = range_verdict("BTN", ("3s", "2s"), stack_bb=300)
+    check(shallow is not None and not shallow.in_range, "100BB 的 32s BTN 应在外")
+    check(deep is not None and deep.in_range, "300BB 的 32s BTN 应被补进来")
+
+
+def test_depth_short_drops_speculative() -> None:
+    """短码：切掉靠隐含赔率兑现的同花连张。"""
+    normal = range_verdict("LJ", ("6s", "5s"), stack_bb=100)
+    short = range_verdict("LJ", ("6s", "5s"), stack_bb=30)
+    check(normal is not None and normal.in_range, "100BB 的 65s LJ 应在范围内")
+    check(short is not None and not short.in_range, "30BB 的 65s LJ 应被切掉")
+
+
+def test_depth_ranges_stay_monotonic() -> None:
+    """调整后的表仍然是累积表：后一个位置必须包含前一个位置。"""
+    for depth in (30.0, 300.0):
+        ranges = depth_ranges(depth)
+        prev: set[str] = set()
+        for pos in OPEN_POSITIONS:
+            cur = set(ranges[pos])
+            check(prev <= cur, f"{depth:g}BB 时 {pos} 不是前一个位置的超集")
+            prev = cur
+
+
 def main() -> int:
     tests = [
         test_expand_notation, test_hand_key, test_positions_are_monotonic,
@@ -393,6 +438,10 @@ def main() -> int:
         test_sb_low_straight_note,
         test_utg2_exists,
         test_open_frequency_ramps_up_by_position,
+        test_depth_deep_tightens_early_position,
+        test_depth_deep_widens_late_position,
+        test_depth_short_drops_speculative,
+        test_depth_ranges_stay_monotonic,
     ]
     for t in tests:
         before = len(FAILS)

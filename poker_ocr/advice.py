@@ -59,7 +59,7 @@ HERO_ACTOR = "hero"
 
 # 当前唯一的中文 lean 提示词版本。写入 session_start / advice JSONL，
 # 复盘归因用；改动 system 或事实块时 bump。
-PROMPT_VERSION = "lean-zh-2026-10-29.1"
+PROMPT_VERSION = "lean-zh-2026-10-30.1"
 PROMPT_LANGUAGE = "zh"
 
 # 加注尺度：名字 → 底池倍数。「满池 1.2」是超池，用于需要施压/劝退的场合
@@ -132,15 +132,21 @@ def _all_in_option(snap: HandSnapshot) -> Option | None:
         presets = preset_targets(snap)
         if presets and hero_max <= max(a for a, _ in presets.values()) + 1e-9:
             return None
-    return Option("all-in", f"全下 {hero_max:g}BB", "allin", hero_max,
-                  "剩余后手全部投入")
+    note = "剩余后手全部投入"
+    effective = _effective_stack(snap)
+    if effective is not None and effective < hero_max - 1e-9:
+        note += (f"；有效筹码只有 {effective:g}BB，"
+                 f"多出的 {hero_max - effective:g}BB 不会被跟")
+    return Option("all-in", f"全下 {hero_max:g}BB", "allin", hero_max, note)
 
 
 # 翻前开池的基础倍数（bb），按位置分档，来自 preflop-open.md：
 # 前位 2.5-3.0 / 中位 3.0-3.5 / 后位 3.5-4.0 / 小盲 3.0。
 # 大盲在溜入池里再加注时，尺度要比开池更大（没有位置劣势补偿，直接收池）。
-# 这些只是**下限修正前**的原始尺度：低于本桌 6BB 最低加注（PREFLOP_MIN_RAISE_BB）
-# 的档位会由 `_cap()` 统一抬到 6BB。
+# 这些是**无前注、底池 1.5BB** 时的原始尺度。实际开池还要乘上底池缩放
+# (底池/1.5)**OPEN_POT_EXPONENT（见 build_preflop_options），再被本桌
+# 5.5BB 最低开池（PREFLOP_MIN_RAISE_BB）抬一次下限。本桌 9 人 0.5BB 前注
+# → 底池 6BB → 缩放约 2.3 倍 → 后位 8-9BB。
 _OPEN_BASES: dict[str, tuple[float, ...]] = {
     "UTG": (2.5, 2.75, 3.0),
     "UTG+1": (2.5, 2.75, 3.0),
@@ -153,20 +159,25 @@ _OPEN_BASES: dict[str, tuple[float, ...]] = {
     "BB": (3.5, 4.0, 4.5),
 }
 
-# 松桌的开池加成（BB）：跟注站/松弱桌开大一点收价值；紧桌不加。
-# 叠加在「位置倍数 × 前注加成 + 溜入者加成」之后，再由 _cap 做全下/最小加注修正。
-LOOSE_OPEN_BONUS = 0.5
-# 溜入者的加成递减：前两个每个 +1BB，第 3 个起每个 +0.5BB。
-# 3-4 个 limper 时如果还按 +1BB 线性叠加，BTN 会开到 12.5BB（100BB 的 12%+），
-# 只会把能跟注的范围压成两极化；递减后 3-4 个 limper 的 BTN 约 10-11.5BB。
-LIMP_BONUS_FIRST = 1.0
-LIMP_BONUS_EXTRA = 0.5
+# 开池的底池缩放指数：开池 = 位置基础 × (底池 / 1.5BB) ** 指数。
+#
+# 0.5（开方）时底池 4 倍 → 开池 2 倍（后位 8BB）；0.6 → 后位 9.2BB。
+# 选 0.6 而不是 1.0（线性）：线性会在底池 6BB 时把后位开到 16BB，可跟注
+# 范围直接两极化。指数越大，前注/溜入者推高尺度的力度越强。
+OPEN_POT_EXPONENT = 0.6
 
-# 翻前桌上规则：任何加注/开池/再加注的「加注到」总额不得低于 6BB。
+# 松桌的开池加成（BB）：跟注站/松弱桌开大一点收价值；紧桌不加。
+# 叠加在「位置倍数 × 底池缩放」之后，再由 _cap 做全下/最小加注修正。
+#
+# 溜入者不再单独加成：他们本来就把底池做大了，开池尺度按底池缩放时已经
+# 计过一次；再叠一层就是重复收费（底池涨一次、尺度再涨一次）。
+LOOSE_OPEN_BONUS = 0.5
+
+# 翻前桌上规则：任何加注/开池/再加注的「加注到」总额不得低于 5.5BB。
 # 牌桌客户端会拒绝更小的尺度，给出 2.5BB 的开池建议等于给一个点不出来的动作。
-# 位置尺度（2.5-4BB）低于这个下限时由 `_cap()` 抬到 6BB；真正的全下不受此限
-# （后手不足 6BB 时只能全下，这是合法动作）。改牌桌规则时只改这个常量。
-PREFLOP_MIN_RAISE_BB = 6.0
+# 位置尺度（2.5-4BB）低于这个下限时由 `_cap()` 抬到 5.5BB；真正的全下不受此限
+# （后手不足 5.5BB 时只能全下，这是合法动作）。改牌桌规则时只改这个常量。
+PREFLOP_MIN_RAISE_BB = 5.5
 
 # 成手牌「**单个对手**能赢我」的比例超过这个值，就不再按价值牌处理。
 #
@@ -186,8 +197,8 @@ def _cap(target: float, hero_max: float | None, min_raise_to: float,
          min_note: str = "已抬到最小加注") -> tuple[float, str]:
     """把目标额修正到合法范围：低于最小加注抬上去，高于后手封顶为全下。
 
-    `min_note` 让翻前的牌桌下限（6BB）能和扑克本身的最小加注区分开：
-    模型看到「已抬到本桌最低加注 6BB」才知道不是程序算错了。
+    `min_note` 让翻前的牌桌下限（5.5BB）能和扑克本身的最小加注区分开：
+    模型看到「已抬到本桌最低加注 5.5BB」才知道不是程序算错了。
     """
     note = ""
     if target < min_raise_to:
@@ -233,8 +244,8 @@ def build_preflop_options(snap: HandSnapshot,
     second = snap.second_bet
     increment = max(max_bet - second if second is not None else max_bet, bb)
     legal_min_raise_to = max_bet + increment
-    # 本桌的 6BB 下限与扑克的最小加注取较严的那个：上家已经加注到 10BB 时，
-    # 合法的再加注到 20BB 比 6BB 更严，不能被 6BB 覆盖掉。
+    # 本桌的 5.5BB 下限与扑克的最小加注取较严的那个：上家已经加注到 10BB 时，
+    # 合法的再加注到 20BB 比 5.5BB 更严，不能被 5.5BB 覆盖掉。
     table_min_raise_to = bb * PREFLOP_MIN_RAISE_BB
     min_raise_to = max(legal_min_raise_to, table_min_raise_to)
     min_note = ("已抬到最小加注"
@@ -265,11 +276,16 @@ def build_preflop_options(snap: HandSnapshot,
                               _round_bb(to_call)))
         options.append(Option("fold", "弃牌", "fold"))
         # 面对加注：3bet/再加注到「上家加注的 3 倍 / 4 倍」，来自
-        # preflop-3bet-pot.md「有位置 3-4 倍，盲注位一律 4 倍」
+        # preflop-3bet-pot.md「有位置 3-4 倍，盲注位一律 4 倍」。
+        #
+        # 标签只写动作的性质（3-bet / 4-bet），倍数放括注：原来直接把倍数字
+        # 写成「4-bet」，模型会把「对单加注的 4 倍」误读成「对 3-bet 的再加注」，
+        # 进而套用错误的 4-bet 范围。
+        prefix = "4-bet" if "three-bet" in (snap.preflop_shapes or ()) else "3-bet"
         for mult in (3, 4):
             amount, note = _cap(max_bet * mult, hero_max, min_raise_to, min_note)
             options.append(Option(
-                f"raise-{mult}x", f"{mult}-bet 到 {amount:g}BB", "raise",
+                f"raise-{mult}x", f"{prefix} 到 {amount:g}BB（{mult} 倍）", "raise",
                 amount, note))
         extra = _all_in_option(snap)
         if extra is not None:
@@ -305,19 +321,22 @@ def build_preflop_options(snap: HandSnapshot,
     if to_call > 0:
         options.append(Option("fold", "弃牌", "fold"))
 
-    limpers = count_limpers(snap)
-    limper_bonus = (min(limpers, 2) * LIMP_BONUS_FIRST
-                    + max(limpers - 2, 0) * LIMP_BONUS_EXTRA)
     base = _OPEN_BASES.get(hero_pos, (3.0, 3.25, 3.5))
-    # 前注按「大盲的倍数」加，不能拿它去乘开池尺度：0.5BB 的前注会把 UTG 的
-    # 2.5BB 开池直接翻成 5BB（h39 的 5.5BB 就是这么来的），既偏离标准
-    # 2.5-3.5BB，也把能跟注的范围压成两极化。前注只是死钱，开池加 0.5-1BB
-    # 足够覆盖。
-    ante_bb = 0.0
-    if snap.blinds and snap.blinds.ante and snap.blinds.bb:
-        ante_bb = float(snap.blinds.ante) / float(snap.blinds.bb)
+    # 开池尺度按**底池**缩放，不按盲注。
+    #
+    # 2.5-4BB 这套位置尺度成立的前提是「无前注、底池 1.5BB」。本桌 9 人
+    # 各交 0.5BB 前注，底池一到翻前就是 6BB —— 开 5.5BB 时大盲只需补 4.5
+    # 进 16，门槛 28%，比无前注局的 31% 还便宜。开池要对已经躺在底池里的
+    # 死钱收费，所以尺度必须跟着底池走。
+    #
+    # 用**开方**而不是线性：底池 1.5→6 是 4 倍，开池跟着乘 2（前位 5BB、
+    # 后位 8BB）；线性放大到 10-16BB 会把能跟注的范围压成两极化 —— 那正是
+    # h39 当初要避免的问题。溜入者也通过底池自动计入，不再单独加码，避免
+    # 「底池涨一次、尺度再涨一次」的重复计算。
+    pot_now = max(float(snap.pot or 0.0), 1.5 * bb)
+    scale = (pot_now / (1.5 * bb)) ** OPEN_POT_EXPONENT
     for b in base:
-        target = b + ante_bb + limper_bonus + max(open_bonus, 0.0)
+        target = b * scale + max(open_bonus, 0.0)
         target, note = _cap(target, hero_max, min_raise_to, min_note)
         table_min = "（本桌最低加注）" if target >= table_min_raise_to \
             and target == table_min_raise_to else ""
@@ -334,8 +353,8 @@ def _raise_geometry(snap: HandSnapshot) -> tuple[float, float, float, float | No
     """加注金额的公共几何：需跟额、底池、当前最高下注、后手封顶、最小加注到。
 
     `build_options()` 和 `preset_targets()` 共用，避免两处对「最小加注 / 全下
-    封顶」的算法漂移。翻前还要叠加本桌的 6BB 下限（`PREFLOP_MIN_RAISE_BB`）：
-    点击器按这个几何选档位，档位目标低于 6BB 就等于点出一个牌桌拒绝的动作。
+    封顶」的算法漂移。翻前还要叠加本桌的 5.5BB 下限（`PREFLOP_MIN_RAISE_BB`）：
+    点击器按这个几何选档位，档位目标低于 5.5BB 就等于点出一个牌桌拒绝的动作。
     """
     to_call = max(snap.to_call or 0.0, 0.0)
     pot = snap.pot or 0.0
@@ -1670,7 +1689,7 @@ def render_hand_facts(sit: Situation) -> str:
             # 行动线可能漏掉平跟（没有动作徽章）；用同帧下注额补出来，
             # 让模型知道前面到底有几个人溜入，而不是只看底池猜。
             lines.append(f"Limpers before me: {limpers}")
-        # 本桌规则：翻前任何加注不得低于 6BB。选项生成已经按这个下限抬过；
+        # 本桌规则：翻前任何加注不得低于 5.5BB。选项生成已经按这个下限抬过；
         # 这里再写一句，防止模型在 reason 里建议「加到 2.5-3BB」这种点不出来的尺度。
         if any(o.kind in ("raise", "bet") for o in sit.options):
             lines.append(
@@ -1954,9 +1973,23 @@ SYSTEM_ZH = """\
 - 尺度只能从「可选动作」里选，金额由程序算好，不要自己算。
 - all-in 是最后手段：只有赔率、筹码深度和底池几何都合理时才用，不要用它代替正常的价值下注。
 
+## 前注局（桌况里带前注时）
+- 前注是死钱：翻前底池比无前注局大，入池赔率更好，范围应该放宽而不是收紧；在前注局里收紧范围等于白交前注。
+- 加注尺度按**底池**定：前注和溜入者把底池做大，开池尺度就跟着变大（本桌 9 人各 0.5BB 前注 → 翻前底池 6BB → 后位开池 8-9BB；溜入者越多越大）。选项金额已按这个口径算好，不要因为「比 3BB 大」就当成算错；只用最小加注开池，等于把全桌送进底池。
+- 溜入者多的桌子隔离加注收不到弃牌，不要为了提高加注率去加注垃圾牌；用多人池里能成坚果的牌入池，位置越好越宽。
+- 前注大 → 底池大 → SPR 低：翻前选牌时就要想好翻后能不能打完。
+
+## 筹码深度（先看有效筹码，再看自己的后手）
+- 有效筹码 = min(我, 对手)。我 300BB、对手 100BB 时，这一手打的是 100BB 的牌；只有对手也深才是深码局。判断深度用有效筹码，不要用自己的后手。
+- SPR 高（>6）：一对不做大底池。深码的利润来自「成坚果 + 对手付钱」，不是把顶对打光；听牌的隐含赔率和位置价值都放大。
+- SPR 低（<3）：单挑或 3 人池里顶对/超对就是套池牌，按权益和赔率打光，不要因为「怕被反超」弃牌；4 人以上的多人池仍然降级，因为总有人有两对以上。
+- 后手 <20BB：翻前进入推/弃区。小加注没有意义，要么全下要么弃牌；20–40BB 仍然是正常加注，只是翻后基本一枪定生死。
+
 ## 常见错误
 - 牌型名字不等于牌型排名；两对、三条、顺子都要看牌面和对手范围。
 - 不要因为“已经投入”而跟注；不要因为“怕被反超”而弃掉明显领先的牌。
+- 有前注时按无前注的范围收紧，是这类局最常见的失血方式。
+- 拿自己的后手当有效筹码，忽略对手更浅：深码的名头会骗你去打一个其实只有 100BB 的底池。
 - 不要编造对手手牌，不要给不存在的范围表/规则找理由。
 """
 
@@ -2008,6 +2041,22 @@ def _effective_stack(snap: HandSnapshot) -> float | None:
     return min([snap.hero_stack, *stacks]) if stacks else snap.hero_stack
 
 
+def _playable_depth(snap: HandSnapshot) -> float | None:
+    """开池范围该按多深来算。
+
+    不是 min(我, 所有对手)：桌上只要有**一个**短码，min 就把整桌判成浅码，
+    而决定这手牌能打多深的是能跟注的最深那个对手。所以取
+    min(我的后手, 最深的未弃牌对手)。
+    """
+    if snap.hero_stack is None:
+        return None
+    others = [o.stack for o in snap.opponents
+              if not o.folded and o.stack is not None]
+    if not others:
+        return snap.hero_stack
+    return min(snap.hero_stack, max(others))
+
+
 def _range_conclusion_zh(snap: HandSnapshot,
                          table_dynamics: str | None) -> str | None:
     """翻前开池归属的一句话中文结论（只在无人入池/溜入时使用）。
@@ -2017,7 +2066,8 @@ def _range_conclusion_zh(snap: HandSnapshot,
     """
     verdict = range_verdict(snap.hero_position, snap.hero_cards,
                             table_dynamics=table_dynamics,
-                            limpers=count_limpers(snap))
+                            limpers=count_limpers(snap),
+                            stack_bb=_playable_depth(snap))
     if verdict is None:
         return None
     if verdict.in_range is None:
@@ -2030,6 +2080,8 @@ def _range_conclusion_zh(snap: HandSnapshot,
                else "已不在收紧后的范围内")
         text += (f"；前面有 {verdict.limpers} 个溜入者，"
                  f"按 {verdict.isolation_position} 的更紧范围看{iso}")
+    if verdict.depth_note:
+        text += f"（{verdict.depth_note}）"
     return text
 
 
@@ -2311,7 +2363,9 @@ def render_hand_strength_zh(sit: Situation) -> list[str]:
                      f"公平份额 {1.0 / actual_players:.1%}")
         lines.extend(render_ranges_zh(sit))
 
-    return lines
+    # 只有标题、没有任何事实时整段省略：一张「## 实时牌力」后面空空如也，
+    # 模型会以为牌力未知是「没算」而不是「没手牌」。
+    return lines if len(lines) > 1 else []
 
 
 def render_preflop_zh(sit: Situation) -> list[str]:
@@ -2329,9 +2383,52 @@ def render_preflop_zh(sit: Situation) -> list[str]:
     if limpers:
         lines.append(f"前面溜入人数：{limpers}")
     if any(o.kind in ("raise", "bet") for o in sit.options):
-        lines.append(f"本桌翻前最低加注：{PREFLOP_MIN_RAISE_BB:g}BB；"
-                     "所有加注选项已不低于该值")
+        lines.append(f"本桌翻前最低加注：{PREFLOP_MIN_RAISE_BB:g}BB —— 这是牌桌"
+                     "下限（更小的会被客户端拒绝），不是建议尺度；"
+                     "开池尺度已按底池放大，以上面的选项金额为准")
     return lines
+
+
+def render_explosive_zh(sit: Situation) -> list[str]:
+    """炸弹池的结构与打法事实。
+
+    为什么放事实块、不写进 system：这些判断依赖本手的**实际 SPR 和人数**。
+    写死在方法论里会在深筹码炸弹池上说错话，也会让模型在常规池里误用；
+    紧跟「爆炸底池：是」这个具体事实给一段贴着当前几何的说明，比让它自己
+    翻方法论可靠（与 value_directive 当初的取舍一致）。
+    """
+    if sit.street == PREFLOP:
+        return ["炸弹池翻前：每人强制投入 5BB 前注后直接发翻牌，翻前没有可做的决策；"
+                "翻牌后的第一个决策就是「跟注是否已经套池」。"]
+    spr = sit.spr
+    if spr is None:
+        return ["炸弹池结构：SPR 未知，按有效筹码和底池几何自行判断能否套池。"]
+
+    if spr > 3.0:
+        return [
+            f"炸弹池结构：SPR {spr:.1f} —— 底池虽大，后手仍然很深，这不是套池局面；"
+            "按常规深码翻后打，不要因为「是炸弹池」就默认打完。",
+            "炸弹池深码：一对不做大底池，深码的利润来自成坚果和对手付钱；"
+            "顶对强踢可以正常下注/跟注，听牌、组合听牌和位置的价值都放大。",
+            "炸弹池深码多人池：9 人看翻牌时仍然要小心「总有人有两对以上」，"
+            "但不要套用短码炸弹池「只看坚果」那套 —— 后手够深时中等牌有正常价值。",
+        ]
+
+    # SPR ≤ 3：翻牌跟一个接近满池的下注就已经套池，没有「跟注再看一条街」。
+    return [
+        f"炸弹池结构：SPR {spr:.1f} —— 翻牌跟一个接近满池的下注就已经套池，"
+        "这里没有「跟注再看一条街」的选项，翻牌跟注等于承诺打光。",
+        "炸弹池中等牌：牌力分档为顶对弱踢、中对、底对、弱听牌的，不投入底池；"
+        "顶对强踢和超对在干燥面可以用小注拿薄价值，但不要为了套池造大底池"
+        "——9 人池里就算牌力标成「大」，也按中等牌处理。"
+        "只用「打到全下还舒服」的牌做大底池（三条、两对、成顺/成花、组合听牌）。"
+        "已经投入的钱是沉没成本，不要因为底池大、不跟可惜而用中等牌追。",
+        "炸弹池读牌：默认按「下注=强、过牌=中等」处理（桌风或画像另有说明时以它们为准）。"
+        "面对下注，顶对以下按赔率和人数快速弃牌，不要抓诈。",
+        "炸弹池收池：前面全过牌且 Hero 在后位时，对手范围已经封顶，可以用 1/3 池下注"
+        "收池（强牌价值、听牌半诈唬、无摊牌价值的牌偷）；有摊牌价值的中等牌优先过牌兑现。"
+        "被加注通常等于坚果，除了强牌和坚果听牌直接弃。",
+    ]
 
 
 def render_facts_zh(sit: Situation) -> str:
@@ -2382,7 +2479,8 @@ def render_facts_zh(sit: Situation) -> str:
                      f"{_fmt_num(winnable)}BB = {owed / winnable * 100:.1f}%")
     if snap.pot is not None:
         excess = uncalled_excess(snap)
-        pot_line = f"可争夺底池：{_fmt_num(winnable)}BB（含我的跟注）"
+        pot_line = f"可争夺底池：{_fmt_num(winnable)}BB" + (
+            "（含我的跟注）" if owed > 0 else "")
         if excess > 0:
             pot_line += (f"；牌桌底池 {_fmt_num(snap.pot)}BB 含对手超额 "
                          f"{_fmt_num(excess)}BB，已扣除")
@@ -2410,6 +2508,8 @@ def render_facts_zh(sit: Situation) -> str:
         explosive += (f"（上一街底池 {_fmt_num(prev_pot)}BB ÷ {count} 人 = "
                       f"{sit.pot_per_player:.2f}BB/人，炸弹前注固定 5BB/人）")
     lines.append(f"爆炸底池：{explosive}")
+    if sit.explosive_pot:
+        lines.extend(render_explosive_zh(sit))
 
     preflop = render_preflop_zh(sit)
     if preflop:

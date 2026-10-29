@@ -28,13 +28,13 @@ import os
 import re
 import time
 import unicodedata
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Iterable, Mapping, Sequence
 
 # 分类器版本：规则/阈值改动时递增，画像文件里会记录，重建时能看出差异。
-CLASSIFIER_VERSION = "rules-2026-10-23"
+CLASSIFIER_VERSION = "rules-2026-10-30"
 
 # 合法类型。与设计文档 6.1 一致。
 ARCHETYPES = ("unknown", "station", "lag", "maniac", "nit", "tag")
@@ -136,6 +136,21 @@ def _num(value: float | int | None):
     return round(value, 4) if isinstance(value, float) else value
 
 
+def _pct(hit: float, opps: float, *, min_opps: float = 3.0) -> float | None:
+    """命中率；机会数不足返回 None —— 3 次机会算出 0% 或 100% 没有信息量。"""
+    if opps < min_opps:
+        return None
+    return hit / opps * 100
+
+
+def _bucket_map(raw) -> dict[str, float]:
+    """JSON 里的位置分桶计数：只留数值，别让脏数据把整份画像读崩。"""
+    if not isinstance(raw, Mapping):
+        return {}
+    return {str(k): float(v) for k, v in raw.items()
+            if isinstance(v, (int, float))}
+
+
 def _median(values: Sequence[float]) -> float | None:
     if not values:
         return None
@@ -197,6 +212,21 @@ class HandObservation:
     # 只有强制前注、没有主动入池，不计入 VPIP 分母（VPIP 只统计主动入池）。
     bomb_pot: bool = False
     passive_entry: bool = False
+    # 位置开池：翻前轮到我时前面没人主动入池 → 这是开池机会。
+    open_opp: bool = False
+    opened: bool = False
+    # 翻牌 c-bet：我是翻前最后加注者，且翻牌第一个下注是我。
+    cbet_opp: bool = False
+    cbet: bool = False
+    # 转牌续打：翻牌 c-bet 过之后，转牌还下注。
+    barrel_opp: bool = False
+    barrel: bool = False
+    # 被过牌后下注（stab）：这条街前面所有人过牌，轮到我。
+    stab_opp: bool = False
+    stab: bool = False
+    # 过牌-加注：我先过牌，后面有人下注，我加注。
+    check_raise_opp: bool = False
+    check_raise: bool = False
     display_name: str | None = None
     seat_id: str | None = None
     position: str | None = None
@@ -268,6 +298,34 @@ def _actions_by_street(hand: Mapping) -> dict[str, list[dict]]:
             if isinstance(action, Mapping):
                 out.setdefault(name, []).append({**action, "_street": name})
     return out
+
+
+_POSITION_BUCKETS = {
+    "EP": {"UTG", "UTG+1", "UTG+2"},
+    "MP": {"LJ", "HJ"},
+    "LP": {"CO", "BTN"},
+}
+
+
+def position_bucket(position: str | None) -> str:
+    """位置粗分档：EP / MP / LP / 盲注。画像按档统计，不按具体位置 ——
+    9 人桌每个具体位置一个 session 只有几手，分到单点全是噪声。"""
+    if not position:
+        return "?"
+    pos = position.strip().upper()
+    for bucket, names in _POSITION_BUCKETS.items():
+        if pos in names:
+            return bucket
+    return "盲注" if pos in ("SB", "BB") else "?"
+
+
+def _preflop_aggressor(actions: list[dict]) -> str | None:
+    """翻前最后一个加注者；没有加注返回 None。"""
+    last = None
+    for action in actions:
+        if action.get("action") in ("bet", "raise"):
+            last = str(action.get("seat_id") or "") or None
+    return last
 
 
 def _dealt_seats(hand: Mapping, active: Mapping[str, set[str]],
@@ -496,6 +554,64 @@ def observations_from_hand(hand: Mapping, *,
         category, aggressive_showdown = _showdown(hand, seat_id, board)
         bet_sizes = _bet_size_ratios(hand, seat_id)
 
+        # ── 位置开池：轮到我时前面没人主动入池（跟注/加注都算入池）──
+        prior_pre = (preflop_actions[:first_idx]
+                     if first_idx is not None else preflop_actions)
+        open_opp = (not passive_entry and bool(preflop)
+                    and seat_id in preflop
+                    and not any(a.get("action") in ("call", "bet", "raise")
+                                for a in prior_pre))
+        opened = open_opp and any(_aggr(a) for a in pre_acts)
+
+        # ── c-bet：我是翻前最后加注者，翻牌第一个下注是我 ──
+        aggressor = _preflop_aggressor(preflop_actions)
+        cbet_opp = cbet = False
+        barrel_opp = barrel = False
+        if aggressor == seat_id and flop and seat_id in flop:
+            flop_acts = actions.get("flop") or []
+            first_bet = next((a for a in flop_acts
+                              if a.get("action") in ("bet", "raise")), None)
+            cbet_opp = True
+            cbet = bool(first_bet
+                        and str(first_bet.get("seat_id")) == seat_id)
+            if cbet:
+                # 续打只在「翻牌下注后真的看到转牌」时才有机会
+                turn_acts = actions.get("turn") or []
+                if turn_acts:
+                    barrel_opp = True
+                    barrel = any(
+                        a.get("action") in ("bet", "raise")
+                        and str(a.get("seat_id")) == seat_id
+                        for a in turn_acts)
+
+        # ── 被过牌后下注 / 过牌-加注：按街扫描自己的第一次动作 ──
+        stab_opp = stab = False
+        check_raise_opp = check_raise = False
+        for street in _POSTFLOP:
+            seq = actions.get(street) or []
+            mine = next((i for i, a in enumerate(seq)
+                         if str(a.get("seat_id")) == seat_id), None)
+            if mine is None:
+                continue
+            before = seq[:mine]
+            action = seq[mine].get("action")
+            if (not stab_opp
+                    and not any(a.get("action") in ("bet", "raise")
+                                for a in before)
+                    and any(a.get("action") == "check" for a in before)):
+                stab_opp = True
+                stab = action in ("bet", "raise")
+            if not check_raise_opp and action == "check":
+                after = seq[mine + 1:]
+                if any(a.get("action") in ("bet", "raise") for a in after):
+                    check_raise_opp = True
+                    check_raise = any(
+                        a.get("action") in ("bet", "raise")
+                        and str(a.get("seat_id")) == seat_id
+                        for a in after)
+            if stab_opp and check_raise_opp:
+                break
+
         out.append(HandObservation(
             opponent_key=key,
             hand_uid=uid,
@@ -524,6 +640,16 @@ def observations_from_hand(hand: Mapping, *,
             display_name=name,
             seat_id=seat_id,
             position=info.get("position"),
+            open_opp=open_opp,
+            opened=opened,
+            cbet_opp=cbet_opp,
+            cbet=cbet,
+            barrel_opp=barrel_opp,
+            barrel=barrel,
+            stab_opp=stab_opp,
+            stab=stab,
+            check_raise_opp=check_raise_opp,
+            check_raise=check_raise,
             weight=weight,
         ))
     return out
@@ -560,6 +686,20 @@ class OpponentStats:
     weak_aggressive_showdowns: float = 0.0
     bomb_pot_hands: float = 0.0
     passive_entry_hands: float = 0.0
+    # ── 位置开池与翻后线路（用户口径：要能看出「在哪个位置爱加注」和
+    #    「x / xc / xr」这些线路，否则只能靠 VPIP/PFR 猜）──
+    open_opp: float = 0.0
+    opened: float = 0.0
+    cbet_opp: float = 0.0
+    cbets: float = 0.0
+    barrel_opp: float = 0.0
+    barrels: float = 0.0
+    stab_opp: float = 0.0
+    stabs: float = 0.0
+    check_raise_opp: float = 0.0
+    check_raises: float = 0.0
+    open_by_bucket: dict[str, float] = field(default_factory=dict)
+    open_opp_by_bucket: dict[str, float] = field(default_factory=dict)
     inferred_weighted: float = 0.0
     weight_total: float = 0.0
     manual_pin: str | None = None
@@ -616,6 +756,28 @@ class OpponentStats:
         return (self.weak_aggressive_showdowns / self.aggressive_showdowns * 100)
 
     @property
+    def cbet_pct(self) -> float | None:
+        return _pct(self.cbets, self.cbet_opp)
+
+    @property
+    def barrel_pct(self) -> float | None:
+        return _pct(self.barrels, self.barrel_opp)
+
+    @property
+    def stab_pct(self) -> float | None:
+        """被过牌后下注频率：这条街前面全过牌时他下注的比例。"""
+        return _pct(self.stabs, self.stab_opp)
+
+    @property
+    def check_raise_pct(self) -> float | None:
+        return _pct(self.check_raises, self.check_raise_opp)
+
+    def open_pct(self, bucket: str) -> float | None:
+        """某个位置档的开池频率。样本不足返回 None。"""
+        return _pct(self.open_by_bucket.get(bucket, 0.0),
+                    self.open_opp_by_bucket.get(bucket, 0.0))
+
+    @property
     def inferred_ratio(self) -> float:
         return (self.inferred_weighted / self.weight_total
                 if self.weight_total > 0 else 0.0)
@@ -653,6 +815,23 @@ class OpponentStats:
             self.bet_sizes.append(float(size))
         if len(self.bet_sizes) > MAX_BET_SIZES:
             del self.bet_sizes[:len(self.bet_sizes) - MAX_BET_SIZES]
+        self.open_opp += w if obs.open_opp else 0.0
+        self.opened += w if obs.opened else 0.0
+        self.cbet_opp += w if obs.cbet_opp else 0.0
+        self.cbets += w if obs.cbet else 0.0
+        self.barrel_opp += w if obs.barrel_opp else 0.0
+        self.barrels += w if obs.barrel else 0.0
+        self.stab_opp += w if obs.stab_opp else 0.0
+        self.stabs += w if obs.stab else 0.0
+        self.check_raise_opp += w if obs.check_raise_opp else 0.0
+        self.check_raises += w if obs.check_raise else 0.0
+        if obs.open_opp:
+            bucket = position_bucket(obs.position)
+            self.open_opp_by_bucket[bucket] = (
+                self.open_opp_by_bucket.get(bucket, 0.0) + w)
+            if obs.opened:
+                self.open_by_bucket[bucket] = (
+                    self.open_by_bucket.get(bucket, 0.0) + w)
         if obs.bomb_pot:
             self.bomb_pot_hands += 1.0
         if obs.passive_entry:
@@ -692,6 +871,19 @@ class OpponentStats:
             "weak_aggressive_showdowns": _num(self.weak_aggressive_showdowns),
             "bomb_pot_hands": _num(self.bomb_pot_hands),
             "passive_entry_hands": _num(self.passive_entry_hands),
+            "open_opp": _num(self.open_opp),
+            "opened": _num(self.opened),
+            "cbet_opp": _num(self.cbet_opp),
+            "cbets": _num(self.cbets),
+            "barrel_opp": _num(self.barrel_opp),
+            "barrels": _num(self.barrels),
+            "stab_opp": _num(self.stab_opp),
+            "stabs": _num(self.stabs),
+            "check_raise_opp": _num(self.check_raise_opp),
+            "check_raises": _num(self.check_raises),
+            "open_by_bucket": {k: _num(v) for k, v in self.open_by_bucket.items()},
+            "open_opp_by_bucket": {k: _num(v)
+                                   for k, v in self.open_opp_by_bucket.items()},
             "inferred_ratio": round(self.inferred_ratio, 4),
             "archetype": read.archetype,
             "confidence": round(read.confidence, 4),
@@ -737,6 +929,18 @@ class OpponentStats:
             weak_aggressive_showdowns=f("weak_aggressive_showdowns"),
             bomb_pot_hands=f("bomb_pot_hands"),
             passive_entry_hands=f("passive_entry_hands"),
+            open_opp=f("open_opp"),
+            opened=f("opened"),
+            cbet_opp=f("cbet_opp"),
+            cbets=f("cbets"),
+            barrel_opp=f("barrel_opp"),
+            barrels=f("barrels"),
+            stab_opp=f("stab_opp"),
+            stabs=f("stabs"),
+            check_raise_opp=f("check_raise_opp"),
+            check_raises=f("check_raises"),
+            open_by_bucket=_bucket_map(raw.get("open_by_bucket")),
+            open_opp_by_bucket=_bucket_map(raw.get("open_opp_by_bucket")),
             inferred_weighted=(f("inferred_ratio") * f("hands")),
             weight_total=f("hands"),
             manual_pin=(raw.get("manual_pin")
@@ -766,6 +970,14 @@ class OpponentRead:
     source: str
     note: str
     gate: str = "unknown"
+    # ── 打法倾向：位置开池与翻后线路。None = 样本不够，不猜。──
+    open_ep_pct: float | None = None
+    open_lp_pct: float | None = None
+    cbet_pct: float | None = None
+    barrel_pct: float | None = None
+    stab_pct: float | None = None
+    check_raise_pct: float | None = None
+    threebet_pct: float | None = None
 
     @property
     def aggressive(self) -> bool:
@@ -787,6 +999,41 @@ def _gate(n: int, confidence: float) -> str:
     if n >= READ_SAMPLE and confidence >= READ_CONFIDENCE:
         return "read"
     return "tentative"
+
+
+# 每个倾向指标的最低机会数。低于这个数不给百分比 —— 3 次机会算出的
+# 0%/100% 会把模型带向过度剥削。
+TENDENCY_MIN_OPPS = {
+    "open": 8.0,
+    "cbet": 6.0,
+    "barrel": 5.0,
+    "stab": 6.0,
+    "check_raise": 6.0,
+}
+
+
+def _tendency(value: float | None, opps: float, kind: str) -> float | None:
+    if value is None or opps < TENDENCY_MIN_OPPS[kind]:
+        return None
+    return round(value, 0)
+
+
+def _tendencies(stats: OpponentStats) -> dict:
+    """位置开池与翻后线路。全部按机会数门控，不够就是 None。"""
+    return dict(
+        open_ep_pct=_tendency(stats.open_pct("EP"),
+                              stats.open_opp_by_bucket.get("EP", 0.0), "open"),
+        open_lp_pct=_tendency(stats.open_pct("LP"),
+                              stats.open_opp_by_bucket.get("LP", 0.0), "open"),
+        cbet_pct=_tendency(stats.cbet_pct, stats.cbet_opp, "cbet"),
+        barrel_pct=_tendency(stats.barrel_pct, stats.barrel_opp, "barrel"),
+        stab_pct=_tendency(stats.stab_pct, stats.stab_opp, "stab"),
+        check_raise_pct=_tendency(stats.check_raise_pct,
+                                  stats.check_raise_opp, "check_raise"),
+        threebet_pct=(round(stats.threebet_pct, 0)
+                      if stats.threebet_pct is not None
+                      and stats.threebet_opps >= 6 else None),
+    )
 
 
 def _unknown_read(stats: OpponentStats | None, *, seat_id: str | None = None,
@@ -883,6 +1130,7 @@ def classify(stats: OpponentStats) -> OpponentRead:
         vpip=round(vpip, 1),
         pfr=round(pfr, 1),
         af=round(af, 2) if af is not None else 0.0,
+        **_tendencies(stats),
         source="auto",
         note=", ".join(note_parts),
         gate=gate,
@@ -1074,6 +1322,22 @@ class ProfileStore:
         target.weak_aggressive_showdowns += old.weak_aggressive_showdowns
         target.bomb_pot_hands += old.bomb_pot_hands
         target.passive_entry_hands += old.passive_entry_hands
+        target.open_opp += old.open_opp
+        target.opened += old.opened
+        target.cbet_opp += old.cbet_opp
+        target.cbets += old.cbets
+        target.barrel_opp += old.barrel_opp
+        target.barrels += old.barrels
+        target.stab_opp += old.stab_opp
+        target.stabs += old.stabs
+        target.check_raise_opp += old.check_raise_opp
+        target.check_raises += old.check_raises
+        for bucket, value in old.open_by_bucket.items():
+            target.open_by_bucket[bucket] = (
+                target.open_by_bucket.get(bucket, 0.0) + value)
+        for bucket, value in old.open_opp_by_bucket.items():
+            target.open_opp_by_bucket[bucket] = (
+                target.open_opp_by_bucket.get(bucket, 0.0) + value)
         target.inferred_weighted += old.inferred_weighted
         target.weight_total += old.weight_total
         if old.first_seen and (not target.first_seen
@@ -1129,28 +1393,20 @@ class ProfileStore:
             return _unknown_read(None, seat_id=seat_id,
                                  note="未匹配到画像")
         auto = classify(stats)
+        # 用 replace 而不是重列字段：以后再加倾向指标时，这里不会静默丢字段。
         if stats.manual_pin:
-            return OpponentRead(
-                seat_id=seat_id, key=stats.key,
+            return replace(
+                auto, seat_id=seat_id,
                 display_name=stats.display_name or stats.key,
-                archetype=stats.manual_pin, confidence=1.0, n=auto.n,
-                vpip=auto.vpip, pfr=auto.pfr, af=auto.af,
+                archetype=stats.manual_pin, confidence=1.0,
                 source="pin",
                 note=f"manual pin（自动 n={auto.n}，{auto.archetype}）",
-                gate="stable",
-            )
+                gate="stable")
         if auto.archetype != "unknown" and auto.gate in ("read", "stable"):
-            return OpponentRead(
-                seat_id=seat_id, key=auto.key, display_name=auto.display_name,
-                archetype=auto.archetype, confidence=auto.confidence,
-                n=auto.n, vpip=auto.vpip, pfr=auto.pfr, af=auto.af,
-                source="auto", note=auto.note, gate=auto.gate)
-        return OpponentRead(
-            seat_id=seat_id, key=auto.key, display_name=auto.display_name,
-            archetype=auto.archetype, confidence=auto.confidence,
-            n=auto.n, vpip=auto.vpip, pfr=auto.pfr, af=auto.af,
-            source="auto" if auto.archetype != "unknown" else "unknown",
-            note=auto.note, gate=auto.gate)
+            return replace(auto, seat_id=seat_id, source="auto")
+        return replace(
+            auto, seat_id=seat_id,
+            source="auto" if auto.archetype != "unknown" else "unknown")
 
     def read_for(self, opponents: Iterable) -> dict[str, OpponentRead]:
         """按 `seat_id → OpponentRead` 返回本手在局对手的画像。
@@ -1359,7 +1615,70 @@ def render_reads_zh(reads: Iterable[OpponentRead],
             f"- {position} {name}：{read.archetype.upper()}"
             f"（n={read.n}，VPIP {read.vpip:g}%，PFR {read.pfr:g}%{af}，"
             f"置信 {read.confidence:.2f}{source}）{gate}")
+        profile = render_tendencies_zh(read)
+        if profile:
+            lines.append(f"  打法：{profile}")
+        exploit = exploit_hint_zh(read)
+        if exploit:
+            lines.append(f"  可剥削：{exploit}")
     return lines
+
+
+def render_tendencies_zh(read: OpponentRead) -> str:
+    """位置开池 + 翻后线路的一行摘要；没有足够样本时返回空串。
+
+    只渲染有样本的指标：宁可不写，也不给模型一个 3 次机会算出来的百分比。
+    """
+    parts: list[str] = []
+    opens = []
+    if read.open_ep_pct is not None:
+        opens.append(f"EP {read.open_ep_pct:.0f}%")
+    if read.open_lp_pct is not None:
+        opens.append(f"LP {read.open_lp_pct:.0f}%")
+    if opens:
+        parts.append("开池 " + " / ".join(opens))
+    if read.threebet_pct is not None:
+        parts.append(f"3-bet {read.threebet_pct:.0f}%")
+    if read.cbet_pct is not None:
+        parts.append(f"翻牌 c-bet {read.cbet_pct:.0f}%")
+    if read.barrel_pct is not None:
+        parts.append(f"转牌续打 {read.barrel_pct:.0f}%")
+    if read.stab_pct is not None:
+        parts.append(f"被过牌后下注 {read.stab_pct:.0f}%")
+    if read.check_raise_pct is not None:
+        parts.append(f"过牌-加注 {read.check_raise_pct:.0f}%")
+    return "｜".join(parts)
+
+
+def exploit_hint_zh(read: OpponentRead, *, limit: int = 2) -> str:
+    """把倾向翻译成**可执行的剥削方向**，最多两条。
+
+    只在样本足够（render_tendencies_zh 已经门控过）且偏离明显时才给：
+    中间值两边都不站，宁可不说。
+    """
+    hints: list[str] = []
+
+    if read.stab_pct is not None:
+        if read.stab_pct <= 25:
+            hints.append("被过牌后很少下注 —— 他过牌多半没牌，过牌到你时可以更主动偷池")
+        elif read.stab_pct >= 60:
+            hints.append("被过牌后爱下注 —— 过牌给他要准备 check-raise，别用中等牌白跟")
+
+    if read.check_raise_pct is not None and read.check_raise_pct >= 20:
+        hints.append("过牌-加注频繁 —— 别对他的过牌随手开火")
+
+    if read.cbet_pct is not None:
+        if read.cbet_pct >= 75:
+            hints.append("c-bet 频率高 —— 可以多 float，转牌他再开枪再决定")
+        elif read.cbet_pct <= 40:
+            hints.append("c-bet 频率低 —— 翻牌他过牌基本是没中，可以在转牌接管控池")
+
+    if (read.open_lp_pct is not None and read.open_lp_pct >= 40
+            and (read.threebet_pct is None or read.threebet_pct <= 8)):
+        hints.append("后位开池宽、3-bet 少 —— 他开池的范围偏弱，"
+                     "身后没人入池时可以有一定频率 3-bet 挤压")
+
+    return "；".join(hints[:limit])
 
 
 def format_read_line(read: OpponentRead, position: str | None = None) -> str:
