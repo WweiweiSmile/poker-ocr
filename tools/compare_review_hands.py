@@ -45,7 +45,7 @@
 - 翻前表外加注 / 表外溜入 / 开池平跟（范围表由程序算）
 - SB 补盲垃圾牌（`preflop_ranges.sb_completable`）
 - 范围内却弃牌（没人加注时）
-- 非价值下注（`value_directive` 明确 NOT A VALUE / BOARD PLAY / NO FOLD EQUITY）
+- 非价值下注（`hand_strength`/`ground_truth` 说明是空气/打牌面/多路听牌）
 - 非坚果加注（`VALUE CAUTION` / `ONE PAIR vs AGGRESSION` / 爆炸池一对）
 - 有赔率却弃牌（听牌权益 > 跟注门槛；门槛按可争夺底池算，隐含赔率按 0）
 - 价值下注过小（强牌只下 1/3 池；复盘里 1/3 从不当价值尺度）
@@ -66,17 +66,13 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from poker_ocr.advice import (  # noqa: E402
-    AISettings, IMPLIED_ODDS_CAP_PCT, advise, build_situation, call_amount,
-    is_jev_model, value_directive, winnable_pot,
+    AISettings, advise, audit_advice_tags, build_situation, is_jev_model,
 )
 from poker_ocr.env import load_env  # noqa: E402
 from poker_ocr.hand_track import (  # noqa: E402
     ActionRecord, HandSnapshot, OpponentSnapshot, StreetRecord,
 )
 from poker_ocr.parse import Blinds  # noqa: E402
-from poker_ocr.preflop_ranges import (  # noqa: E402
-    hand_key, range_verdict, sb_completable,
-)
 from poker_ocr.table_dynamics import load_table_dynamics  # noqa: E402
 
 POSTFLOP = ("flop", "turn", "river")
@@ -273,82 +269,13 @@ def build_decisions(h: dict) -> tuple[list[dict], bool] | None:
 # ── 规则审计 ──────────────────────────────────────────────────
 
 
-def _aggressive(kind: str) -> bool:
-    return kind in AGGRESSIVE
-
-
-def _directive_prefix(sit) -> str:
-    d = value_directive(sit) or ""
-    return d.split(":")[0] if d else ""
-
-
 def audit(sit, kind: str, amount: float | None) -> set[str]:
-    """对一条建议做硬规则审计，返回违规标签集合。"""
-    tags: set[str] = set()
-    snap = sit.snap
-    street = snap.street
-    pos = (snap.hero_position or "").upper()
-    cards = snap.hero_cards
-    to_call = float(snap.to_call or 0.0)
-    pot = float(snap.pot or 0.0)
-    prefix = _directive_prefix(sit)
-    agg = _aggressive(kind)
+    """对一条建议做硬规则审计，返回违规标签集合。
 
-    # 翻后：价值指令明确说「不是价值牌」还下注/加注。
-    if agg and prefix in ("NOT A VALUE HAND BY RANK", "NO FOLD EQUITY"):
-        tags.add("非价值下注")
-    if agg and prefix == "BOARD PLAY":
-        # 打牌面允许「翻牌一条小街」，其它情况算白送。
-        if street != "flop" or (amount is not None and pot and amount > 0.5 * pot):
-            tags.add("打牌面下注")
-    # 非坚果/一对面对加注时加注。
-    if kind == "raise" and prefix == "VALUE CAUTION":
-        tags.add("非坚果加注")
-    if kind == "raise" and prefix == "ONE PAIR vs AGGRESSION":
-        tags.add("一对加注")
-    if kind == "raise" and prefix in ("EXPLOSIVE POT", "TABLE DYNAMICS OVERRIDE"):
-        tags.add("非坚果加注")
-    # 多路听牌主动下注（当前代码已经把这档从选项里拿掉，这里是回归检查）。
-    if agg and (sit.opponents_in_hand or 0) >= 3 \
-            and sit.hand_tier in ("强听", "弱听"):
-        tags.add("多路听牌下注")
-
-    # 翻前范围。
-    if street == "preflop" and len(cards) == 2:
-        v = range_verdict(pos, cards)
-        key = hand_key(cards)
-        if v is not None:
-            if pos not in ("SB", "BB") and v.in_range is False:
-                if agg and to_call <= 1.0:
-                    tags.add("翻前表外加注")
-                if kind == "call" and to_call <= 1.0 and key not in SMALL_PAIRS:
-                    tags.add("翻前表外溜入")
-            if pos not in ("SB", "BB") and v.in_range is True \
-                    and kind == "fold" and to_call <= 1.0:
-                tags.add("范围内却弃牌")
-        if pos == "SB" and kind == "call" and to_call <= 1.5 \
-                and not sb_completable(cards):
-            tags.add("SB补盲垃圾牌")
-        if pos not in ("SB", "BB") and kind == "call" and to_call <= 1.0 \
-                and snap.preflop_shapes == ("unopened",):
-            tags.add("开池平跟")
-
-    # 赔率：听牌权益高于跟注门槛却弃牌。
-    if kind == "fold" and to_call > 0 \
-            and sit.hand_tier in ("强听", "弱听") \
-            and sit.equity_pct is not None and pot > 0:
-        call = call_amount(snap)
-        winnable = winnable_pot(snap)
-        bep = call / winnable * 100 if call > 0 and winnable > 0 else 0.0
-        if sit.equity_pct > bep + IMPLIED_ODDS_CAP_PCT:
-            tags.add("有赔率却弃牌")
-
-    # 价值尺度：强牌只下 1/3 池。
-    if street != "preflop" and agg and amount is not None and pot > 0 \
-            and sit.hand_tier in ("强成牌", "超对", "顶对强踢") \
-            and prefix == "VALUE DEFAULT" and amount < 0.4 * pot:
-        tags.add("价值下注过小")
-    return tags
+    与 replay 共用 `advice.audit_advice_tags`：只看牌力解析、坚果校验、
+    牌面结构与赔率，不再读旧 Value directive。
+    """
+    return audit_advice_tags(sit, kind, amount)
 
 
 # ── 对比与汇总 ────────────────────────────────────────────────

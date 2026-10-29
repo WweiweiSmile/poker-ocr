@@ -49,7 +49,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from poker_ocr.advice import (  # noqa: E402
-    AISettings, advise, build_situation, render_hand_facts, value_directive,
+    AISettings, advise, build_situation, render_facts_zh,
 )
 from poker_ocr.env import load_env  # noqa: E402
 from poker_ocr.hand_track import (  # noqa: E402
@@ -298,14 +298,16 @@ def main(argv: list[str] | None = None) -> int:
             stale += 1
             continue
         sit = build_situation(snap, table_dynamics=dynamics_text)
-        d_new = value_directive(sit) or ""
+        hs = sit.hand_strength
         row = {
             "hand": snap.hand_id, "street": adv["street"],
             "cards": " ".join(snap.hero_cards), "board": " ".join(snap.board),
             "pot": snap.pot, "to_call": snap.to_call,
             "old": old_summary(adv), "old_reason": adv.get("reason") or "",
             "tier": sit.hand_tier, "beat": sit.beat_at_least_pct,
-            "directive": d_new.split(":")[0] if d_new else "(none)",
+            "hs_kind": hs.kind if hs is not None else None,
+            "hs_size": hs.size if hs is not None else None,
+            "facts": render_facts_zh(sit),
             "snap": snap, "sit": sit,
         }
         rows.append(row)
@@ -326,18 +328,21 @@ def main(argv: list[str] | None = None) -> int:
     if args.limit:
         rows = rows[:args.limit]
 
-    print(f"决策点 {len(rows)} 个（跳过陈旧帧 {stale} 个）；当前代码的牌型排名与价值指令：\n")
-    flagged = [r for r in rows if "NOT A VALUE" in r["directive"]]
-    print(f"被新规则判为「不是价值牌」的有 {len(flagged)} 个\n")
+    print(f"决策点 {len(rows)} 个（跳过陈旧帧 {stale} 个）；"
+          "当前中文 facts 的牌力解析：\n")
+    flagged = [r for r in rows if r["hs_kind"] in ("weak", "board_play")]
+    print(f"牌力解析判为空气/打牌面的有 {len(flagged)} 个\n")
 
-    hdr = f"{'手':7}{'街':8}{'我的牌':9}{'牌面':18}{'全桌领先':>9}  {'旧建议':10}{'新指令'}"
+    hdr = f"{'手':7}{'街':8}{'我的牌':9}{'牌面':18}{'全桌领先':>9}  {'旧建议':10}{'牌力'}"
     print(hdr)
     print("-" * len(hdr))
     for r in rows:
         b = f"{r['beat']:.1f}%" if r["beat"] is not None else "-"
-        star = " ★" if "NOT A VALUE" in r["directive"] else ""
+        hs = (f"{r['hs_kind']}/{r['hs_size']}"
+              if r["hs_kind"] else (r["tier"] or "-"))
+        star = " ★" if r["hs_kind"] in ("weak", "board_play") else ""
         print(f"{r['hand']:7}{r['street']:8}{r['cards']:9}{r['board']:18}"
-              f"{b:>9}  {r['old']:10}{r['directive']}{star}")
+              f"{b:>9}  {r['old']:10}{hs}{star}")
 
     if args.model:
         print("\n重新问模型 ...")
@@ -383,7 +388,13 @@ def main(argv: list[str] | None = None) -> int:
                 "ground_truth": (sit.ground_truth.to_dict()
                                  if sit.ground_truth is not None else None),
                 "old": r["old"], "old_reason": r["old_reason"],
-                "directive": r["directive"],
+                "hand_strength": ({
+                    "kind": sit.hand_strength.kind,
+                    "size": sit.hand_strength.size,
+                    "behind_any": sit.hand_strength.behind_any,
+                    "equity": sit.hand_strength.equity,
+                } if sit.hand_strength is not None else None),
+                "prompt_facts": r["facts"],
                 "new": r.get("new"), "new_reason": r.get("new_reason"),
                 "options": [o.id for o in sit.options],
             })

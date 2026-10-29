@@ -613,10 +613,13 @@ def snapshot_from_json(text: str) -> HandSnapshot:
 
 
 def decision_facts(sit) -> dict:
-    """该版本实际看到的 Situation 事实。桌风会影响 options/directive。"""
-    from poker_ocr.advice import value_directive
+    """该版本实际看到的 Situation 事实。桌风会影响选项与桌风快照。
 
+    旧版会把 `value_directive` 写进 `directive` 字段；中文 lean 上线后该字段
+    不再生成（旧记录里的值保持只读）。
+    """
     gt = getattr(sit, "ground_truth", None)
+    hs = getattr(sit, "hand_strength", None)
     return {
         "handTier": sit.hand_tier,
         "handLabel": sit.hand_label,
@@ -631,7 +634,12 @@ def decision_facts(sit) -> dict:
         "bestFive": ([_card(c) for c in gt.made.best_five]
                      if gt is not None and getattr(gt, "made", None) else None),
         "madeName": (gt.made.name if gt is not None and getattr(gt, "made", None) else None),
-        "directive": value_directive(sit),
+        "madeNameCn": (gt.made.name_cn if gt is not None and getattr(gt, "made", None) else None),
+        "handStrength": ({
+            "kind": hs.kind, "size": hs.size,
+            "behindAny": round(hs.behind_any, 4),
+            "equity": round(hs.equity, 4), "n": hs.n,
+        } if hs is not None else None),
         "options": [o.to_dict() for o in sit.options],
         "opponentsInHand": sit.opponents_in_hand,
         "tableDynamics": bool(sit.table_dynamics),

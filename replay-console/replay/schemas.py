@@ -51,7 +51,7 @@ class VersionCreate(APIModel):
     maxTokens: int | None = None
     thinking: Literal["enabled", "disabled"] | None = None
     reasoningEffort: Literal["none", "low", "high", "max"] | None = None
-    promptStyle: Literal["lean", "skills"] = "lean"
+    promptStyle: Literal["lean"] = "lean"
     tableDynamicsMode: Literal["current", "text", "none"] = "current"
     tableDynamicsText: str | None = None
     notes: str | None = None
@@ -68,7 +68,7 @@ class VersionClone(APIModel):
     maxTokens: int | None = None
     thinking: Literal["enabled", "disabled"] | None = None
     reasoningEffort: Literal["none", "low", "high", "max"] | None = None
-    promptStyle: Literal["lean", "skills"] | None = None
+    promptStyle: Literal["lean"] | None = None
     tableDynamicsMode: Literal["keep", "current", "text", "none"] | None = None
     tableDynamicsText: str | None = None
     notes: str | None = None

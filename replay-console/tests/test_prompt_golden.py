@@ -18,8 +18,8 @@ from poker_ocr.parse import Blinds
 
 from replay.versioning import CURRENT_ADVICE_VERSION
 
-EXPECTED_ADVICE_VERSION = "advice-2026-10-28.5"
-EXPECTED_PROMPT_HASH = "6387fd378469d02b5c3bc41a37851214bdb4fc77fb5432de95b8d94c46e15faf"
+EXPECTED_ADVICE_VERSION = "advice-2026-10-29.1"
+EXPECTED_PROMPT_HASH = "ee26e005bc6a8685c1c7bef1aa8beca1ecdd60968c687fa40d013c9aca3e2902"
 
 
 def test_prompt_golden_is_tied_to_advice_version():
@@ -49,7 +49,7 @@ def test_prompt_golden_is_tied_to_advice_version():
         bomb_pot=False, players_dealt=6,
     )
     sit = build_situation(snap, table_dynamics="")
-    system, user = build_messages(sit, "lean")
+    system, user = build_messages(sit)
     digest = hashlib.sha256((system + "\n---\n" + user).encode()).hexdigest()
     assert digest == EXPECTED_PROMPT_HASH, (
         "提示词内容变了。若这是有意的，请 bump CURRENT_ADVICE_VERSION 并更新 "

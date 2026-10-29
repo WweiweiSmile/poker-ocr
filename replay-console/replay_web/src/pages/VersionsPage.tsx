@@ -28,7 +28,7 @@ interface FormValues {
   maxTokens: number | null
   thinking: 'enabled' | 'disabled' | null
   reasoningEffort: 'none' | 'low' | 'high' | 'max' | null
-  promptStyle: 'lean' | 'skills'
+  promptStyle: 'lean'
   tableDynamicsMode: 'current' | 'text' | 'none' | 'keep'
   tableDynamicsText?: string
   notes?: string
@@ -123,7 +123,7 @@ export default function VersionsPage() {
       maxTokens: version.maxTokens,
       thinking: version.thinking as FormValues['thinking'],
       reasoningEffort: version.reasoningEffort as FormValues['reasoningEffort'],
-      promptStyle: version.promptStyle as FormValues['promptStyle'],
+      promptStyle: 'lean',
       tableDynamicsMode: 'keep',
       tableDynamicsText: version.tableDynamics,
       notes: version.notes,
@@ -374,8 +374,7 @@ export default function VersionsPage() {
             </Form.Item>
             <Form.Item name="promptStyle" label="提示词风格">
               <Radio.Group optionType="button" buttonStyle="solid">
-                <Radio.Button value="lean">lean</Radio.Button>
-                <Radio.Button value="skills">skills</Radio.Button>
+                <Radio.Button value="lean">中文 lean（唯一）</Radio.Button>
               </Radio.Group>
             </Form.Item>
           </div>

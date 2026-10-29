@@ -12,12 +12,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from poker_ocr.advice import (
-    AIError, Advice, AISettings, IMPLIED_ODDS_CAP_PCT, advise, build_messages,
-    call_amount as snapshot_call_amount, complete_json, value_directive,
-    winnable_pot,
-)
-from poker_ocr.preflop_ranges import (
-    hand_key, range_verdict, sb_completable,
+    AIError, Advice, AISettings, PROMPT_VERSION, advise, audit_advice_tags,
+    complete_json,
 )
 
 from .decisions import DecisionPoint, call_amount, decision_facts
@@ -25,85 +21,16 @@ from .util import cards_of
 
 log = logging.getLogger("replay.engine")
 
-AGGRESSIVE = ("bet", "raise", "allin")
-SMALL_PAIRS = {"22", "33", "44", "55", "66"}
 CONSERVATIVE = ("fold", "check", "call", "bet", "raise", "allin")
-
-
-def _aggressive(kind: str | None) -> bool:
-    return kind in AGGRESSIVE
-
-
-def _directive_prefix(sit) -> str:
-    d = value_directive(sit) or ""
-    return d.split(":")[0] if d else ""
 
 
 def audit(sit, kind: str | None, amount: float | None) -> set[str]:
     """对一条建议做硬规则审计，返回违规标签集合。
 
-    口径沿用 tools/compare_review_hands.py：只报可证伪的硬错，不做主观好坏。
+    口径统一在 `poker_ocr.advice.audit_advice_tags`：只看牌力解析、
+    坚果校验、牌面结构与赔率，不再读旧 Value directive。
     """
-    tags: set[str] = set()
-    snap = sit.snap
-    street = snap.street
-    pos = (snap.hero_position or "").upper()
-    cards = snap.hero_cards
-    to_call = float(snap.to_call or 0.0)
-    pot = float(snap.pot or 0.0)
-    prefix = _directive_prefix(sit)
-    agg = _aggressive(kind)
-
-    if agg and prefix in ("NOT A VALUE HAND BY RANK", "NO FOLD EQUITY"):
-        tags.add("非价值下注")
-    if agg and prefix == "BOARD PLAY":
-        if street != "flop" or (amount is not None and pot and amount > 0.5 * pot):
-            tags.add("打牌面下注")
-    if kind == "raise" and prefix == "VALUE CAUTION":
-        tags.add("非坚果加注")
-    if kind == "raise" and prefix == "ONE PAIR vs AGGRESSION":
-        tags.add("一对加注")
-    if kind == "raise" and prefix in ("EXPLOSIVE POT", "TABLE DYNAMICS OVERRIDE"):
-        tags.add("非坚果加注")
-    if agg and (sit.opponents_in_hand or 0) >= 3 \
-            and sit.hand_tier in ("强听", "弱听"):
-        tags.add("多路听牌下注")
-
-    if street == "preflop" and len(cards) == 2:
-        v = range_verdict(pos, cards)
-        key = hand_key(cards)
-        if v is not None:
-            if pos not in ("SB", "BB") and v.in_range is False:
-                if agg and to_call <= 1.0:
-                    tags.add("翻前表外加注")
-                if kind == "call" and to_call <= 1.0 and key not in SMALL_PAIRS:
-                    tags.add("翻前表外溜入")
-            if pos not in ("SB", "BB") and v.in_range is True \
-                    and kind == "fold" and to_call <= 1.0:
-                tags.add("范围内却弃牌")
-        if pos == "SB" and kind == "call" and to_call <= 1.5 \
-                and not sb_completable(cards):
-            tags.add("SB补盲垃圾牌")
-        if pos not in ("SB", "BB") and kind == "call" and to_call <= 1.0 \
-                and snap.preflop_shapes == ("unopened",):
-            tags.add("开池平跟")
-
-    if kind == "fold" and to_call > 0 \
-            and sit.hand_tier in ("强听", "弱听") \
-            and sit.equity_pct is not None and pot > 0:
-        # 全下 cover 我时，牌桌底池里对手超额的那部分会退回，赔率分母只能
-        # 用可争夺底池；否则门槛被系统性低估（990036：23% vs 真实 39%）。
-        call = snapshot_call_amount(snap)
-        winnable = winnable_pot(snap)
-        bep = call / winnable * 100 if call > 0 and winnable > 0 else 0.0
-        if sit.equity_pct > bep + IMPLIED_ODDS_CAP_PCT:
-            tags.add("有赔率却弃牌")
-
-    if street != "preflop" and agg and amount is not None and pot > 0 \
-            and sit.hand_tier in ("强成牌", "超对", "顶对强踢") \
-            and prefix == "VALUE DEFAULT" and amount < 0.4 * pot:
-        tags.add("价值下注过小")
-    return tags
+    return audit_advice_tags(sit, kind, amount)
 
 
 def classify(new_kind: str | None, new_amt: float | None,
@@ -197,10 +124,9 @@ def execute_unit(
     """
     from poker_ocr.advice import build_situation
 
-    prompt_style = version.get("prompt_style") or "lean"
+    # 旧 lean-rules / skills 版本只读，不再重跑（versioning.run_blockers 已拦）。
     sit = build_situation(decision.snap,
-                          table_dynamics=version.get("table_dynamics") or "",
-                          style=prompt_style)
+                          table_dynamics=version.get("table_dynamics") or "")
     facts = decision_facts(sit)
     actual_tags = sorted(audit(sit, decision.actual, decision.actual_amount))
     facts["actualViolationTags"] = actual_tags
@@ -231,8 +157,7 @@ def execute_unit(
     started = time.monotonic()
     try:
         advice: Advice = advise(sit, settings, timeout=timeout,
-                                complete=complete,
-                                style=prompt_style)
+                                complete=complete)
         elapsed = int((time.monotonic() - started) * 1000)
         source = advice.source
         option = advice.option
@@ -253,6 +178,7 @@ def execute_unit(
             "reason": advice.reason,
             "source": source,
             "model": advice.model or version.get("model"),
+            "prompt_version": PROMPT_VERSION,
             "duration_ms": elapsed or advice.duration_ms,
             "tokens_in": None,
             "tokens_out": None,
@@ -274,7 +200,9 @@ def execute_unit(
         payload = {
             "option_id": None, "option_kind": None, "option_amount": None,
             "option_label": None, "reason": None, "source": "error",
-            "model": version.get("model"), "duration_ms": elapsed,
+            "model": version.get("model"),
+            "prompt_version": PROMPT_VERSION,
+            "duration_ms": elapsed,
             "tokens_in": None, "tokens_out": None, "bucket": "error",
             "violation_tags": json.dumps([], ensure_ascii=False),
             "facts_json": json.dumps(facts, ensure_ascii=False, default=str),

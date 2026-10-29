@@ -865,8 +865,9 @@ class ResultRepository:
                (job_id, decision_id, version_id, repeat_index, option_id,
                 option_kind, option_amount, option_label, reason, source, model,
                 duration_ms, tokens_in, tokens_out, bucket, violation_tags,
-                facts_json, prompt_system, prompt_user, raw_response, error_msg)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                facts_json, prompt_system, prompt_user, raw_response, error_msg,
+                prompt_version)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
             (
                 job_id, decision_id, version_id, repeat_index,
                 payload.get("option_id"), payload.get("option_kind"),
@@ -877,7 +878,7 @@ class ResultRepository:
                 payload.get("bucket"), payload.get("violation_tags"),
                 payload.get("facts_json"), payload.get("prompt_system"),
                 payload.get("prompt_user"), payload.get("raw_response"),
-                payload.get("error_msg"),
+                payload.get("error_msg"), payload.get("prompt_version"),
             ))
         return bool(result)
 

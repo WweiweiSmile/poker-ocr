@@ -46,7 +46,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from poker_ocr.advice import (  # noqa: E402
-    AISettings, advise, build_situation, is_jev_model, render_hand_facts,
+    AISettings, advise, build_situation, is_jev_model, render_facts_zh,
 )
 from poker_ocr.env import load_env  # noqa: E402
 from poker_ocr.hand_track import (  # noqa: E402
@@ -315,7 +315,7 @@ def main(path: str, limit: int, timeout: float, verbose: bool = False,
             print(f"    └ {reason}")
         if verbose and sit is not None and bucket in ("动作不同", "尺度差"):
             print("    ── 牌况 ──")
-            print("    " + render_hand_facts(sit).replace("\n", "\n    "))
+            print("    " + render_facts_zh(sit).replace("\n", "\n    "))
 
     total = sum(buckets.values())
     print("─" * 96)
@@ -361,7 +361,7 @@ def main(path: str, limit: int, timeout: float, verbose: bool = False,
                 "actual": {"action": d["actual"], "amount": d["actual_amt"]},
                 "bucket": bucket,
                 "reason": reason,
-                "hand_facts": render_hand_facts(sit) if sit is not None else None,
+                "hand_facts": render_facts_zh(sit) if sit is not None else None,
             }
 
         dump = {

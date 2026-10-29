@@ -37,7 +37,7 @@ for p in (str(ROOT), str(TOOLS)):
 
 from poker_ocr.ground_truth import card_text  # noqa: E402
 from poker_ocr.advice import (  # noqa: E402
-    AISettings, advise, build_situation, value_directive,
+    AISettings, advise, build_situation,
 )
 from poker_ocr.env import load_env  # noqa: E402
 from poker_ocr.table_dynamics import load_table_dynamics  # noqa: E402
@@ -98,9 +98,10 @@ def facts_block(r: dict) -> str:
         lines.append(f"  made={gt.made.name} ({gt.made.detail})  "
                      f"nuts={gt.hero_is_nuts}  "
                      f"best_five={' '.join(card_text(c) for c in gt.made.best_five)}")
-    d = value_directive(sit)
-    if d:
-        lines.append(f"  directive={d}")
+    hs = sit.hand_strength
+    if hs is not None:
+        lines.append(f"  hand_strength={hs.kind}/{hs.size} "
+                     f"behind={hs.behind_any:.1%} equity={hs.equity:.0%}")
     if sit.warnings:
         lines.append(f"  warnings={'; '.join(sit.warnings)}")
     lines.append("  options=" + ", ".join(
@@ -200,7 +201,12 @@ def main(argv: list[str] | None = None) -> int:
                         "texture": r["sit"].texture_en,
                         "equity_pct": r["sit"].equity_pct,
                         "beat_at_least_pct": r["sit"].beat_at_least_pct,
-                        "directive": value_directive(r["sit"]),
+                        "hand_strength": ({
+                            "kind": r["sit"].hand_strength.kind,
+                            "size": r["sit"].hand_strength.size,
+                            "behind_any": r["sit"].hand_strength.behind_any,
+                            "equity": r["sit"].hand_strength.equity,
+                        } if r["sit"].hand_strength is not None else None),
                         "options": [o.id for o in r["sit"].options],
                         "warnings": list(r["sit"].warnings),
                     },

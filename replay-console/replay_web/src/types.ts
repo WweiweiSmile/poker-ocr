@@ -154,6 +154,7 @@ export interface Version {
   thinking: string | null
   reasoningEffort: string | null
   promptStyle: string
+  promptVersion?: string | null
   adviceVersion: string
   reconstructVersion: string
   engineCommit: string | null
@@ -180,6 +181,14 @@ export interface OptionFacts {
   beatAtLeastPct?: number | null
   heroIsNuts?: boolean | null
   directive?: string | null
+  madeNameCn?: string | null
+  handStrength?: {
+    kind: string
+    size: string
+    behindAny: number
+    equity: number
+    n: number
+  } | null
   options?: { id: string; label: string; kind: string; amount?: number | null }[]
   warnings?: string[]
   opponentsInHand?: number | null

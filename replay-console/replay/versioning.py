@@ -15,7 +15,7 @@ from .config import REPO_ROOT, git_state
 from .errors import ApiError
 from .util import iso, json_dumps, sha256_text
 
-from poker_ocr.advice import AISettings, DEFAULT_PROMPT_STYLE, PROMPT_STYLES  # noqa: E402
+from poker_ocr.advice import AISettings, PROMPT_VERSION  # noqa: E402
 from poker_ocr.table_dynamics import (  # noqa: E402
     load_table_dynamics, parse_table_dynamics,
 )
@@ -27,12 +27,16 @@ from poker_ocr.table_dynamics import (  # noqa: E402
 # 2026-10-28.4：skills 提示词再注入逐座位对手画像（Current opponent reads）。
 # 2026-10-28.5：默认 lean 只注入状态/画像/实时牌力/桌风，移除范围表、翻后规则、
 #               价值指令、Math gate、plan 回灌与 GTO；旧版完整 lean 改为 lean-rules。
-CURRENT_ADVICE_VERSION = "advice-2026-10-28.5"
+# 2026-10-29.1：只保留一套中文 lean；新增中文事实块（SPR/位置/赔率门槛/爆炸底池/
+#               转河变化/多人池实际人数）与 all-in 选项；skills/lean-rules 下线。
+CURRENT_ADVICE_VERSION = "advice-2026-10-29.1"
 # 改动 decisions.py 的重建语义时 bump。
 # recon-3：翻前底池补上盲注（实时 pbs 只记前注，h39 4.5 → 6.0）。
 CURRENT_RECONSTRUCT_VERSION = "recon-3"
 
-PROMPT_STYLE_VALUES = tuple(PROMPT_STYLES)
+# 新版本只允许 lean；旧版本里的 skills / lean-rules 只读，不再重跑。
+PROMPT_STYLE_VALUES = ("lean",)
+LEGACY_PROMPT_STYLES = ("lean-rules", "skills")
 THINKING_VALUES = (None, "enabled", "disabled")
 EFFORT_VALUES = (None, "none", "low", "high", "max")
 
@@ -109,6 +113,7 @@ def config_payload(
         "thinking": thinking,
         "reasoning_effort": reasoning_effort,
         "prompt_style": prompt_style,
+        "prompt_version": PROMPT_VERSION,
         "advice_version": advice_version,
         "reconstruct_version": reconstruct_version,
         "api_key_ref": (api_key_ref or "").strip(),
@@ -187,6 +192,13 @@ def run_blockers(version: dict) -> list[dict]:
     if int(version.get("archived") or 0):
         blockers.append({"code": "VERSION_ARCHIVED",
                          "message": f"版本 {version.get('name')} 已归档"})
+    if (version.get("prompt_style") or "lean") != "lean":
+        blockers.append({
+            "code": "VERSION_LEGACY_PROMPT",
+            "message": ("旧提示词风格 "
+                        f"{version.get('prompt_style')} 已从 live 链路删除，"
+                        "该版本只能只读查看，不能重跑"),
+        })
     if version.get("advice_version") != CURRENT_ADVICE_VERSION:
         blockers.append({
             "code": "VERSION_STALE",
@@ -210,7 +222,7 @@ def run_blockers(version: dict) -> list[dict]:
 def default_version_name(model: str, style: str, date_text: str) -> str:
     safe_model = "".join(ch if ch.isalnum() or ch in "-_." else "-"
                          for ch in (model or "model")).strip("-") or "model"
-    return f"{safe_model}-{style or DEFAULT_PROMPT_STYLE}-{date_text}"
+    return f"{safe_model}-{style or 'lean'}-{date_text}"
 
 
 def public_version(row: dict, *, has_key_value: bool | None = None,
@@ -236,6 +248,7 @@ def public_version(row: dict, *, has_key_value: bool | None = None,
         "thinking": row.get("thinking"),
         "reasoningEffort": row.get("reasoning_effort"),
         "promptStyle": row.get("prompt_style"),
+        "promptVersion": (payload or {}).get("prompt_version") if isinstance(payload, dict) else None,
         "adviceVersion": row.get("advice_version"),
         "reconstructVersion": row.get("reconstruct_version"),
         "engineCommit": row.get("engine_commit"),
