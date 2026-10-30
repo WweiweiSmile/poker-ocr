@@ -924,6 +924,67 @@ def test_limp_and_cbet_defence_observations() -> None:
     check(got.dcb_opp and got.dcb, f"延迟 c-bet 应被记下：{got}")
 
 
+def test_fold_to_three_bet_and_missing_fold_inference() -> None:
+    """被 3-bet 的弃牌率；以及「手牌在翻前/翻牌结束、弃牌没被拍到」的补推。"""
+    seats = [
+        {"seat_id": "hero", "name": "我", "position": "BB", "stack": 100.0},
+        {"seat_id": "a", "name": "开池者", "position": "SB", "stack": 100.0},
+        {"seat_id": "b", "name": "三下注", "position": "BTN", "stack": 100.0},
+    ]
+
+    # 明确记录到弃牌
+    explicit = make_hand(
+        uid="s01-t10", seats=seats,
+        preflop=[act("a", "raise", 8.0, name="开池者", position="SB"),
+                 act("b", "raise", 24.0, name="三下注", position="BTN"),
+                 act("hero", "fold", None, is_hero=True),
+                 act("a", "fold", None, name="开池者")],
+        board=(), street_active={"preflop": ["hero", "a", "b", "c"]})
+    got = next(o for o in observations_from_hand(explicit)
+               if o.opponent_key == "开池者")
+    check(got.f3b_opp and got.f3b_fold,
+          f"被 3-bet 后弃牌应被记下：{got}")
+
+    # 弃牌没被拍到：翻前就结束、没有翻牌 → 只能是我弃牌
+    inferred = make_hand(
+        uid="s01-t11", seats=seats,
+        preflop=[act("a", "raise", 8.0, name="开池者", position="SB"),
+                 act("b", "raise", 24.0, name="三下注", position="BTN"),
+                 act("hero", "fold", None, is_hero=True)],
+        board=(), street_active={"preflop": ["hero", "a", "b", "c"]})
+    got = next(o for o in observations_from_hand(inferred)
+               if o.opponent_key == "开池者")
+    check(got.f3b_opp and got.f3b_fold,
+          f"翻前结束且没有翻牌，应补推为弃牌：{got}")
+
+    # 被截断的手牌不推
+    truncated = make_hand(
+        uid="s01-t12", seats=seats,
+        preflop=[act("a", "raise", 8.0, name="开池者", position="SB"),
+                 act("b", "raise", 24.0, name="三下注", position="BTN"),
+                 act("hero", "fold", None, is_hero=True)],
+        board=(), street_active={"preflop": ["hero", "a", "b", "c"]})
+    truncated["partial"] = True
+    got = next(o for o in observations_from_hand(truncated)
+               if o.opponent_key == "开池者")
+    check(not got.f3b_opp, f"partial 手牌不该补推弃牌：{got}")
+
+    # c-bet 之后翻牌就结束 → 剩下的座位补推为弃牌
+    ends_on_flop = make_hand(
+        uid="s01-t13", seats=seats,
+        preflop=[act("a", "raise", 8.0, name="开池者", position="SB"),
+                 act("hero", "fold", None, is_hero=True),
+                 act("b", "call", 8.0, name="跟注者", position="BTN")],
+        flop=[act("a", "bet", 10.0, name="开池者")],
+        board=("Ad", "7s", "2c"),
+        street_active={"preflop": ["hero", "a", "b", "c"], "flop": ["a", "b"]})
+    # 座位名以 seat_meta 为准（动作里的 name 只是显示用）
+    got = next(o for o in observations_from_hand(ends_on_flop)
+               if o.opponent_key == "三下注")
+    check(got.ftc_opp and got.ftc_fold,
+          f"翻牌结束且没有转牌，应补推为面对 c-bet 弃牌：{got}")
+
+
 def run() -> int:
     tests = [
         test_fold_and_check_are_inferred_at_street_end,
@@ -947,6 +1008,7 @@ def run() -> int:
         test_tendency_render_and_exploit_hints,
         test_street_actions_are_reordered_chronologically,
         test_limp_and_cbet_defence_observations,
+        test_fold_to_three_bet_and_missing_fold_inference,
     ]
     for t in tests:
         before = len(FAILS)

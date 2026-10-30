@@ -36,7 +36,7 @@ from typing import Callable, Iterable, Mapping, Sequence
 from .positions import POSITIONS_BY_TABLE_SIZE
 
 # 分类器版本：规则/阈值改动时递增，画像文件里会记录，重建时能看出差异。
-CLASSIFIER_VERSION = "rules-2026-10-30b"
+CLASSIFIER_VERSION = "rules-2026-10-30c"
 
 # 合法类型。与设计文档 6.1 一致。
 ARCHETYPES = ("unknown", "station", "lag", "maniac", "nit", "tag")
@@ -243,6 +243,11 @@ class HandObservation:
     # 延迟 c-bet：翻前加注者翻牌过牌、转牌补一枪。
     dcb_opp: bool = False
     dcb: bool = False
+    # 面对 3-bet：我开池之后有人再加注，我弃/跟/4-bet。
+    f3b_opp: bool = False
+    f3b_fold: bool = False
+    f3b_call: bool = False
+    f3b_4bet: bool = False
     display_name: str | None = None
     seat_id: str | None = None
     position: str | None = None
@@ -365,6 +370,16 @@ def _ordered_street_actions(actions: list[dict],
                       action))
     keyed.sort(key=lambda item: item[0])
     return [action for _, action in keyed]
+
+
+def _has_street(hand: Mapping, name: str) -> bool:
+    """这一手有没有进入过某条街。
+
+    不能看「这条街有没有动作」：街存在但没人下注时动作列表是空的，
+    而「有没有转牌」正是判断「翻牌是否已经结束」的依据。
+    """
+    return any(str(street.get("street") or "") == name
+               for street in hand.get("streets") or [])
 
 
 def _preflop_aggressor(actions: list[dict]) -> str | None:
@@ -644,6 +659,41 @@ def observations_from_hand(hand: Mapping, *,
                     and not any(_aggr(a) for a in prior_pre))
         limped = bool(limp_opp and first_pre.get("action") == "call")
 
+        # ── 面对 3-bet：自己开的池，被后面的人再加注 ──
+        f3b_opp = f3b_fold = f3b_call = f3b_4bet = False
+        pre_seq = ordered.get(_PREFLOP) or []
+        first_own = next((i for i, a in enumerate(pre_seq)
+                          if str(a.get("seat_id")) == seat_id), None)
+        if first_own is not None:
+            first_action = pre_seq[first_own]
+            opened_it = (
+                first_action.get("action") in ("bet", "raise")
+                and not any(a.get("action") in ("bet", "raise")
+                            for a in pre_seq[:first_own]))
+            if opened_it:
+                later = pre_seq[first_own + 1:]
+                re_raise = next(
+                    (a for a in later
+                     if a.get("action") in ("bet", "raise")
+                     and str(a.get("seat_id")) != seat_id), None)
+                if re_raise is not None:
+                    response = next(
+                        (a for a in later[later.index(re_raise) + 1:]
+                         if str(a.get("seat_id")) == seat_id), None)
+                    if response is not None:
+                        f3b_opp = True
+                        kind = response.get("action")
+                        f3b_fold = kind == "fold"
+                        f3b_call = kind == "call"
+                        f3b_4bet = kind in ("bet", "raise")
+                    elif (not _has_street(hand, "flop")
+                            and not hand.get("partial")):
+                        # 被 3-bet 之后没有翻牌、也没有我的下一个动作 ——
+                        # 手牌在翻前就结束了，只能是我弃牌。和 c-bet 那条
+                        # 一样：弃牌徽章经常在收池动画里被吞掉。
+                        f3b_opp = True
+                        f3b_fold = True
+
         # ── 面对 c-bet / 转牌续打 / 延迟 c-bet ──
         flop_seq = ordered.get("flop") or []
         turn_seq = ordered.get("turn") or []
@@ -665,6 +715,15 @@ def observations_from_hand(hand: Mapping, *,
                 ftc_fold = kind == "fold"
                 ftc_call = kind == "call"
                 ftc_raise = kind in ("bet", "raise")
+            elif (not _has_street(hand, "turn") and not hand.get("partial")
+                    and seat_id in (flop or ())):
+                # 这手在翻牌就结束了，而且没有转牌 —— 有人跟注就一定会发
+                # 转牌，所以这个座位只能是弃牌。追踪器没拍到那几帧（发牌
+                # 动画把弃牌徽章盖掉了），实测四成 c-bet 属于这种。
+                #
+                # `partial=True` 是被截断的手牌，不按这个推。
+                ftc_opp = True
+                ftc_fold = True
                 # 只有跟注的人才会在转牌再面对同一个人的续打
                 if ftc_call and turn_seq:
                     turn_bet = next((a for a in turn_seq
@@ -766,6 +825,10 @@ def observations_from_hand(hand: Mapping, *,
             ftb_fold=ftb_fold,
             dcb_opp=dcb_opp,
             dcb=dcb,
+            f3b_opp=f3b_opp,
+            f3b_fold=f3b_fold,
+            f3b_call=f3b_call,
+            f3b_4bet=f3b_4bet,
             weight=weight,
         ))
     return out
@@ -827,6 +890,10 @@ class OpponentStats:
     ftb_fold: float = 0.0
     dcb_opp: float = 0.0
     dcb: float = 0.0
+    f3b_opp: float = 0.0
+    f3b_fold: float = 0.0
+    f3b_call: float = 0.0
+    f3b_4bet: float = 0.0
     inferred_weighted: float = 0.0
     weight_total: float = 0.0
     manual_pin: str | None = None
@@ -924,6 +991,14 @@ class OpponentStats:
     def delay_cbet_pct(self) -> float | None:
         return _pct(self.dcb, self.dcb_opp)
 
+    @property
+    def fold_to_3bet_pct(self) -> float | None:
+        return _pct(self.f3b_fold, self.f3b_opp)
+
+    @property
+    def fourbet_pct(self) -> float | None:
+        return _pct(self.f3b_4bet, self.f3b_opp)
+
     def open_pct(self, bucket: str) -> float | None:
         """某个位置档的开池频率。样本不足返回 None。"""
         return _pct(self.open_by_bucket.get(bucket, 0.0),
@@ -987,6 +1062,10 @@ class OpponentStats:
         self.ftb_fold += w if obs.ftb_fold else 0.0
         self.dcb_opp += w if obs.dcb_opp else 0.0
         self.dcb += w if obs.dcb else 0.0
+        self.f3b_opp += w if obs.f3b_opp else 0.0
+        self.f3b_fold += w if obs.f3b_fold else 0.0
+        self.f3b_call += w if obs.f3b_call else 0.0
+        self.f3b_4bet += w if obs.f3b_4bet else 0.0
         if obs.open_opp:
             bucket = position_bucket(obs.position)
             self.open_opp_by_bucket[bucket] = (
@@ -1056,6 +1135,10 @@ class OpponentStats:
             "ftb_fold": _num(self.ftb_fold),
             "dcb_opp": _num(self.dcb_opp),
             "dcb": _num(self.dcb),
+            "f3b_opp": _num(self.f3b_opp),
+            "f3b_fold": _num(self.f3b_fold),
+            "f3b_call": _num(self.f3b_call),
+            "f3b_4bet": _num(self.f3b_4bet),
             "inferred_ratio": round(self.inferred_ratio, 4),
             "archetype": read.archetype,
             "confidence": round(read.confidence, 4),
@@ -1123,6 +1206,10 @@ class OpponentStats:
             ftb_fold=f("ftb_fold"),
             dcb_opp=f("dcb_opp"),
             dcb=f("dcb"),
+            f3b_opp=f("f3b_opp"),
+            f3b_fold=f("f3b_fold"),
+            f3b_call=f("f3b_call"),
+            f3b_4bet=f("f3b_4bet"),
             inferred_weighted=(f("inferred_ratio") * f("hands")),
             weight_total=f("hands"),
             manual_pin=(raw.get("manual_pin")
@@ -1165,6 +1252,8 @@ class OpponentRead:
     call_to_cbet_pct: float | None = None
     fold_to_barrel_pct: float | None = None
     delay_cbet_pct: float | None = None
+    fold_to_3bet_pct: float | None = None
+    fourbet_pct: float | None = None
 
     @property
     def aggressive(self) -> bool:
@@ -1200,6 +1289,7 @@ TENDENCY_MIN_OPPS = {
     "fold_to_cbet": 8.0,
     "fold_to_barrel": 5.0,
     "delay_cbet": 5.0,
+    "fold_to_3bet": 5.0,
 }
 
 
@@ -1233,6 +1323,10 @@ def _tendencies(stats: OpponentStats) -> dict:
                                      "fold_to_barrel"),
         delay_cbet_pct=_tendency(stats.delay_cbet_pct, stats.dcb_opp,
                                  "delay_cbet"),
+        fold_to_3bet_pct=_tendency(stats.fold_to_3bet_pct, stats.f3b_opp,
+                                   "fold_to_3bet"),
+        fourbet_pct=_tendency(stats.fourbet_pct, stats.f3b_opp,
+                              "fold_to_3bet"),
     )
 
 
@@ -1542,6 +1636,10 @@ class ProfileStore:
         target.ftb_fold += old.ftb_fold
         target.dcb_opp += old.dcb_opp
         target.dcb += old.dcb
+        target.f3b_opp += old.f3b_opp
+        target.f3b_fold += old.f3b_fold
+        target.f3b_call += old.f3b_call
+        target.f3b_4bet += old.f3b_4bet
         for bucket, value in old.open_by_bucket.items():
             target.open_by_bucket[bucket] = (
                 target.open_by_bucket.get(bucket, 0.0) + value)
@@ -1868,6 +1966,11 @@ def render_tendencies_zh(read: OpponentRead) -> str:
         parts.append(f"转牌再弃 {read.fold_to_barrel_pct:.0f}%")
     if read.delay_cbet_pct is not None:
         parts.append(f"延迟 c-bet {read.delay_cbet_pct:.0f}%")
+    if read.fold_to_3bet_pct is not None:
+        seg = f"被 3-bet 弃 {read.fold_to_3bet_pct:.0f}%"
+        if read.fourbet_pct is not None:
+            seg += f" / 4-bet {read.fourbet_pct:.0f}%"
+        parts.append(seg)
     return "｜".join(parts)
 
 
@@ -1906,10 +2009,16 @@ def exploit_hint_zh(read: OpponentRead, *, limit: int = 2) -> str:
     if read.delay_cbet_pct is not None and read.delay_cbet_pct >= 40:
         hints.append("翻牌过牌不代表放弃 —— 他会在转牌补一枪，别用中等牌白跟")
 
-    if (read.open_lp_pct is not None and read.open_lp_pct >= 40
+    if read.fold_to_3bet_pct is not None and read.fold_to_3bet_pct >= 60:
+        # 这才是挤压的真实判据：他开池后被 3-bet 会弃。
+        hints.append("被 3-bet 就弃 —— 他开池后可以直接挤压，"
+                     "身后都弃牌时成功率高")
+    elif (read.open_lp_pct is not None and read.open_lp_pct >= 40
             and (read.threebet_pct is None or read.threebet_pct <= 8)):
+        # 兜底：没采到「被 3-bet 的弃牌率」时，用开池宽度做代理。
         hints.append("后位开池宽、3-bet 少 —— 他开池的范围偏弱，"
-                     "身后没人入池时可以有一定频率 3-bet 挤压")
+                     "身后没人入池时可以有一定频率 3-bet 挤压"
+                     "（还没采到被 3-bet 的弃牌率）")
 
     return "；".join(hints[:limit])
 
