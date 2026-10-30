@@ -105,7 +105,9 @@ class DrawInfo:
     oesd: bool
     gutshot: bool
     straight_outs: int
-    total_outs: int
+    overcards: bool                 # 无花顺听、未成对，两张/一张高张可反超当前顶对
+    overcard_outs: int
+    total_outs: int                 # 花顺 outs + 两高张反超 outs（没有花顺听时才加）
     equity_pct: float               # 四二法则，0-100
     note: str
 
@@ -117,6 +119,8 @@ class DrawInfo:
                 "straight_draw": self.straight_draw,
                 "oesd": self.oesd, "gutshot": self.gutshot,
                 "straight_outs": self.straight_outs,
+                "overcards": self.overcards,
+                "overcard_outs": self.overcard_outs,
                 "total_outs": self.total_outs,
                 "equity_pct": round(self.equity_pct, 1),
                 "note": self.note}
@@ -291,7 +295,7 @@ class GroundTruth:
 
     def _draw_text(self) -> str:
         d = self.draws
-        if not d.flush_draw and not d.straight_draw:
+        if not d.flush_draw and not d.straight_draw and not d.overcards:
             return "Draws: none."
         parts = []
         if d.flush_draw:
@@ -300,7 +304,11 @@ class GroundTruth:
         if d.straight_draw:
             kind = "open-ended/double-gutshot" if d.oesd else "gutshot"
             parts.append(f"{kind} straight draw ({d.straight_outs} outs)")
-        return (f"Draws: {' + '.join(parts)}; total {d.total_outs} outs "
+        if d.overcards:
+            kind = "two overcards" if d.overcard_outs >= 6 else "one overcard"
+            parts.append(f"{kind} ({d.overcard_outs} outs)")
+        prefix = "Draws:" if (d.flush_draw or d.straight_draw) else "Future outs:"
+        return (f"{prefix} {' + '.join(parts)}; total {d.total_outs} outs "
                 f"(rule of 4/2 equity {d.equity_pct:.0f}%).")
 
     def _draw_status_text(self) -> str:
@@ -503,7 +511,20 @@ def _draws(hero: list[Card], board: list[Card], cat: int) -> DrawInfo:
             # 也算成顺子补牌（22 在 88T 上补 2 成葫芦），outs 会虚高。
             if evaluate(hero + board + [c])[0] in (STRAIGHT, STRAIGHT_FLUSH):
                 straight_cards.add(c)
-    total_cards = flush_cards | straight_cards
+    draw_cards = flush_cards | straight_cards
+    # 两高张只在**没有花顺听**时计：9h8h 在 7h6c2h 已有 15 张花顺 outs，
+    # 再把 9/8 的 6 张高张算进去会变成 21 张（84%），显然错。纯两高张对
+    # 当前顶对则是 6 张反超 outs，四二法则 24%，不能记 0。
+    overcard_cards: set[Card] = set()
+    if not no_more_cards and not draw_cards and cat == HIGH_CARD and board:
+        board_top = max(r for r, _ in board)
+        # 牌面最大点数成对时，对手的顶对是三条；高张配对只是两对，反超不了。
+        top_paired = sum(1 for r, _ in board if r == board_top) >= 2
+        hole_ranks = {r for r, _ in hero}
+        if not top_paired:
+            overcard_cards = {c for c in remaining
+                              if c[0] > board_top and c[0] in hole_ranks}
+    total_cards = draw_cards | overcard_cards
     equity = 0.0 if no_more_cards else min(
         len(total_cards) * (4 if board_len == 3 else 2), 100.0)
 
@@ -514,18 +535,26 @@ def _draws(hero: list[Card], board: list[Card], cat: int) -> DrawInfo:
         parts.append(("nut " if nut_flush_draw else "") + "flush draw")
     if straight_cards:
         parts.append("open-ended/double-gutshot" if oesd else "gutshot")
+    if overcard_cards:
+        ranks = sorted({c[0] for c in overcard_cards}, reverse=True)
+        kind = "two overcards" if len(ranks) >= 2 else "one overcard"
+        parts.append(f"{kind} ({len(overcard_cards)} outs)")
     if not parts:
         note = "none"
     else:
         note = " + ".join(parts)
-        if len(total_cards) < len(flush_cards) + len(straight_cards):
+        if len(total_cards) < (len(flush_cards) + len(straight_cards)
+                               + len(overcard_cards)):
             note += " (overlap counted once)"
     return DrawInfo(
         flush_draw=flush_draw, nut_flush_draw=nut_flush_draw,
         flush_suit=flush_suit if flush_draw else None,
         flush_outs=len(flush_cards),
         straight_draw=bool(straight_cards), oesd=oesd, gutshot=gutshot,
-        straight_outs=len(straight_cards), total_outs=len(total_cards),
+        straight_outs=len(straight_cards),
+        overcards=bool(overcard_cards),
+        overcard_outs=len(overcard_cards),
+        total_outs=len(total_cards),
         equity_pct=equity, note=note,
     )
 

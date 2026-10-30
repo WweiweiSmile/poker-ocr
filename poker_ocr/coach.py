@@ -444,14 +444,20 @@ class Read:
     tier: str                              # 分档键，规则表按它查
     label: str                             # 人话，如「顶对顶踢」
     category: int                          # evaluate 的牌型下标
-    outs: int                              # 改良 outs（顺子补牌 + 同花听 9 张）
-    equity_pct: float                      # 四二法则估的成牌率（0-100）
+    # 改良 outs 的**总张数**：顺子/同花补牌 + 无听牌时的两高张反超张数。
+    # 两高张不是「听牌」，但打到河牌确实能反超当前顶对，权益不能记 0。
+    outs: int
+    equity_pct: float                      # 四二法则估的成牌/反超率（0-100）
     capped_by_board: bool                  # 牌面上限（board_ceiling）比我的牌型大 → 被牌面压制
     ceiling: int                           # 牌面允许的最高牌型下标，见 board_ceiling
     nut_draw: bool                         # 听牌命中后是不是坚果（严格口径，见 _nut_draw）
     combo: bool = False                    # 成牌 + ≥8 outs 的强听（"有牌又有听"，盲点①）
     plays_board: bool = False              # 最好的 5 张全靠公共牌（盲点②）
     label_en: str = ""                     # 英文标签，只给 AI 提示词用（advice.py）
+    # 其中真正来自顺子/同花听的张数。`outs` 可能含两高张，分档看这个字段，
+    # 避免把「两张高牌」误判成听牌，也避免把 15 outs 的花顺双抽再加 6 张高张。
+    draw_outs: int = 0
+    overcard_outs: int = 0                 # 两高张的反超张数（无花顺听时才有）
     # 单个对手（随机两手牌）赢我的比例，0..1，见 beat_rate。
     # capped_by_board 用它做闸门：牌面上限更高**且**真有人能赢我才算被压制。
     beat_pct: float = 0.0
@@ -459,7 +465,9 @@ class Read:
     def to_dict(self) -> dict:
         return {"tier": self.tier, "label": self.label,
                 "category": CATEGORY_NAMES[self.category],
-                "outs": self.outs, "equity_pct": round(self.equity_pct, 1),
+                "outs": self.outs, "draw_outs": self.draw_outs,
+                "overcard_outs": self.overcard_outs,
+                "equity_pct": round(self.equity_pct, 1),
                 "relative_strength": ("被牌面压制" if self.capped_by_board else "坚果/牌面之上"),
                 "board_ceiling": CATEGORY_NAMES[self.ceiling],
                 "beat_by_random_pct": round(self.beat_pct * 100, 1),
@@ -467,12 +475,19 @@ class Read:
                 "plays_board": self.plays_board}
 
 
-def _count_outs(hole: list[tuple[int, str]], board: list[tuple[int, str]]) -> tuple[int, bool]:
-    """数改良 outs —— 是**张数**不是点数，返回 (outs, 是否同花听)。
+def _count_outs(hole: list[tuple[int, str]], board: list[tuple[int, str]],
+                cat: int | None = None) -> tuple[int, int, int, bool]:
+    """数改良 outs —— 是**张数**不是点数。
+
+    返回 `(总 outs, 花顺 outs, 两高张 outs, 是否同花听)`。
 
     顺子补牌（下一张能成顺的所有牌）与同花补牌取**并集**：这样组合听牌不会重复计数，
     口径和 odds-table.md 第 4 张表对得上（花听+卡顺 = 12、花听+两头顺 = 15）。
     分开相加会多算 2 张（既成花又成顺的那两张），成牌率跟着虚高。
+
+    两高张只在**没有花顺听**时单独计入：9h8h 在 7h6c2h 上已有 15 张花顺 outs，
+    再把 9/8 的 6 张高张加进去会变成 21 outs（84%），显然错。纯两高张对顶对
+    是另一回事——6 张反超 outs 对应四二法则 24%，不能记 0。
     """
     seen = hole + board
     used = {r for r, _ in seen}
@@ -485,8 +500,24 @@ def _count_outs(hole: list[tuple[int, str]], board: list[tuple[int, str]]) -> tu
         suit_counts[suit] = suit_counts.get(suit, 0) + 1
     flush_suit = next((s for s, n in suit_counts.items() if n == FLUSH_DRAW_SUIT_COUNT), None)
     flush_completers = {c for c in remaining if c[1] == flush_suit} if flush_suit else set()
+    draw_completers = straight_completers | flush_completers
 
-    return len(straight_completers | flush_completers), flush_suit is not None
+    overcard_completers: set[tuple[int, str]] = set()
+    if cat is None:
+        cat = evaluate(hole + board)[0]
+    if cat == HIGH_CARD and not draw_completers and board:
+        board_top = max(r for r, _ in board)
+        # 牌面最大点数已经成对：对手的「顶对」实际是三条，高张配对只是
+        # 两对，反超不了。这种面不要把 6 张高张算成 live outs。
+        top_paired = sum(1 for r, _ in board if r == board_top) >= 2
+        hole_ranks = {r for r, _ in hole}
+        if not top_paired:
+            overcard_completers = {c for c in remaining
+                                   if c[0] > board_top and c[0] in hole_ranks}
+
+    total = draw_completers | overcard_completers
+    return (len(total), len(draw_completers), len(overcard_completers),
+            flush_suit is not None)
 
 
 def _max_straight_high(ranks: list[int]) -> int:
@@ -556,10 +587,11 @@ def read_hand(hole: list[tuple[int, str]], board: list[tuple[int, str]]) -> Read
     pocket = hole_ranks[0] == hole_ranks[1]
 
     board_len = len(board)
+    draw_outs = overcard_outs = 0
     if board_len >= 5:                                     # 河牌：没有下一张，不数 outs
         outs, equity = 0, 0.0
     else:
-        outs, _flush = _count_outs(hole, board)
+        outs, draw_outs, overcard_outs, _flush = _count_outs(hole, board, cat)
         equity = min(outs * (4 if board_len == 3 else 2), 100.0)   # 四二法则
 
     paired_tiers = (OVERPAIR, TPTK, TP_WEAK, MID_BOTTOM)
@@ -578,7 +610,8 @@ def read_hand(hole: list[tuple[int, str]], board: list[tuple[int, str]]) -> Read
                     _nut_draw(hole, board),
                     combo=(outs >= 8 and tier in paired_tiers),   # 有牌又有听
                     plays_board=(tier == BOARD_PLAY),
-                    label_en=label_en, beat_pct=beat)
+                    label_en=label_en, draw_outs=draw_outs,
+                    overcard_outs=overcard_outs, beat_pct=beat)
 
     # ── 打牌面：最好的 5 张全靠公共牌（人人都有），只有更好的牌会跟 ──
     if cat >= ONE_PAIR and _plays_board(hole, board):
@@ -627,14 +660,22 @@ def read_hand(hole: list[tuple[int, str]], board: list[tuple[int, str]]) -> Read
         if board_paired:
             return mk(MID_BOTTOM, "公对(借牌面)", "Board pair (playing the board)")
 
-    # ── 高牌：看听牌与高张 ──
-    if outs >= 8:
+    # ── 高牌：先判真正的花顺听，再判两高张 ──
+    # 分档看 draw_outs，不看 outs：两高张有 6 张反超 outs，但它不是听牌，
+    # 不能触发听牌的价格闸门/半诈唬规则；有牌面听时高张也不重复加。
+    if draw_outs >= 8:
         return mk(STRONG_DRAW, f"强听({outs} outs)", f"Strong draw ({outs} outs)")
-    if outs >= 4:
+    if draw_outs >= 4:
         return mk(WEAK_DRAW, f"弱听({outs} outs)", f"Weak draw ({outs} outs)")
     overcards = all(r > board_top for r in hole_ranks)
+    if overcards and overcard_outs:
+        return mk(AIR, f"两张高牌({overcard_outs} outs)",
+                  f"Two overcards ({overcard_outs} outs)")
     if overcards:
         return mk(AIR, "两张高牌", "Two overcards")
+    if overcard_outs:
+        return mk(AIR, f"高牌({overcard_outs} outs)",
+                  f"High card ({overcard_outs} outs)")
     return mk(AIR, "高牌/空气", "High card / air")
 
 

@@ -192,6 +192,37 @@ def test_two_pair_does_not_get_phantom_straight_outs() -> None:
     assert gt.draws.total_outs == 0
 
 
+def test_two_overcards_get_future_outs() -> None:
+    """两高张对当前顶对的 6 张反超 outs 要进事实，不能显示「无听牌、0%」。"""
+    gt = compute_ground_truth("AcJc", "7sTs6d", opponents=1)
+    assert gt is not None
+    d = gt.draws
+    assert d.overcards and d.overcard_outs == 6
+    assert d.total_outs == 6
+    assert d.equity_pct == 24.0
+    text = gt.render()
+    assert "Future outs: two overcards (6 outs)" in text
+    assert "total 6 outs" in text
+    assert "rule of 4/2 equity 24%" in text
+
+
+def test_paired_top_card_has_no_overcard_outs() -> None:
+    """QQ7 面：对手顶对是三条，AK 的高张配对只是两对，不是 live outs。"""
+    gt = compute_ground_truth("AcKc", "QsQd7h")
+    assert gt is not None
+    assert gt.draws.overcard_outs == 0
+    assert gt.draws.total_outs == 0
+
+
+def test_flush_draw_does_not_add_overcards_twice() -> None:
+    """AhKh 在 Qh9h2c 已有 9 张花听，不能再把 A/K 的高张算成 6 张。"""
+    gt = compute_ground_truth("AhKh", "Qh9h2c")
+    assert gt is not None
+    d = gt.draws
+    assert d.flush_draw and d.overcard_outs == 0 and d.total_outs == 9
+    assert d.equity_pct == 36.0
+
+
 # ─────────────────────────── 输入校验 ───────────────────────────
 
 def test_no_ground_truth_preflop_or_short_board() -> None:
@@ -228,6 +259,18 @@ def test_prompt_contains_ground_truth_and_forced_rules() -> None:
     system, user = build_messages(sit)
     assert "事实优先级" in system
     assert "坚果：是" in user
+
+
+def test_prompt_shows_overcard_future_equity() -> None:
+    """两高张不能只写「无成牌、无听牌」；反超 outs 与 24% 要进中文事实。"""
+    sit = build_situation(snap(board=("7s", "Ts", "6d"),
+                               hero_cards=("Ac", "Jc"), n_opp=2, pot=6.0))
+    assert sit.has_draw is False, "两高张不是听牌，不能触发听牌规则"
+    facts = render_facts_zh(sit)
+    assert "反超 outs：两高张 6 张" in facts, facts
+    assert "反超成牌率" in facts, facts
+    assert "24%" in facts, facts
+    assert "无听牌；有高张反超 outs" in facts, facts
 
 
 def test_river_prompt_says_flush_beats_straight() -> None:

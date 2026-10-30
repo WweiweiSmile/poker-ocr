@@ -62,7 +62,7 @@ HERO_ACTOR = "hero"
 
 # 当前唯一的中文 lean 提示词版本。写入 session_start / advice JSONL，
 # 复盘归因用；改动 system 或事实块时 bump。
-PROMPT_VERSION = "lean-zh-2026-10-30.13"
+PROMPT_VERSION = "lean-zh-2026-10-31.1"
 PROMPT_LANGUAGE = "zh"
 
 # 加注尺度：名字 → 底池倍数。「满池 1.2」是超池，用于需要施压/劝退的场合
@@ -838,7 +838,8 @@ class Situation:
     hand_label_en: str | None = None
     texture_en: str | None = None
     opponent_strength_en: dict | None = None
-    # 四二法则估的成牌率（0-100）。给提示词做「赔率 vs 胜率」比较用
+    # 四二法则估的成牌/反超率（0-100）：花顺听 + 纯两高张的 6 张反超 outs。
+    # 给提示词做「赔率 vs 胜率」比较用，但它是**成牌率**，不是对范围的河牌胜率。
     equity_pct: float | None = None
     # 人工维护的**现场观察**（根目录 .table_dy）。只写统计算不出来的东西：
     # 「3 号位上头了」「这桌有人合伙」。桌子的松紧/3-bet 频率由 table_stats 给数字。
@@ -867,8 +868,9 @@ class Situation:
     # 桌风是否明确含「松浪/松凶」。混合桌也可以为 True：只要桌上有一个
     # LAG，中等成牌就不能默认做薄价值。见 table_dynamics.is_aggressive_table。
     aggressive_table: bool = False
-    # 当前改良 outs（coach.Read.outs）。用于区分「成牌+弱听」和「成牌+强听」：
-    # 4 张卡顺不该豁免「被统治」判定，8+ 张 combo draw 才该按半诈唬处理。
+    # 当前改良 outs（coach.Read.outs），含无花顺听时的两高张反超 outs。
+    # 用于区分「成牌+弱听」和「成牌+强听」：4 张卡顺不该豁免「被统治」判定，
+    # 8+ 张 combo draw 才该按半诈唬处理。两高张不是听牌（见 hand_tier）。
     outs: int | None = None
     # 本手在局对手的画像（按 seat_id 对回具体的人）。空 = 没有画像，
     # 行为退回 `.table_dy` / aggressive_table 的旧口径。
@@ -1023,7 +1025,9 @@ def build_situation(snap: HandSnapshot,
         hand_tier=read.tier if read else None,
         category=read.category if read else None,
         texture=texture,
-        has_draw=bool(read and (read.outs >= 4)),
+        # 两高张有反超 outs，但不是听牌：只有真正的花顺听才算 has_draw。
+        has_draw=bool(read and read.tier in (STRONG_DRAW, WEAK_DRAW)
+                      and read.outs >= 4),
         plays_board=bool(read and read.plays_board),
         opponent_strength=opp,
         warnings=warnings,
@@ -2591,7 +2595,10 @@ def render_hand_strength_zh(sit: Situation) -> list[str]:
     elif tier == "打牌面":
         lines.append("牌力：打牌面（最好的五张全部来自公共牌）")
     elif tier == "空气":
-        lines.append("牌力：空气（无成牌、无听牌）")
+        if sit.outs:
+            lines.append("牌力：空气（无成牌、无听牌；有高张反超 outs）")
+        else:
+            lines.append("牌力：空气（无成牌、无听牌）")
     elif sit.hand_label:
         # 只给牌型标签；「大 / 中 / 小」是 hand_strength 的第 4 套口径，
         # 已经由 hand_tier / ground_truth / hand_ranges 的数字覆盖，不再重复。
@@ -2634,14 +2641,24 @@ def render_hand_strength_zh(sit: Situation) -> list[str]:
                 lines.append("能打败你的牌型（理论上）："
                              + "、".join(stronger))
         lines.append(f"听牌：{_draws_zh(gt)}")
+        if gt.draws.overcard_outs:
+            kind = ("两高张" if gt.draws.overcard_outs >= 6 else "单高张")
+            lines.append(f"反超 outs：{kind} {gt.draws.overcard_outs} 张")
         if combo_draw:
             lines.append(
                 "有牌又有听：成牌 + 强听（combo draw，不是纯听牌）；"
                 "权益高于公平份额时默认下注 1/3–2/3 池，"
                 "不要只因为这手“落后至少一家”就过牌")
         if gt.draws.total_outs:
-            lines.append("补牌成牌率（四二法则，到河牌；"
-                         "仅全下/无后续下注时可直接比门槛）："
+            # 纯两高张不是「补牌成牌」，是反超当前顶对的权益；分开写，
+            # 免得模型把 24% 当成「已经能跟任何下注」的胜率。
+            overcard_only = (gt.draws.overcard_outs
+                             and not gt.draws.flush_draw
+                             and not gt.draws.straight_draw)
+            label = "反超成牌率" if overcard_only else "补牌成牌率"
+            basis = ("按高张 outs 估，不是对范围的河牌胜率"
+                     if overcard_only else "仅全下/无后续下注时可直接比门槛")
+            lines.append(f"{label}（四二法则，到河牌；{basis}）："
                          f"{gt.draws.equity_pct:.0f}%")
 
     hr = sit.hand_ranges

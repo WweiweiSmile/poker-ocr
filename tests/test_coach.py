@@ -81,6 +81,43 @@ def test_read_hand() -> None:
           f"AsTh on Jc8dKd 应 弱听 4 outs（卡顺），实际 {r.tier} {r.outs}")
 
 
+def test_two_overcards_get_future_outs() -> None:
+    """两高张不是听牌，但对当前顶对有 6 张反超 outs；不能记 0。
+
+    AJ 在 T76 上：A/J 各 3 张，四二法则 24%。分档仍是空气（不触发听牌的
+    价格闸门/半诈唬规则），但 outs/equity_pct 要把它算进去。
+    """
+    r = read_hand(parse_cards("AcJc"), parse_cards("7sTs6d"))
+    check(r.tier == "空气", f"纯两高张应仍是空气，实际 {r.tier}")
+    check(r.outs == 6 and r.draw_outs == 0 and r.overcard_outs == 6,
+          f"两高张应有 6 张反超 outs，实际 outs={r.outs} "
+          f"draw={r.draw_outs} over={r.overcard_outs}")
+    check(abs(r.equity_pct - 24.0) < 1e-9,
+          f"两高张翻牌四二法则应 24%，实际 {r.equity_pct}")
+    check("6 outs" in r.label, f"标签应带反超 outs，实际 {r.label}")
+
+    # 已经有花顺听时，高张是重复/低质量 outs，不能再加 6 张。
+    draw = read_hand(parse_cards("9h8h"), parse_cards("7h6c2h"))
+    check(draw.outs == 15 and draw.overcard_outs == 0,
+          f"花顺双抽不应再加高张：outs={draw.outs} over={draw.overcard_outs}")
+
+    # 成牌的高张（顶对的踢脚）不是反超 outs。
+    pair = read_hand(parse_cards("KhQh"), parse_cards("Ks7d2c"))
+    check(pair.overcard_outs == 0 and pair.outs == 0,
+          f"顶对不应拿高张 outs：outs={pair.outs} over={pair.overcard_outs}")
+
+    # 牌面最大点数成对：对手的顶对是三条，高张配对只是两对，不能算 live。
+    paired = read_hand(parse_cards("AcKc"), parse_cards("QsQd7h"))
+    check(paired.overcard_outs == 0 and paired.outs == 0,
+          f"QQ7 面高张不能算反超 outs：outs={paired.outs} "
+          f"over={paired.overcard_outs}")
+
+    # 但公对在顶对之下（Q77）：顶对只是两对，高张配对仍能反超，照算。
+    low_pair = read_hand(parse_cards("AcKc"), parse_cards("Qs7d7h"))
+    check(low_pair.overcard_outs == 6,
+          f"Q77 面高张仍应算 6 张反超 outs，实际 {low_pair.overcard_outs}")
+
+
 def test_relative_strength_by_board() -> None:
     """相对牌力：牌面上可能构成的牌型比我的大 → capped_by_board。"""
     # 三同花面：我的顺子被同花压制
@@ -522,6 +559,7 @@ def main() -> int:
     tests = [
         test_texture,
         test_read_hand,
+        test_two_overcards_get_future_outs,
         test_relative_strength_by_board,
         test_tptk_dry_bets_two_thirds,
         test_tptk_wet_bets_half,
