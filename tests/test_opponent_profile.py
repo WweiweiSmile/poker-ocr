@@ -832,6 +832,10 @@ def test_prompt_renders_opponent_reads() -> None:
           f"画像应带位置和类型：\n{facts}")
     check("好运常在ok：STATION" in facts and "（暂定）" in facts,
           f"tentative 应标注：\n{facts}")
+    check("STATION（松弱/跟注站）" in facts,
+          f"类型要带中文语义，别让模型自己翻译：\n{facts}")
+    check("加注/开池时是窄而强的范围" in facts,
+          f"松弱=加注窄必须写进事实：\n{facts}")
     check("路人" not in facts, "unknown 不应输出，避免噪声")
 
 
@@ -910,7 +914,7 @@ def test_tendency_render_and_exploit_hints() -> None:
         cbet_pct=45.0, barrel_pct=40.0, stab_pct=12.0, check_raise_pct=5.0)
     text = render_tendencies_zh(passive)
     check("开池 EP 12% / LP 45%" in text, f"位置开池应渲染：{text}")
-    check("被过牌后下注 12%" in text, f"stab 应渲染：{text}")
+    check("别人过牌后他下注 12%" in text, f"stab 应渲染：{text}")
     hints = exploit_hint_zh(passive)
     check("偷池" in hints, f"低 stab 应给偷池建议：{hints}")
     check("挤压" in hints, f"宽开池 + 低 3-bet 应给挤压建议：{hints}")

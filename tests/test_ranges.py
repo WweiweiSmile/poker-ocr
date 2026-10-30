@@ -50,7 +50,7 @@ def test_named_ranges_and_widths() -> None:
     utg = ranges.get("RFI_UTG")
     bb = ranges.get("BB_DEF_vs_LP")
     assert btn and utg and bb
-    check(abs(btn.width_pct - 43.0) < 0.5, f"BTN RFI 宽度应约 43%，实际 {btn.width_pct}")
+    check(abs(btn.width_pct - 44.8) < 0.5, f"BTN RFI 宽度应约 44.8%，实际 {btn.width_pct}")
     check(abs(utg.width_pct - 12.1) < 0.5, f"UTG RFI 宽度应约 12.1%，实际 {utg.width_pct}")
     check(abs(bb.width_pct - 43.9) < 0.5, f"BB 防守应约 43.9%，实际 {bb.width_pct}")
     check(abs(sum(btn.combo_weights.values()) - 1.0) < 1e-9, "范围权重应归一化")

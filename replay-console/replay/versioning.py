@@ -34,7 +34,16 @@ from poker_ocr.table_dynamics import (  # noqa: E402
 #               选项 id 别名与 reason 截断；数据质量中文摘要；范围内部 id 下线。
 # 2026-10-30.10：live 不再预计算/渲染 hand_strength 的「大/中/小」，
 #                第 4 套牌力口径只留离线审计；prompt 只给牌型标签。
-CURRENT_ADVICE_VERSION = "advice-2026-10-30.11"
+# 2026-10-30.11：当前桌统计只算在局对手；3-bet 低不再写成整体被动；
+#                option id 按街映射；坚果/当前落后/四二门槛的语义澄清。
+# 2026-10-30.12：多人池 combo draw（对子+强听）不再按纯听牌过牌；
+#                事实块给 combo draw 标「有牌又有听」+ 权益/公平份额倍数。
+# 2026-10-30.13：有效筹码改用「后手 + 本街已下注」（对手下注后不再把 SPR 算小）；
+#                身后待行动算上未跟注的溜入者；翻前面对加注给继续范围与被支配结论；
+#                位置事实写明先/后行动；炸弹池浅 SPR 顶对按套池价值牌；
+#                对手类型补「松弱=加注窄」语义与 stab 指标改名；
+#                RFI 补 QTo/JTo（BTN 的 Q8o+/J8o+），范围结论中文修正。
+CURRENT_ADVICE_VERSION = "advice-2026-10-30.13"
 # 改动 decisions.py 的重建语义时 bump。
 # recon-3：翻前底池补上盲注（实时 pbs 只记前注，h39 4.5 → 6.0）。
 CURRENT_RECONSTRUCT_VERSION = "recon-3"

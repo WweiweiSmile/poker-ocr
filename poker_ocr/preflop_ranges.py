@@ -52,7 +52,7 @@ OPEN_POSITIONS = ("UTG", "UTG+1", "UTG+2", "LJ", "HJ", "CO", "BTN")
 #   · 位置越后越宽：EP 只加一档（翻后多路又没位置），LP 加得最狠
 #     （有位置 + 对手付钱）。
 #
-# 开池频率（组合加权，1326 手为分母）：UTG 12.1% → BTN 43.0%。
+# 开池频率（组合加权，1326 手为分母）：UTG 12.1% → BTN 44.8%。
 CHART_ADDITIONS: dict[str, tuple[str, ...]] = {
     "UTG": ("55+", "A9s+", "KTs+", "QTs+", "JTs", "T9s", "98s", "AJo+", "KQo"),
     "UTG+1": ("44", "A8s", "K9s", "Q9s", "J9s", "87s", "ATo+"),
@@ -63,8 +63,11 @@ CHART_ADDITIONS: dict[str, tuple[str, ...]] = {
     "HJ": ("K6s", "Q6s", "J6s", "T6s", "96s", "85s", "75s", "64s", "A9o", "K9o"),
     "CO": ("K5s", "Q5s", "J5s", "T5s", "95s", "84s", "74s", "54s", "43s",
            "A8o", "K8o", "Q9o", "J9o", "T9o"),
+    # Offsuit 的 Q8o/J8o 要写 `+`：单键只展开 Q8o/J8o 本身，会把更强的
+    # QTo/JTo 挡在范围外（Q8o 在范围内、QTo 不在，和本节「加宽到有张子的
+    # 高张」的口径矛盾）。Q9o/J9o 在 CO 已经收入，这里只补 QTo/JTo。
     "BTN": ("K4s", "Q4s", "J4s", "T4s", "94s", "63s", "53s",
-            "A7o", "K7o", "Q8o", "J8o", "T8o", "98o"),
+            "A7o", "K7o", "Q8o+", "J8o+", "T8o", "98o"),
 }
 
 NOTES = {

@@ -366,7 +366,7 @@ def test_utg2_exists() -> None:
 def test_open_frequency_ramps_up_by_position() -> None:
     """加宽后的开池频率：每个位置都要比前一个宽，且落在合理区间。
 
-    参照值（2026-10-23 按跟注站加宽后）：UTG 12.1% … BTN 43.0%。
+    参照值（2026-10-23 按跟注站加宽后，2026-10-31 补 QTo/JTo）：UTG 12.1% … BTN 44.8%。
     下限守「别又缩回去」，上限守「别宽到拿 72o 开池」。
     """
     freqs = {p: open_frequency(p) for p in OPEN_POSITIONS}

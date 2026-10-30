@@ -48,6 +48,16 @@ ARCHETYPE_NAMES = {
     "nit": "紧弱",
     "tag": "紧凶",
 }
+# 类型标签的「范围语义」。这是模型最容易读反的一处：松弱 = 跟注宽 +
+# 主动加注少，他主动加注时是**窄而强**的范围；「松」只描述跟注，不描述加注。
+ARCHETYPE_RANGE_NOTES = {
+    "station": "跟注宽、主动加注少 —— 他加注/开池时是窄而强的范围，"
+               "不能把「松」当成「加注范围宽」；加注宽度只看 PFR/开池%/3-bet%",
+    "nit": "入池少、加注更少 —— 他主动加注的范围很窄，别用边缘牌硬碰",
+    "lag": "入池和加注都多 —— 加注范围宽，但不等于任意两张",
+    "maniac": "加注/超池频繁 —— 范围很宽，被跟注时也更容易是弱牌",
+    "tag": "入池紧、加注位置化 —— 加注范围强，别用被支配牌硬碰",
+}
 AGGRESSIVE_ARCHETYPES = ("lag", "maniac")
 PASSIVE_ARCHETYPES = ("station", "nit")
 
@@ -2422,10 +2432,16 @@ def render_reads_zh(reads: Iterable[OpponentRead],
         elif read.source == "prior":
             source = "，.table_dy 先验"
         af = f"，AF {read.af:g}" if read.af else ""
+        cn = ARCHETYPE_NAMES.get(read.archetype, read.archetype)
         lines.append(
-            f"- {position} {name}：{read.archetype.upper()}"
+            f"- {position} {name}：{read.archetype.upper()}（{cn}）"
             f"（n={read.n}，VPIP {read.vpip:g}%，PFR {read.pfr:g}%{af}，"
             f"置信 {read.confidence:.2f}{source}）{gate}")
+        range_note = ARCHETYPE_RANGE_NOTES.get(read.archetype)
+        if range_note:
+            # 「松弱 = 加注范围宽」是模型最常读反的一条；把类型语义和
+            # 实测 PFR 放在一起，别让它用标签替代数字。
+            lines.append(f"  加注宽度：{range_note}")
         profile = render_tendencies_zh(read)
         if profile:
             lines.append(f"  打法：{profile}")
@@ -2462,7 +2478,7 @@ def render_tendencies_zh(read: OpponentRead) -> str:
         parts.append(_mark(read, ("barrel",), f"转牌续打 {read.barrel_pct:.0f}%"))
     if read.stab_pct is not None:
         parts.append(_mark(read, ("stab",),
-                           f"被过牌后下注 {read.stab_pct:.0f}%"))
+                           f"别人过牌后他下注 {read.stab_pct:.0f}%"))
     if read.check_raise_pct is not None:
         parts.append(_mark(read, ("check_raise",),
                            f"过牌-加注 {read.check_raise_pct:.0f}%"))
@@ -2517,9 +2533,11 @@ def exploit_hint_zh(read: OpponentRead, *, limit: int = 2) -> str:
 
     if _confident(read, "stab") and read.stab_pct is not None:
         if read.stab_pct <= 25:
-            hints.append("被过牌后很少下注 —— 他过牌多半没牌，过牌到你时可以更主动偷池")
+            hints.append("别人过牌后他很少下注 —— 过牌给他基本能免费看下一张；"
+                          "他过牌后你可以在下一街主动偷池")
         elif read.stab_pct >= 60:
-            hints.append("被过牌后爱下注 —— 过牌给他要准备 check-raise，别用中等牌白跟")
+            hints.append("别人过牌后他爱下注 —— 你过牌给他要准备 check-raise，"
+                          "别用中等牌白跟")
 
     if (_confident(read, "check_raise")
             and read.check_raise_pct is not None

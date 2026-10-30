@@ -436,10 +436,44 @@ def test_pot_label_without_number() -> None:
 
 
 def test_unreadable_bet_is_an_error() -> None:
+    """读成了乱码、但明显不是 UI 标签（没有汉字）→ 真的没读出来，整帧丢。"""
     rows = {k: dict(v) for k, v in BASE.items()}
-    rows["lowL"]["bet"] = "入池36%"
+    rows["lowL"]["bet"] = "1OBB"          # 数字 0 被 rec 读成字母 O
     s = state(rows)
     check("bet:lowL" in s.errors, f"下注乱码应报 bet:lowL，实际 {s.errors}")
+
+
+def test_bet_slot_ui_label_is_not_an_error() -> None:
+    """bet 槽被中文 UI 文本占住时按 0 处理，不能整帧丢掉。
+
+    实盘：WePoker 新加的「发发看 / 免费」促销按钮正好压在 hero 的 bet 槽上，
+    OCR 读成「发发表」。以前这算「读到乱码」→ bet=None → `bet:hero` →
+    整帧进质量闸丢弃；hero 一弃牌，下一手的牌面/建议就全被闸在外面，
+    上一手也要等好几帧才能落库。下注 pill 只有数字 + BB，汉字只可能是别的
+    UI 元素，本街就是没下注。
+    """
+    rows = {k: dict(v) for k, v in BASE.items()}
+    rows["hero"] = {"name": "gggamel", "chip": "86.5BB", "bet": "发发表"}
+    s = state(rows)
+    check("bet:hero" not in s.errors, f"UI 标签不该报 bet:hero，实际 {s.errors}")
+    check(not s.errors, f"这一帧应当可用，实际 {s.errors}")
+    hero = next(p for p in s.players if p.seat_id == "hero")
+    check(hero.bet == 0.0, f"标签文本应落成本街 0，实际 {hero.bet}")
+    check(hero.in_hand, "hero 仍在手里，不能因为 bet 槽被占就不算在场")
+    check(any("标签文本" in n for n in hero.notes),
+          f"应留一条 note 方便查 ROI 被占，实际 {hero.notes}")
+
+
+def test_mojibake_bet_without_cjk_is_still_an_error() -> None:
+    """没有汉字的乱码仍算「没读出来的下注」，不能悄悄当成 0。
+
+    `lOBB`（数字被读成字母）很可能是真有下注，当成 0 会让 hero 的 to_call
+    和底池都算错 —— 宁可丢一帧等下一帧，也不能给错建议。
+    """
+    rows = {k: dict(v) for k, v in BASE.items()}
+    rows["hero"] = {"name": "gggamel", "chip": "86.5BB", "bet": "lOBB"}
+    s = state(rows)
+    check("bet:hero" in s.errors, f"无汉字的乱码仍应报错，实际 {s.errors}")
 
 
 def test_unreadable_chip_is_an_error() -> None:
@@ -602,6 +636,8 @@ def main() -> int:
         test_missing_dealer,
         test_pot_label_without_number,
         test_unreadable_bet_is_an_error,
+        test_bet_slot_ui_label_is_not_an_error,
+        test_mojibake_bet_without_cjk_is_still_an_error,
         test_unreadable_chip_is_an_error,
         test_unparseable_blinds_without_previous,
         test_blinds_carried_from_previous,

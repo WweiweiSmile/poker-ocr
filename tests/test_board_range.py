@@ -5,7 +5,9 @@
 
 验收基准来自 docs/实时牌面范围与手牌强度-设计文档.md：
   · AsKs4d 上 25/34/5s6s/7s8s/7h8h/QJ/22/44 的分类；
-  · 纯牌面 44.6%、∩ BTN 24.5%、∩ UTG 9.4%；
+  · 纯牌面 44.6%、∩ BTN 26.3%、∩ UTG 9.4%；
+    （BTN 的 QTo/JTo 是 2026-10-31 补进 RFI 表的，设计文档里
+     24.5% / 325 组合是补之前的旧基准。）
   · 7s8s 必须包含（不能被“78 无关”误杀），7h8h 必须排除。
 """
 
@@ -111,8 +113,8 @@ def test_widths_match_design() -> None:
     assert pure and btn and utg
     check(abs(pure.width_pct - 44.6) < 0.8,
           f"纯牌面宽度应约 44.6%，实际 {pure.width_pct:.1f}%")
-    check(abs(btn.width_pct - 24.5) < 0.8,
-          f"∩ BTN 宽度应约 24.5%，实际 {btn.width_pct:.1f}%")
+    check(abs(btn.width_pct - 26.3) < 0.8,
+          f"∩ BTN 宽度应约 26.3%，实际 {btn.width_pct:.1f}%")
     check(abs(utg.width_pct - 9.4) < 0.8,
           f"∩ UTG 宽度应约 9.4%，实际 {utg.width_pct:.1f}%")
     check(pure.width_pct > btn.width_pct > utg.width_pct, "先验越紧，范围应越窄")

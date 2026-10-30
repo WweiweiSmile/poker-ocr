@@ -18,8 +18,8 @@ from poker_ocr.parse import Blinds
 
 from replay.versioning import CURRENT_ADVICE_VERSION
 
-EXPECTED_ADVICE_VERSION = "advice-2026-10-30.11"
-EXPECTED_PROMPT_HASH = "9205ae231e765d281d0dc2c7dce47d2d67457177499db10f78bae8e87530e5a5"
+EXPECTED_ADVICE_VERSION = "advice-2026-10-30.13"
+EXPECTED_PROMPT_HASH = "31c8904a7976e7931656e317db239e0934531ed6d434191da83b9993138d515a"
 
 
 def test_prompt_golden_is_tied_to_advice_version():

@@ -312,10 +312,18 @@ def build_state(frame: RoiFrame, profile: Profile,
             if loose is not None:
                 bet_a = Amount(bet_raw, loose, "?", error=None)
                 bet_loose = True
-        # 空 bet 文本 = 这款 app 没渲染 pill = 本街 0；读到乱码才是「未知」。
+        # 空 bet 文本 = 这款 app 没渲染 pill = 本街 0。
+        # **带中文的文本也是 0**：下注 pill 只有数字 + BB，读了汉字只可能是别的
+        # UI 落进了这块 ROI（实测 WePoker 新加的「发发看 / 免费」促销按钮正好压在
+        # hero 的 bet 槽上，读成「发发表」；动作徽章也是中文）。
+        # 这种文本不是「没读懂的下注」：当成未知会把整帧丢掉 —— hero 一弃牌，
+        # 下一手的牌面/建议就全被质量闸拦在外面，上一手也要等闸恢复才落库。
+        # 只认汉字：`lOBB` / `BB` / `--` 这类没汉字的乱码仍然算读不出来
+        # （可能是真下注被读坏），宁可丢一帧，也不能悄悄当成 0。
         # 百分数是胜率，不是下注额。
+        bet_label = any("\u4e00" <= ch <= "\u9fff" for ch in bet_raw)
         bet = (None if bet_equity is not None else
-               0.0 if not bet_raw.strip() else
+               0.0 if (not bet_raw.strip() or bet_label) else
                (bet_a.value if bet_a.ok else None))
         stack = None if chip_equity is not None else (chip.value if chip.ok else None)
 
@@ -424,6 +432,10 @@ def build_state(frame: RoiFrame, profile: Profile,
             notes.append(f"chip: {chip.error}")
         if bet_loose:
             notes.append(f"bet: 宽松解析 {bet_raw!r} → {bet_a.value}")
+        elif bet_label:
+            # 不是金额的 UI 文本（促销按钮/动作徽章）落在 bet 槽：按 0 处理，
+            # 但留一条 note 方便查「这块 ROI 又被谁占了」。
+            notes.append(f"bet: 标签文本 {bet_raw!r} → 本街 0")
         elif bet_raw.strip() and not bet_a.ok and not all_in:
             notes.append(f"bet: {bet_a.error}")
         if equity is not None:

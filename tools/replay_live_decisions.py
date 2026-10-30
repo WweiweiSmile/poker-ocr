@@ -141,6 +141,19 @@ def synth_street(state: dict, street: str) -> StreetRecord:
             action=action, amount=bet, all_in=bool(seat.get("all_in")),
             is_hero=is_hero))
     rows.sort(key=lambda a: a.amount or 0.0)
+    # 同一金额的第二个人是「跟注」，不是第二次加注：只看 bet 额时
+    # BB 加到 9、UTG 跟 9 会被重建成两次 raise → 形状从 single-raise
+    # 变成 three-bet，翻前范围结论整段失效。按金额水位重标一次。
+    level = bb if street == "preflop" else 0.0
+    for i, action in enumerate(rows):
+        amount = float(action.amount or 0.0)
+        if amount <= level + 1e-9:
+            rows[i] = replace(action, action="call")
+        else:
+            if street != "preflop":
+                rows[i] = replace(action,
+                                  action=("bet" if level <= 1e-9 else "raise"))
+            level = amount
     return StreetRecord(street, float(state.get("pot_before_street") or 0.0),
                         tuple(rows))
 
