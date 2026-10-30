@@ -1505,7 +1505,10 @@ def test_prompt_has_no_rule_layers() -> None:
         check(banned not in system, f"system 不该含 {banned}")
         check(banned not in user, f"facts 不该含 {banned}")
     check("事实优先级" in system, "system 应说明事实优先级")
-    check("all-in 是最后手段" in system, "system 应约束 all-in")
+    check("深码不要用 all-in 代替正常尺度" in system,
+          "system 应约束深码 all-in")
+    check("后手 ≤20BB 的翻前推/弃区全下是标准动作" in system,
+          "system 应说明短码推/弃区全下是标准动作")
 
 
 def test_prompt_is_chinese_with_english_contract() -> None:
@@ -1625,7 +1628,8 @@ def test_table_stats_come_from_profiles() -> None:
     check("## 全场数据" in user, f"应渲染全场数据段：\n{user}")
     check("VPIP 38%" in user and "对 c-bet 弃 79%" in user,
           f"应写出具体比例：\n{user}")
-    check("整体：松、被动" in user, f"应给出松/被动的结论：\n{user}")
+    check("整体：松、3-bet 少" in user, f"应给出松/3-bet 少的结论：\n{user}")
+    check("被动" not in user, f"3-bet 少不能写成整体被动：\n{user}")
     check("河牌 92%" in user, f"分街弃牌率应包含河牌：\n{user}")
     check("河牌大注基本没人跟" in user,
           f"全场级剥削应指出河牌没人跟：\n{user}")
@@ -1806,8 +1810,8 @@ def test_lean_system_priorities() -> None:
     check("事实优先级" in system, "system 应含事实优先级")
     check("硬事实" in system and "逐座位对手画像" in system,
           "system 应说明硬事实与逐座位画像的优先级")
-    check("全场统计/人工观察" in system,
-          "system 应给全场统计/人工观察排位")
+    check("当前牌桌统计/全场先验/人工观察" in system,
+          "system 应给当前桌统计/全场先验/人工观察排位")
     check("规则提示" in system, "system 应说明规则提示不能覆盖硬事实")
     check("哪些更差的牌会跟" in system,
           "system 的翻后决策顺序应问「哪些更差的牌会跟」")
@@ -1949,8 +1953,10 @@ def test_draw_facts_are_chinese_and_not_vetoed() -> None:
     check("牌力：强听牌" in text, f"听牌应标强听牌：\n{text}")
     check("VERY SMALL" not in text, "听牌不该出现 VERY SMALL")
     check("NOT THE NUTS" not in text, "听牌不该出现英文 NOT THE NUTS")
-    check("坚果：否（指当前成牌；听牌不代表最终输）" in text,
+    check("坚果：否（指当前成牌；听牌不代表最终输；更大牌型只是理论存在）" in text,
           f"坚果否决应带说明：\n{text}")
+    check("仅全下/无后续下注时可直接比门槛" in text,
+          f"四二成牌率应带单街/全下限定：\n{text}")
     check("当前成牌落后至少一家：" in text and "不代表最终胜率" in text,
           f"落后比例应带听牌说明：\n{text}")
     ids = [o.id for o in sit.options]
@@ -2792,8 +2798,14 @@ def test_system_has_id_mapping_and_budget() -> None:
     sit = build_situation(make_point(to_call=4.0, pot=10.0, hero_stack=90.0))
     system, _ = build_messages(sit)
     check("id 映射" in system, "system 应说明 option id 映射")
-    check("过牌返回 call" in system, "system 应说明过牌用 call")
-    check("下注也返回 raise-*" in system, "system 应说明下注用 raise-*")
+    check("翻前无人入池" in system and "open-*/call" in system,
+          "system 应说明翻前开池/平跟的 id")
+    check("翻后无人下注" in system and "call=过牌" in system,
+          "system 应说明翻后过牌用 call")
+    check("翻后面对下注" in system and "raise-1/3…1.2=加注" in system,
+          "system 应说明翻后加注用 raise-1/3…1.2")
+    check("翻前面对加注" in system and "raise-3x/raise-4x" in system,
+          "system 应把 raise-3x/4x 限定在翻前")
     check(len(system) <= 1400, f"system 不应重新膨胀，实际 {len(system)}")
 
 
@@ -2818,7 +2830,7 @@ def test_table_stats_label_marks_current_table_scope() -> None:
     _, user = build_messages(sit)
     check("当前牌桌数据" in user and "本手在局 6 人" in user,
           f"应标明当前桌口径：\n{user}")
-    check("4 人有画像" in user, f"应给出画像覆盖：\n{user}")
+    check("4 名对手有画像" in user, f"应给出画像覆盖：\n{user}")
     check("可能跨桌" not in user and "画像库" not in user,
           f"不应再出现跨桌免责：\n{user}")
 
@@ -2831,6 +2843,100 @@ def test_table_stats_label_marks_current_table_scope() -> None:
           f"冷启动先验要标明不是本桌：\n{prior_user}")
 
 
+def test_table_stats_counts_hero_and_flags_small_samples() -> None:
+    """当前桌：人数含 Hero；小样本指标要标机会数；3-bet 少不写成被动。"""
+    from poker_ocr.opponent_profile import PooledStats
+
+    stats = PooledStats(
+        hands=66, players=2, total_players=3,
+        scope="current_table", approx_hands=True,
+        vpip=45.0, pfr=17.0, threebet=8.9, limp=48.0,
+        fold_to_cbet=82.0, stab=11.0, fold_to_bet_river=100.0,
+        opportunities={"preflop": 50.0, "threebet": 22.5, "limp": 21.0,
+                       "fcbet": 5.5, "stab": 9.0, "river": 4.5})
+    _, user = build_messages(build_situation(
+        make_point(to_call=4.0, pot=10.0, hero_stack=90.0),
+        table_stats=stats))
+    check("本手在局 3 人（含 Hero）" in user,
+          f"人数必须含 Hero：\n{user}")
+    check("2 名对手有画像" in user and "单人最多约 66 手" in user,
+          f"样本口径要写单人不写整桌：\n{user}")
+    check("对 c-bet 弃 82%（仅 5.5 次机会）" in user,
+          f"5.5 次机会的 82% 必须标样本：\n{user}")
+    check("河牌 100%（仅 4.5 次机会）" in user,
+          f"4.5 次机会的 100% 必须标样本：\n{user}")
+    check("整体：松" in user and "被动" not in user,
+          f"3-bet 9% 不能写成被动：\n{user}")
+    check("3-bet 少" not in user,
+          f"3-bet 8.9% 不应打「3-bet 少」：\n{user}")
+    check("前位也可以放宽开池" not in user,
+          f"溜入 48% 时不该推前位放宽：\n{user}")
+    check("本桌爱溜入" in user, f"当前桌应说本桌：\n{user}")
+
+
+def test_table_stats_low_coverage_suppresses_table_exploit() -> None:
+    """9 人在局只有 1 人有画像时，不给「当前桌可剥削」的整桌结论。"""
+    from poker_ocr.opponent_profile import PooledStats
+
+    stats = PooledStats(
+        hands=66, players=1, total_players=9,
+        scope="current_table", approx_hands=True,
+        vpip=45.0, threebet=5.0, limp=50.0,
+        opportunities={"preflop": 50.0, "threebet": 50.0, "limp": 50.0})
+    _, user = build_messages(build_situation(
+        make_point(to_call=4.0, pot=10.0, hero_stack=90.0),
+        table_stats=stats))
+    check("另外 7 名在局对手没有画像" in user,
+          f"覆盖率要写清：\n{user}")
+    check("当前桌可剥削" not in user,
+          f"1/8 覆盖不该给整桌结论：\n{user}")
+
+    # 2/8 仍低于一半覆盖，也不该把两个人算成整桌。
+    partial = PooledStats(
+        hands=66, players=2, total_players=9,
+        scope="current_table", approx_hands=True,
+        vpip=45.0, threebet=5.0, limp=50.0,
+        opportunities={"preflop": 50.0, "threebet": 50.0, "limp": 50.0})
+    _, partial_user = build_messages(build_situation(
+        make_point(to_call=4.0, pot=10.0, hero_stack=90.0),
+        table_stats=partial))
+    check("当前桌可剥削" not in partial_user,
+          f"2/8 覆盖也不该给整桌结论：\n{partial_user}")
+
+
+def test_table_stats_low_3bet_with_limpers_does_not_widen_early_open() -> None:
+    """低 3-bet + 高溜入：提示词应说前位不要放宽，而不是放宽。"""
+    from poker_ocr.opponent_profile import PooledStats
+
+    stats = PooledStats(
+        hands=66, players=3, total_players=4,
+        scope="current_table", approx_hands=True,
+        vpip=35.0, threebet=5.0, limp=50.0,
+        opportunities={"preflop": 80.0, "threebet": 80.0, "limp": 80.0})
+    _, user = build_messages(build_situation(
+        make_point(to_call=4.0, pot=10.0, hero_stack=90.0),
+        table_stats=stats))
+    check("3-bet 很少，但溜入/入池多" in user,
+          f"低 3-bet + 溜入多应提示前位收紧：\n{user}")
+    check("前位也可以放宽开池" not in user,
+          f"不能推前位放宽：\n{user}")
+
+
+def test_made_hand_facts_include_better_one_pair_and_caveat() -> None:
+    """77 在 A 高面：不能只说两对/三条，也要说更大的对子；落后不是输牌率。"""
+    sit = build_situation(make_point(
+        street="turn", board=("5s", "8h", "10s", "Ac"),
+        hero_cards=("7d", "7c"), to_call=0.0, pot=100.0,
+        pot_before_street=26.0, hero_stack=28.0))
+    text = render_facts_zh(sit)
+    check("更大的对子（一对）" in text,
+          f"更好的对子必须列出来：\n{text}")
+    check("不代表对手持有" in text,
+          f"坚果/牌型要说明只是理论存在：\n{text}")
+    check("不是输牌概率/权益" in text,
+          f"当前落后要说明不是输牌率：\n{text}")
+
+
 def test_system_ante_module_is_conditional() -> None:
     """前注局只在有前注时追加，不再让无前注桌读一段无关规则。"""
     from poker_ocr.parse import Blinds
@@ -2839,7 +2945,12 @@ def test_system_ante_module_is_conditional() -> None:
     ante, _ = build_messages(build_situation(
         make_point(blinds=Blinds(0.5, 1.0, 0.5, "1/2(1)"))))
     check("前注局" not in plain, "无前注桌不该出现前注局")
-    check("前注局" in ante, "有前注时应追加前注局")
+    check("前注局（前注 0.5BB）" in ante,
+          f"前注局应写实际前注：\n{ante}")
+    check("有前注不等于低 SPR" in ante,
+          f"前注局不能默认 SPR 低：\n{ante}")
+    check("范围通常放宽" not in ante,
+          f"前注局不能无条件放宽范围：\n{ante}")
     check(len(ante) < 1500, f"前注局 system 不应过长：{len(ante)}")
 
 

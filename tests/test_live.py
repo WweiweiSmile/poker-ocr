@@ -77,6 +77,34 @@ def check(cond: bool, msg: str) -> None:
         FAILS.append(msg)
 
 
+def test_table_stats_for_active_skips_folded_and_counts_hero() -> None:
+    """已弃牌的人不进当前桌统计；total_players 必须含 Hero。"""
+    seen = {}
+
+    class _Store:
+        def stats_for_opponents(self, opponents):
+            seen["opponents"] = list(opponents)
+            return ["stats"]
+
+        def pooled_for_stats(self, stats, *, total_players=0):
+            seen["stats"] = stats
+            seen["total_players"] = total_players
+            return "pooled"
+
+    class _Opp:
+        def __init__(self, seat_id, folded):
+            self.seat_id = seat_id
+            self.folded = folded
+
+    got = live._table_stats_for_active(
+        _Store(), [_Opp("a", False), _Opp("b", True), _Opp("c", False)])
+    check(got == "pooled", f"应返回 pooled，实际 {got!r}")
+    check([o.seat_id for o in seen["opponents"]] == ["a", "c"],
+          f"只应聚合在局对手：{[o.seat_id for o in seen['opponents']]}")
+    check(seen["total_players"] == 3,
+          f"total 应含 Hero（2 名在局对手 + 1）：{seen['total_players']}")
+
+
 def test_record_without_hero_defaults_off_and_env_flag() -> None:
     """没有自己手牌的记录默认不写；CLI / RECORD_WITHOUT_HERO 可以打开。"""
     ap = live.build_parser()

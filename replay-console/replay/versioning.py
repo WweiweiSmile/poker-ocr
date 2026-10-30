@@ -34,7 +34,7 @@ from poker_ocr.table_dynamics import (  # noqa: E402
 #               选项 id 别名与 reason 截断；数据质量中文摘要；范围内部 id 下线。
 # 2026-10-30.10：live 不再预计算/渲染 hand_strength 的「大/中/小」，
 #                第 4 套牌力口径只留离线审计；prompt 只给牌型标签。
-CURRENT_ADVICE_VERSION = "advice-2026-10-30.10"
+CURRENT_ADVICE_VERSION = "advice-2026-10-30.11"
 # 改动 decisions.py 的重建语义时 bump。
 # recon-3：翻前底池补上盲注（实时 pbs 只记前注，h39 4.5 → 6.0）。
 CURRENT_RECONSTRUCT_VERSION = "recon-3"

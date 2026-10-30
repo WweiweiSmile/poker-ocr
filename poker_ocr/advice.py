@@ -40,8 +40,8 @@ from dataclasses import dataclass, field, replace
 from typing import Iterable
 
 from .coach import (
-    DRY, HIGH_CARD, MID_BOTTOM, OVERPAIR, STRONG_DRAW, STRONG_MADE, TPTK, TP_WEAK,
-    TWO_PAIR,
+    DRY, HIGH_CARD, MID_BOTTOM, ONE_PAIR, OVERPAIR, STRONG_DRAW,
+    STRONG_MADE, TPTK, TP_WEAK, TWO_PAIR,
     WEAK_DRAW, board_texture, opponent_strength, parse_cards, read_hand,
 )
 from .ground_truth import GroundTruth, card_text, compute_ground_truth
@@ -62,7 +62,7 @@ HERO_ACTOR = "hero"
 
 # 当前唯一的中文 lean 提示词版本。写入 session_start / advice JSONL，
 # 复盘归因用；改动 system 或事实块时 bump。
-PROMPT_VERSION = "lean-zh-2026-10-30.10"
+PROMPT_VERSION = "lean-zh-2026-10-30.11"
 PROMPT_LANGUAGE = "zh"
 
 # 加注尺度：名字 → 底池倍数。「满池 1.2」是超池，用于需要施压/劝退的场合
@@ -787,7 +787,7 @@ class Situation:
     # 四二法则估的成牌率（0-100）。给提示词做「赔率 vs 胜率」比较用
     equity_pct: float | None = None
     # 人工维护的**现场观察**（根目录 .table_dy）。只写统计算不出来的东西：
-    # 「3 号位上头了」「这桌有人合伙」。桌子的松紧/被动由 table_stats 给数字。
+    # 「3 号位上头了」「这桌有人合伙」。桌子的松紧/3-bet 频率由 table_stats 给数字。
     table_dynamics: str | None = None
     # 当前桌/全场先验统计。`scope` 决定提示词标题和口径。
     table_stats: "PooledStats | None" = None
@@ -2076,14 +2076,17 @@ SYSTEM_CORE_ZH = """你是一名德州扑克现金局实时教练。Hero 只有�
 只输出一个 JSON 对象，不要 Markdown，不要前后解释：
 {"option": "<选项 id>", "reason": "<中文一句话，不超过 30 字>", "confidence": <可选 0-1>}
 - option 必须严格来自「可选动作」，不得编造选项 id 或金额。
-- id 映射：没人下注时，过牌返回 call；下注也返回 raise-*；翻前开池返回 open-*，面对加注返回 raise-3x/raise-4x；全下是 all-in。不要自造 check/bet-*。
+- id 映射（以「可选动作」为准）：
+  翻前无人入池用 open-*/call（平跟、补盲、BB 过牌）；翻前面对加注用 raise-3x/raise-4x。
+  翻后无人下注 call=过牌、raise-1/3…1.2=下注；翻后面对下注 call=跟注、raise-1/3…1.2=加注；全下 all-in。
+- 不要自造 check/bet-*。
 - reason 必须引用输入里的具体事实（牌力、赔率、位置、对手画像）；不要引用未提供的规则、图表、概率或“价值指令”。
 - 关键事实缺失时，选最保守的合法动作，并在 reason 里说明缺什么。
 
 ## 事实优先级
 1. 硬事实：牌、公共牌、底池、需跟、在局人数、后手。
 2. 程序计算：SPR、赔率门槛、牌型/坚果/听牌、范围权益、当前落后比例。
-3. 逐座位对手画像；4. 全场统计/人工观察；5. 通用扑克经验。
+3. 逐座位对手画像；4. 当前牌桌统计/全场先验/人工观察；5. 通用扑克经验。
 冲突时高优先级覆盖低优先级；范围结论、可剥削等规则提示不能覆盖硬事实。
 
 ## 决策顺序
@@ -2092,25 +2095,25 @@ SYSTEM_CORE_ZH = """你是一名德州扑克现金局实时教练。Hero 只有�
 - 听牌：按 outs、价格、弃牌率、公对面/成花风险判断；不要因为“当前未成牌不是坚果”就否决半诈唬。
 - 多人池：顶对/超对降级；没有弃牌率时不要用听牌硬下注。
 - 河牌：没有未来牌，听牌等同空气；跟注看赔率和对手线路，价值下注看更差的牌会不会跟。
-- 尺度只能从「可选动作」里选，金额由程序算好；all-in 是最后手段，只在赔率、筹码深度和底池几何都合理时用。
+- 尺度只能从「可选动作」里选，金额由程序算好；深码不要用 all-in 代替正常尺度，后手 ≤20BB 的翻前推/弃区全下是标准动作。
 
 ## 指标口径
-- 补牌成牌率（四二法则）= 听牌到河牌成牌的概率，不是胜率。
-- 对范围权益 = 对建模范围的河牌胜率；当前成牌落后 = 按当前五张至少一家领先。
-- 跟注看权益与门槛；下注看更差的牌会不会跟；不要用“当前落后”单独否决听牌。
+- 补牌成牌率（四二法则）= 听牌到河牌成牌的概率，不是胜率；翻牌时是两街，不能直接和单街赔率门槛比，只有全下/后面不再下注时才可直接比。
+- 对范围权益 = 对建模范围的河牌胜率；当前成牌落后 = 按当前五张至少一家领先，不是输牌概率/权益。
+- 跟注看权益与门槛；下注看更差的牌会不会跟；不要用“当前落后”单独否决听牌，对成牌它也不是输牌概率。
 
 ## 筹码深度
 - 有效筹码 = min(我, 对手)；判断深度用它，不要用自己的后手。
 - SPR 高（>6）：一对通常不做大底池；SPR 低（<3）：单挑/3 人池顶对通常可以套池，4 人以上降级。
-- 后手 <20BB：翻前进入推/弃区；20–40BB 仍是正常加注，只是翻后基本一枪定生死。
+- 后手 ≤20BB：翻前进入推/弃区，全下是标准动作；20–40BB 仍是正常加注，只是翻后基本一枪定生死。
 """
 
 # 只有桌况带前注时追加。前注局的核心差异是「底池更大、开池要收费」，
 # 不需要把 9 人/0.5BB 这类具体牌桌写死进 system。
-SYSTEM_ANTE_ZH = """## 前注局
-- 前注是死钱：翻前底池比无前注局大，入池赔率更好，范围通常放宽而不是收紧。
+SYSTEM_ANTE_ZH = """## 前注局（前注 {ante}BB）
+- 前注是死钱：翻前底池比无前注局大，入池赔率更好；但放宽主要在后位/BB，前位仍按位置范围，不要因为“便宜”用垃圾牌入池。
 - 开池尺度按底池放大；选项金额已按这个口径算好，不要用固定 3BB 去质疑它。
-- 前注大 → 底池大 → SPR 低：翻前选牌时就要想好翻后能不能打完。
+- 有前注不等于低 SPR：只有有效筹码/底池算出来 SPR<3 才是低 SPR；深码前注局仍按深码打，别因为“前注大”急着套池。
 """
 
 
@@ -2119,7 +2122,8 @@ def build_system(sit: "Situation") -> str:
     parts = [SYSTEM_CORE_ZH.rstrip()]
     blinds = sit.snap.blinds
     if blinds is not None and blinds.ante:
-        parts.append(SYSTEM_ANTE_ZH.rstrip())
+        parts.append(SYSTEM_ANTE_ZH.format(
+            ante=_fmt_num(blinds.ante)).rstrip())
     return "\n\n".join(parts)
 
 _STREET_ZH = {"preflop": "翻前", "flop": "翻牌", "turn": "转牌", "river": "河牌"}
@@ -2522,19 +2526,28 @@ def render_hand_strength_zh(sit: Situation) -> list[str]:
             if gt.rank.tie_pct > 0:
                 nuts += f"；平局 {gt.rank.tie_pct:.1%} 分池"
         elif is_draw:
-            nuts = "否（指当前成牌；听牌不代表最终输）"
+            nuts = ("否（指当前成牌；听牌不代表最终输；"
+                    "更大牌型只是理论存在）")
         else:
-            nuts = "否（有更好的成牌存在）"
+            nuts = ("否（指当前成牌；更大牌型只是理论存在，"
+                    "不代表对手持有）")
         lines.append(f"坚果：{nuts}")
         if not gt.hero_is_nuts:
-            stronger = [b.name for b in gt.rank.beaten_by
-                        if b.category >= TWO_PAIR]
+            stronger = []
+            for beaten in gt.rank.beaten_by:
+                if beaten.category == ONE_PAIR:
+                    name = ("更大的对子（一对）"
+                            if gt.made.category == ONE_PAIR else "一对")
+                else:
+                    name = _CATEGORY_EN_ZH.get(beaten.name, beaten.name)
+                stronger.append(name)
             if stronger:
-                names = "、".join(_CATEGORY_EN_ZH.get(n, n) for n in stronger)
-                lines.append(f"能打败你的牌型：{names}")
+                lines.append("能打败你的牌型（理论上）："
+                             + "、".join(stronger))
         lines.append(f"听牌：{_draws_zh(gt)}")
         if gt.draws.total_outs:
-            lines.append(f"补牌成牌率（四二法则，到河牌）："
+            lines.append("补牌成牌率（四二法则，到河牌；"
+                         "仅全下/无后续下注时可直接比门槛）："
                          f"{gt.draws.equity_pct:.0f}%")
 
     hr = sit.hand_ranges
@@ -2543,6 +2556,9 @@ def render_hand_strength_zh(sit: Situation) -> list[str]:
                   f"{gt.rank.beat_at_least_pct:.1%}（按随机牌下界")
         if is_draw:
             behind += "；当前未成牌，不代表最终胜率"
+        else:
+            behind += ("；这是当前五张被至少一家压过的概率，"
+                       "不是输牌概率/权益")
         lines.append(behind + "）")
     if hr is not None:
         modeled_players = len(hr.opponents) + 1
@@ -2557,13 +2573,18 @@ def render_hand_strength_zh(sit: Situation) -> list[str]:
         behind = f"当前成牌落后至少一家：{hr.behind_any:.1%}"
         if is_draw:
             behind += "（当前未成牌，不代表最终胜率）"
+        else:
+            behind += ("（当前五张被至少一家压过的概率，"
+                       "不是输牌概率/权益）")
         lines.append(behind)
         lines.append(f"多人池：实际 {actual_players} 人 / "
                      f"范围建模 {len(hr.opponents)} 人 / "
                      f"公平份额 {1.0 / actual_players:.1%}")
         lines.extend(render_ranges_zh(sit))
     elif sit.equity_pct is not None and is_draw:
-        lines.append(f"补牌成牌率（四二法则，到河牌）：{sit.equity_pct:.0f}%")
+        lines.append("补牌成牌率（四二法则，到河牌；"
+                     "仅全下/无后续下注时可直接比门槛）："
+                     f"{sit.equity_pct:.0f}%")
 
     if gt is not None:
         lines.append(f"牌面结构：{_board_structure_zh(gt)}")
@@ -2603,6 +2624,18 @@ def render_preflop_zh(sit: Situation) -> list[str]:
     return lines
 
 
+_TABLE_SMALL_OPPS = 20.0
+
+
+def _table_stat_zh(label: str, value: float,
+                   opportunities: float | None = None) -> str:
+    """单个桌况指标；机会数 <20 时明说，避免 5 次机会的 82% 被当成硬事实。"""
+    text = f"{label} {value:.0f}%"
+    if opportunities is not None and opportunities < _TABLE_SMALL_OPPS:
+        text += f"（仅 {_fmt_num(opportunities)} 次机会）"
+    return text
+
+
 def render_table_stats_zh(stats: "PooledStats | None") -> list[str]:
     """桌况事实：`current_table` 是本手在局对手，`population` 是冷启动先验。
 
@@ -2611,23 +2644,32 @@ def render_table_stats_zh(stats: "PooledStats | None") -> list[str]:
     """
     if stats is None or stats.hands < 20:
         return []
-    parts: list[str] = []
-    for label, value in (("VPIP", stats.vpip), ("PFR", stats.pfr),
-                         ("3-bet", stats.threebet), ("溜入", stats.limp),
-                         ("对 c-bet 弃", stats.fold_to_cbet),
-                         ("被过牌后下注", stats.stab)):
-        if value is not None:
-            parts.append(f"{label} {value:.0f}%")
+    opportunities = stats.opportunities or {}
+    parts = [
+        _table_stat_zh(label, value, opportunities.get(key))
+        for label, value, key in (
+            ("VPIP", stats.vpip, "preflop"),
+            ("PFR", stats.pfr, "preflop"),
+            ("3-bet", stats.threebet, "threebet"),
+            ("溜入", stats.limp, "limp"),
+            ("对 c-bet 弃", stats.fold_to_cbet, "fcbet"),
+            ("被过牌后下注", stats.stab, "stab"),
+        )
+        if value is not None
+    ]
     if not parts:
         return []
+    total = 0
     if stats.scope == "current_table":
-        total = stats.total_players or stats.players
-        sample = (f"样本约 {stats.hands} 手" if stats.approx_hands
-                  else f"{stats.hands} 手")
-        lines = [f"## 当前牌桌数据（本手在局 {total} 人，"
-                 f"{stats.players} 人有画像，{sample}）"]
-        if total > stats.players:
-            lines.append(f"另外 {total - stats.players} 人没有画像，"
+        # total_players 现在含 Hero；旧调用只传对手数时 max 兜底，避免又少 1。
+        total = max(int(stats.total_players or 0), stats.players + 1)
+        sample = (f"历史画像，单人最多约 {stats.hands} 手"
+                  if stats.approx_hands else f"历史画像，单人最多 {stats.hands} 手")
+        lines = [f"## 当前牌桌数据（本手在局 {total} 人（含 Hero），"
+                 f"{stats.players} 名对手有画像；{sample}）"]
+        unknown = max(total - 1 - stats.players, 0)
+        if unknown:
+            lines.append(f"另外 {unknown} 名在局对手没有画像，"
                          "按未知对手处理，不伪造个人数据")
     else:
         lines = ["## 全场数据（全场先验，非本桌）"]
@@ -2636,11 +2678,15 @@ def render_table_stats_zh(stats: "PooledStats | None") -> list[str]:
     else:
         lines.append(f"{stats.players} 人 / {stats.hands} 手："
                      + "｜".join(parts))
-    street = [f"{label} {value:.0f}%"
-              for label, value in (("翻牌", stats.fold_to_bet_flop),
-                                   ("转牌", stats.fold_to_bet_turn),
-                                   ("河牌", stats.fold_to_bet_river))
-              if value is not None]
+    street = [
+        _table_stat_zh(label, value, opportunities.get(key))
+        for label, value, key in (
+            ("翻牌", stats.fold_to_bet_flop, "flop"),
+            ("转牌", stats.fold_to_bet_turn, "turn"),
+            ("河牌", stats.fold_to_bet_river, "river"),
+        )
+        if value is not None
+    ]
     if street:
         lines.append("面对下注弃：" + "｜".join(street))
     tags: list[str] = []
@@ -2648,16 +2694,26 @@ def render_table_stats_zh(stats: "PooledStats | None") -> list[str]:
         tags.append("松")
     elif stats.loose is False:
         tags.append("紧")
+    # 「3-bet 少」不是「整体被动」：后者需要翻后 call/raise 数据，
+    # 只看 3-bet 会把带 MANIAC 的桌子写成被动桌。
     if stats.passive is True:
-        tags.append("被动")
-    elif stats.passive is False:
-        tags.append("有加注")
+        tags.append("3-bet 少")
     if tags:
         lines.append("整体：" + "、".join(tags))
-    exploit = table_exploit_zh(stats)
-    if exploit:
-        label = "当前桌可剥削" if stats.scope == "current_table" else "全场可剥削"
-        lines.append(label + "：" + exploit)
+    total_opponents = max(total - 1, 0)
+    all_known = total_opponents > 0 and stats.players >= total_opponents
+    # 至少一半在局对手有画像才给桌级结论；9 人桌只有 2 人有数据时，
+    # 「当前桌可剥削」会盖过另外 6 个未知对手。
+    enough_coverage = (stats.players >= 2
+                       and stats.players * 2 >= total_opponents)
+    allow_exploit = (stats.scope != "current_table"
+                     or all_known or enough_coverage)
+    if allow_exploit:
+        exploit = table_exploit_zh(stats)
+        if exploit:
+            label = ("当前桌可剥削" if stats.scope == "current_table"
+                     else "全场可剥削")
+            lines.append(label + "：" + exploit)
     return lines
 
 
@@ -2741,6 +2797,13 @@ def render_facts_zh(sit: Situation) -> str:
     else:
         blinds = "未知"
     lines.append(f"桌况：{table}｜盲注 {blinds}")
+    in_hand = snap.opponents_in_hand
+    folded = sum(1 for o in snap.opponents if o.folded)
+    in_hand_line = (f"本手在局：{in_hand + 1} 人"
+                    f"（Hero + {in_hand} 名对手）")
+    if folded:
+        in_hand_line += f"；已弃牌 {folded} 人"
+    lines.append(in_hand_line)
     hero_cards = " ".join(snap.hero_cards) or "未知"
     stack_text = (f"{_fmt_num(snap.hero_stack)}BB"
                   if snap.hero_stack is not None else "未知")

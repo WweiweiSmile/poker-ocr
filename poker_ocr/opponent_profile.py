@@ -1487,11 +1487,12 @@ class OpponentRead:
 
 @dataclass(frozen=True)
 class PooledStats:
-    """全场合并统计：整份画像按机会数加权合并。
+    """桌况聚合统计：一组对手的画像按机会数加权合并。
 
-    这是「这张桌子是什么局」的**事实**，用来替代 `.table_dy` 里那些
-    「整体偏松 / 多数人不诈唬」的形容词 —— 同一件事，数字比形容词可靠，
-    而且不会在换桌之后过期。
+    `scope=current_table` 只含**本手还在局**的对手，是这些人的历史画像，
+    不是本桌实时观测；`scope=population` 是冷启动的全场先验。用来替代
+    `.table_dy` 里那些「整体偏松 / 多数人不诈唬」的形容词 —— 同一件事，
+    数字比形容词可靠，但必须带上样本口径。
     """
 
     hands: int
@@ -1509,8 +1510,8 @@ class PooledStats:
     # 各指标的**机会数**。比率必须有机会数托底才能拿去下结论 ——
     # 2 次机会算出来的 100% 不是「全场都是这样」。
     opportunities: dict[str, float] = field(default_factory=dict)
-    # 当前桌视图：本手在局人数（含没有画像的人）。`players` 是其中有画像的
-    # 人数；两者一起才能说清「6 人里 4 人有数据」。
+    # 当前桌视图：本手在局人数（**含 Hero**，也含没有画像的对手）。
+    # `players` 是其中有画像的对手人数；两者一起才能说清「6 人里 4 人有数据」。
     total_players: int = 0
     scope: str = "population"          # population / current_table
     # 当前桌的 hands 只能按玩家 hands 取 max 近似（同一手多人重复），
@@ -1525,7 +1526,8 @@ class PooledStats:
 
     @property
     def passive(self) -> bool | None:
-        """加注少不少。只看 3-bet 频率：这一桌 3-bet 少就是被动。"""
+        """3-bet 少不少。**只表示 3-bet 频率低，不等于翻后被动**；
+        提示词里只写「3-bet 少」，不要写成「整体被动」。"""
         return None if self.threebet is None else self.threebet <= 8.0
 
 
@@ -1563,15 +1565,19 @@ def pooled_stats_to_dict(stats: "PooledStats | None") -> dict | None:
 
 
 def table_exploit_zh(stats: PooledStats, *, limit: int = 2) -> str:
-    """**全场级**的剥削方向：这桌整体该怎么打。
+    """**桌级**的剥削方向：这桌整体该怎么打。
 
     与逐座位的 `exploit_hint_zh` 是两层：那个回答「这个人怎么打」，这个回答
-    「这桌怎么打」。全场是合并样本，比任何单人都稳，所以可以直接下结论；
-    但仍然要求机会数达标 —— 2 次机会算出来的 100% 不是「全场都这样」。
+    「这桌怎么打」。合并样本比任何单人都稳，但仍然要求机会数达标 ——
+    2 次机会算出来的 100% 不是「这桌都这样」。
+
+    低 3-bet 不再直接推「前位放宽」：低 3-bet + 高溜入/高 VPIP 的桌子，
+    前位放宽只会多打多人底池。只有「紧桌 + 低 3-bet」才值得放宽前位。
     """
     def enough(key: str) -> bool:
         return stats.opportunities.get(key, 0.0) >= TABLE_MIN_OPPS[key]
 
+    table_word = "本桌" if stats.scope == "current_table" else "全场"
     hints: list[str] = []
     if (stats.fold_to_bet_river is not None and enough("river")
             and stats.fold_to_bet_river >= 80):
@@ -1581,10 +1587,21 @@ def table_exploit_zh(stats: PooledStats, *, limit: int = 2) -> str:
             and stats.fold_to_cbet >= 70):
         hints.append("对 c-bet 弃得多 —— 翻牌可以高频开火，别只拿强牌下注")
     if (stats.limp is not None and enough("limp") and stats.limp >= 40):
-        hints.append("全场爱溜入 —— 有位置时多隔离加注")
+        hints.append(f"{table_word}爱溜入 —— 有位置时多隔离加注")
     if (stats.threebet is not None and enough("threebet")
             and stats.threebet <= 8):
-        hints.append("3-bet 很少 —— 开池很少被反击，前位也可以放宽开池")
+        loose_callers = ((stats.limp is not None and stats.limp >= 40)
+                         or (stats.vpip is not None and stats.vpip >= 32))
+        tight_table = (stats.vpip is not None and stats.vpip < 28
+                       and stats.limp is not None and stats.limp < 25)
+        if loose_callers:
+            hints.append("3-bet 很少，但溜入/入池多 —— 前位不要放宽，"
+                         "后位多隔离加注")
+        elif tight_table:
+            hints.append("3-bet 很少 —— 开池很少被反击，前位可以适当放宽开池")
+        else:
+            hints.append("3-bet 很少 —— 但入池数据不足，前位仍按正常范围，"
+                         "后位再放宽")
     return "；".join(hints[:limit])
 
 
@@ -2084,9 +2101,10 @@ class ProfileStore:
                          total_players: int = 0) -> PooledStats:
         """当前手在局对手的聚合统计。
 
-        `total_players` 是本手在局人数（含没有画像的人）；`players` 是其中
-        真正有画像的人数。`hands` 用玩家 hands 的最大值近似 —— 同一手牌会
-        让多个玩家各记一次，求和会重复计数。精确去重等 observation 表。
+        `total_players` 是本手在局人数（**含 Hero**，也含没有画像的对手）；
+        `players` 是其中真正有画像的**对手**人数。`hands` 用玩家 hands 的
+        最大值近似 —— 同一手牌会让多个玩家各记一次，求和会重复计数。
+        精确去重等 observation 表。
         """
         players = [raw for raw in stats if raw is not None]
         hands = max(
@@ -2130,6 +2148,8 @@ class ProfileStore:
             fold_to_bet_turn=street_fold("turn"),
             fold_to_bet_river=street_fold("river"),
             opportunities={
+                "preflop": sum(_field(raw, "preflop_opps")
+                               for raw in players),
                 "flop": sum(_dict_field(raw, "face_opp", "flop")
                             for raw in players),
                 "turn": sum(_dict_field(raw, "face_opp", "turn")
@@ -2140,8 +2160,10 @@ class ProfileStore:
                 "fcbet": sum(_field(raw, "ftc_opp") for raw in players),
                 "limp": sum(_field(raw, "limp_opp") for raw in players),
                 "threebet": sum(_field(raw, "threebet_opps") for raw in players),
+                "stab": sum(_field(raw, "stab_opp") for raw in players),
             },
-            total_players=max(int(total_players or 0), len(players)),
+            # 含 Hero：旧调用若只传对手数，这里兜到「对手数+1」，避免又少 1。
+            total_players=max(int(total_players or 0), len(players) + 1),
             scope=scope,
             approx_hands=approx_hands,
         )

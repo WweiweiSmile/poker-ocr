@@ -142,6 +142,18 @@ def _advice_bar(kind: str) -> str:
     return _ANSI_ADVICE_BAR.get(kind, _ANSI_ADVICE_BAR_DEFAULT)
 
 
+def _table_stats_for_active(profile_store, opponents):
+    """只聚合「本手还在局」的对手；total_players 含 Hero。
+
+    已弃牌的人不再参与当前决策；把他们算进桌况会让「本手在局 N 人」
+    和实际底池人数对不上（一手 8 人发牌、5 人弃牌时会被写成 7 人桌）。
+    """
+    active = [o for o in opponents if not getattr(o, "folded", False)]
+    current = profile_store.stats_for_opponents(active)
+    return profile_store.pooled_for_stats(
+        current, total_players=len(active) + 1)
+
+
 def _hand_done_text(hand: dict) -> str:
     """完整手牌落库提示文案：hand_id（JSONL 里按 id 能直接搜到）。
 
@@ -1340,24 +1352,25 @@ class LiveProcessor:
                             self._table_dynamics_text = dynamics
                 # 本手在局对手的画像。没有画像时为空，build_situation 仍按
                 # .table_dy 的 aggressive_table 走旧口径，不会退化。
+                # 已弃牌的人不再参与当前决策，桌况/画像都不应再算他们。
+                active_opponents = [o for o in point.opponents
+                                    if not o.folded]
                 reads: dict = {}
                 if self.profile_store is not None:
                     try:
-                        reads = self.profile_store.read_for(point.opponents)
+                        reads = self.profile_store.read_for(
+                            active_opponents)
                     except Exception as exc:      # noqa: BLE001
                         self.log(f"  [对手] 画像读取失败："
                                  f"{type(exc).__name__}: {exc}")
                         reads = {}
-                # 当前**这一手在局对手**的聚合统计，不是整个画像库。
-                # 换桌/换人后自然跟着变；手牌进行中同一手只算一次。
+                # 当前**这一手还在局**的对手聚合，不是整个画像库，也不是
+                # 已弃牌的人。total_players 含 Hero，提示词才能说「3 人」。
                 table_stats = None
                 if self.profile_store is not None:
                     try:
-                        opponents = list(point.opponents)
-                        current = self.profile_store.stats_for_opponents(
-                            opponents)
-                        table_stats = self.profile_store.pooled_for_stats(
-                            current, total_players=len(opponents))
+                        table_stats = _table_stats_for_active(
+                            self.profile_store, active_opponents)
                     except Exception as exc:      # noqa: BLE001
                         self.log(f"  [对手] 当前桌统计失败："
                                  f"{type(exc).__name__}: {exc}")
