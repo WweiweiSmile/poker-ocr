@@ -36,7 +36,7 @@ from typing import Callable, Iterable, Mapping, Sequence
 from .positions import POSITIONS_BY_TABLE_SIZE
 
 # 分类器版本：规则/阈值改动时递增，画像文件里会记录，重建时能看出差异。
-CLASSIFIER_VERSION = "rules-2026-10-30d"
+CLASSIFIER_VERSION = "rules-2026-10-30e"
 
 # 合法类型。与设计文档 6.1 一致。
 ARCHETYPES = ("unknown", "station", "lag", "maniac", "nit", "tag")
@@ -164,6 +164,7 @@ PRIOR_STRENGTH: dict[str, float] = {
     "fold_to_bet_flop": 8.0,
     "fold_to_bet_turn": 6.0,
     "barrel_call": 5.0,
+    "fold_to_bet_river": 6.0,
 }
 
 # 全场样本不足时的兜底先验（百分比）。数值来自常见现金局的经验值，
@@ -185,6 +186,7 @@ DEFAULT_PRIORS: dict[str, float] = {
     "fold_to_bet_flop": 45.0,
     "fold_to_bet_turn": 45.0,
     "barrel_call": 50.0,
+    "fold_to_bet_river": 60.0,
 }
 
 # 指标 → (命中字段, 机会字段)。人群先验和收缩都靠这张表。
@@ -242,6 +244,16 @@ def _pct(hit: float, opps: float, *, min_opps: float = 3.0) -> float | None:
     if opps < min_opps:
         return None
     return hit / opps * 100
+
+
+def _dict_field(raw, name: str, street: str) -> float:
+    """读「按街存 dict」的计数字段：street → 次数。"""
+    mapping = (raw.get(name) if isinstance(raw, Mapping)
+               else getattr(raw, name, None))
+    if not isinstance(mapping, Mapping):
+        return 0.0
+    value = mapping.get(street)
+    return float(value) if isinstance(value, (int, float)) else 0.0
 
 
 def _bucket_map(raw) -> dict[str, float]:
@@ -1457,6 +1469,7 @@ class OpponentRead:
     fold_to_bet_flop_pct: float | None = None
     fold_to_bet_turn_pct: float | None = None
     barrel_call_pct: float | None = None
+    fold_to_bet_river_pct: float | None = None
     # 哪些指标是被人群先验收缩过的（不是实测值）。渲染时加 ≈。
     prior_dominated: tuple[str, ...] = ()
 
@@ -1490,6 +1503,9 @@ class PooledStats:
     fold_to_cbet: float | None = None
     stab: float | None = None
     cbet: float | None = None
+    fold_to_bet_flop: float | None = None
+    fold_to_bet_turn: float | None = None
+    fold_to_bet_river: float | None = None
 
     @property
     def loose(self) -> bool | None:
@@ -1532,6 +1548,7 @@ TENDENCY_MIN_OPPS = {
     "fold_to_bet_flop": 8.0,
     "fold_to_bet_turn": 6.0,
     "barrel_call": 5.0,
+    "fold_to_bet_river": 8.0,
 }
 
 
@@ -1591,6 +1608,8 @@ def _tendencies(stats: OpponentStats,
     put("fold_to_bet_turn", stats.face_fold.get("turn", 0.0),
         stats.face_opps("turn"), "fold_to_bet_turn")
     put("barrel_call", stats.ftb_call, stats.ftb_opp, "barrel_call")
+    put("fold_to_bet_river", stats.face_fold.get("river", 0.0),
+        stats.face_opps("river"), "fold_to_bet_river")
     return fields, tuple(low)
 
 
@@ -1980,6 +1999,11 @@ class ProfileStore:
 
         # hands 用**去重后的手数**（seen_hands），不是各玩家 hands 之和 ——
         # 一手牌会让 4-8 个对手各记一次，求和会把 294 手说成 1100 多手。
+        def street_fold(street: str) -> float | None:
+            hit = sum(_dict_field(raw, "face_fold", street) for raw in players)
+            opps = sum(_dict_field(raw, "face_opp", street) for raw in players)
+            return hit / opps * 100 if opps > 0 else None
+
         return PooledStats(
             hands=len(self.seen_hands),
             players=len(players),
@@ -1990,6 +2014,9 @@ class ProfileStore:
             fold_to_cbet=agg("ftc_fold", "ftc_opp"),
             stab=agg("stabs", "stab_opp"),
             cbet=agg("cbets", "cbet_opp"),
+            fold_to_bet_flop=street_fold("flop"),
+            fold_to_bet_turn=street_fold("turn"),
+            fold_to_bet_river=street_fold("river"),
         )
 
     def _priors(self) -> dict[str, float]:
@@ -2279,13 +2306,16 @@ def render_tendencies_zh(read: OpponentRead) -> str:
                            f"延迟 c-bet {read.delay_cbet_pct:.0f}%"))
     if (read.fold_to_bet_flop_pct is not None
             or read.fold_to_bet_turn_pct is not None):
+        # 逐街单独标记：河牌样本通常比翻/转少，不能因为河牌是估计值就
+        # 把整段都标成 ≈。
         seg = []
-        if read.fold_to_bet_flop_pct is not None:
-            seg.append(f"翻牌 {read.fold_to_bet_flop_pct:.0f}%")
-        if read.fold_to_bet_turn_pct is not None:
-            seg.append(f"转牌 {read.fold_to_bet_turn_pct:.0f}%")
-        parts.append(_mark(read, ("fold_to_bet_flop", "fold_to_bet_turn"),
-                           "面对下注弃 " + " / ".join(seg)))
+        for street, name, value in (
+                ("翻牌", "fold_to_bet_flop", read.fold_to_bet_flop_pct),
+                ("转牌", "fold_to_bet_turn", read.fold_to_bet_turn_pct),
+                ("河牌", "fold_to_bet_river", read.fold_to_bet_river_pct)):
+            if value is not None:
+                seg.append(_mark(read, (name,), f"{street} {value:.0f}%"))
+        parts.append("面对下注弃 " + " / ".join(seg))
     if read.barrel_call_pct is not None:
         parts.append(_mark(read, ("barrel_call",),
                            f"翻牌跟注→转牌再跟 {read.barrel_call_pct:.0f}%"))
@@ -2344,6 +2374,14 @@ def exploit_hint_zh(read: OpponentRead, *, limit: int = 2) -> str:
             hints.append("转牌弃得多 —— 翻牌跟注之后可以连开第二枪")
         elif read.fold_to_bet_turn_pct <= 40:
             hints.append("转牌很少弃 —— 第二枪要拿真牌，别拿空气硬开")
+
+    if (_confident(read, "fold_to_bet_river")
+            and read.fold_to_bet_river_pct is not None):
+        if read.fold_to_bet_river_pct >= 80:
+            hints.append("河牌面对下注弃得多 —— 河牌下注很少被跟，"
+                         "没摊牌价值的牌可以在河牌开一枪")
+        elif read.fold_to_bet_river_pct <= 40:
+            hints.append("河牌跟得多 —— 河牌诈唬无效，只用价值下注")
 
     if (_confident(read, "limp") and read.limp_pct is not None
             and read.limp_pct >= 25):

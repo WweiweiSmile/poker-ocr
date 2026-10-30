@@ -60,7 +60,7 @@ HERO_ACTOR = "hero"
 
 # 当前唯一的中文 lean 提示词版本。写入 session_start / advice JSONL，
 # 复盘归因用；改动 system 或事实块时 bump。
-PROMPT_VERSION = "lean-zh-2026-10-30.6"
+PROMPT_VERSION = "lean-zh-2026-10-30.7"
 PROMPT_LANGUAGE = "zh"
 
 # 加注尺度：名字 → 底池倍数。「满池 1.2」是超池，用于需要施压/劝退的场合
@@ -2428,6 +2428,13 @@ def render_table_stats_zh(stats: "PooledStats | None") -> list[str]:
     lines = ["## 全场数据"]
     lines.append(f"{stats.players} 人 / {stats.hands} 手："
                  + "｜".join(parts))
+    street = [f"{label} {value:.0f}%"
+              for label, value in (("翻牌", stats.fold_to_bet_flop),
+                                   ("转牌", stats.fold_to_bet_turn),
+                                   ("河牌", stats.fold_to_bet_river))
+              if value is not None]
+    if street:
+        lines.append("面对下注弃：" + "｜".join(street))
     tags: list[str] = []
     if stats.loose is True:
         tags.append("松")
