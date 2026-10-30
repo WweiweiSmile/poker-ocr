@@ -47,7 +47,7 @@ from .ground_truth import GroundTruth, card_text, compute_ground_truth
 from .hand_track import ActionRecord, FLOP, HandSnapshot, PREFLOP, RIVER, TURN
 from .opponent_profile import (AGGRESSIVE_ARCHETYPES, PASSIVE_ARCHETYPES,
                                OpponentRead, PooledStats, render_reads,
-                               render_reads_zh)
+                               render_reads_zh, table_exploit_zh)
 from .positions import BB, POSITIONS_BY_TABLE_SIZE, SB
 from .preflop_ranges import range_verdict, sb_completable
 from .table_dynamics import (is_aggressive_table, is_loose_table,
@@ -60,7 +60,7 @@ HERO_ACTOR = "hero"
 
 # 当前唯一的中文 lean 提示词版本。写入 session_start / advice JSONL，
 # 复盘归因用；改动 system 或事实块时 bump。
-PROMPT_VERSION = "lean-zh-2026-10-30.7"
+PROMPT_VERSION = "lean-zh-2026-10-30.8"
 PROMPT_LANGUAGE = "zh"
 
 # 加注尺度：名字 → 底池倍数。「满池 1.2」是超池，用于需要施压/劝退的场合
@@ -2446,6 +2446,9 @@ def render_table_stats_zh(stats: "PooledStats | None") -> list[str]:
         tags.append("有加注")
     if tags:
         lines.append("整体：" + "、".join(tags))
+    exploit = table_exploit_zh(stats)
+    if exploit:
+        lines.append("全场可剥削：" + exploit)
     return lines
 
 

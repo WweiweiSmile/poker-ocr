@@ -1548,7 +1548,9 @@ def test_table_stats_come_from_profiles() -> None:
     stats = PooledStats(hands=294, players=30, vpip=38.0, pfr=12.0,
                         threebet=5.9, limp=46.0, fold_to_cbet=79.0, stab=5.0,
                         fold_to_bet_flop=87.0, fold_to_bet_turn=72.0,
-                        fold_to_bet_river=92.0)
+                        fold_to_bet_river=92.0,
+                        opportunities={"river": 41.0, "fcbet": 41.0,
+                                       "limp": 248.0, "threebet": 305.0})
     sit = build_situation(make_point(to_call=4.0, pot=10.0, hero_stack=90.0),
                           table_stats=stats)
     _, user = build_messages(sit)
@@ -1557,6 +1559,19 @@ def test_table_stats_come_from_profiles() -> None:
           f"应写出具体比例：\n{user}")
     check("整体：松、被动" in user, f"应给出松/被动的结论：\n{user}")
     check("河牌 92%" in user, f"分街弃牌率应包含河牌：\n{user}")
+    check("河牌大注基本没人跟" in user,
+          f"全场级剥削应指出河牌没人跟：\n{user}")
+    check("价值下注要收小" in user or "收小注" in user,
+          f"应同时提示价值下注要收小：\n{user}")
+
+    # 机会数不够时不给全场级结论
+    thin_river = PooledStats(hands=30, players=9, vpip=40.0,
+                             fold_to_bet_river=95.0,
+                             opportunities={"river": 4.0})
+    _, thin_user = build_messages(build_situation(
+        make_point(to_call=4.0, pot=10.0, hero_stack=90.0), table_stats=thin_river))
+    check("河牌大注基本没人跟" not in thin_user,
+          f"河牌机会不足时不该下结论：\n{thin_user}")
 
     # 样本太小时不渲染：十手牌算出来的「全场 VPIP」比没有更误导
     thin = PooledStats(hands=12, players=3, vpip=60.0)

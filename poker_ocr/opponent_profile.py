@@ -1506,6 +1506,9 @@ class PooledStats:
     fold_to_bet_flop: float | None = None
     fold_to_bet_turn: float | None = None
     fold_to_bet_river: float | None = None
+    # 各指标的**机会数**。比率必须有机会数托底才能拿去下结论 ——
+    # 2 次机会算出来的 100% 不是「全场都是这样」。
+    opportunities: dict[str, float] = field(default_factory=dict)
 
     @property
     def loose(self) -> bool | None:
@@ -1517,6 +1520,41 @@ class PooledStats:
     def passive(self) -> bool | None:
         """加注少不少。只看 3-bet 频率：这一桌 3-bet 少就是被动。"""
         return None if self.threebet is None else self.threebet <= 8.0
+
+
+# 全场级结论的最低机会数。比逐座位宽松（全场是合并样本），但也不能没有。
+TABLE_MIN_OPPS: dict[str, float] = {
+    "river": 12.0,
+    "fcbet": 20.0,
+    "limp": 20.0,
+    "threebet": 20.0,
+}
+
+
+def table_exploit_zh(stats: PooledStats, *, limit: int = 2) -> str:
+    """**全场级**的剥削方向：这桌整体该怎么打。
+
+    与逐座位的 `exploit_hint_zh` 是两层：那个回答「这个人怎么打」，这个回答
+    「这桌怎么打」。全场是合并样本，比任何单人都稳，所以可以直接下结论；
+    但仍然要求机会数达标 —— 2 次机会算出来的 100% 不是「全场都这样」。
+    """
+    def enough(key: str) -> bool:
+        return stats.opportunities.get(key, 0.0) >= TABLE_MIN_OPPS[key]
+
+    hints: list[str] = []
+    if (stats.fold_to_bet_river is not None and enough("river")
+            and stats.fold_to_bet_river >= 80):
+        hints.append("河牌大注基本没人跟 —— 没摊牌价值时可以诈唬收池；"
+                     "自己有强牌反而要收小注，指望被跟")
+    if (stats.fold_to_cbet is not None and enough("fcbet")
+            and stats.fold_to_cbet >= 70):
+        hints.append("对 c-bet 弃得多 —— 翻牌可以高频开火，别只拿强牌下注")
+    if (stats.limp is not None and enough("limp") and stats.limp >= 40):
+        hints.append("全场爱溜入 —— 有位置时多隔离加注")
+    if (stats.threebet is not None and enough("threebet")
+            and stats.threebet <= 8):
+        hints.append("3-bet 很少 —— 开池很少被反击，前位也可以放宽开池")
+    return "；".join(hints[:limit])
 
 
 def _gate(n: int, confidence: float) -> str:
@@ -2017,6 +2055,18 @@ class ProfileStore:
             fold_to_bet_flop=street_fold("flop"),
             fold_to_bet_turn=street_fold("turn"),
             fold_to_bet_river=street_fold("river"),
+            opportunities={
+                "flop": sum(_dict_field(raw, "face_opp", "flop")
+                            for raw in players),
+                "turn": sum(_dict_field(raw, "face_opp", "turn")
+                            for raw in players),
+                "river": sum(_dict_field(raw, "face_opp", "river")
+                             for raw in players),
+                "cbet": sum(_field(raw, "cbet_opp") for raw in players),
+                "fcbet": sum(_field(raw, "ftc_opp") for raw in players),
+                "limp": sum(_field(raw, "limp_opp") for raw in players),
+                "threebet": sum(_field(raw, "threebet_opps") for raw in players),
+            },
         )
 
     def _priors(self) -> dict[str, float]:
