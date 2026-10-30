@@ -60,6 +60,7 @@ MIN_OPPS = {
     "fold_to_barrel": 5.0,
     "delay_cbet": 5.0,
     "fold_to_3bet": 5.0,
+    "fold_to_bet": 8.0,
 }
 
 COLUMNS = [
@@ -87,6 +88,8 @@ COLUMNS = [
     ("跟c-bet", "call_to_cbet"),
     ("转牌再弃", "fold_to_barrel"),
     ("延迟c-bet", "delay_cbet"),
+    ("对下注弃F", "fold_bet_flop"),
+    ("对下注弃T", "fold_bet_turn"),
     ("被3-bet弃", "fold_to_3bet"),
     ("4-bet", "fourbet"),
     ("摊牌", "showdowns"),
@@ -182,6 +185,10 @@ def row_of(name: str, raw: dict, *, pool: str = "") -> dict:
         "call_to_cbet": _ratio(_num(raw, "ftc_call"), _num(raw, "ftc_opp")),
         "fold_to_barrel": _ratio(_num(raw, "ftb_fold"), _num(raw, "ftb_opp")),
         "delay_cbet": _ratio(_num(raw, "dcb"), _num(raw, "dcb_opp")),
+        "fold_bet_flop": _ratio((raw.get("face_fold") or {}).get("flop", 0.0),
+                                (raw.get("face_opp") or {}).get("flop", 0.0)),
+        "fold_bet_turn": _ratio((raw.get("face_fold") or {}).get("turn", 0.0),
+                                (raw.get("face_opp") or {}).get("turn", 0.0)),
         "fold_to_3bet": _ratio(_num(raw, "f3b_fold"), _num(raw, "f3b_opp")),
         "fourbet": _ratio(_num(raw, "f3b_4bet"), _num(raw, "f3b_opp")),
         "weak_showdown": _ratio(_num(raw, "weak_aggressive_showdowns"),
@@ -220,6 +227,7 @@ _KIND = {
     "call_to_cbet": "fold_to_cbet", "fold_to_barrel": "fold_to_barrel",
     "delay_cbet": "delay_cbet",
     "fold_to_3bet": "fold_to_3bet", "fourbet": "fold_to_3bet",
+    "fold_bet_flop": "fold_to_bet", "fold_bet_turn": "fold_to_bet",
 }
 
 
@@ -229,7 +237,7 @@ def render_markdown(rows: list[dict]) -> str:
                  "开池EP", "开池MP", "开池LP", "开池盲"]
     line_cols = ["玩家", "c-bet", "续打", "被过牌后下注", "过牌-加注",
                  "溜入", "对c-bet弃", "跟c-bet", "转牌再弃", "延迟c-bet",
-                 "被3-bet弃", "4-bet",
+                 "对下注弃F", "对下注弃T", "被3-bet弃", "4-bet",
                  "弃 vs 跟", "开池中位", "下注中位", "摊牌", "弱摊牌",
                  "炸弹池"]
     reverse = {label: key for label, key in COLUMNS}

@@ -1031,6 +1031,59 @@ def test_population_prior_shrinkage() -> None:
           "实测指标应给出剥削指令")
 
 
+def test_facing_bet_by_street() -> None:
+    """分街面对下注：翻牌跟、转牌弃；以及「最后一街没人记录」的补推。"""
+    seats = [
+        {"seat_id": "hero", "name": "我", "position": "BB", "stack": 100.0},
+        {"seat_id": "a", "name": "开池者", "position": "SB", "stack": 100.0},
+        {"seat_id": "b", "name": "跟注者", "position": "BTN", "stack": 100.0},
+    ]
+    base = dict(seats=seats,
+                preflop=[act("a", "raise", 8.0, name="开池者", position="SB"),
+                         act("hero", "fold", None, is_hero=True),
+                         act("b", "call", 8.0, name="跟注者", position="BTN")])
+
+    # 翻牌跟注、转牌弃牌
+    folded = make_hand(
+        uid="s01-t20", **base,
+        flop=[act("a", "bet", 10.0, name="开池者"),
+              act("b", "call", 10.0, name="跟注者")],
+        turn=[act("a", "bet", 20.0, name="开池者"),
+              act("b", "fold", None, name="跟注者")],
+        board=("Ad", "7s", "2c", "3h"))
+    got = next(o for o in observations_from_hand(folded)
+               if o.opponent_key == "跟注者")
+    check(got.face_call.get("flop") == 1,
+          f"翻牌面对下注应记为跟注：{got.face_call}")
+    check(got.face_fold.get("turn") == 1,
+          f"转牌面对下注应记为弃牌：{got.face_fold}")
+
+    # 转牌弃牌没被拍到：牌面只到转牌、后面没人再行动 → 补推为弃牌
+    inferred = make_hand(
+        uid="s01-t21", **base,
+        flop=[act("a", "bet", 10.0, name="开池者"),
+              act("b", "call", 10.0, name="跟注者")],
+        turn=[act("a", "bet", 20.0, name="开池者")],
+        board=("Ad", "7s", "2c", "3h"))
+    got = next(o for o in observations_from_hand(inferred)
+               if o.opponent_key == "跟注者")
+    check(got.face_fold.get("turn") == 1,
+          f"最后一街无记录时应补推为弃牌：{got.face_fold}/{got.face_opp}")
+
+    # 牌面到河牌但记录缺河牌街：不能当成「转牌就结束了」
+    reached_river = make_hand(
+        uid="s01-t22", **base,
+        flop=[act("a", "bet", 10.0, name="开池者"),
+              act("b", "call", 10.0, name="跟注者")],
+        turn=[act("a", "bet", 20.0, name="开池者"),
+              act("b", "call", 20.0, name="跟注者")],
+        board=("Ad", "7s", "2c", "3h", "9d"))
+    got = next(o for o in observations_from_hand(reached_river)
+               if o.opponent_key == "跟注者")
+    check(not got.face_fold.get("turn"),
+          f"牌面到河牌就不该把转牌补推成弃牌：{got.face_fold}")
+
+
 def run() -> int:
     tests = [
         test_fold_and_check_are_inferred_at_street_end,
@@ -1056,6 +1109,7 @@ def run() -> int:
         test_limp_and_cbet_defence_observations,
         test_fold_to_three_bet_and_missing_fold_inference,
         test_population_prior_shrinkage,
+        test_facing_bet_by_street,
     ]
     for t in tests:
         before = len(FAILS)

@@ -36,7 +36,7 @@ from typing import Callable, Iterable, Mapping, Sequence
 from .positions import POSITIONS_BY_TABLE_SIZE
 
 # 分类器版本：规则/阈值改动时递增，画像文件里会记录，重建时能看出差异。
-CLASSIFIER_VERSION = "rules-2026-10-30c"
+CLASSIFIER_VERSION = "rules-2026-10-30d"
 
 # 合法类型。与设计文档 6.1 一致。
 ARCHETYPES = ("unknown", "station", "lag", "maniac", "nit", "tag")
@@ -161,6 +161,9 @@ PRIOR_STRENGTH: dict[str, float] = {
     "threebet": 6.0,
     "call_to_cbet": 8.0,
     "fourbet": 4.0,
+    "fold_to_bet_flop": 8.0,
+    "fold_to_bet_turn": 6.0,
+    "barrel_call": 5.0,
 }
 
 # 全场样本不足时的兜底先验（百分比）。数值来自常见现金局的经验值，
@@ -179,6 +182,9 @@ DEFAULT_PRIORS: dict[str, float] = {
     "threebet": 6.0,
     "call_to_cbet": 45.0,
     "fourbet": 5.0,
+    "fold_to_bet_flop": 45.0,
+    "fold_to_bet_turn": 45.0,
+    "barrel_call": 50.0,
 }
 
 # 指标 → (命中字段, 机会字段)。人群先验和收缩都靠这张表。
@@ -333,6 +339,14 @@ class HandObservation:
     # 面对转牌续打：翻牌跟了 c-bet 之后，转牌再面对同一个人的下注。
     ftb_opp: bool = False
     ftb_fold: bool = False
+    ftb_call: bool = False
+    # 分街面对下注：这条街上**前面有人下注**时自己的反应。比「只统计
+    # 同一个人的续打」样本多得多 —— 后者要「翻牌跟注 + 转牌同一个人再开枪」，
+    # 实测 193 手是 0 次。
+    face_opp: dict = field(default_factory=dict)
+    face_fold: dict = field(default_factory=dict)
+    face_call: dict = field(default_factory=dict)
+    face_raise: dict = field(default_factory=dict)
     # 延迟 c-bet：翻前加注者翻牌过牌、转牌补一枪。
     dcb_opp: bool = False
     dcb: bool = False
@@ -463,6 +477,24 @@ def _ordered_street_actions(actions: list[dict],
                       action))
     keyed.sort(key=lambda item: item[0])
     return [action for _, action in keyed]
+
+
+_STREET_BOARD_LEN = {"flop": 3, "turn": 4, "river": 5}
+
+
+def _reached_street(hand: Mapping, name: str) -> bool:
+    """这一手有没有走到某条街 —— 以**公共牌长度**为准。
+
+    记录里可能缺某条街的 `streets` 条目（没动作、或被截断），但牌面不会
+    骗人：发了 5 张牌就是走到了河牌。只看 `streets` 会把「翻牌就结束」
+    误判成「河牌还在打」。
+    """
+    need = _STREET_BOARD_LEN.get(name)
+    if need is None:
+        return False
+    if len(hand.get("board") or []) >= need:
+        return True
+    return _has_street(hand, name)
 
 
 def _has_street(hand: Mapping, name: str) -> bool:
@@ -688,23 +720,51 @@ def observations_from_hand(hand: Mapping, *,
         fold = sum(1 for a in post_acts if a.get("action") == "fold")
         check = sum(1 for a in post_acts if a.get("action") == "check")
 
-        # 面对下注次数：按**还原过顺序**的行动线扫，这条街前面有人下注
+        # 分街面对下注：按**还原过顺序**的行动线扫，这条街前面有人下注
         # 才轮到「面对下注」。
         #
         # 原来用原始顺序 + 金额水位判断，有两个问题：推断出来的过牌/弃牌
         # 是乱序追加的，水位经常还没抬起来就遇到本座的 fold；金额缺失时
         # 水位永远是 0。结果是分母偏小、出现过 folds > facing_bets 的
         # 不可能比值（实测 10/9）。
-        facing = 0
+        face_opp: dict = {}
+        face_fold: dict = {}
+        face_call: dict = {}
+        face_raise: dict = {}
+        board_len = len(board)
+        last_street = ("river" if board_len >= 5 else
+                       "turn" if board_len == 4 else
+                       "flop" if board_len == 3 else
+                       next((st for st in reversed(_STREET_ORDER)
+                             if _has_street(hand, st)), None))
         for street in _POSTFLOP:
+            seq = ordered.get(street) or []
             bet_seen = False
-            for action in ordered.get(street) or []:
+            responded = False
+            for action in seq:
                 kind = action.get("action")
                 mine = str(action.get("seat_id")) == seat_id
                 if mine and bet_seen and kind in ("call", "fold", "raise"):
-                    facing += 1
+                    face_opp[street] = 1
+                    responded = True
+                    if kind == "fold":
+                        face_fold[street] = 1
+                    elif kind == "call":
+                        face_call[street] = 1
+                    else:
+                        face_raise[street] = 1
+                    break
                 if kind in ("bet", "raise"):
                     bet_seen = True
+            # 补推：这条街就是最后一街、前面有人下注、本座没有任何反应，
+            # 且牌局正常结束（不是被截断）—— 那只能是弃牌。和 c-bet 的补推
+            # 同一条判据，只是推广到每条街。
+            if (not responded and bet_seen and street == last_street
+                    and not hand.get("partial")
+                    and seat_id in (active.get(street) or ())):
+                face_opp[street] = 1
+                face_fold[street] = 1
+        facing = sum(face_opp.values())
 
         inferred = sum(1 for a in seat_actions if a.get("inferred"))
         inferred_ratio = inferred / len(seat_actions) if seat_actions else 0.0
@@ -779,7 +839,7 @@ def observations_from_hand(hand: Mapping, *,
                         f3b_fold = kind == "fold"
                         f3b_call = kind == "call"
                         f3b_4bet = kind in ("bet", "raise")
-                    elif (not _has_street(hand, "flop")
+                    elif (not _reached_street(hand, "flop")
                             and not hand.get("partial")):
                         # 被 3-bet 之后没有翻牌、也没有我的下一个动作 ——
                         # 手牌在翻前就结束了，只能是我弃牌。和 c-bet 那条
@@ -795,7 +855,7 @@ def observations_from_hand(hand: Mapping, *,
         is_cbet = bool(first_aggr is not None
                        and str(first_aggr.get("seat_id")) == aggressor)
         ftc_opp = ftc_fold = ftc_call = ftc_raise = False
-        ftb_opp = ftb_fold = False
+        ftb_opp = ftb_fold = ftb_call = False
         if is_cbet and aggressor != seat_id:
             # 注意别叫 `facing`：下面的 facing_bet 计数用的是同一个变量名，
             # 在这里覆写会让所有机会计数变成一个 list（实测直接崩）。
@@ -808,7 +868,7 @@ def observations_from_hand(hand: Mapping, *,
                 ftc_fold = kind == "fold"
                 ftc_call = kind == "call"
                 ftc_raise = kind in ("bet", "raise")
-            elif (not _has_street(hand, "turn") and not hand.get("partial")
+            elif (not _reached_street(hand, "turn") and not hand.get("partial")
                     and seat_id in (flop or ())):
                 # 这手在翻牌就结束了，而且没有转牌 —— 有人跟注就一定会发
                 # 转牌，所以这个座位只能是弃牌。追踪器没拍到那几帧（发牌
@@ -828,7 +888,9 @@ def observations_from_hand(hand: Mapping, *,
                              if str(a.get("seat_id")) == seat_id), None)
                         if mine_turn is not None:
                             ftb_opp = True
-                            ftb_fold = mine_turn.get("action") == "fold"
+                            kind_turn = mine_turn.get("action")
+                            ftb_fold = kind_turn == "fold"
+                            ftb_call = kind_turn == "call"
 
         # ── 延迟 c-bet：翻前加注者翻牌过牌、转牌下注 ──
         dcb_opp = dcb = False
@@ -916,6 +978,11 @@ def observations_from_hand(hand: Mapping, *,
             ftc_raise=ftc_raise,
             ftb_opp=ftb_opp,
             ftb_fold=ftb_fold,
+            ftb_call=ftb_call,
+            face_opp=face_opp,
+            face_fold=face_fold,
+            face_call=face_call,
+            face_raise=face_raise,
             dcb_opp=dcb_opp,
             dcb=dcb,
             f3b_opp=f3b_opp,
@@ -981,6 +1048,12 @@ class OpponentStats:
     ftc_raise: float = 0.0
     ftb_opp: float = 0.0
     ftb_fold: float = 0.0
+    ftb_call: float = 0.0
+    # 分街面对下注：street → 机会/弃/跟/加
+    face_opp: dict[str, float] = field(default_factory=dict)
+    face_fold: dict[str, float] = field(default_factory=dict)
+    face_call: dict[str, float] = field(default_factory=dict)
+    face_raise: dict[str, float] = field(default_factory=dict)
     dcb_opp: float = 0.0
     dcb: float = 0.0
     f3b_opp: float = 0.0
@@ -1081,6 +1154,23 @@ class OpponentStats:
         return _pct(self.ftb_fold, self.ftb_opp)
 
     @property
+    def barrel_call_pct(self) -> float | None:
+        """翻牌跟了 c-bet 之后，转牌面对同一个人再跟注的比例。"""
+        return _pct(self.ftb_call, self.ftb_opp)
+
+    def fold_to_bet_pct(self, street: str) -> float | None:
+        """某条街上「前面有人下注」时弃牌的比例。"""
+        return _pct(self.face_fold.get(street, 0.0),
+                    self.face_opp.get(street, 0.0))
+
+    def call_to_bet_pct(self, street: str) -> float | None:
+        return _pct(self.face_call.get(street, 0.0),
+                    self.face_opp.get(street, 0.0))
+
+    def face_opps(self, street: str) -> float:
+        return self.face_opp.get(street, 0.0)
+
+    @property
     def delay_cbet_pct(self) -> float | None:
         return _pct(self.dcb, self.dcb_opp)
 
@@ -1153,6 +1243,13 @@ class OpponentStats:
         self.ftc_raise += w if obs.ftc_raise else 0.0
         self.ftb_opp += w if obs.ftb_opp else 0.0
         self.ftb_fold += w if obs.ftb_fold else 0.0
+        self.ftb_call += w if obs.ftb_call else 0.0
+        for target, source in ((self.face_opp, obs.face_opp),
+                               (self.face_fold, obs.face_fold),
+                               (self.face_call, obs.face_call),
+                               (self.face_raise, obs.face_raise)):
+            for street, hit in (source or {}).items():
+                target[street] = target.get(street, 0.0) + w * float(hit)
         self.dcb_opp += w if obs.dcb_opp else 0.0
         self.dcb += w if obs.dcb else 0.0
         self.f3b_opp += w if obs.f3b_opp else 0.0
@@ -1226,6 +1323,11 @@ class OpponentStats:
             "ftc_raise": _num(self.ftc_raise),
             "ftb_opp": _num(self.ftb_opp),
             "ftb_fold": _num(self.ftb_fold),
+            "ftb_call": _num(self.ftb_call),
+            "face_opp": {k: _num(v) for k, v in self.face_opp.items()},
+            "face_fold": {k: _num(v) for k, v in self.face_fold.items()},
+            "face_call": {k: _num(v) for k, v in self.face_call.items()},
+            "face_raise": {k: _num(v) for k, v in self.face_raise.items()},
             "dcb_opp": _num(self.dcb_opp),
             "dcb": _num(self.dcb),
             "f3b_opp": _num(self.f3b_opp),
@@ -1297,6 +1399,11 @@ class OpponentStats:
             ftc_raise=f("ftc_raise"),
             ftb_opp=f("ftb_opp"),
             ftb_fold=f("ftb_fold"),
+            ftb_call=f("ftb_call"),
+            face_opp=_bucket_map(raw.get("face_opp")),
+            face_fold=_bucket_map(raw.get("face_fold")),
+            face_call=_bucket_map(raw.get("face_call")),
+            face_raise=_bucket_map(raw.get("face_raise")),
             dcb_opp=f("dcb_opp"),
             dcb=f("dcb"),
             f3b_opp=f("f3b_opp"),
@@ -1347,6 +1454,9 @@ class OpponentRead:
     delay_cbet_pct: float | None = None
     fold_to_3bet_pct: float | None = None
     fourbet_pct: float | None = None
+    fold_to_bet_flop_pct: float | None = None
+    fold_to_bet_turn_pct: float | None = None
+    barrel_call_pct: float | None = None
     # 哪些指标是被人群先验收缩过的（不是实测值）。渲染时加 ≈。
     prior_dominated: tuple[str, ...] = ()
 
@@ -1419,6 +1529,9 @@ TENDENCY_MIN_OPPS = {
     "threebet": 6.0,
     "call_to_cbet": 8.0,
     "fourbet": 5.0,
+    "fold_to_bet_flop": 8.0,
+    "fold_to_bet_turn": 6.0,
+    "barrel_call": 5.0,
 }
 
 
@@ -1473,6 +1586,11 @@ def _tendencies(stats: OpponentStats,
     put("delay_cbet", stats.dcb, stats.dcb_opp)
     put("fold_to_3bet", stats.f3b_fold, stats.f3b_opp)
     put("fourbet", stats.f3b_4bet, stats.f3b_opp)
+    put("fold_to_bet_flop", stats.face_fold.get("flop", 0.0),
+        stats.face_opps("flop"), "fold_to_bet_flop")
+    put("fold_to_bet_turn", stats.face_fold.get("turn", 0.0),
+        stats.face_opps("turn"), "fold_to_bet_turn")
+    put("barrel_call", stats.ftb_call, stats.ftb_opp, "barrel_call")
     return fields, tuple(low)
 
 
@@ -1783,6 +1901,13 @@ class ProfileStore:
         target.ftc_raise += old.ftc_raise
         target.ftb_opp += old.ftb_opp
         target.ftb_fold += old.ftb_fold
+        target.ftb_call += old.ftb_call
+        for target_map, source_map in ((target.face_opp, old.face_opp),
+                                       (target.face_fold, old.face_fold),
+                                       (target.face_call, old.face_call),
+                                       (target.face_raise, old.face_raise)):
+            for street, value in source_map.items():
+                target_map[street] = target_map.get(street, 0.0) + value
         target.dcb_opp += old.dcb_opp
         target.dcb += old.dcb
         target.f3b_opp += old.f3b_opp
@@ -2152,6 +2277,18 @@ def render_tendencies_zh(read: OpponentRead) -> str:
     if read.delay_cbet_pct is not None:
         parts.append(_mark(read, ("delay_cbet",),
                            f"延迟 c-bet {read.delay_cbet_pct:.0f}%"))
+    if (read.fold_to_bet_flop_pct is not None
+            or read.fold_to_bet_turn_pct is not None):
+        seg = []
+        if read.fold_to_bet_flop_pct is not None:
+            seg.append(f"翻牌 {read.fold_to_bet_flop_pct:.0f}%")
+        if read.fold_to_bet_turn_pct is not None:
+            seg.append(f"转牌 {read.fold_to_bet_turn_pct:.0f}%")
+        parts.append(_mark(read, ("fold_to_bet_flop", "fold_to_bet_turn"),
+                           "面对下注弃 " + " / ".join(seg)))
+    if read.barrel_call_pct is not None:
+        parts.append(_mark(read, ("barrel_call",),
+                           f"翻牌跟注→转牌再跟 {read.barrel_call_pct:.0f}%"))
     if read.fold_to_3bet_pct is not None:
         seg = f"被 3-bet 弃 {read.fold_to_3bet_pct:.0f}%"
         if read.fourbet_pct is not None:
@@ -2195,6 +2332,18 @@ def exploit_hint_zh(read: OpponentRead, *, limit: int = 2) -> str:
             hints.append("对 c-bet 弃得多 —— 干燥面可以高频开火，别只拿强牌下注")
         elif read.fold_to_cbet_pct <= 30:
             hints.append("对 c-bet 跟得多 —— 别用空气开火，价值牌打大")
+
+    if (_confident(read, "barrel_call")
+            and read.barrel_call_pct is not None
+            and read.barrel_call_pct >= 60):
+        hints.append("翻牌跟注后转牌还会跟 —— 第二枪别用空气开，等真牌再打")
+
+    if (_confident(read, "fold_to_bet_turn")
+            and read.fold_to_bet_turn_pct is not None):
+        if read.fold_to_bet_turn_pct >= 65:
+            hints.append("转牌弃得多 —— 翻牌跟注之后可以连开第二枪")
+        elif read.fold_to_bet_turn_pct <= 40:
+            hints.append("转牌很少弃 —— 第二枪要拿真牌，别拿空气硬开")
 
     if (_confident(read, "limp") and read.limp_pct is not None
             and read.limp_pct >= 25):
