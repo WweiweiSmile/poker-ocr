@@ -1509,6 +1509,13 @@ class PooledStats:
     # 各指标的**机会数**。比率必须有机会数托底才能拿去下结论 ——
     # 2 次机会算出来的 100% 不是「全场都是这样」。
     opportunities: dict[str, float] = field(default_factory=dict)
+    # 当前桌视图：本手在局人数（含没有画像的人）。`players` 是其中有画像的
+    # 人数；两者一起才能说清「6 人里 4 人有数据」。
+    total_players: int = 0
+    scope: str = "population"          # population / current_table
+    # 当前桌的 hands 只能按玩家 hands 取 max 近似（同一手多人重复），
+    # 精确去重需要 observation 表。提示词里要标出来，别把近似值当精确值。
+    approx_hands: bool = False
 
     @property
     def loose(self) -> bool | None:
@@ -1529,6 +1536,30 @@ TABLE_MIN_OPPS: dict[str, float] = {
     "limp": 20.0,
     "threebet": 20.0,
 }
+
+
+def pooled_stats_to_dict(stats: "PooledStats | None") -> dict | None:
+    """把 TableStats/PooledStats 序列化成可落库/可重跑的紧凑快照。"""
+    if stats is None:
+        return None
+    return {
+        "scope": stats.scope,
+        "hands": stats.hands,
+        "players": stats.players,
+        "total_players": stats.total_players,
+        "approx_hands": stats.approx_hands,
+        "vpip": stats.vpip,
+        "pfr": stats.pfr,
+        "threebet": stats.threebet,
+        "limp": stats.limp,
+        "fold_to_cbet": stats.fold_to_cbet,
+        "stab": stats.stab,
+        "cbet": stats.cbet,
+        "fold_to_bet_flop": stats.fold_to_bet_flop,
+        "fold_to_bet_turn": stats.fold_to_bet_turn,
+        "fold_to_bet_river": stats.fold_to_bet_river,
+        "opportunities": dict(stats.opportunities),
+    }
 
 
 def table_exploit_zh(stats: PooledStats, *, limit: int = 2) -> str:
@@ -1792,7 +1823,7 @@ class ProfileStore:
         return self._pool_key
 
     def set_pool_key(self, pool_key: str | None) -> None:
-        """首次读到盲注后确定牌桌池。已有画像时不会被改掉。"""
+        """记录牌桌池，仅用于日志/元数据；**不参与玩家身份**。"""
         if not pool_key or self._pool_key == pool_key:
             return
         if not self._pool_key:
@@ -1826,11 +1857,24 @@ class ProfileStore:
             data.get("classifier_version") or CLASSIFIER_VERSION)
         if not self._pool_key:
             self._pool_key = str(data.get("pool_key") or "")
-        for key, entry in (data.get("players") or {}).items():
+        for raw_key, entry in (data.get("players") or {}).items():
             if not isinstance(entry, Mapping):
                 continue
-            stats = OpponentStats.from_dict(str(key), entry)
-            self.players[str(key)] = stats
+            key = str(raw_key)
+            stats = OpponentStats.from_dict(key, entry)
+            # 旧文件里可能有「名字@池」的分区键。现在身份全局合并：把 @ 后面的
+            # 池后缀去掉，统计并入裸名字。pool_key 只保留为元数据。
+            if "@" in key:
+                base = key.split("@", 1)[0]
+                existing = self.players.get(base)
+                if existing is None:
+                    stats.key = base
+                    self.players[base] = stats
+                else:
+                    self._merge_stats(existing, stats)
+                self._dirty = True
+            else:
+                self.players[key] = stats
         self.aliases = {str(k): str(v) for k, v in
                         (data.get("aliases") or {}).items()}
         self.seat_keys = {str(k): str(v) for k, v in
@@ -1843,8 +1887,8 @@ class ProfileStore:
         """解析一手牌并更新画像。同一 hand_uid 重复调用不会重复计数。"""
         if not self.enabled:
             return []
-        # 有盲注就按这一手自己的盲注推导池键；没有盲注（旧记录）才用
-        # store 的默认池。这样同一个文件里 1/2 和 5/10 不会混在一起。
+        # 池键仍然从这一手的盲注推导，但它只是观察/手牌的元数据，不再参与
+        # 玩家身份。同名玩家跨池合并到同一个 key（见 docs/桌子动态重构...）。
         observations = observations_from_hand(
             hand, pool_key=(None if hand.get("blinds")
                             else (self._pool_key or None)))
@@ -1855,15 +1899,12 @@ class ProfileStore:
             return []
         self._learn_seat_aliases(observations)
         for obs in observations:
+            # 全局身份：不再按 pool 分键。pool 只记录最近一次见到的桌型，
+            # 供日志/元数据使用。
             key = obs.opponent_key
             pool = obs.pool_key or self._pool_key
             if not self._pool_key and pool:
                 self._pool_key = pool
-            base = self.players.get(key)
-            if (base is not None and base.pool_key and pool
-                    and base.pool_key != pool):
-                # 同名不同池：按 pool 分开，避免 1/2 和 5/10 混在一起。
-                key = f"{key}@{pool}"
             stats = self.players.get(key)
             if stats is None:
                 stats = OpponentStats(key=key, display_name=obs.display_name,
@@ -1919,6 +1960,10 @@ class ProfileStore:
 
     @staticmethod
     def _merge_stats(target: OpponentStats, old: OpponentStats) -> None:
+        if not target.display_name and old.display_name:
+            target.display_name = old.display_name
+        if not target.pool_key and old.pool_key:
+            target.pool_key = old.pool_key
         target.hands += old.hands
         target.sample_hands += old.sample_hands
         target.sample_preflop_opps += old.sample_preflop_opps
@@ -1997,9 +2042,6 @@ class ProfileStore:
         key = normalized
         if key in self.players:
             return key
-        pool = self._pool_key
-        if pool and f"{key}@{pool}" in self.players:
-            return f"{key}@{pool}"
         alias = self.aliases.get(key)
         if alias and alias in self.players:
             return alias
@@ -2027,23 +2069,55 @@ class ProfileStore:
 
     # ── 读取 ──
     def pooled(self) -> PooledStats:
-        """全场合并统计（按机会加权）。"""
-        players = list(self.players.values())
+        """全场合并统计（按机会加权），只用于冷启动先验。
+
+        不是「当前桌」统计 —— 当前桌用 `pooled_for_stats()`。这个口径保留
+        给 `.table_dy` 兜底和 `population_prior`，避免新桌第一手完全没数据。
+        """
+        return self._pooled(
+            list(self.players.values()),
+            hands=len(self.seen_hands),
+            scope="population",
+        )
+
+    def pooled_for_stats(self, stats: Iterable[OpponentStats], *,
+                         total_players: int = 0) -> PooledStats:
+        """当前手在局对手的聚合统计。
+
+        `total_players` 是本手在局人数（含没有画像的人）；`players` 是其中
+        真正有画像的人数。`hands` 用玩家 hands 的最大值近似 —— 同一手牌会
+        让多个玩家各记一次，求和会重复计数。精确去重等 observation 表。
+        """
+        players = [raw for raw in stats if raw is not None]
+        hands = max(
+            (int(round(float(raw.hands or 0.0))) for raw in players),
+            default=0,
+        )
+        return self._pooled(
+            players,
+            hands=hands,
+            scope="current_table",
+            total_players=max(int(total_players or 0), len(players)),
+            approx_hands=True,
+        )
+
+    def _pooled(self, players: list[OpponentStats], *, hands: int,
+                scope: str, total_players: int = 0,
+                approx_hands: bool = False) -> PooledStats:
+        """按机会加权合并一组玩家。调用方决定 hands/scope 的口径。"""
 
         def agg(hit_field: str, opp_field: str) -> float | None:
             hit = sum(_field(raw, hit_field) for raw in players)
             opps = sum(_field(raw, opp_field) for raw in players)
             return hit / opps * 100 if opps > 0 else None
 
-        # hands 用**去重后的手数**（seen_hands），不是各玩家 hands 之和 ——
-        # 一手牌会让 4-8 个对手各记一次，求和会把 294 手说成 1100 多手。
         def street_fold(street: str) -> float | None:
             hit = sum(_dict_field(raw, "face_fold", street) for raw in players)
             opps = sum(_dict_field(raw, "face_opp", street) for raw in players)
             return hit / opps * 100 if opps > 0 else None
 
         return PooledStats(
-            hands=len(self.seen_hands),
+            hands=int(hands),
             players=len(players),
             vpip=agg("vpip", "preflop_opps"),
             pfr=agg("pfr", "preflop_opps"),
@@ -2067,6 +2141,9 @@ class ProfileStore:
                 "limp": sum(_field(raw, "limp_opp") for raw in players),
                 "threebet": sum(_field(raw, "threebet_opps") for raw in players),
             },
+            total_players=max(int(total_players or 0), len(players)),
+            scope=scope,
+            approx_hands=approx_hands,
         )
 
     def _priors(self) -> dict[str, float]:
@@ -2093,6 +2170,32 @@ class ProfileStore:
         return replace(
             auto, seat_id=seat_id,
             source="auto" if auto.archetype != "unknown" else "unknown")
+
+    def stats_for_opponents(self, opponents: Iterable) -> list[OpponentStats]:
+        """把本手在局对手解析成 `OpponentStats`，同名只返回一次。
+
+        这是「当前桌统计」的入口：只取 `point.opponents`（本手发牌/在局的人），
+        不再读整个 `self.players`。名字匹配走 `_resolve_key`，因此 alias /
+        OCR 纠正后的键也能对上。
+        """
+        out: list[OpponentStats] = []
+        if not self.enabled:
+            return out
+        seen: set[str] = set()
+        for opp in opponents or ():
+            if isinstance(opp, Mapping):
+                name = opp.get("name")
+            else:
+                name = getattr(opp, "name", None)
+            key = self._resolve_key(name)
+            if not key:
+                continue
+            stats = self.players.get(key)
+            if stats is None or stats.key in seen:
+                continue
+            seen.add(stats.key)
+            out.append(stats)
+        return out
 
     def read_for(self, opponents: Iterable) -> dict[str, OpponentRead]:
         """按 `seat_id → OpponentRead` 返回本手在局对手的画像。

@@ -19,7 +19,8 @@ from .db import Database
 from .errors import ApiError
 from .runner import Runner
 from .schemas import (
-    HandDelete, ImportHands, MarkPatch, RunCreate, RunPreview, VersionClone,
+    DecisionMark, ExperimentCreate, ExperimentRun, HandDelete, ImportHands,
+    IngestHands, MarkPatch, RunCreate, RunPreview, VersionClone,
     VersionCreate, VersionMetaPatch,
 )
 from .service import ReplayService
@@ -194,6 +195,35 @@ def create_app(settings: Settings | None = None,
         return service(request).import_hands(
             body.model_dump(exclude_unset=True))
 
+    @app.post("/api/hands/ingest")
+    def ingest_hands(body: IngestHands, request: Request):
+        return service(request).ingest_hands(
+            body.model_dump(exclude_unset=True))
+
+    @app.post("/api/experiments")
+    def create_experiment(body: ExperimentCreate, request: Request):
+        return service(request).create_experiment(
+            body.model_dump(exclude_unset=True))
+
+    @app.get("/api/experiments")
+    def list_experiments(request: Request):
+        return service(request).list_experiments()
+
+    @app.get("/api/experiments/{experiment_id}")
+    def get_experiment(experiment_id: int, request: Request):
+        return service(request).get_experiment(experiment_id)
+
+    @app.post("/api/experiments/{experiment_id}/run")
+    def run_experiment(experiment_id: int, body: ExperimentRun,
+                       request: Request):
+        return service(request).run_experiment(
+            experiment_id, body.model_dump(exclude_unset=True))
+
+    @app.get("/api/experiments/{experiment_id}/results")
+    def experiment_results(experiment_id: int, request: Request):
+        split = (request.query_params.get("split") or "").strip() or None
+        return service(request).experiment_results(experiment_id, split=split)
+
     @app.post("/api/hands/delete")
     def delete_hands(body: HandDelete, request: Request):
         return service(request).delete_hands(
@@ -214,6 +244,11 @@ def create_app(settings: Settings | None = None,
     @app.get("/api/hands/{hand_id}/comparison")
     def get_hand_comparison(hand_id: int, request: Request):
         return service(request).hand_comparison(hand_id, dict(request.query_params))
+
+    @app.patch("/api/decisions/{decision_id}/mark")
+    def mark_decision(decision_id: int, body: DecisionMark, request: Request):
+        return service(request).mark_decision(
+            decision_id, body.model_dump(exclude_unset=True))
 
     @app.patch("/api/hands/{hand_id}/mark")
     def patch_mark(hand_id: int, body: MarkPatch, request: Request):

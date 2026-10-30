@@ -51,6 +51,15 @@ class FakeService:
         return {"handId": hand_id, "favorite": payload.get("favorite", False),
                 "tags": payload.get("tags", []), "status": "todo", "note": ""}
 
+    def ingest_hands(self, payload):
+        self._check()
+        self.calls.append(("ingest_hands", payload))
+        return {"batchId": 1, "source": payload.get("source"),
+                "received": len(payload.get("records") or []),
+                "inserted": 1, "updated": 0, "duplicates": 0,
+                "invalid": 0, "errors": 0, "handIds": [1],
+                "advices": 0, "players": 0, "samples": [], "issues": []}
+
     def import_hands(self, payload):
         self._check()
         self.calls.append(("import_hands", payload))
@@ -124,6 +133,37 @@ class FakeService:
     def retry_failed(self, job_id):
         self._check()
         return {"jobId": 10}
+
+    def create_experiment(self, payload):
+        self._check()
+        self.calls.append(("create_experiment", payload))
+        return {"id": 7, "name": payload.get("name"), "jobId": None,
+                "hands": {"total": 1, "dev": 1, "holdout": 0}}
+
+    def list_experiments(self, limit=100):
+        self._check()
+        return [{"id": 7, "name": "ab", "jobId": None,
+                 "hands": {"total": 1, "dev": 1, "holdout": 0}}]
+
+    def get_experiment(self, experiment_id):
+        self._check()
+        return {"id": experiment_id, "name": "ab", "jobId": 9,
+                "hands": {"total": 1, "dev": 1, "holdout": 0}}
+
+    def run_experiment(self, experiment_id, payload):
+        self._check()
+        self.calls.append(("run_experiment", experiment_id, payload))
+        return {"jobId": 9, "experimentId": experiment_id}
+
+    def experiment_results(self, experiment_id, split=None):
+        self._check()
+        return {"experiment": {"id": experiment_id}, "jobId": 9,
+                "split": split, "rows": 2, "versions": {}, "review": {}}
+
+    def mark_decision(self, decision_id, payload):
+        self._check()
+        self.calls.append(("mark_decision", decision_id, payload))
+        return {"decisionId": decision_id, **payload}
 
     def export(self, query):
         self._check()
@@ -226,3 +266,49 @@ def test_delete_hands_routes(client):
 
     empty = test_client.post("/api/hands/delete", json={"handIds": []})
     assert empty.status_code == 422
+
+
+def test_ingest_and_experiment_routes(client):
+    test_client, fake = client
+    ingested = test_client.post("/api/hands/ingest", json={
+        "source": "live",
+        "records": [{"schema": "hand.v2", "uid": "u1", "hand_id": "u1"}],
+    })
+    assert ingested.status_code == 200
+    assert ingested.json()["inserted"] == 1
+    assert ("ingest_hands", {"source": "live",
+                             "records": [{"schema": "hand.v2", "uid": "u1",
+                                          "hand_id": "u1"}]}) in fake.calls
+
+    created = test_client.post("/api/experiments", json={
+        "name": "ctx-ab",
+        "baselineVersionId": 1,
+        "variantVersionId": 2,
+        "scope": "filter",
+        "filter": {"source": "live"},
+        "devRatio": 0.7,
+        "repeat": 3,
+    })
+    assert created.status_code == 200
+    assert created.json()["id"] == 7
+
+    listed = test_client.get("/api/experiments")
+    assert listed.status_code == 200
+    assert listed.json()[0]["id"] == 7
+
+    detail = test_client.get("/api/experiments/7")
+    assert detail.status_code == 200
+    assert detail.json()["jobId"] == 9
+
+    run = test_client.post("/api/experiments/7/run", json={"confirmLarge": True})
+    assert run.status_code == 200
+    assert run.json()["jobId"] == 9
+
+    results = test_client.get("/api/experiments/7/results?split=dev")
+    assert results.status_code == 200
+    assert results.json()["split"] == "dev"
+
+    marked = test_client.patch("/api/decisions/3/mark",
+                              json={"verdict": "bad", "tags": ["尺寸"]})
+    assert marked.status_code == 200
+    assert ("mark_decision", 3, {"verdict": "bad", "tags": ["尺寸"]}) in fake.calls

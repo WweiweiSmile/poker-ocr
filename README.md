@@ -188,9 +188,15 @@ LAG/maniac；样本不足的 `unknown` 不改变建议。画像存在
 .venv/bin/python -m poker_ocr.live --ai-advice \
   --opponent-db data/opponents/profiles.json
 
-# 启动时清空当前池画像
+# 启动时清空本地画像（身份已全局合并，不再按池清）
 .venv/bin/python -m poker_ocr.live --ai-advice --reset-opponents
 ```
+
+**身份与桌况口径**：玩家身份按名字全局合并，跨桌/跨 session 累积；`pool_key`
+只保留为手牌元数据，不再把同一人拆成 `名字@池`。提示词里的桌况数据只取
+**本手在局对手**（不是整个画像库），并标明「本手在局 N 人，M 人有画像」；
+样本不足时退回全场先验并明确标注。当前手只在内存；手结束才写手牌记录、
+更新画像。
 
 优先级：**人工 pin > 高置信自动画像（n≥15 且 conf≥0.65）> 桌级 `.table_dy` >
 unknown 基线**。`n<8` 一律 unknown；8–14 只标 `tentative`，
@@ -268,8 +274,11 @@ OpenRouter 的 Activity 页看被拒原因，或换一个有 OpenAI 模型权限
   河牌只主动秀一张时 `cards` 只有一张）和全下汇总（`all_ins`，含全下金额与
   界面实时胜率；全下需连续 2 帧确认，避免亮牌牌背的单帧误判），可以直接拿去
   复盘或对照。完整手牌落库时终端会打一条**亮黄底**提示（如
-  `完整手牌 7，id h7 日志已经生成`），AI 决策有问题时凭这行就能按 `hand_id`
-  回到 JSONL 定位。
+  `完整手牌 20261030-3f2a91c8d0 日志已经生成`），AI 决策有问题时凭这行就能按
+  `hand_id` 回到 JSONL 定位。`hand_id` 由「日期 + 全部玩家名称/位置 + 开始时间」
+  摘要生成，不再用每次启动都重置的 `h1`；记录还带 `table_signature`（名单/日期）
+  和 `table_roster`（开手时在座所有人）。已结束手牌同时写入
+  `data/hand_outbox/`，用 `tools/sync_hand_outbox.py` 同步到手牌库。
 - 上一手收牌到下一手发牌之间，追踪器会开一手**没有 hero 手牌、也没有行动线**
   的「空档手牌」；这种记录默认不写，否则每手牌后面都会多出一条空记录。
   需要**旁观/观察对手**时加 `--record-without-hero`（或在 `.env` 里写

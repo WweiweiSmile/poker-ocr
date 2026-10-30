@@ -14,6 +14,8 @@
     test_hand_strength 实时牌力解析：behind/equity 合成一行结论（纯逻辑）
     test_advice     实时 AI 建议：行动线/中文事实/选项/模型协议（纯逻辑）
     test_gto_lookup GTO 近似表查询：同构映射/节点/插值/保守 None（纯逻辑）
+    test_hand_id     手牌 ID：名单/位置/日期摘要 + 碰撞后缀（纯逻辑）
+    test_hand_outbox 手牌 outbox：一手一文件/幂等/sent 迁移（纯逻辑）
     test_opponent_profile 对手画像：弃牌补全/统计/分类/pin/建议集成（纯逻辑）
     test_clicker    桌面自动点击：坐标/配置/档位映射/安全闸（纯逻辑，不点鼠标）
     test_ai_advice_replay 复盘手牌 → 决策点快照的重建（纯逻辑，不连库不调模型）
@@ -47,6 +49,7 @@ SUITES = ["test_positions.py", "test_env.py", "test_coach.py",
           "test_ranges.py", "test_board_range.py", "test_field_ranges.py",
           "test_hand_vs_ranges.py", "test_hand_strength.py", "test_advice.py",
           "test_gto_lookup.py",
+          "test_hand_id.py", "test_hand_outbox.py",
           "test_opponent_profile.py", "test_clicker.py",
           "test_ai_advice_replay.py", "test_dealer.py", "test_roi_reader.py",
           "test_roi_dedup.py", "test_parse.py", "test_frame_state.py",

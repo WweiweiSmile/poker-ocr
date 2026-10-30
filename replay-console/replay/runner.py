@@ -15,8 +15,8 @@ from .decisions import (
 )
 from .engine import RateLimiter, execute_unit
 from .repository import (
-    DecisionRepository, HandRepository, JobRepository, ResultRepository,
-    VersionRepository,
+    DecisionRepository, ExperimentRepository, HandRepository, JobRepository,
+    LiveAdviceRepository, ResultRepository, VersionRepository,
 )
 from .util import json_load
 from .versioning import build_settings
@@ -31,7 +31,7 @@ def _decision_from_row(row: dict) -> DecisionPoint:
         hand_id=str(row.get("hand_id")),
         street=row.get("street") or snap.street,
         seq=int(row.get("seq") or 0),
-        action_index=0,
+        action_index=int(row.get("action_index") or 0),
         snap=snap,
         actual=row.get("actual_action"),
         actual_amount=row.get("actual_amount"),
@@ -54,8 +54,11 @@ class Runner:
         self.jobs_repo = JobRepository(db, settings.console_user_id)
         self.version_repo = VersionRepository(db, settings.console_user_id)
         self.decision_repo = DecisionRepository(db)
+        self.live_advice_repo = LiveAdviceRepository(db)
         self.result_repo = ResultRepository(db)
         self.hand_repo = HandRepository(db, settings.hand_user_id)
+        self.experiment_repo = ExperimentRepository(
+            db, settings.console_user_id)
         self.limiter = RateLimiter(settings.rate_limit_per_second)
 
     # ─────────────── 生命周期 ───────────────
@@ -126,6 +129,7 @@ class Runner:
                         int(job["id"]), "failed",
                         error_msg=f"{type(exc).__name__}: {exc}"[:500],
                         done=counts["done"], failed=counts["failed"])
+                    self._finish_experiment(job, "failed")
                     self._refresh_hand_statuses(int(job["id"]))
                 except Exception:  # noqa: BLE001
                     log.exception("标记任务失败时再次异常")
@@ -185,8 +189,13 @@ class Runner:
             self.jobs_repo.update_hand_status(job_id, hand_id, "running")
             hand_total = len(decision_rows) * len(selected) * repeat
             hand_totals[hand_id] = hand_total
+            # 线上建议上下文（table_stats/opponent_reads）按决策点挂到快照上；
+            # 版本 context_mode=snapshot 时 engine 会用它，保证线上/重跑同上下文。
+            contexts = self.live_advice_repo.context_for_hand(hand_id)
             for db_row in decision_rows:
                 decision = _decision_from_row(db_row)
+                decision.context = contexts.get(
+                    (decision.street, decision.action_index), {})
                 for version in selected:
                     for repeat_index in range(repeat):
                         pending.append((decision, version, repeat_index,
@@ -316,6 +325,17 @@ class Runner:
         self._finish(job_id, status, done, failed, error_msg)
         self._refresh_hand_statuses(job_id)
 
+    def _finish_experiment(self, job: dict, status: str) -> None:
+        experiment_id = job.get("experiment_id")
+        if not experiment_id:
+            return
+        try:
+            self.experiment_repo.set_status(
+                int(experiment_id), "done" if status in ("succeeded", "partial")
+                else "failed")
+        except Exception:  # noqa: BLE001
+            log.exception("更新实验状态失败 experiment=%s", experiment_id)
+
     def _refresh_hand_statuses(self, job_id: int) -> None:
         """以 results 为准刷新逐手状态（断点恢复后也正确）。"""
         try:
@@ -360,6 +380,7 @@ class Runner:
                 error_msg: str | None = None) -> None:
         self.jobs_repo.finalize(job_id, status, error_msg=error_msg,
                                 done=done, failed=failed)
+        self._finish_experiment(self.jobs_repo.get_any(job_id) or {}, status)
         log.info("任务 #%s 结束 status=%s done=%s failed=%s",
                  job_id, status, done, failed)
 

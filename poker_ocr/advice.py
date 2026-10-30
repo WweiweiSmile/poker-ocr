@@ -25,6 +25,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import http.client
 import io
 import json
@@ -46,8 +47,9 @@ from .coach import (
 from .ground_truth import GroundTruth, card_text, compute_ground_truth
 from .hand_track import ActionRecord, FLOP, HandSnapshot, PREFLOP, RIVER, TURN
 from .opponent_profile import (AGGRESSIVE_ARCHETYPES, PASSIVE_ARCHETYPES,
-                               OpponentRead, PooledStats, render_reads,
-                               render_reads_zh, table_exploit_zh)
+                               OpponentRead, PooledStats, pooled_stats_to_dict,
+                               render_reads, render_reads_zh,
+                               table_exploit_zh)
 from .positions import BB, POSITIONS_BY_TABLE_SIZE, SB
 from .preflop_ranges import range_verdict, sb_completable
 from .table_dynamics import (is_aggressive_table, is_loose_table,
@@ -787,8 +789,11 @@ class Situation:
     # 人工维护的**现场观察**（根目录 .table_dy）。只写统计算不出来的东西：
     # 「3 号位上头了」「这桌有人合伙」。桌子的松紧/被动由 table_stats 给数字。
     table_dynamics: str | None = None
-    # 全场合并统计（人群画像）。这是「这桌是什么局」的事实来源。
+    # 当前桌/全场先验统计。`scope` 决定提示词标题和口径。
     table_stats: "PooledStats | None" = None
+    # 本手第几个 hero 决策点（0 起）。写进 advice 后可与 replay 的
+    # DecisionPoint.action_index 对齐，解决「同一街多个决策点」无法配对。
+    action_index: int = 0
     # 爆炸底池：上一街底池 ÷ 实际参与人数（BB/人）及其是否刚好 5BB。
     # 见 previous_street_pot() / is_explosive_pot()。
     pot_per_player: float | None = None
@@ -974,6 +979,8 @@ def build_situation(snap: HandSnapshot,
         equity_pct=read.equity_pct if read else None,
         table_dynamics=(table_dynamics or "").strip() or None,
         table_stats=table_stats,
+        action_index=(int(snap.decision_key[2])
+                      if len(snap.decision_key) > 2 else 0),
         pot_per_player=per_player,
         explosive_pot=is_explosive_pot(snap),
         beat_pct=beat_pct,
@@ -2597,10 +2604,10 @@ def render_preflop_zh(sit: Situation) -> list[str]:
 
 
 def render_table_stats_zh(stats: "PooledStats | None") -> list[str]:
-    """全场合并统计：替代 `.table_dy` 里「整体偏松」那类形容词。
+    """桌况事实：`current_table` 是本手在局对手，`population` 是冷启动先验。
 
-    同一件事，数字比形容词可靠，而且不会在换桌之后过期。样本太小时不渲染 ——
-    十手牌算出来的「全场 VPIP」比没有更误导。
+    替代 `.table_dy` 里「整体偏松」那类形容词。样本太小时不渲染 ——
+    十手牌算出来的「本桌 VPIP」比没有更误导。
     """
     if stats is None or stats.hands < 20:
         return []
@@ -2613,9 +2620,22 @@ def render_table_stats_zh(stats: "PooledStats | None") -> list[str]:
             parts.append(f"{label} {value:.0f}%")
     if not parts:
         return []
-    lines = ["## 全场数据（同盲注/人数画像库，可能跨桌）"]
-    lines.append(f"{stats.players} 人 / {stats.hands} 手："
-                 + "｜".join(parts))
+    if stats.scope == "current_table":
+        total = stats.total_players or stats.players
+        sample = (f"样本约 {stats.hands} 手" if stats.approx_hands
+                  else f"{stats.hands} 手")
+        lines = [f"## 当前牌桌数据（本手在局 {total} 人，"
+                 f"{stats.players} 人有画像，{sample}）"]
+        if total > stats.players:
+            lines.append(f"另外 {total - stats.players} 人没有画像，"
+                         "按未知对手处理，不伪造个人数据")
+    else:
+        lines = ["## 全场数据（全场先验，非本桌）"]
+    if stats.scope == "current_table":
+        lines.append("｜".join(parts))
+    else:
+        lines.append(f"{stats.players} 人 / {stats.hands} 手："
+                     + "｜".join(parts))
     street = [f"{label} {value:.0f}%"
               for label, value in (("翻牌", stats.fold_to_bet_flop),
                                    ("转牌", stats.fold_to_bet_turn),
@@ -2636,7 +2656,8 @@ def render_table_stats_zh(stats: "PooledStats | None") -> list[str]:
         lines.append("整体：" + "、".join(tags))
     exploit = table_exploit_zh(stats)
     if exploit:
-        lines.append("全场可剥削：" + exploit)
+        label = "当前桌可剥削" if stats.scope == "current_table" else "全场可剥削"
+        lines.append(label + "：" + exploit)
     return lines
 
 
@@ -3269,6 +3290,11 @@ class Advice:
     preset_amounts: tuple[tuple[str, float], ...] = ()
     # 出这条建议时用到的对手画像快照（seat/type/conf/n/source）。空 = 没有画像。
     opponent_reads: tuple[OpponentRead, ...] = ()
+    # 本手第几个 hero 决策点。与 replay 的 DecisionPoint.action_index 对齐。
+    action_index: int = 0
+    # 出这条建议时的桌况快照：table_stats/table_dynamics/roster 版本等。
+    # 手牌库/A-B 用它在重跑时复现线上上下文；空 = 旧记录。
+    context: dict = field(default_factory=dict)
     # 模型给的下一街意图与自评置信度。新 prompt 不再要求 plan，通常为空。
     plan: str = ""
     confidence: float | None = None
@@ -3307,6 +3333,9 @@ class Advice:
             **({"error": self.error} if self.error else {}),
             # 复盘时能回答「当时用了哪个对手的什么类型/置信度/样本数」。
             **({"opponent_reads": reads} if reads else {}),
+            **({"action_index": self.action_index}
+               if self.action_index else {}),
+            **({"context": self.context} if self.context else {}),
             **({"plan": self.plan} if self.plan else {}),
             **({"confidence": round(self.confidence, 3)}
                if self.confidence is not None else {}),
@@ -3367,6 +3396,29 @@ def _clip_reason(text: str, limit: int = 30) -> str:
     return cut[:max(1, limit - 1)] + "…"
 
 
+def _advice_context(sit: Situation) -> dict:
+    """线上建议的上下文快照：重跑/A-B 必须看到和线上同一份桌况。"""
+    stats = sit.table_stats
+    dynamics = (sit.table_dynamics or "").strip()
+    reads = [
+        {"seat_id": read.seat_id, "key": read.key,
+         "display_name": read.display_name, "archetype": read.archetype,
+         "confidence": read.confidence, "n": read.n,
+         "source": read.source, "gate": read.gate}
+        for read in sit.opponent_reads
+    ]
+    context = {
+        "table_dynamics": dynamics or None,
+        "table_dynamics_sha": (hashlib.sha256(dynamics.encode("utf-8")).hexdigest()
+                               if dynamics else None),
+        "table_stats": pooled_stats_to_dict(stats),
+        "table_stats_scope": stats.scope if stats is not None else None,
+        "opponent_reads": reads or None,
+    }
+    return {key: value for key, value in context.items()
+            if value not in (None, "", {})}
+
+
 def advise(sit: Situation, settings: AISettings | None,
            timeout: float = 20.0, complete=None) -> Advice:
     """出一次建议。`complete` 可注入（单测用），默认走 complete_json。
@@ -3393,6 +3445,8 @@ def advise(sit: Situation, settings: AISettings | None,
                       decision_key=snap.decision_key,
                       preset_amounts=tuple(preset_amounts(snap).items()),
                       opponent_reads=tuple(sit.opponent_reads),
+                      action_index=sit.action_index,
+                      context=_advice_context(sit),
                       plan=plan, confidence=confidence,
                       prompt_version=PROMPT_VERSION,
                       finish_reason=meta.get("finish_reason"),

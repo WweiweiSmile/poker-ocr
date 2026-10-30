@@ -768,7 +768,7 @@ cd ~/codes/poker-ocr
 ### 6.5 `advice`
 
 ```json
-{"type":"advice","ts":"...","hand_id":"h7","street":"flop",
+{"type":"advice","ts":"...","hand_id":"20261030-3f2a91c8d0","street":"flop",
  "hero_cards":["Ah","Kd"],"board":["Ks","7d","2c"],
  "pot":19.5,"to_call":8.0,
  "option":{"id":"raise-1/2","label":"加注到 25.75BB（1/2 池加注）",
@@ -792,8 +792,8 @@ cd ~/codes/poker-ocr
 点击后 0.5s 页面仍无变化时会补点一次，另写一条记录：
 
 ```json
-{"type":"click_retry","ts":"...","hand_id":"h7",
- "decision_key":["h7","flop",6,19.5,8.0,["Ah","Kd"]],
+{"type":"click_retry","ts":"...","hand_id":"20261030-3f2a91c8d0",
+ "decision_key":["20261030-3f2a91c8d0","flop",6,19.5,8.0,["Ah","Kd"]],
  "attempt":1,
  "click":{"status":"clicked","action":"raise","preset":"raise-1/2",
           "steps":[{"button":"raise-1/2","x":810.1,"y":701.7}],
@@ -827,13 +827,20 @@ cd ~/codes/poker-ocr
 `RECORD_WITHOUT_HERO=1`）保留这些记录。
 
 ```json
-{"type":"hand","ts":"...","hand_id":"h6",
+{"type":"hand","ts":"...","schema":"hand.v2",
+ "uid":"20261030-a1b2c3d4e5","hand_id":"20261030-a1b2c3d4e5",
+ "table_signature":"20261030-6f1c2a9b7d3e",
  "hero_cards":["Ah","Kd"],"hero_position":"BTN","table_size":6,
  "blinds":{"sb":0.5,"bb":1.0,"ante":null,"raw":"1/2"},
  "hero_stack_bb":100.0,
  "start_stacks":[
    {"seat_id":"a","name":"老王","position":"CO","stack":85.0},
    {"seat_id":"b","name":"小李","position":"BB","stack":120.0}
+ ],
+ "table_roster":[
+   {"seat_id":"hero","name":"me","position":"BTN","status":"playing","in_hand":true,"stack":100.0},
+   {"seat_id":"a","name":"老王","position":"CO","status":"playing","in_hand":true,"stack":85.0},
+   {"seat_id":"b","name":"小李","position":"BB","status":"folded","in_hand":false,"stack":120.0}
  ],
  "board":["Ks","7d","2c"],"pot":19.5,
  "streets":[
@@ -855,13 +862,26 @@ cd ~/codes/poker-ocr
    {"seat_id":"hero","name":"me","position":"BTN","amount":60.5,"equity":30.0}
  ],
  "advices":[
-   {"hand_id":"h6","street":"flop","hero_cards":["Ah","Kd"],
+   {"hand_id":"20261030-a1b2c3d4e5","street":"flop","hero_cards":["Ah","Kd"],
     "board":["Ks","7d","2c"],"pot":19.5,"to_call":22.0,
     "option":{"id":"call","label":"Call 22BB","kind":"call"},
+    "action_index":3,
     "reason":"...","source":"model","model":"deepseek-flash",
-    "prompt_version":"lean-zh-2026-10-30.10","skill_codes":[],"duration_ms":1840}
+    "prompt_version":"lean-zh-2026-10-30.10","skill_codes":[],"duration_ms":1840,
+    "context":{"table_stats_scope":"current_table",
+               "table_stats":{"scope":"current_table","players":2,
+                              "total_players":2,"vpip":38.0,"pfr":12.0,
+                              "hands":86,"approx_hands":true},
+               "table_dynamics_sha":"...",
+               "opponent_reads":[{"seat_id":"a","key":"老王","archetype":"lag"}]}}
  ]}
 ```
+
+`hand_id` 是「日期 + 全部玩家名称/位置 + 开始时间」的摘要，`table_signature`
+只含名单/位置/日期（同一桌同一天的多手牌共用）。`table_roster` 是**开手时在座
+所有人**；`seat_meta` 仍然只给本手实际在局的人，两者不要混用。`advice.action_index`
+是该决策点之前的动作条数，`advice.context` 是当时的桌况/对手画像快照，手牌库
+重跑 A/B 时用它复现线上上下文。
 
 `hero_stack_bb` / `start_stacks` 是这一手的**起始筹码**（翻前下注/前注之前的值；
 `start_stacks` 不含 hero）。开局发牌动画的前几帧筹码胶囊可能还没渲染、或筹码图标
@@ -891,15 +911,18 @@ All-in 文本）会立即收掉当前手牌，不依赖牌面/庄位变化。
 `advices` 只在**这一手确实给过建议**时出现，按给出顺序排列；没有 AI 建议时连键都不出现。
 其余 `advice` 记录仍会照常单独写一份，方便实时流式查看；复盘用 `hand.advices` 即可，不必再按 `hand_id` join。
 
-日志是追加写的，`hand_id` 每次启动都从 `h1` 重新计数，跨会话会重复。要按手牌
-批量分析时，用 `tools/export_live_hands.py` 导出 `hands.json`：
+日志是追加写的。`hand_id` 现在是「日期 + 全部玩家名称/位置 + 开始时间」的摘要
+（如 `20261030-3f2a91c8d0`），同一天同一桌也会因为开始时间不同而唯一；记录里还带
+`table_signature`（只含名单/位置/日期），适合按桌分组。旧日志的 `h1` 仍然可读。
+要按手牌批量分析时，用 `tools/export_live_hands.py` 导出 `hands.json`：
 
 ```bash
 .venv/bin/python tools/export_live_hands.py
 ```
 
 默认只保留「从翻前开始、且不是退出时截断」的完整手牌，并给每条记录追加
-`session`（第几个 `session_start`）和 `uid`（如 `s24-h10`）用于跨会话区分。
+`session`（第几个 `session_start`）和 `uid`（如
+`s24-20261030-3f2a91c8d0`）用于跨会话区分。
 `--mid-hand` / `--include-partial` 可放宽口径，`--require-hero-cards` /
 `--require-actions` 可进一步筛掉没读到手牌或没有行动记录的手。
 

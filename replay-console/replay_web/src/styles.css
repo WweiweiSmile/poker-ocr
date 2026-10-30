@@ -477,3 +477,26 @@ h1, h2, h3, p { margin: 0; }
 .import-reason { font-size: 10.5px; color: var(--muted); }
 .import-done, .import-footnote { margin-top: 10px; }
 .import-footnote { color: var(--muted-2); font-size: 10.5px; border-top: 1px solid var(--line); padding-top: 9px; }
+
+/* 逐决策点复盘 + 线上建议上下文 */
+.decision-review { display: flex; align-items: center; gap: 6px; margin-left: auto; }
+.advice-context { margin-top: 8px; border-top: 1px dashed var(--line); padding-top: 7px; }
+.advice-context summary { cursor: pointer; font-size: 10.5px; color: var(--muted); user-select: none; }
+.advice-context-body { display: flex; flex-direction: column; gap: 6px; margin-top: 7px; }
+.advice-context-row { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; }
+.advice-context-dynamics {
+  font-size: 11px; line-height: 1.6; color: var(--ink); background: #f5faf8;
+  border: 1px solid var(--line); border-radius: 7px; padding: 6px 8px; white-space: pre-wrap;
+}
+
+/* A/B 实验 */
+.experiments-page .cell-link { padding: 0; height: auto; font-weight: 650; }
+.experiments-page .cell-sub { font-size: 10.5px; margin-top: 2px; max-width: 360px; }
+.version-pair { font-size: 11px; line-height: 1.7; }
+.experiment-meta-card { margin-bottom: 16px; }
+.experiment-meta-card .ant-descriptions-item-label { font-size: 10.5px; color: var(--muted-2); }
+.experiment-summary {
+  display: flex; gap: 22px; align-items: center; font-size: 11.5px;
+  color: var(--muted); margin-bottom: 12px;
+}
+.experiment-summary b { color: var(--ink); }

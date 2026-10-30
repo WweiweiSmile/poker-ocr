@@ -4,7 +4,10 @@ from poker_ocr.advice import build_situation
 from poker_ocr.hand_track import HandSnapshot, OpponentSnapshot, StreetRecord
 from poker_ocr.parse import Blinds
 
-from replay.engine import audit, classify, decision_to_public, summarize_version
+from replay.engine import (
+    audit, classify, decision_to_public, reads_from_context,
+    summarize_version, table_stats_from_context,
+)
 
 BLINDS = Blinds(sb=0.5, bb=1.0, ante=None, raw="1/2")
 
@@ -127,3 +130,37 @@ def test_decision_to_public_splits_cards_and_keeps_actual():
     assert block["decision"]["board"] == ["Ks", "7d", "2c"]
     assert block["actual"]["label"] == "call 4"
     assert block["versions"][0]["summary"]["source"] == "none"
+
+
+def test_reads_from_context_roundtrip():
+    context = {
+        "opponent_reads": [{
+            "seat_id": "btn", "key": "芒果与西米", "display_name": "芒果与西米",
+            "archetype": "lag", "confidence": 0.82, "n": 96,
+            "vpip": 55.0, "pfr": 25.0, "af": 3.0,
+            "source": "auto", "gate": "stable",
+        }],
+    }
+    reads = reads_from_context(context)
+    assert len(reads) == 1
+    assert reads[0].seat_id == "btn"
+    assert reads[0].archetype == "lag"
+    assert reads[0].n == 96
+
+
+def test_table_stats_from_context_roundtrip():
+    context = {
+        "table_stats": {
+            "scope": "current_table", "hands": 312, "players": 4,
+            "total_players": 6, "approx_hands": True,
+            "vpip": 38.0, "pfr": 12.0, "threebet": 4.0,
+            "opportunities": {"threebet": 80.0},
+        },
+    }
+    stats = table_stats_from_context(context)
+    assert stats is not None
+    assert stats.scope == "current_table"
+    assert stats.total_players == 6
+    assert stats.players == 4
+    assert stats.hands == 312
+    assert stats.opportunities["threebet"] == 80.0

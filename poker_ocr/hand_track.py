@@ -43,8 +43,11 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Callable
 
 from .frame_state import FrameState, PlayerState
+from .hand_id import build_hand_identity
 from .parse import Blinds
 
 PREFLOP = "preflop"
@@ -200,6 +203,12 @@ class _LiveHand:
 
     hand_id: str
     hand_index: int
+    # 只含名单/位置/日期的指纹。同一桌同一天的多手牌共用它，便于手牌库分组；
+    # hand_id 里额外带开始时间，保证每手唯一。
+    table_signature: str = ""
+    # 开手时**在座所有人**的名单快照（不只是本手发牌的人）。手牌库按玩家/
+    # 按桌分析要用；seat_meta 仍然只给本手在局者，两者语义不同。
+    table_roster: list[dict] = field(default_factory=list)
     hero_cards: tuple[str, ...] = ()
     hero_position: str | None = None
     table_size: int = 0
@@ -289,11 +298,15 @@ class LiveHandTracker:
             advisor.submit(point)
     """
 
-    def __init__(self, *, confirm_frames: int = 2) -> None:
+    def __init__(self, *, confirm_frames: int = 2,
+                 now: Callable[[], datetime] | None = None) -> None:
         # 轮到我需要连续几帧确认。真机上预设按钮会在回合内闪断，单帧不够
         self.confirm_frames = max(1, int(confirm_frames))
+        self._now = now or (lambda: datetime.now().astimezone())
         self.hand: _LiveHand | None = None
         self.hand_seq = 0
+        # 本会话已经用过的手牌 ID。同名/同名单同秒的极端碰撞用 -2/-3 兜底。
+        self._used_hand_ids: set[str] = set()
         self.turn_frames = 0
         # 已经建议过的决策点。同一个回合里按钮闪断会重复给出同一个 key
         self.advised: set[tuple] = set()
@@ -668,15 +681,46 @@ class LiveHandTracker:
         initial = blinds.sb + blinds.bb + ante * max(seats, 2)
         return state.pot <= initial + 0.01
 
+    def _roster_for_id(self, state: FrameState) -> list[dict]:
+        """给 hand_id 用的名单：当前帧 + 最近一次读到的名字/位置。
+
+        开牌第一帧名字可能还没渲染；用 `_seat_meta` 的上一手缓存补上，避免
+        同一桌因为一帧空名字得到两个完全不同的 ID。空座/离桌的人由
+        `build_hand_identity()` 过滤。
+        """
+        rows: list[dict] = []
+        for player in state.players:
+            meta_name, meta_position = self._seat_meta.get(
+                player.seat_id, (None, None))
+            rows.append({
+                "seat_id": player.seat_id,
+                "name": player.name or meta_name,
+                "position": player.position or meta_position,
+                "status": player.status,
+                "in_hand": player.in_hand,
+            })
+        return rows
+
     def _start_hand(self, state: FrameState, cards: tuple[str, ...],
                     board_len: int, board: tuple[str, ...]) -> None:
         self.hand_seq += 1
         self._all_in_streak.clear()
         street = street_of_board(board_len) or PREFLOP
         hero = self._hero(state)
+        roster_rows = self._roster_for_id(state)
+        identity = build_hand_identity(
+            roster_rows,
+            started_at=self._now(),
+            table_size=state.table_seats,
+            dealer=state.dealer,
+            taken=self._used_hand_ids,
+        )
+        self._used_hand_ids.add(identity.hand_id)
         hand = _LiveHand(
-            hand_id=f"h{self.hand_seq}",
+            hand_id=identity.hand_id,
             hand_index=self.hand_seq,
+            table_signature=identity.table_signature,
+            table_roster=roster_rows,
             hero_cards=cards,
             hero_position=hero.position if hero else None,
             table_size=state.table_seats,
@@ -1397,6 +1441,10 @@ class LiveHandTracker:
     def _hand_dict(self, hand: _LiveHand) -> dict:
         out = {
             "hand_id": hand.hand_id,
+            **({"table_signature": hand.table_signature}
+               if hand.table_signature else {}),
+            **({"table_roster": hand.table_roster}
+               if hand.table_roster else {}),
             "hero_cards": list(hand.hero_cards),
             "hero_position": hand.hero_position,
             "table_size": hand.table_size,

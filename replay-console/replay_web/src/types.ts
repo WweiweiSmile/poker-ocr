@@ -63,6 +63,12 @@ export interface ActualAction {
   label: string
 }
 
+export interface DecisionReview {
+  verdict: 'good' | 'bad' | 'unsure' | string
+  tags: string[]
+  note: string
+}
+
 export interface DecisionMeta {
   id: number | null
   street: string
@@ -81,6 +87,7 @@ export interface DecisionMeta {
   quality: Quality
   warnings: string[]
   actual: ActualAction
+  review?: DecisionReview | null
   snapshot?: Record<string, unknown>
 }
 
@@ -120,6 +127,28 @@ export interface HandAdvice {
   source?: string | null
   model?: string | null
   durationMs?: number | null
+  promptVersion?: string | null
+  actionIndex?: number | null
+  decisionKey?: unknown
+  actualAction?: string | null
+  actualAmount?: number | null
+  bucket?: string | null
+  context?: {
+    table_dynamics?: string | null
+    table_dynamics_sha?: string | null
+    table_stats_scope?: string | null
+    table_stats?: Record<string, unknown> | null
+    opponent_reads?: {
+      seat_id?: string | null
+      key?: string
+      display_name?: string | null
+      archetype?: string
+      confidence?: number
+      n?: number
+      source?: string
+      gate?: string
+    }[]
+  } | null
 }
 
 export interface HandDetail {
@@ -162,6 +191,8 @@ export interface Version {
   tableDynamics: string
   tableDynamicsSha: string | null
   tableDynamicsLength: number
+  contextMode?: string
+  tableStatsMode?: string
   configHash: string
   notes: string
   archived: boolean
@@ -536,4 +567,43 @@ export interface HandDeleteResult {
   reviewHidden: number
   missing: number[]
   handId?: number
+}
+
+export interface Experiment {
+  id: number
+  name: string
+  hypothesis: string
+  baselineVersionId: number
+  variantVersionId: number
+  filter: Record<string, unknown>
+  devRatio: number
+  repeat: number
+  status: string
+  jobId: number | null
+  hands: { total: number; dev: number; holdout: number }
+  createdAt: string | null
+  startedAt: string | null
+  finishedAt: string | null
+}
+
+export interface ExperimentVersionResult {
+  versionId: number
+  name: string
+  contextMode: string
+  tableStatsMode: string
+  n: number
+  bucket: Record<string, number>
+  source: Record<string, number>
+  violations: Record<string, number>
+  splits: Record<string, number>
+  agreement: number
+}
+
+export interface ExperimentResults {
+  experiment: Experiment
+  jobId: number
+  split: string | null
+  rows: number
+  versions: Record<string, ExperimentVersionResult>
+  review: Record<string, number>
 }

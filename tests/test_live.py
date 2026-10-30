@@ -32,6 +32,7 @@ from poker_ocr.live import (  # noqa: E402
     plan_crop, throttle_delay,
 )
 from poker_ocr.frame_state import FrameState, PlayerState  # noqa: E402
+from poker_ocr.hand_id import HAND_ID_RE  # noqa: E402
 from poker_ocr.hand_track import LiveHandTracker  # noqa: E402
 from poker_ocr.state_stream import FrameOutcome  # noqa: E402
 from poker_ocr.table_dynamics import TableDynamics  # noqa: E402
@@ -1235,8 +1236,8 @@ def test_hand_memory_flushes_on_switch_frame() -> None:
         proc.handle(packet(2))
 
     hands = [r for r in writer.rows if r["type"] == "hand"]
-    check(len(hands) == 1 and hands[0]["hand_id"] == "h1",
-          f"换手那一帧就应落库上一手：{hands}")
+    check(len(hands) == 1 and HAND_ID_RE.match(str(hands[0]["hand_id"])),
+          f"换手那一帧就应落库上一手，且 hand_id 应是名单摘要：{hands}")
 
 
 def test_hand_gap_without_hero_is_skipped_by_default() -> None:
@@ -1286,17 +1287,20 @@ def test_hand_gap_without_hero_is_skipped_by_default() -> None:
         return proc, [r for r in writer.rows if r["type"] == "hand"]
 
     proc, hands = run(False)
-    check([h["hand_id"] for h in hands] == ["h1", "h2"],
-          f"默认只应记真正有手牌的两手（空档直接长成真手），实际 "
-          f"{[h['hand_id'] for h in hands]}")
+    ids = [h["hand_id"] for h in hands]
+    check(len(ids) == 2 and all(HAND_ID_RE.match(hid) for hid in ids),
+          f"默认只应记真正有手牌的两手，且 ID 是名单摘要，实际 {ids}")
+    check(len(set(ids)) == 2, f"两手 ID 应不同：{ids}")
     check(all(h.get("hero_cards") for h in hands),
           f"落库的手牌都应带 hero 手牌：{hands}")
     check(proc.hands_skipped_no_hero == 1,
           f"只有退出时还没发牌的空档该跳过，实际 {proc.hands_skipped_no_hero}")
 
     proc2, hands2 = run(True)
-    check([h["hand_id"] for h in hands2] == ["h1", "h2", "h3"],
-          f"观察对手模式应把退出时的空档也记下来：{[h['hand_id'] for h in hands2]}")
+    ids2 = [h["hand_id"] for h in hands2]
+    check(len(ids2) == 3 and all(HAND_ID_RE.match(hid) for hid in ids2),
+          f"观察对手模式应把退出时的空档也记下来，且 ID 合法：{ids2}")
+    check(len(set(ids2)) == 3, f"三手 ID 应不同：{ids2}")
     check(proc2.hands_skipped_no_hero == 0,
           f"观察对手模式不应再跳过，实际 {proc2.hands_skipped_no_hero}")
 
@@ -1904,8 +1908,8 @@ def test_complete_hand_logs_yellow_banner() -> None:
 
     check(len(logs) == 1,
           f"只有完整手牌才打提示，实际 {logs}")
-    check("完整手牌 7，id h7 日志已经生成" in logs[0],
-          f"提示应带手牌序号和 hand_id：{logs[0]}")
+    check("完整手牌 h7 日志已经生成" in logs[0],
+          f"提示应带 hand_id：{logs[0]}")
     check(logs[0].startswith(live._ANSI_HAND_DONE)
           and logs[0].endswith(live._ANSI_RESET),
           f"提示应是黄色背景：{logs[0]!r}")
@@ -1917,7 +1921,7 @@ def test_complete_hand_logs_yellow_banner() -> None:
                           hand_tracker=tracker, log=plain.append)
     with patch.object(live, "_use_ansi", lambda: False):
         proc2.drain_advice()
-    check(plain == ["完整手牌 9，id h9 日志已经生成"],
+    check(plain == ["完整手牌 h9 日志已经生成"],
           f"重定向时不应带 ANSI 转义：{plain}")
 
 

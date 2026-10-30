@@ -69,6 +69,7 @@ from .env import EnvFileError, load_env
 from .frame_state import action_signature
 from .full_table import (DealerTracker, FullOutcome, FullStateRecorder,
                          FullTableConfig, load_full_config, observe_full)
+from .hand_outbox import HandOutbox
 from .hand_track import LiveHandTracker
 from .ocr import OcrEngine
 from .parse import parse_blinds
@@ -88,6 +89,7 @@ DEFAULT_PROFILE = PROJECT_ROOT / "config" / "table_wpk_1080x2400.json"
 DEFAULT_URL = "cam:auto"
 DEFAULT_OUT = Path("logs/live.states.jsonl")
 DEFAULT_INCIDENT_DIR = Path("logs/incidents")
+DEFAULT_HAND_OUTBOX = PROJECT_ROOT / "data" / "hand_outbox"
 # 异常要持续这么久才落盘：发牌/翻牌动画里的单帧误读（1 张公共牌、hero 只读到
 # 1 张）属于正常现象，稳定闸会吸收掉，不值得为每一帧存 10 张图。
 INCIDENT_MIN_SECONDS = 1.0
@@ -141,10 +143,13 @@ def _advice_bar(kind: str) -> str:
 
 
 def _hand_done_text(hand: dict) -> str:
-    """完整手牌落库提示文案：手牌序号 + hand_id（JSONL 里按 id 能直接搜到）。"""
+    """完整手牌落库提示文案：hand_id（JSONL 里按 id 能直接搜到）。
+
+    ID 现在是「日期 + 名单摘要」，不再有 `h7` 这样的顺序号；直接显示 ID，
+    避免再维护一套序号解析。
+    """
     hand_id = str(hand.get("hand_id") or "?")
-    seq = hand_id[1:] if hand_id[:1] == "h" and hand_id[1:].isdigit() else "?"
-    return f"完整手牌 {seq}，id {hand_id} 日志已经生成"
+    return f"完整手牌 {hand_id} 日志已经生成"
 
 
 def _log_hand_done(log: Callable[[str], None], hand: dict) -> None:
@@ -964,6 +969,7 @@ class LiveProcessor:
                  table_dynamics_loader: Callable[[], TableDynamics] | None = None,
                  table_dynamics_text: str = "",
                  profile_store: ProfileStore | None = None,
+                 hand_outbox: HandOutbox | None = None,
                  incident_dir: Path | None = None,
                  incident_frames: int = 10,
                  incident_max: int = DEFAULT_INCIDENT_MAX,
@@ -1029,6 +1035,8 @@ class LiveProcessor:
         self._table_dynamics_error: str | None = None
         # 对手画像仓库：None = 关闭（--no-opponent-profile 或无 AI 建议）。
         self.profile_store = profile_store
+        # 已结束手牌的本地队列：手牌库通过 outbox 异步取，不阻塞打牌。
+        self.hand_outbox = hand_outbox
         self.profile_updates = 0
         self.advice_count = 0
         # hand_id → 这一手已经给出的建议（按时间顺序）。换手 / 退出时并进
@@ -1334,22 +1342,24 @@ class LiveProcessor:
                 # .table_dy 的 aggressive_table 走旧口径，不会退化。
                 reads: dict = {}
                 if self.profile_store is not None:
-                    self.profile_store.set_pool_key(pool_key_from_blinds(
-                        point.blinds, point.table_size))
                     try:
                         reads = self.profile_store.read_for(point.opponents)
                     except Exception as exc:      # noqa: BLE001
                         self.log(f"  [对手] 画像读取失败："
                                  f"{type(exc).__name__}: {exc}")
                         reads = {}
-                # 全场合并统计：桌子的松紧/被动改成**事实注入**，
-                # 不再靠 `.table_dy` 里的人工形容词。
+                # 当前**这一手在局对手**的聚合统计，不是整个画像库。
+                # 换桌/换人后自然跟着变；手牌进行中同一手只算一次。
                 table_stats = None
                 if self.profile_store is not None:
                     try:
-                        table_stats = self.profile_store.pooled()
+                        opponents = list(point.opponents)
+                        current = self.profile_store.stats_for_opponents(
+                            opponents)
+                        table_stats = self.profile_store.pooled_for_stats(
+                            current, total_players=len(opponents))
                     except Exception as exc:      # noqa: BLE001
-                        self.log(f"  [对手] 全场统计失败："
+                        self.log(f"  [对手] 当前桌统计失败："
                                  f"{type(exc).__name__}: {exc}")
                 # 一个坏快照不能把整条拉流链路带下去
                 try:
@@ -1666,13 +1676,24 @@ class LiveProcessor:
         if partial:
             record["partial"] = True
         record.update(hand)
+        # 新记录带 schema/uid，手牌库可以直接按 uid 幂等入库；旧消费者
+        # 会忽略多出来的键。
+        record.setdefault("schema", "hand.v2")
+        record.setdefault("uid", str(hand.get("hand_id") or ""))
         if advices:
             # 没有建议时连键都不出现，保持无 AI 模式下的输出与旧版一致
             record["advices"] = advices
         self.writer.write(record)
+        if not partial and self.hand_outbox is not None:
+            try:
+                self.hand_outbox.enqueue(record)
+            except OSError as exc:
+                # 队列写失败不能拖垮牌局：JSONL 已经落盘，之后可以用
+                # tools/sync_hand_outbox.py 从日志回填。
+                self.log(f"  [手牌] outbox 写入失败：{exc}")
         if not partial:
             # 完整手牌落库后立刻在终端打一条黄色提示：AI 决策出问题时，
-            # 用户能凭这行记住「第几手 / hand_id」，再回 JSONL 按 id 定位。
+            # 用户能凭这行记住「hand_id」，再回 JSONL 按 id 定位。
             _log_hand_done(self.log, hand)
 
     def _log_advice(self, advice) -> None:
@@ -2066,13 +2087,19 @@ def build_parser() -> argparse.ArgumentParser:
                     help="按本手在局对手的本地历史画像调整建议（默认开启；"
                          "--no-opponent-profile 回退到 .table_dy）")
     ap.add_argument("--reset-opponents", action="store_true",
-                    help="启动时清空当前牌桌池的对手画像（不影响其它池）")
+                    help="启动时清空本地对手画像（身份已全局合并，不再按池清）")
     ap.add_argument("--ai-timeout", type=float, default=None,
                     help="单次 AI 建议的超时秒数（默认读 AI_SERVER_TIMEOUT，"
                          "否则 20）。实时链路建议 5–8 秒")
     ap.add_argument("--ai-confirm", type=int, default=1,
                     help="轮到我需要连续几帧确认（默认 1 = 第一帧就触发，"
                          "配合蓝色下注按钮；按钮会闪断的旧 UI 可调回 2）")
+    ap.add_argument("--hand-outbox", type=Path, default=DEFAULT_HAND_OUTBOX,
+                    help="已结束手牌的本地 outbox 目录（默认 "
+                         f"{DEFAULT_HAND_OUTBOX}）。手牌库通过 "
+                         "tools/sync_hand_outbox.py 异步取走")
+    ap.add_argument("--no-hand-outbox", action="store_true",
+                    help="不写手牌 outbox（只保留 logs/live.states.jsonl）")
     ap.add_argument("--record-without-hero",
                     action=argparse.BooleanOptionalAction, default=None,
                     help="没读到自己手牌时也写入手牌记录（默认跳过换手空档"
@@ -2242,6 +2269,7 @@ def main(argv: list[str] | None = None) -> int:
     hand_tracker = None
     clicker = None
     profile_store = None
+    hand_outbox = None
     table_dynamics_text = ""
     if args.ai_advice:
         if not env_load.found:
@@ -2271,6 +2299,9 @@ def main(argv: list[str] | None = None) -> int:
                 "blue_button（用 hero 头像槽判蓝色下注按钮），或补上 hero_turn_probe")
         advice_runner = AdviceRunner(settings, timeout=args.ai_timeout, log=_log)
         hand_tracker = LiveHandTracker(confirm_frames=args.ai_confirm)
+        if not args.no_hand_outbox:
+            hand_outbox = HandOutbox(args.hand_outbox)
+            _log(f"[手牌] outbox {hand_outbox.root}（已结束手牌异步同步到手牌库）")
         _log("[手牌] 没读到自己手牌时："
              + ("也记录（观察对手）" if args.record_without_hero
                 else "默认跳过换手空档（--record-without-hero 可开启）"))
@@ -2299,13 +2330,12 @@ def main(argv: list[str] | None = None) -> int:
                 _log(f"[对手] 画像读取失败，按空画像运行："
                      f"{profile_store.load_error}")
             if args.reset_opponents:
-                removed = profile_store.clear(
-                    pool_key=initial_pool or None)
+                removed = profile_store.clear()
                 profile_store.save(force=True)
-                _log(f"[对手] 已清空当前池画像（{removed} 人）："
+                _log(f"[对手] 已清空本地画像（{removed} 人）："
                      f"{profile_store.path}")
             _log(f"[对手] 画像库 {profile_store.path}"
-                 f"（池 {profile_store.pool_key or '未定（首手盲注后确定）'}，"
+                 f"（最近池 {profile_store.pool_key or '未定（首手盲注后确定）'}，"
                  f"玩家 {len(profile_store.players)}，"
                  f"版本 {profile_store.classifier_version}）")
             if profile_store.players:
@@ -2405,6 +2435,10 @@ def main(argv: list[str] | None = None) -> int:
             "opponent_profile": True,
             "pool_key": profile_store.pool_key}
            if profile_store is not None else {"opponent_profile": False}),
+        **({"hand_outbox": str(hand_outbox.root)}
+           if hand_outbox is not None else {}),
+        "hand_schema": "hand.v2",
+        "table_view_mode": "current_hand",
     })
 
     mailbox = LatestFrame()
@@ -2426,6 +2460,7 @@ def main(argv: list[str] | None = None) -> int:
         table_dynamics_loader=load_table_dynamics if args.ai_advice else None,
         table_dynamics_text=table_dynamics_text,
         profile_store=profile_store,
+        hand_outbox=hand_outbox,
         incident_dir=(None if args.no_incident else args.incident_dir),
         incident_frames=args.incident_frames,
         incident_max=args.incident_max,

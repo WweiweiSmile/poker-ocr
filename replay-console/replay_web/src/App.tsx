@@ -3,6 +3,7 @@ import zhCN from 'antd/locale/zh_CN'
 import {
   DatabaseOutlined,
   DeploymentUnitOutlined,
+  ExperimentOutlined,
   SettingOutlined,
   ThunderboltOutlined,
 } from '@ant-design/icons'
@@ -21,6 +22,8 @@ import JobDetailPage from './pages/JobDetailPage'
 import JobComparisonPage from './pages/JobComparisonPage'
 import VersionsPage from './pages/VersionsPage'
 import SettingsPage from './pages/SettingsPage'
+import ExperimentsPage from './pages/ExperimentsPage'
+import ExperimentDetailPage from './pages/ExperimentDetailPage'
 
 dayjs.locale('zh-cn')
 
@@ -36,6 +39,7 @@ const queryClient = new QueryClient({
 
 const NAV = [
   { to: '/hands', label: '手牌库', icon: <DatabaseOutlined />, hint: '筛选、收藏、逐街对比' },
+  { to: '/experiments', label: 'A/B 实验', icon: <ExperimentOutlined />, hint: '离线冻结数据集、dev/holdout' },
   { to: '/jobs', label: '复跑任务', icon: <ThunderboltOutlined />, hint: '进度、取消、重试' },
   { to: '/versions', label: '版本管理', icon: <DeploymentUnitOutlined />, hint: '不可变 AI 配置快照' },
   { to: '/settings', label: '设置与健康', icon: <SettingOutlined />, hint: '连接、队列、上限' },
@@ -183,6 +187,8 @@ export default function App() {
                 <Route path="/" element={<Navigate to="/hands" replace />} />
                 <Route path="/hands" element={<HandsPage />} />
                 <Route path="/hands/:handId" element={<HandDetailPage />} />
+                <Route path="/experiments" element={<ExperimentsPage />} />
+                <Route path="/experiments/:experimentId" element={<ExperimentDetailPage />} />
                 <Route path="/jobs" element={<JobsPage />} />
                 <Route path="/jobs/:jobId" element={<JobDetailPage />} />
                 <Route path="/jobs/:jobId/compare" element={<JobComparisonPage />} />

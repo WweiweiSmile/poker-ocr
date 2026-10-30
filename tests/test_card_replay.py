@@ -31,6 +31,7 @@ from poker_ocr.cards import (  # noqa: E402
     CardSlotRead, CardsResult, recognize_cards,
 )
 from poker_ocr.frame_state import FrameState, PlayerState  # noqa: E402
+from poker_ocr.hand_id import HAND_ID_RE  # noqa: E402
 from poker_ocr.hand_track import LiveHandTracker  # noqa: E402
 from poker_ocr.profile import Profile  # noqa: E402
 from poker_ocr.state_stream import FrameOutcome  # noqa: E402
@@ -157,7 +158,8 @@ def test_replay_one_hand_and_all_artifacts() -> None:
     if not hands:
         return
     hand = hands[0]
-    check(hand["hand_id"] == "h1", f"记录应属于 h1：{hand['hand_id']}")
+    check(HAND_ID_RE.match(str(hand["hand_id"])),
+          f"hand_id 应是名单摘要而不是 h1：{hand['hand_id']}")
     check(hand["hero_cards"] == ["Js", "Qs"],
           f"hero 手牌不对：{hand['hero_cards']}")
     check(hand["board"] == ["Kc", "6h", "3h", "Ks", "2s"],

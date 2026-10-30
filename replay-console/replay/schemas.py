@@ -36,6 +36,42 @@ class ImportHands(APIModel):
     includeMidHand: bool = False
 
 
+class IngestHands(APIModel):
+    """实时 outbox 的结构化 ingest：直接吃 HandRecord v2 数组。
+
+    与 `ImportHands.content` 的区别：不做文本解析，保留 table_roster /
+    advice.context 等结构化字段，按 external_uid 幂等。
+    """
+
+    source: Literal["live", "review"] = "live"
+    records: list[dict[str, Any]] = Field(min_length=1, max_length=500)
+    filename: str | None = None
+
+
+class ExperimentCreate(APIModel):
+    """离线 A/B 实验：冻结手牌集 + baseline/variant 两个版本。"""
+
+    name: str = Field(min_length=1, max_length=100)
+    hypothesis: str | None = None
+    baselineVersionId: int
+    variantVersionId: int
+    scope: Literal["hands", "filter"] = "hands"
+    handIds: list[int] | None = None
+    filter: dict[str, Any] = Field(default_factory=dict)
+    devRatio: float = Field(0.7, ge=0.1, le=0.9)
+    repeat: int = Field(3, ge=1, le=5)
+
+
+class ExperimentRun(APIModel):
+    confirmLarge: bool = True
+
+
+class DecisionMark(APIModel):
+    verdict: Literal["good", "bad", "unsure"] = "unsure"
+    tags: list[str] | None = None
+    note: str | None = None
+
+
 class HandDelete(APIModel):
     handIds: list[int] = Field(min_length=1, max_length=1000)
 
@@ -54,6 +90,8 @@ class VersionCreate(APIModel):
     promptStyle: Literal["lean"] = "lean"
     tableDynamicsMode: Literal["current", "text", "none"] = "current"
     tableDynamicsText: str | None = None
+    contextMode: Literal["none", "snapshot", "recompute"] = "none"
+    tableStatsMode: Literal["none", "snapshot", "recompute"] = "none"
     notes: str | None = None
 
 
@@ -71,6 +109,8 @@ class VersionClone(APIModel):
     promptStyle: Literal["lean"] | None = None
     tableDynamicsMode: Literal["keep", "current", "text", "none"] | None = None
     tableDynamicsText: str | None = None
+    contextMode: Literal["none", "snapshot", "recompute"] | None = None
+    tableStatsMode: Literal["none", "snapshot", "recompute"] | None = None
     notes: str | None = None
 
 

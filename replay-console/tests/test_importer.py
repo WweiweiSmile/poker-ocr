@@ -5,7 +5,8 @@ import json
 
 from replay.decisions import analyze_hand
 from replay.importer import (
-    SOURCE_LIVE, SOURCE_REVIEW, normalize_review_hand, parse_hand_text,
+    SOURCE_LIVE, SOURCE_REVIEW, normalize_live_hand, normalize_review_hand,
+    parse_hand_text,
 )
 
 
@@ -151,6 +152,45 @@ def test_live_hands_json_is_detected_and_normalized():
     analysis = analyze_hand(row)
     assert analysis.quality == "approx"
     assert analysis.decision_count == 2
+
+
+def test_live_v2_preserves_roster_and_advice_context():
+    """v2 记录要保留 table_roster / uid / advice 的 action_index+context。"""
+    hand = live_hand(
+        schema="hand.v2",
+        uid="20261030-3f2a91c8d0",
+        table_signature="20261030-1234567890ab",
+        table_roster=[
+            {"seat_id": "hero", "name": "hero", "position": "UTG+1",
+             "status": "playing", "in_hand": True, "stack": 100.0},
+            {"seat_id": "topR", "name": "陈7程7", "position": "BTN",
+             "status": "folded", "in_hand": False, "stack": 80.0},
+            {"seat_id": "lowL", "name": "老王", "position": "CO",
+             "status": "playing", "in_hand": True, "stack": 120.0},
+        ],
+        advices=[{
+            "street": "flop", "action_index": 3,
+            "option": {"id": "call", "label": "Call", "kind": "call",
+                       "amount_bb": 6.5},
+            "reason": "x", "source": "model", "model": "deepseek-flash",
+            "prompt_version": "lean-zh-2026-10-30.10",
+            "context": {"table_stats": {"scope": "current_table"},
+                        "table_dynamics_sha": "abc"},
+        }],
+        result={"hero_net_bb": -12.5, "source": "stack_delta"},
+    )
+    row = normalize_live_hand(hand, session=3)
+    assert row["external_uid"] == "20261030-3f2a91c8d0"
+    assert row["schema_version"] == 2
+    assert row["result"] == "lose"
+    assert row["result_amount"] == -12.5
+    assert row["result_source"] == "stack_delta"
+    assert len(row["table_roster"]) == 3
+    assert row["table_roster"][2]["name"] == "老王"
+    advice = row["advices"][0]
+    assert advice["action_index"] == 3
+    assert advice["context"]["table_stats"]["scope"] == "current_table"
+    assert advice["prompt_version"] == "lean-zh-2026-10-30.10"
 
 
 def test_live_hand_start_stacks_feed_replay_constraints():

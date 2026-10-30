@@ -366,12 +366,23 @@ def normalize_live_hand(rec: dict, *, session: int = 0,
     villains = _live_villains(rec)
     bomb = 1.0 if rec.get("bomb_pot") else 0.0
     hero_net = safe_float(rec.get("hero_net"))
+    result_block = rec.get("result") if isinstance(rec.get("result"), dict) else {}
+    if hero_net is None:
+        hero_net = safe_float(result_block.get("hero_net_bb"))
     result, result_amount = _result_of(hero_net)
+    result_source = (_text(result_block.get("source"))
+                     or ("stack_delta" if hero_net is not None else "unknown"))
+    schema_version = 2 if _text(rec.get("schema")) == "hand.v2" else 1
+    table_roster = _live_table_roster(rec)
     created = _parse_datetime(rec.get("ts") or rec.get("started_at")) or now_cn()
     row = {
         "id": 0,
         "source": SOURCE_LIVE,
         "external_id": external_id,
+        "external_uid": external_id[:128],
+        "schema_version": schema_version,
+        "result_source": result_source[:16],
+        "table_roster": table_roster,
         "title": _text(rec.get("title")) or _default_title(hero_position, hero_cards),
         "hero_cards": hero_cards,
         "board": board,
@@ -432,6 +443,50 @@ def _live_streets(rec: dict) -> list[dict]:
             "street": street,
             "potStartBb": safe_float(raw.get("pot_start")),
             "actions": actions,
+        })
+    return out
+
+
+def _live_table_roster(rec: dict) -> list[dict]:
+    """在座名单。v2 直接读 `table_roster`；旧记录从 `seat_meta` 兜底。
+
+    与 `villains` 的区别：roster 包含**没有行动/没有入池**的人，用于手牌库按
+    玩家/按桌检索；`villains` 只用于重建有效筹码，不能混。
+    """
+    out: list[dict] = []
+    raw = rec.get("table_roster")
+    if isinstance(raw, list):
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            seat_id = _text(item.get("seat_id"))
+            if not seat_id:
+                continue
+            out.append({
+                "seat_id": seat_id,
+                "name": _text(item.get("name")) or None,
+                "position": _text(item.get("position")) or None,
+                "status": _text(item.get("status")) or "playing",
+                "in_hand": bool(item.get("in_hand", True)),
+                "stack": safe_float(item.get("stack")),
+                "hole_cards": _cards_text(item.get("hole_cards"))[:4] or None,
+            })
+        if out:
+            return out
+    for item in _as_list(rec.get("seat_meta")):
+        if not isinstance(item, dict):
+            continue
+        seat_id = _text(item.get("seat_id"))
+        if not seat_id:
+            continue
+        out.append({
+            "seat_id": seat_id,
+            "name": _text(item.get("name")) or None,
+            "position": _text(item.get("position")) or None,
+            "status": "playing",
+            "in_hand": True,
+            "stack": safe_float(item.get("stack")),
+            "hole_cards": None,
         })
     return out
 

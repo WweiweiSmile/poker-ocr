@@ -196,6 +196,7 @@ class ImportedHandRepository:
         h.hero_stack_bb, h.small_blind_bb, h.big_blind_bb, h.ante_bb,
         h.bomb_pot_bb, h.villain_count, h.villains, h.streets, h.result,
         h.result_amount, h.pot_type, h.hero_tags, h.source_created_at,
+        h.external_uid, h.schema_version, h.result_source, h.table_roster,
         h.created_at, h.updated_at
     """
 
@@ -294,14 +295,36 @@ class ImportedHandRepository:
                 WHERE user_id=%s AND source=%s AND fingerprint=%s""",
             (self.user_id, source, fingerprint))
 
+    def find_by_uid(self, source: str, external_uid: str | None) -> dict | None:
+        """按来源内稳定 uid 查重；旧记录没有 uid 时返回 None。"""
+        uid = (external_uid or "").strip()
+        if not uid:
+            return None
+        return self.db.one(
+            """SELECT id, source, fingerprint, external_uid
+                 FROM replay_imported_hands
+                WHERE user_id=%s AND source=%s AND external_uid=%s
+                LIMIT 1""",
+            (self.user_id, source, uid[:128]))
+
     def upsert(self, row: dict, *, batch_id: int | None = None) -> tuple[int, bool]:
-        """按 (user, source, fingerprint) 幂等写入。返回 (id, 是否新建)。"""
-        existing = self.find_by_fingerprint(row["source"], row["fingerprint"])
+        """幂等写入：优先按 (user, source, external_uid)，旧记录回退 fingerprint。
+
+        uid 优先的原因：同一手牌补了 advice/context 后 fingerprint 会变，
+        但手牌本身没变；只用 fingerprint 会把同一手重复入库。
+        """
+        source = row["source"]
+        external_uid = (row.get("external_uid") or "").strip()[:128] or None
+        existing = self.find_by_uid(source, external_uid)
+        if existing is None:
+            existing = self.find_by_fingerprint(source, row["fingerprint"])
+
         payload = {k: v for k, v in row.items() if k != "raw"}
         created_at = row.get("source_created_at") or now_cn()
         values = (
-            self.user_id, batch_id, row["source"],
+            self.user_id, batch_id, source,
             (row.get("external_id") or "")[:128],
+            external_uid,
             row["fingerprint"],
             ((row.get("title") or "")[:255] or None),
             (row.get("hero_cards") or "")[:8],
@@ -318,45 +341,156 @@ class ImportedHandRepository:
             json_dumps(row.get("hero_tags") or []),
             json_dumps(payload), json_dumps(row.get("raw") or {}),
             row.get("source_created_at") or created_at, created_at, now_cn(),
+            int(row.get("schema_version") or 1),
+            ((row.get("result_source") or "")[:16] or None),
+            json_dumps(row.get("table_roster") or []),
         )
         if existing is not None:
             self.db.execute(
                 """UPDATE replay_imported_hands SET
-                     batch_id=%s, external_id=%s, title=%s, hero_cards=%s,
-                     board=%s, hero_position=%s, table_size=%s, hero_stack_bb=%s,
-                     small_blind_bb=%s, big_blind_bb=%s, ante_bb=%s,
-                     bomb_pot_bb=%s, villain_count=%s, villains=%s, streets=%s,
-                     result=%s, result_amount=%s, pot_type=%s, hero_tags=%s,
+                     batch_id=%s, external_id=%s, external_uid=%s,
+                     title=%s, hero_cards=%s, board=%s, hero_position=%s,
+                     table_size=%s, hero_stack_bb=%s, small_blind_bb=%s,
+                     big_blind_bb=%s, ante_bb=%s, bomb_pot_bb=%s,
+                     villain_count=%s, villains=%s, streets=%s, result=%s,
+                     result_amount=%s, pot_type=%s, hero_tags=%s,
                      payload_json=%s, raw_json=%s, source_created_at=%s,
+                     schema_version=%s, result_source=%s, table_roster=%s,
                      updated_at=%s, deleted_at=NULL
                    WHERE id=%s AND user_id=%s""",
-                (values[1], values[3], values[5], values[6], values[7], values[8],
-                 values[9], values[10], values[11], values[12], values[13],
-                 values[14], values[15], values[16], values[17], values[18],
-                 values[19], values[20], values[21], values[22], values[23],
-                 values[24], values[26], int(existing["id"]), self.user_id),
+                (values[1], values[3], values[4], values[6], values[7],
+                 values[8], values[9], values[10], values[11], values[12],
+                 values[13], values[14], values[15], values[16], values[17],
+                 values[18], values[19], values[20], values[21], values[22],
+                 values[23], values[24], values[25], values[28], values[29],
+                 values[30], values[27], int(existing["id"]), self.user_id),
             )
             return int(existing["id"]), False
         try:
             new_id = self.db.execute(
                 """INSERT INTO replay_imported_hands
-                     (user_id, batch_id, source, external_id, fingerprint, title,
-                      hero_cards, board, hero_position, table_size, hero_stack_bb,
-                      small_blind_bb, big_blind_bb, ante_bb, bomb_pot_bb,
-                      villain_count, villains, streets, result, result_amount,
-                      pot_type, hero_tags, payload_json, raw_json,
-                      source_created_at, created_at, updated_at)
-                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
-                           %s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                     (user_id, batch_id, source, external_id, external_uid,
+                      fingerprint, title, hero_cards, board, hero_position,
+                      table_size, hero_stack_bb, small_blind_bb, big_blind_bb,
+                      ante_bb, bomb_pot_bb, villain_count, villains, streets,
+                      result, result_amount, pot_type, hero_tags, payload_json,
+                      raw_json, source_created_at, created_at, updated_at,
+                      schema_version, result_source, table_roster)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
+                           %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
                 values,
             )
             return int(new_id), True
         except IntegrityError:
-            existing = self.find_by_fingerprint(row["source"],
-                                                row["fingerprint"])
+            existing = (self.find_by_uid(source, external_uid)
+                        or self.find_by_fingerprint(source, row["fingerprint"]))
             if existing is None:
                 raise
             return int(existing["id"]), False
+
+    def replace_players(self, hand_id: int, roster: list[dict] | None) -> int:
+        """覆盖一手牌的座位/玩家行（先删旧行，roster 为空则只清空）。"""
+        self.db.execute(
+            "DELETE FROM replay_hand_players WHERE hand_id=%s", (int(hand_id),))
+        if not roster:
+            return 0
+        written = 0
+        for item in roster:
+            if not isinstance(item, dict):
+                continue
+            seat_id = str(item.get("seat_id") or "").strip()
+            if not seat_id:
+                continue
+            name = str(item.get("name") or "").strip() or None
+            self.db.execute(
+                """INSERT INTO replay_hand_players
+                     (hand_id, seat_id, player_key, display_name, position,
+                      is_hero, in_hand, start_stack, hole_cards)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                   ON DUPLICATE KEY UPDATE
+                     player_key=VALUES(player_key),
+                     display_name=VALUES(display_name),
+                     position=VALUES(position),
+                     is_hero=VALUES(is_hero),
+                     in_hand=VALUES(in_hand),
+                     start_stack=VALUES(start_stack),
+                     hole_cards=VALUES(hole_cards)""",
+                (int(hand_id), seat_id[:16], name, name,
+                 (str(item.get("position") or "")[:10] or None),
+                 1 if item.get("is_hero") else 0,
+                 1 if item.get("in_hand", True) else 0,
+                 item.get("stack") if item.get("stack") is not None
+                 else item.get("start_stack"),
+                 (str(item.get("hole_cards") or "")[:8] or None)),
+            )
+            written += 1
+        return written
+
+    def replace_live_advices(self, hand_id: int, advices: list[dict] | None,
+                             *, decision_ids: dict | None = None) -> int:
+        """覆盖一手牌的线上建议审计行（先删旧行）。"""
+        self.db.execute(
+            "DELETE FROM replay_live_advices WHERE hand_id=%s", (int(hand_id),))
+        if not advices:
+            return 0
+        decision_ids = decision_ids or {}
+        written = 0
+        for index, advice in enumerate(advices):
+            if not isinstance(advice, dict):
+                continue
+            street = str(advice.get("street") or "")[:10]
+            action_index = int(advice.get("action_index") or 0)
+            option = (advice.get("option")
+                      if isinstance(advice.get("option"), dict) else {})
+            key = (street, action_index)
+            decision_id = decision_ids.get(key)
+            self.db.execute(
+                """INSERT INTO replay_live_advices
+                     (hand_id, decision_id, street, action_index, decision_key,
+                      option_id, option_kind, option_amount, option_label,
+                      reason, source, model, prompt_version, context_json,
+                      duration_ms, tokens_in, tokens_out,
+                      actual_action, actual_amount, bucket)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
+                           %s,%s,%s)
+                   ON DUPLICATE KEY UPDATE
+                     decision_id=VALUES(decision_id),
+                     decision_key=VALUES(decision_key),
+                     option_id=VALUES(option_id),
+                     option_kind=VALUES(option_kind),
+                     option_amount=VALUES(option_amount),
+                     option_label=VALUES(option_label),
+                     reason=VALUES(reason),
+                     source=VALUES(source),
+                     model=VALUES(model),
+                     prompt_version=VALUES(prompt_version),
+                     context_json=VALUES(context_json),
+                     duration_ms=VALUES(duration_ms),
+                     tokens_in=VALUES(tokens_in),
+                     tokens_out=VALUES(tokens_out),
+                     actual_action=VALUES(actual_action),
+                     actual_amount=VALUES(actual_amount),
+                     bucket=VALUES(bucket)""",
+                (int(hand_id), decision_id, street, action_index,
+                 json_dumps(advice.get("decision_key") or [])[:255],
+                 (str(option.get("id") or "")[:32] or None),
+                 (str(option.get("kind") or "")[:16] or None),
+                 option.get("amount_bb", option.get("amount")),
+                 (str(option.get("label") or "")[:64] or None),
+                 advice.get("reason"),
+                 (str(advice.get("source") or "model")[:16]),
+                 (str(advice.get("model") or "")[:100] or None),
+                 (str(advice.get("prompt_version") or "")[:32] or None),
+                 json_dumps(advice.get("context") or {}),
+                 advice.get("duration_ms"),
+                 advice.get("prompt_tokens"),
+                 advice.get("completion_tokens"),
+                 (str(advice.get("actual_action") or "")[:10] or None),
+                 advice.get("actual_amount"),
+                 (str(advice.get("bucket") or "")[:16] or None)),
+            )
+            written += 1
+        return written
 
 
 class ImportBatchRepository:
@@ -471,6 +605,44 @@ class MarkRepository:
         return [int(r["hand_id"]) for r in rows]
 
 
+class DecisionMarkRepository:
+    """逐决策点人工复盘：good/bad/unsure + 标签 + 备注。"""
+
+    def __init__(self, db: Database, user_id: int = 0):
+        self.db = db
+        self.user_id = user_id
+
+    def get(self, decision_id: int) -> dict | None:
+        return self.db.one(
+            "SELECT * FROM replay_decision_marks "
+            "WHERE user_id=%s AND decision_id=%s",
+            (self.user_id, int(decision_id)))
+
+    def for_decisions(self, decision_ids: Iterable[int]) -> dict[int, dict]:
+        ids = [int(x) for x in decision_ids]
+        if not ids:
+            return {}
+        placeholders = ",".join(["%s"] * len(ids))
+        rows = self.db.query(
+            f"""SELECT * FROM replay_decision_marks
+                 WHERE user_id=%s AND decision_id IN ({placeholders})""",
+            (self.user_id, *ids))
+        return {int(row["decision_id"]): row for row in rows}
+
+    def upsert(self, decision_id: int, *, verdict: str,
+               tags: list[str] | None = None,
+               note: str | None = None) -> dict:
+        self.db.execute(
+            """INSERT INTO replay_decision_marks
+                 (user_id, decision_id, verdict, tags, note)
+               VALUES (%s,%s,%s,%s,%s)
+               ON DUPLICATE KEY UPDATE
+                 verdict=VALUES(verdict), tags=VALUES(tags), note=VALUES(note)""",
+            (self.user_id, int(decision_id), verdict,
+             json_dumps(tags or []), (note or "")[:4000] or None))
+        return self.get(decision_id) or {}
+
+
 class VersionRepository:
     def __init__(self, db: Database, user_id: int = 0):
         self.db = db
@@ -509,6 +681,7 @@ class VersionRepository:
             "prompt_style", "advice_version", "reconstruct_version",
             "engine_commit", "engine_dirty", "table_dynamics",
             "table_dynamics_sha", "config_hash", "notes", "archived",
+            "context_mode", "table_stats_mode",
         ]
         values = [fields.get(c) for c in cols]
         placeholders = ",".join(["%s"] * len(cols))
@@ -589,11 +762,12 @@ class DecisionRepository:
             self.db.execute(
                 """INSERT INTO replay_decisions
                    (hand_id, hand_fingerprint, reconstruct_version, street, seq,
-                    pot, to_call, hero_stack, hero_position, hero_cards, board,
-                    players, opponents, actual_action, actual_amount, quality,
-                    warnings, snapshot_json)
-                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    action_index, pot, to_call, hero_stack, hero_position,
+                    hero_cards, board, players, opponents, actual_action,
+                    actual_amount, quality, warnings, snapshot_json)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                    ON DUPLICATE KEY UPDATE
+                     action_index=VALUES(action_index),
                      snapshot_json=VALUES(snapshot_json),
                      warnings=VALUES(warnings),
                      quality=VALUES(quality),
@@ -602,6 +776,7 @@ class DecisionRepository:
                 (
                     analysis.hand_id, analysis.fingerprint,
                     current_reconstruct_version(), d.street, d.seq,
+                    int(d.action_index or 0),
                     d.pot, float(snap.to_call or 0.0), snap.hero_stack,
                     snap.hero_position, "".join(snap.hero_cards),
                     "".join(snap.board), snap.table_size,
@@ -637,6 +812,151 @@ def current_reconstruct_version() -> str:
     # 延迟导入，避免 repository ↔ versioning 循环
     from .versioning import CURRENT_RECONSTRUCT_VERSION
     return CURRENT_RECONSTRUCT_VERSION
+
+
+class LiveAdviceRepository:
+    """线上建议审计行（replay_live_advices）的读取。"""
+
+    def __init__(self, db: Database):
+        self.db = db
+
+    def context_for_hand(self, hand_id: int) -> dict[tuple[str, int], dict]:
+        """(street, action_index) → context_json。没有线上快照的手牌返回空。"""
+        rows = self.db.query(
+            """SELECT street, action_index, context_json
+                 FROM replay_live_advices WHERE hand_id=%s""",
+            (int(hand_id),))
+        out: dict[tuple[str, int], dict] = {}
+        for row in rows:
+            context = json_load(row.get("context_json"), {})
+            if isinstance(context, dict):
+                out[(str(row.get("street") or ""),
+                     int(row.get("action_index") or 0))] = context
+        return out
+
+
+class ExperimentRepository:
+    """离线 A/B 实验：冻结手牌集、变体对、dev/holdout 切分。"""
+
+    def __init__(self, db: Database, user_id: int = 0):
+        self.db = db
+        self.user_id = user_id
+
+    def create(self, *, name: str, baseline_version_id: int,
+               variant_version_id: int, hypothesis: str | None,
+               filter_payload: dict | None, dev_ratio: float,
+               repeat_count: int, split_strategy: str = "hand_hash") -> int:
+        return int(self.db.execute(
+            """INSERT INTO replay_experiments
+                 (user_id, name, hypothesis, baseline_version_id,
+                  variant_version_id, filter_json, split_strategy,
+                  dev_ratio, repeat_count, status)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,'draft')""",
+            (self.user_id, name[:100], hypothesis,
+             int(baseline_version_id), int(variant_version_id),
+             json_dumps(filter_payload or {}), split_strategy,
+             float(dev_ratio), int(repeat_count))))
+
+    def get(self, experiment_id: int) -> dict | None:
+        row = self.db.one(
+            "SELECT * FROM replay_experiments WHERE id=%s AND user_id=%s",
+            (int(experiment_id), self.user_id))
+        if row is None:
+            return None
+        row["filter"] = json_load(row.get("filter_json"), {}) or {}
+        return row
+
+    def list(self, limit: int = 100) -> list[dict]:
+        rows = self.db.query(
+            """SELECT * FROM replay_experiments WHERE user_id=%s
+                ORDER BY id DESC LIMIT %s""",
+            (self.user_id, int(limit)))
+        for row in rows:
+            row["filter"] = json_load(row.get("filter_json"), {}) or {}
+        return rows
+
+    def add_hands(self, experiment_id: int,
+                  rows: list[tuple[int, str, str, str | None]]) -> int:
+        written = 0
+        for hand_id, fingerprint, split, stratum in rows:
+            self.db.execute(
+                """INSERT INTO replay_experiment_hands
+                     (experiment_id, hand_id, fingerprint, split, stratum)
+                   VALUES (%s,%s,%s,%s,%s)
+                   ON DUPLICATE KEY UPDATE
+                     fingerprint=VALUES(fingerprint),
+                     split=VALUES(split),
+                     stratum=VALUES(stratum)""",
+                (int(experiment_id), int(hand_id), fingerprint,
+                 split[:16], (stratum or "")[:64] or None))
+            written += 1
+        return written
+
+    def hands(self, experiment_id: int,
+              split: str | None = None) -> list[dict]:
+        sql = ("SELECT hand_id, fingerprint, split, stratum "
+               "FROM replay_experiment_hands WHERE experiment_id=%s")
+        params: list[Any] = [int(experiment_id)]
+        if split:
+            sql += " AND split=%s"
+            params.append(split)
+        sql += " ORDER BY hand_id"
+        return self.db.query(sql, tuple(params))
+
+    def set_job(self, experiment_id: int, job_id: int,
+                status: str = "queued") -> None:
+        self.db.execute(
+            """UPDATE replay_experiments
+                  SET job_id=%s, status=%s, started_at=%s
+                WHERE id=%s AND user_id=%s""",
+            (int(job_id), status[:16], now_cn(),
+             int(experiment_id), self.user_id))
+        # worker 用 replay_jobs.experiment_id 回写实验状态；任务创建 API
+        # 不感知实验，所以在这里补关联。
+        self.db.execute(
+            "UPDATE replay_jobs SET experiment_id=%s WHERE id=%s",
+            (int(experiment_id), int(job_id)))
+
+    def set_status(self, experiment_id: int, status: str) -> None:
+        finished = now_cn() if status in ("done", "failed", "archived") else None
+        self.db.execute(
+            """UPDATE replay_experiments
+                  SET status=%s, finished_at=COALESCE(%s, finished_at)
+                WHERE id=%s AND user_id=%s""",
+            (status[:16], finished, int(experiment_id), self.user_id))
+
+    def result_rows(self, experiment_id: int, job_id: int,
+                    split: str | None = None) -> list[dict]:
+        sql = """SELECT e.split, r.version_id, r.bucket, r.source,
+                        r.violation_tags, r.decision_id,
+                        d.street, d.actual_action, d.actual_amount
+                   FROM replay_experiment_hands e
+                   JOIN replay_decisions d
+                     ON d.hand_id=e.hand_id
+                    AND d.hand_fingerprint=e.fingerprint
+                   JOIN replay_results r ON r.decision_id=d.id
+                   JOIN replay_jobs j ON j.id=r.job_id
+                  WHERE e.experiment_id=%s AND j.id=%s"""
+        params: list[Any] = [int(experiment_id), int(job_id)]
+        if split:
+            sql += " AND e.split=%s"
+            params.append(split)
+        return self.db.query(sql, tuple(params))
+
+    def review_rows(self, experiment_id: int,
+                    split: str | None = None) -> list[dict]:
+        sql = """SELECT e.split, dm.verdict, dm.tags
+                   FROM replay_experiment_hands e
+                   JOIN replay_decisions d
+                     ON d.hand_id=e.hand_id
+                    AND d.hand_fingerprint=e.fingerprint
+                   JOIN replay_decision_marks dm ON dm.decision_id=d.id
+                  WHERE e.experiment_id=%s"""
+        params: list[Any] = [int(experiment_id)]
+        if split:
+            sql += " AND e.split=%s"
+            params.append(split)
+        return self.db.query(sql, tuple(params))
 
 
 class JobRepository:

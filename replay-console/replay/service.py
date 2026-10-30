@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import csv
 import datetime as dt
+import hashlib
 import io
 import json
 import logging
@@ -29,12 +30,14 @@ from .engine import (
 )
 from .errors import ApiError
 from .importer import (
-    SOURCE_LABELS, SOURCE_LIVE, SOURCE_REVIEW, parse_hand_text,
+    SOURCE_LABELS, SOURCE_LIVE, SOURCE_REVIEW, normalize_live_hand,
+    parse_hand_text,
 )
 from .repository import (
     HAND_SOURCE_DB, HAND_SOURCE_LABELS, HAND_SOURCE_LIVE, HAND_SOURCE_REVIEW,
-    DecisionRepository, HandRepository, ImportBatchRepository, JobRepository,
-    MarkRepository, ResultRepository, VersionRepository,
+    DecisionMarkRepository, DecisionRepository, ExperimentRepository,
+    HandRepository, ImportBatchRepository, JobRepository, MarkRepository,
+    ResultRepository, VersionRepository,
 )
 from .util import (
     BOARD_LEN, STREET_LABELS, iso, json_load, median, now_cn, split_board,
@@ -106,7 +109,10 @@ class ReplayService:
         self.mark_repo = MarkRepository(db, settings.console_user_id)
         self.version_repo = VersionRepository(db, settings.console_user_id)
         self.decision_repo = DecisionRepository(db)
+        self.decision_mark_repo = DecisionMarkRepository(
+            db, settings.console_user_id)
         self.job_repo = JobRepository(db, settings.console_user_id)
+        self.experiment_repo = ExperimentRepository(db, settings.console_user_id)
         self.result_repo = ResultRepository(db)
 
     # ─────────────────────────── 基础查询 ───────────────────────────
@@ -546,6 +552,164 @@ class ReplayService:
             )
         return summary
 
+    # ─────────────────────────── 结构化 ingest ───────────────────────────
+
+    def ingest_hands(self, payload: dict) -> dict:
+        """实时 outbox 的结构化入口：HandRecord v2 直接入库。
+
+        与 `import_hands()` 的区别：
+          · 不做文本解析，直接吃 outbox 的 dict；
+          · 按 `external_uid` 幂等（补了 advice/context 不会重复入库）；
+          · 同时写座位表 `replay_hand_players` 和线上建议
+            `replay_live_advices`，供手牌库按玩家/A-B 查询。
+        """
+        source = str(payload.get("source") or SOURCE_LIVE).strip().lower()
+        if source not in (SOURCE_LIVE, SOURCE_REVIEW):
+            raise ApiError("INVALID_INGEST_SOURCE",
+                           f"source 只能是 live/review，收到 {source!r}", 422)
+        records = payload.get("records")
+        if not isinstance(records, list) or not records:
+            raise ApiError("INVALID_INGEST_PAYLOAD",
+                           "records 必须是非空数组", 422)
+        if len(records) > 500:
+            raise ApiError("INVALID_INGEST_PAYLOAD",
+                           "一次最多 ingest 500 手", 422)
+
+        batch_id = self.batch_repo.create(
+            source=source, container="json",
+            filename=str(payload.get("filename") or "outbox")[:255],
+            total_records=len(records))
+        inserted = updated = duplicates = invalid = 0
+        errors: list[dict] = []
+        samples: list[dict] = []
+        hand_ids: list[int] = []
+        advices_written = 0
+        players_written = 0
+
+        for index, record in enumerate(records):
+            if not isinstance(record, dict):
+                errors.append({"index": index, "reason": "不是 JSON 对象"})
+                continue
+            try:
+                row = normalize_live_hand(
+                    record,
+                    session=int(record.get("session") or 0),
+                    hand_seq=index + 1,
+                )
+                analysis = analyze_hand({**row, "id": 0})
+                if analysis.quality == INVALID:
+                    invalid += 1
+                row["fingerprint"] = analysis.fingerprint
+                advices = row.get("advices") if isinstance(row.get("advices"), list) else []
+                self._annotate_live_advices(advices, analysis)
+                hand_id, created = self.import_repo.upsert(row, batch_id=batch_id)
+                hand_ids.append(int(hand_id))
+                if created:
+                    inserted += 1
+                else:
+                    updated += 1
+
+                analysis.hand_id = int(hand_id)
+                persisted = self.decision_repo.persist(analysis)
+                decision_ids = {}
+                for decision in analysis.decisions:
+                    stored = persisted.get((decision.street, decision.seq))
+                    if stored:
+                        decision_ids[(decision.street,
+                                      decision.action_index)] = int(stored["id"])
+                roster = self._hero_roster(row.get("table_roster") or [],
+                                           row.get("hero_position"))
+                players_written += self.import_repo.replace_players(
+                    int(hand_id), roster)
+                advices_written += self.import_repo.replace_live_advices(
+                    int(hand_id), advices, decision_ids=decision_ids)
+                if len(samples) < 50:
+                    samples.append({
+                        "index": index,
+                        "uid": row.get("external_uid"),
+                        "handId": int(hand_id),
+                        "status": "imported" if created else "updated",
+                        "quality": analysis.quality,
+                        "decisions": analysis.decision_count,
+                        "advices": len(advices),
+                    })
+            except Exception as exc:  # noqa: BLE001
+                log.exception("ingest 手牌失败：index=%s", index)
+                errors.append({"index": index,
+                               "reason": f"{type(exc).__name__}: {exc}"})
+
+        status = "succeeded" if not errors else ("partial" if inserted + updated else "failed")
+        self.batch_repo.finish(
+            batch_id, status=status, imported=inserted, updated=updated,
+            duplicates=duplicates, invalid=invalid, errors=len(errors),
+            summary={"records": len(records), "advices": advices_written,
+                     "players": players_written},
+            error_msg=(errors[0]["reason"] if errors else None),
+        )
+        return {
+            "batchId": batch_id,
+            "source": source,
+            "received": len(records),
+            "inserted": inserted,
+            "updated": updated,
+            "duplicates": duplicates,
+            "invalid": invalid,
+            "errors": len(errors),
+            "handIds": hand_ids,
+            "advices": advices_written,
+            "players": players_written,
+            "samples": samples,
+            "issues": errors[:50],
+        }
+
+    @staticmethod
+    def _hero_roster(roster: list[dict], hero_position: str | None) -> list[dict]:
+        """给座位补 is_hero；没有 seat_id 的行丢弃。"""
+        out: list[dict] = []
+        for item in roster:
+            if not isinstance(item, dict):
+                continue
+            seat_id = str(item.get("seat_id") or "").strip()
+            if not seat_id:
+                continue
+            position = item.get("position")
+            is_hero = (seat_id == "hero"
+                       or (hero_position is not None
+                           and str(position or "") == str(hero_position)))
+            out.append({**item, "is_hero": is_hero})
+        return out
+
+    @staticmethod
+    def _annotate_live_advices(advices: list[dict], analysis: HandAnalysis) -> None:
+        """把实际动作/尺寸/分类补到线上建议上，复盘和 A-B 直接用。"""
+        by_action = {(decision.street, decision.action_index): decision
+                     for decision in analysis.decisions}
+        counters: dict[str, int] = {}
+        for advice in advices:
+            if not isinstance(advice, dict):
+                continue
+            street = str(advice.get("street") or "")
+            action_index = advice.get("action_index")
+            if action_index is None:
+                action_index = counters.get(street, 0)
+                advice["action_index"] = action_index
+            counters[street] = counters.get(street, 0) + 1
+            decision = by_action.get((street, int(action_index)))
+            if decision is None:
+                continue
+            advice["actual_action"] = decision.actual
+            advice["actual_amount"] = decision.actual_amount
+            option = (advice.get("option")
+                      if isinstance(advice.get("option"), dict) else {})
+            kind = str(option.get("kind") or "")
+            amount = option.get("amount_bb", option.get("amount"))
+            try:
+                advice["bucket"] = classify(
+                    kind, amount, decision.actual, decision.actual_amount,
+                    float(decision.pot or 0.0), street)
+            except Exception:  # noqa: BLE001
+                advice["bucket"] = None
+
     # ─────────────────────────── 删除手牌 ───────────────────────────
 
     def _parse_hand_ids(self, payload: dict) -> list[int]:
@@ -628,6 +792,13 @@ class ReplayService:
             "source": advice.get("source"),
             "model": advice.get("model"),
             "durationMs": advice.get("duration_ms"),
+            "promptVersion": advice.get("prompt_version"),
+            "actionIndex": advice.get("action_index"),
+            "decisionKey": advice.get("decision_key"),
+            "context": advice.get("context"),
+            "actualAction": advice.get("actual_action"),
+            "actualAmount": advice.get("actual_amount"),
+            "bucket": advice.get("bucket"),
         }
 
     def get_hand(self, hand_id: int) -> dict:
@@ -653,10 +824,14 @@ class ReplayService:
         persisted = self.decision_repo.for_hand(hand_id, analysis.fingerprint)
         raw_streets = json_load(row.get("streets"), []) or []
         streets = self._streets_public(raw_streets, analysis)
+        decision_ids = [int(p["id"]) for p in persisted.values()
+                        if p.get("id") is not None]
+        marks = self.decision_mark_repo.for_decisions(decision_ids)
         decisions = []
         for d in analysis.decisions:
             p = persisted.get((d.street, d.seq))
-            decisions.append(self._decision_public(d, p))
+            mark = marks.get(int(p["id"])) if p and p.get("id") is not None else None
+            decisions.append(self._decision_public(d, p, mark))
         dup_items = []
         for other in (dup_groups.get(hand_id) or []):
             if int(other) == hand_id:
@@ -743,7 +918,8 @@ class ReplayService:
             return f"{who} all-in" + (f" {amount:g}" if amount is not None else "")
         return f"{who} {action or ''}".strip()
 
-    def _decision_public(self, d, persisted: dict | None) -> dict:
+    def _decision_public(self, d, persisted: dict | None,
+                         mark: dict | None = None) -> dict:
         return {
             "id": persisted.get("id") if persisted else None,
             "street": d.street,
@@ -765,6 +941,10 @@ class ReplayService:
                 "amountBb": d.actual_amount,
                 "label": fmt_option(d.actual, d.actual_amount),
             },
+            "review": ({"verdict": mark.get("verdict"),
+                        "tags": json_load(mark.get("tags"), []) or [],
+                        "note": mark.get("note") or ""}
+                       if mark else None),
             "snapshot": {
                 "preflopShapes": list(d.snap.preflop_shapes),
                 "heroIsPfr": d.snap.hero_is_pfr,
@@ -772,6 +952,22 @@ class ReplayService:
                 "potBeforeStreet": d.snap.pot_before_street,
             },
         }
+
+    def mark_decision(self, decision_id: int, payload: dict) -> dict:
+        decision = self.decision_repo.get(decision_id)
+        if decision is None:
+            raise ApiError("DECISION_NOT_FOUND",
+                           f"决策点 {decision_id} 不存在", 404)
+        verdict = str(payload.get("verdict") or "unsure").strip().lower()
+        if verdict not in ("good", "bad", "unsure"):
+            raise ApiError("INVALID_MARK",
+                           "verdict 只能是 good/bad/unsure", 422)
+        tags = payload.get("tags")
+        if tags is not None:
+            tags = [str(t).strip() for t in tags if str(t).strip()][:12]
+        note = str(payload.get("note") or "")[:4000]
+        return self.decision_mark_repo.upsert(
+            decision_id, verdict=verdict, tags=tags, note=note)
 
     def patch_mark(self, hand_id: int, payload: dict) -> dict:
         row = self.hand_repo.get_row(hand_id)
@@ -828,12 +1024,23 @@ class ReplayService:
         text = payload.get("tableDynamicsText")
         dynamics = normalize_table_dynamics(mode, text)
         sha = table_dynamics_sha(dynamics)
+        context_mode = str(payload.get("contextMode")
+                           or payload.get("context_mode") or "none").lower()
+        table_stats_mode = str(payload.get("tableStatsMode")
+                               or payload.get("table_stats_mode") or "none").lower()
+        if context_mode not in ("none", "snapshot", "recompute"):
+            raise ApiError("INVALID_VERSION_CONFIG",
+                           f"未知 contextMode：{context_mode}", 422)
+        if table_stats_mode not in ("none", "snapshot", "recompute"):
+            raise ApiError("INVALID_VERSION_CONFIG",
+                           f"未知 tableStatsMode：{table_stats_mode}", 422)
         config = config_payload(
             provider=provider, base_url=base_url, model=model,
             temperature=temperature, top_p=top_p, max_tokens=max_tokens,
             thinking=thinking, reasoning_effort=effort,
             prompt_style=prompt_style, api_key_ref=api_key_ref,
-            dynamics_sha=sha,
+            dynamics_sha=sha, context_mode=context_mode,
+            table_stats_mode=table_stats_mode,
         )
         commit, dirty = engine_state()
         return {
@@ -851,6 +1058,8 @@ class ReplayService:
             "engine_commit": commit, "engine_dirty": 1 if dirty else 0,
             "table_dynamics": dynamics or None,
             "table_dynamics_sha": sha,
+            "context_mode": context_mode,
+            "table_stats_mode": table_stats_mode,
             "config_hash": config_hash(config),
             "notes": (payload.get("notes") or "").strip() or None,
             "archived": 0,
@@ -929,6 +1138,10 @@ class ReplayService:
             "notes": payload.get("notes") or source.get("notes"),
             "tableDynamicsMode": payload.get("tableDynamicsMode") or "keep",
             "tableDynamicsText": payload.get("tableDynamicsText"),
+            "contextMode": (payload.get("contextMode")
+                            or source.get("context_mode") or "none"),
+            "tableStatsMode": (payload.get("tableStatsMode")
+                               or source.get("table_stats_mode") or "none"),
         }
         mode = merged.pop("tableDynamicsMode")
         if mode == "keep":
@@ -1193,6 +1406,184 @@ class ReplayService:
             "totalUnits": resolved["totalUnits"],
             "estimatedSeconds": resolved["estimatedSeconds"],
             "skipped": resolved["skipped"],
+        }
+
+    # ─────────────────────────── 离线 A/B 实验 ───────────────────────────
+
+    def create_experiment(self, payload: dict) -> dict:
+        """冻结手牌集 + 两个版本 + dev/holdout 切分。"""
+        name = str(payload.get("name") or "").strip()
+        if not name:
+            raise ApiError("INVALID_EXPERIMENT", "实验名不能为空", 422)
+        baseline = int(payload.get("baselineVersionId")
+                       or payload.get("baseline_version_id") or 0)
+        variant = int(payload.get("variantVersionId")
+                      or payload.get("variant_version_id") or 0)
+        if not baseline or not variant:
+            raise ApiError("INVALID_EXPERIMENT", "必须指定 baseline/variant 两个版本", 422)
+        if baseline == variant:
+            raise ApiError("INVALID_EXPERIMENT", "baseline 和 variant 不能是同一个版本", 422)
+        self._validate_versions([baseline, variant])
+        dev_ratio = float(payload.get("devRatio", payload.get("dev_ratio", 0.7)))
+        dev_ratio = min(0.9, max(0.1, dev_ratio))
+        repeat = max(1, min(5, int(payload.get("repeat", 3) or 3)))
+        resolved = self.resolve_scope({
+            "scope": payload.get("scope") or "hands",
+            "handIds": payload.get("handIds") or payload.get("hand_ids") or [],
+            "filter": payload.get("filter") or {},
+            # A/B 默认只用 exact 决策点；approx 的推算值会把差异混进噪声。
+            "includeQuality": payload.get("includeQuality") or ["exact"],
+        })
+        included = resolved.pop("_included", [])
+        if not included:
+            raise ApiError("NO_HANDS", "这个范围里没有可重跑的手牌/决策点", 422)
+        split_rows = self._split_experiment_hands(included, name, dev_ratio)
+        experiment_id = self.experiment_repo.create(
+            name=name,
+            baseline_version_id=baseline,
+            variant_version_id=variant,
+            hypothesis=(payload.get("hypothesis") or "").strip() or None,
+            filter_payload=payload.get("filter") or {},
+            dev_ratio=dev_ratio,
+            repeat_count=repeat,
+        )
+        self.experiment_repo.add_hands(experiment_id, split_rows)
+        return self.get_experiment(experiment_id)
+
+    @staticmethod
+    def _split_experiment_hands(included, salt: str, dev_ratio: float):
+        """按 hand fingerprint 做确定性分层切分；先保证两边都有人。"""
+        rows = []
+        for row, analysis, decisions in included:
+            fingerprint = analysis.fingerprint
+            digest = hashlib.sha256(
+                f"{salt}:{fingerprint}".encode("utf-8")).hexdigest()
+            bucket = int(digest[:8], 16) % 100
+            split = "dev" if bucket < dev_ratio * 100 else "holdout"
+            streets = ",".join(sorted({d.street for d in decisions}))
+            rows.append((int(row["id"]), fingerprint, split, streets))
+        if len(rows) >= 2:
+            splits = {row[2] for row in rows}
+            if splits == {"dev"}:
+                rows[-1] = (rows[-1][0], rows[-1][1], "holdout", rows[-1][3])
+            elif splits == {"holdout"}:
+                rows[-1] = (rows[-1][0], rows[-1][1], "dev", rows[-1][3])
+        return rows
+
+    def get_experiment(self, experiment_id: int) -> dict:
+        row = self.experiment_repo.get(experiment_id)
+        if row is None:
+            raise ApiError("EXPERIMENT_NOT_FOUND",
+                           f"实验 {experiment_id} 不存在", 404)
+        hands = self.experiment_repo.hands(experiment_id)
+        split_counts = Counter(str(h.get("split") or "") for h in hands)
+        return {
+            "id": int(row["id"]),
+            "name": row.get("name"),
+            "hypothesis": row.get("hypothesis") or "",
+            "baselineVersionId": int(row["baseline_version_id"]),
+            "variantVersionId": int(row["variant_version_id"]),
+            "filter": row.get("filter") or {},
+            "devRatio": float(row.get("dev_ratio") or 0.7),
+            "repeat": int(row.get("repeat_count") or 3),
+            "status": row.get("status") or "draft",
+            "jobId": (int(row["job_id"]) if row.get("job_id") else None),
+            "hands": {
+                "total": len(hands),
+                "dev": int(split_counts.get("dev", 0)),
+                "holdout": int(split_counts.get("holdout", 0)),
+            },
+            "createdAt": iso(row.get("created_at")),
+            "startedAt": iso(row.get("started_at")),
+            "finishedAt": iso(row.get("finished_at")),
+        }
+
+    def list_experiments(self, limit: int = 100) -> list[dict]:
+        out = []
+        for row in self.experiment_repo.list(limit=limit):
+            try:
+                out.append(self.get_experiment(int(row["id"])))
+            except ApiError:
+                continue
+        return out
+
+    def run_experiment(self, experiment_id: int, payload: dict | None = None) -> dict:
+        payload = payload or {}
+        experiment = self.get_experiment(experiment_id)
+        hands = self.experiment_repo.hands(experiment_id)
+        if not hands:
+            raise ApiError("NO_HANDS", "实验没有冻结手牌", 422)
+        result = self.create_run({
+            "scope": "hands",
+            "handIds": [int(h["hand_id"]) for h in hands],
+            "versionIds": [experiment["baselineVersionId"],
+                           experiment["variantVersionId"]],
+            "repeat": experiment["repeat"],
+            "includeQuality": ["exact"],
+            "confirmLarge": bool(payload.get("confirmLarge", True)),
+            "note": f"experiment:{experiment_id}",
+        })
+        self.experiment_repo.set_job(experiment_id, int(result["jobId"]),
+                                     status="queued")
+        return {**result, "experimentId": experiment_id}
+
+    def experiment_results(self, experiment_id: int,
+                           split: str | None = None) -> dict:
+        split = (split or None)
+        if split not in (None, "dev", "holdout"):
+            raise ApiError("INVALID_SPLIT", "split 只能是 dev/holdout", 422)
+        experiment = self.get_experiment(experiment_id)
+        job_id = experiment.get("jobId")
+        if not job_id:
+            raise ApiError("EXPERIMENT_NOT_RUN", "实验还没跑", 409)
+        rows = self.experiment_repo.result_rows(experiment_id, int(job_id),
+                                                split=split)
+        versions = {}
+        for version_id in (experiment["baselineVersionId"],
+                           experiment["variantVersionId"]):
+            row = self.version_repo.get(int(version_id)) or {}
+            versions[str(version_id)] = {
+                "versionId": int(version_id),
+                "name": row.get("name") or str(version_id),
+                "contextMode": row.get("context_mode") or "none",
+                "tableStatsMode": row.get("table_stats_mode") or "none",
+                "n": 0,
+                "bucket": Counter(),
+                "source": Counter(),
+                "violations": Counter(),
+                "splits": Counter(),
+            }
+        for item in rows:
+            version = versions.get(str(item.get("version_id")))
+            if version is None:
+                continue
+            version["n"] += 1
+            version["bucket"][str(item.get("bucket") or "unknown")] += 1
+            version["source"][str(item.get("source") or "unknown")] += 1
+            version["splits"][str(item.get("split") or "")] += 1
+            tags = json_load(item.get("violation_tags"), []) or []
+            if isinstance(tags, str):
+                tags = [tags]
+            for tag in tags:
+                version["violations"][str(tag)] += 1
+        for version in versions.values():
+            total = version["n"] or 1
+            version["agreement"] = round(
+                version["bucket"].get("一致", 0) / total, 4)
+            version["bucket"] = dict(version["bucket"])
+            version["source"] = dict(version["source"])
+            version["violations"] = dict(version["violations"])
+            version["splits"] = dict(version["splits"])
+        review: Counter = Counter()
+        for item in self.experiment_repo.review_rows(experiment_id, split=split):
+            review[str(item.get("verdict") or "unsure")] += 1
+        return {
+            "experiment": experiment,
+            "jobId": int(job_id),
+            "split": split,
+            "rows": len(rows),
+            "versions": versions,
+            "review": dict(review),
         }
 
     def _version_snapshot(self, row: dict) -> dict:

@@ -620,7 +620,8 @@ def test_temp_key_merged_when_name_recovered() -> None:
         check(stats.n == 2, f"合并后样本数应包含临时键那一手：{stats.n}")
 
 
-def test_pool_keys_are_separated() -> None:
+def test_pool_keys_are_merged_globally() -> None:
+    """同名玩家跨池合并：pool 只是元数据，不再参与 player_key。"""
     with tempfile.TemporaryDirectory() as tmp:
         store = ProfileStore(Path(tmp) / "p.json", "")
         hand_1_2 = _lag_hand("s01-h1")
@@ -631,9 +632,71 @@ def test_pool_keys_are_separated() -> None:
         store.update_hand(hand_1_2)
         store.update_hand(hand_5_10)
         keys = set(store.players)
-        check("芒果与西米" in keys, f"1/2 池应保留基础键：{keys}")
-        check(any("@5/10-9max" in k for k in keys),
-              f"5/10 池应分开存储：{keys}")
+        check("芒果与西米" in keys, f"跨池应保留裸名字键：{keys}")
+        check(not any("@" in key for key in keys),
+              f"不应再产生 name@pool 分区键：{keys}")
+        stats = store.players["芒果与西米"]
+        check(stats.hands == 2,
+              f"跨池两手应合并到同一玩家：hands={stats.hands}")
+
+
+def test_pool_suffix_keys_are_migrated_on_load() -> None:
+    """旧 profiles.json 里的 name@pool 键在 load 时折叠到裸名字。"""
+    from poker_ocr.opponent_profile import OpponentStats
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "p.json"
+        payload = {
+            "version": 1,
+            "pool_key": "0.5/1-9max",
+            "classifier_version": "test",
+            "players": {
+                "A": OpponentStats(key="A", hands=2).to_dict(),
+                "A@5/10-9max": OpponentStats(key="A@5/10-9max", hands=3).to_dict(),
+            },
+            "aliases": {},
+            "seat_keys": {},
+            "seen_hands": [],
+        }
+        path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        store = ProfileStore(path, "")
+        store.load()
+        check(set(store.players) == {"A"},
+              f"@pool 键应折叠：{list(store.players)}")
+        check(store.players["A"].hands == 5,
+              f"折叠后手数应相加：{store.players['A'].hands}")
+
+
+def test_stats_for_opponents_is_current_table_only() -> None:
+    """本手统计只取传入的对手，不把画像库里其他桌的人算进来。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        store = ProfileStore(Path(tmp) / "p.json", "")
+        store.update_hand(_lag_hand("s01-h1"))
+        # 另加一个完全不同桌的玩家，n 很大；不应进入本手聚合。
+        other = _lag_hand("s02-h1")
+        for player in other["seat_meta"]:
+            player["name"] = "别的桌玩家"
+        for street in other.get("streets", []):
+            for action in street.get("actions", []):
+                action["name"] = "别的桌玩家"
+        other["session"] = 2
+        other["uid"] = "s02-h1"
+        store.update_hand(other)
+
+        from poker_ocr.hand_track import OpponentSnapshot
+        opponents = [
+            OpponentSnapshot("a", "芒果与西米", "BTN", 100.0, 0.0, False),
+            OpponentSnapshot("b", "好运常在ok", "SB", 100.0, 0.0, False),
+        ]
+        stats = store.stats_for_opponents(opponents)
+        names = {raw.key for raw in stats}
+        check("别的桌玩家" not in names, f"不应混入别的桌：{names}")
+        pooled = store.pooled_for_stats(stats, total_players=6)
+        check(pooled.scope == "current_table", f"scope={pooled.scope}")
+        check(pooled.total_players == 6, f"total={pooled.total_players}")
+        check(pooled.players == len(stats), f"known={pooled.players}")
+        check(pooled.hands == max(int(raw.hands) for raw in stats),
+              f"hands 应取近似 max：{pooled.hands}")
 
 
 # ─────────────────────────── 建议集成 ───────────────────────────
@@ -726,6 +789,32 @@ def test_advice_records_read_snapshot() -> None:
           and snapshot[0]["seat_id"] == "midR"
           and snapshot[0]["n"] == 50 and snapshot[0]["source"] == "auto",
           f"快照字段应含 seat/type/n/source：{snapshot[0]}")
+    context = result.get("context") or {}
+    check(context.get("opponent_reads") == snapshot,
+          f"context 也应带画像快照（重跑要用）：{context}")
+
+
+def test_advice_context_records_current_table_stats() -> None:
+    from poker_ocr.opponent_profile import PooledStats
+
+    reads = (_read("midR", "芒果与西米", "maniac"),)
+    stats = PooledStats(hands=120, players=1, total_players=6,
+                        scope="current_table", approx_hands=True,
+                        vpip=55.0, pfr=25.0,
+                        opportunities={"threebet": 8.0})
+    sit = build_situation(_h8_point(), opponent_reads=reads,
+                          table_stats=stats, table_dynamics="现场观察")
+    result = advise(sit, None).to_dict()
+    context = result.get("context") or {}
+    check(context.get("table_stats_scope") == "current_table",
+          f"context 应记录桌况口径：{context}")
+    check(context.get("table_stats", {}).get("total_players") == 6,
+          f"context 应记录本手在局人数：{context.get('table_stats')}")
+    check(context.get("table_dynamics") == "现场观察"
+          and context.get("table_dynamics_sha"),
+          f"context 应记录桌风原文/摘要：{context}")
+    check(context.get("opponent_reads") == result.get("opponent_reads"),
+          f"context 与顶层 reads 应一致：{context}")
 
 
 def test_prompt_renders_opponent_reads() -> None:
@@ -1099,7 +1188,9 @@ def run() -> int:
         test_pin_beats_auto,
         test_small_sample_stays_unknown,
         test_temp_key_merged_when_name_recovered,
-        test_pool_keys_are_separated,
+        test_pool_keys_are_merged_globally,
+        test_pool_suffix_keys_are_migrated_on_load,
+        test_stats_for_opponents_is_current_table_only,
         test_advice_uses_per_opponent_read,
         test_advice_records_read_snapshot,
         test_prompt_renders_opponent_reads,

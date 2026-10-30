@@ -32,6 +32,8 @@ class FakeImportRepo:
         self.rows: dict[tuple[str, str], int] = {}
         self.upserts: list[tuple[str, str]] = []
         self.saved_rows: list[dict] = []
+        self.players: dict[int, list[dict]] = {}
+        self.advices: dict[int, list[dict]] = {}
 
     def fingerprint_map(self):
         return dict(self.rows)
@@ -45,6 +47,19 @@ class FakeImportRepo:
         hand_id = 1_000_000_000_000 + len(self.rows) + 1
         self.rows[key] = hand_id
         return hand_id, True
+
+    def replace_players(self, hand_id, roster):
+        self.players[int(hand_id)] = list(roster or [])
+        return len(roster or [])
+
+    def replace_live_advices(self, hand_id, advices, *, decision_ids=None):
+        self.advices[int(hand_id)] = list(advices or [])
+        return len(advices or [])
+
+
+class FakeDecisionRepo:
+    def persist(self, analysis):
+        return {}
 
 
 class FakeBatchRepo:
@@ -66,6 +81,7 @@ def make_service(review_rows=None, active_rows=None):
     service.hand_repo = FakeHandRepo(review_rows, active_rows)
     service.import_repo = FakeImportRepo()
     service.batch_repo = FakeBatchRepo()
+    service.decision_repo = FakeDecisionRepo()
     return service
 
 
@@ -259,6 +275,40 @@ def live_log_with_advice() -> str:
         "reason": "open for value", "source": "model",
     }
     return "\n".join(json.dumps(x) for x in [session_start, advice, hand])
+
+
+def test_ingest_v2_writes_roster_and_live_advice():
+    """结构化 ingest：保留 roster、advice.context，并按 uid 入库。"""
+    service = make_service()
+    records = [json.loads(line) for line in live_log_with_advice().splitlines()]
+    hand = next(r for r in records if r.get("type") == "hand")
+    hand.update({
+        "schema": "hand.v2",
+        "uid": "20261030-abc",
+        "table_roster": [
+            {"seat_id": "hero", "name": "hero", "position": "UTG+1",
+             "status": "playing", "in_hand": True},
+            {"seat_id": "topR", "name": "陈7程7", "position": "BTN",
+             "status": "folded", "in_hand": False},
+        ],
+        "advices": [{
+            "street": "preflop", "action_index": 2,
+            "option": {"id": "open-2.5", "label": "Raise to 2.5BB",
+                       "kind": "raise", "amount_bb": 2.5},
+            "reason": "open for value", "source": "model",
+            "context": {"table_stats": {"scope": "current_table"}},
+        }],
+    })
+    result = service.ingest_hands({"source": "live", "records": [hand]})
+    assert result["inserted"] == 1
+    assert result["received"] == 1
+    assert result["errors"] == 0
+    assert service.import_repo.upserts == [("live", "20261030-abc")]
+    hand_id = result["handIds"][0]
+    assert service.import_repo.players[hand_id][0]["is_hero"] is True
+    advice = service.import_repo.advices[hand_id][0]
+    assert advice["action_index"] == 2
+    assert advice["context"]["table_stats"]["scope"] == "current_table"
 
 
 def test_live_log_import_attaches_advices_to_hand():

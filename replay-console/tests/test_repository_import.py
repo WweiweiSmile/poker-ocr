@@ -55,7 +55,7 @@ def test_upsert_insert_binds_all_columns():
     assert hand_id == IMPORTED_HAND_ID_BASE + 2
     sql, params = db.calls[0]
     assert sql.lstrip().startswith("INSERT INTO replay_imported_hands")
-    assert sql.count("%s") == len(params) == 27
+    assert sql.count("%s") == len(params) == 31
 
 
 def test_upsert_existing_updates_in_place():
@@ -66,5 +66,5 @@ def test_upsert_existing_updates_in_place():
     assert hand_id == 42
     sql, params = db.calls[0]
     assert sql.lstrip().startswith("UPDATE replay_imported_hands")
-    assert sql.count("%s") == len(params) == 25
+    assert sql.count("%s") == len(params) == 29
     assert params[-2:] == (42, 0)

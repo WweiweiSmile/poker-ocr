@@ -55,6 +55,10 @@ class DecisionPoint:
     quality: str
     warnings: list[str] = field(default_factory=list)
     position_index: int = 0
+    # 线上建议上下文快照（table_stats/opponent_reads/table_dynamics）。
+    # runner 从 replay_live_advices 按 (street, action_index) 挂上来；
+    # 旧手牌没有快照时为空，重跑退回 none 模式。
+    context: dict = field(default_factory=dict)
 
     @property
     def identity(self) -> tuple[str, str, int]:

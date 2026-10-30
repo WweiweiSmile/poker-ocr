@@ -171,7 +171,8 @@ def _load_jsonl(path: Path) -> list[dict]:
 def _replay_jsonl(path: Path) -> list[dict]:
     """重放时保留每条 state 所属的 session，交给 replay_states。
 
-    这样跨 session 的手牌 id 不会串（hand_id 每次启动都从 h1 重新计数）。
+    这样跨 session 的手牌 id 不会串（旧日志的 hand_id 每次启动都从 h1
+    重新计数；新日志的 hand_id 已经是日期 + 名单摘要）。
     """
     records: list[dict] = []
     session = 0

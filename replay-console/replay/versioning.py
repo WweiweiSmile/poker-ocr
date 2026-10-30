@@ -107,6 +107,8 @@ def config_payload(
     reconstruct_version: str = CURRENT_RECONSTRUCT_VERSION,
     api_key_ref: str,
     dynamics_sha: str | None,
+    context_mode: str = "none",
+    table_stats_mode: str = "none",
 ) -> dict[str, Any]:
     return {
         "provider": (provider or "").strip().lower(),
@@ -123,6 +125,8 @@ def config_payload(
         "reconstruct_version": reconstruct_version,
         "api_key_ref": (api_key_ref or "").strip(),
         "table_dynamics_sha": dynamics_sha,
+        "context_mode": (context_mode or "none").strip().lower(),
+        "table_stats_mode": (table_stats_mode or "none").strip().lower(),
     }
 
 
@@ -261,6 +265,8 @@ def public_version(row: dict, *, has_key_value: bool | None = None,
         "tableDynamics": row.get("table_dynamics") or "",
         "tableDynamicsSha": row.get("table_dynamics_sha"),
         "tableDynamicsLength": len(row.get("table_dynamics") or ""),
+        "contextMode": row.get("context_mode") or "none",
+        "tableStatsMode": row.get("table_stats_mode") or "none",
         "configHash": row.get("config_hash"),
         "notes": row.get("notes") or "",
         "archived": bool(row.get("archived")),

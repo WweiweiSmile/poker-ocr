@@ -15,6 +15,7 @@ from poker_ocr.advice import (
     AIError, Advice, AISettings, PROMPT_VERSION, advise, audit_advice_tags,
     complete_json,
 )
+from poker_ocr.opponent_profile import OpponentRead, PooledStats
 
 from .decisions import DecisionPoint, call_amount, decision_facts
 from .util import cards_of
@@ -106,6 +107,56 @@ class UnitOutcome:
     model: str | None
 
 
+_STATS_FIELDS = (
+    "hands", "players", "vpip", "pfr", "threebet", "limp", "fold_to_cbet",
+    "stab", "cbet", "fold_to_bet_flop", "fold_to_bet_turn",
+    "fold_to_bet_river", "total_players", "scope", "approx_hands",
+)
+
+
+def reads_from_context(context: dict) -> tuple[OpponentRead, ...]:
+    """把线上 advice.context 里的 opponent_reads 还原成 OpponentRead。"""
+    out: list[OpponentRead] = []
+    for item in (context or {}).get("opponent_reads") or []:
+        if not isinstance(item, dict):
+            continue
+        try:
+            out.append(OpponentRead(
+                seat_id=item.get("seat_id"),
+                key=str(item.get("key") or ""),
+                display_name=item.get("display_name"),
+                archetype=str(item.get("archetype") or "unknown"),
+                confidence=float(item.get("confidence") or 0.0),
+                n=int(item.get("n") or 0),
+                vpip=float(item.get("vpip") or 0.0),
+                pfr=float(item.get("pfr") or 0.0),
+                af=float(item.get("af") or 0.0),
+                source=str(item.get("source") or "auto"),
+                note="replayed from live context",
+                gate=str(item.get("gate") or "unknown"),
+            ))
+        except (TypeError, ValueError):
+            continue
+    return tuple(out)
+
+
+def table_stats_from_context(context: dict) -> PooledStats | None:
+    """把线上 advice.context.table_stats 还原成 TableStats/PooledStats。"""
+    raw = (context or {}).get("table_stats")
+    if not isinstance(raw, dict):
+        return None
+    kwargs = {key: raw.get(key) for key in _STATS_FIELDS if key in raw}
+    kwargs["hands"] = int(kwargs.get("hands") or 0)
+    kwargs["players"] = int(kwargs.get("players") or 0)
+    opportunities = raw.get("opportunities")
+    kwargs["opportunities"] = (dict(opportunities)
+                               if isinstance(opportunities, dict) else {})
+    try:
+        return PooledStats(**kwargs)
+    except TypeError:
+        return None
+
+
 def execute_unit(
     *,
     decision: DecisionPoint,
@@ -125,9 +176,23 @@ def execute_unit(
     from poker_ocr.advice import build_situation
 
     # 旧 lean-rules / skills 版本只读，不再重跑（versioning.run_blockers 已拦）。
-    sit = build_situation(decision.snap,
-                          table_dynamics=version.get("table_dynamics") or "")
+    # context_mode=snapshot：用线上那一刻的 table_stats/opponent_reads；
+    # 否则保持旧行为（只注入 .table_dy 文本），作为 A/B 的基线。
+    context = decision.context or {}
+    context_mode = str(version.get("context_mode") or "none").lower()
+    reads = reads_from_context(context) if context_mode == "snapshot" else ()
+    stats_mode = str(version.get("table_stats_mode") or "none").lower()
+    table_stats = (table_stats_from_context(context)
+                   if stats_mode == "snapshot" else None)
+    sit = build_situation(
+        decision.snap,
+        table_dynamics=version.get("table_dynamics") or "",
+        opponent_reads=reads,
+        table_stats=table_stats,
+    )
     facts = decision_facts(sit)
+    facts["contextMode"] = context_mode
+    facts["tableStatsMode"] = stats_mode
     actual_tags = sorted(audit(sit, decision.actual, decision.actual_amount))
     facts["actualViolationTags"] = actual_tags
 

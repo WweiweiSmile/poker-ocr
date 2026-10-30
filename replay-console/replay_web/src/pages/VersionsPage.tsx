@@ -31,6 +31,8 @@ interface FormValues {
   promptStyle: 'lean'
   tableDynamicsMode: 'current' | 'text' | 'none' | 'keep'
   tableDynamicsText?: string
+  contextMode: 'none' | 'snapshot' | 'recompute'
+  tableStatsMode: 'none' | 'snapshot' | 'recompute'
   notes?: string
 }
 
@@ -105,6 +107,9 @@ export default function VersionsPage() {
       promptStyle: 'lean',
       tableDynamicsMode: 'current',
       tableDynamicsText: '',
+      // 新版本默认复现线上上下文；旧手牌没有快照时 engine 会退回 none。
+      contextMode: 'snapshot',
+      tableStatsMode: 'snapshot',
       notes: '',
     })
     setFormOpen(true)
@@ -126,6 +131,8 @@ export default function VersionsPage() {
       promptStyle: 'lean',
       tableDynamicsMode: 'keep',
       tableDynamicsText: version.tableDynamics,
+      contextMode: (version.contextMode as FormValues['contextMode']) || 'none',
+      tableStatsMode: (version.tableStatsMode as FormValues['tableStatsMode']) || 'none',
       notes: version.notes,
     })
     setFormOpen(true)
@@ -263,6 +270,8 @@ export default function VersionsPage() {
         <Descriptions.Item label="table_dynamics_sha" span={3}>
           <span className="mono">{version.tableDynamicsSha || '—'}</span>
         </Descriptions.Item>
+        <Descriptions.Item label="context_mode">{version.contextMode || 'none'}</Descriptions.Item>
+        <Descriptions.Item label="table_stats_mode">{version.tableStatsMode || 'none'}</Descriptions.Item>
         <Descriptions.Item label="备注" span={3}>{version.notes || '—'}</Descriptions.Item>
       </Descriptions>
       {version.tableDynamicsLength ? (
@@ -392,6 +401,25 @@ export default function VersionsPage() {
               <Input.TextArea autoSize={{ minRows: 5, maxRows: 10 }} placeholder="当前是新手局，桌上基本都是松弱玩家…" />
             </Form.Item>
           ) : null}
+          <Divider className="thin-divider" />
+          <div className="form-grid">
+            <Form.Item name="contextMode" label="对手画像上下文"
+              extra="snapshot：用线上 advice.context 里的 opponent_reads；none：不注入，作为 A/B 基线。recompute 暂未实现。">
+              <Select options={[
+                { value: 'none', label: 'none · 不注入' },
+                { value: 'snapshot', label: 'snapshot · 线上快照' },
+                { value: 'recompute', label: 'recompute · 暂未实现' },
+              ]} />
+            </Form.Item>
+            <Form.Item name="tableStatsMode" label="桌况统计上下文"
+              extra="snapshot：用线上当时的当前桌 table_stats；none：不注入。">
+              <Select options={[
+                { value: 'none', label: 'none · 不注入' },
+                { value: 'snapshot', label: 'snapshot · 线上快照' },
+                { value: 'recompute', label: 'recompute · 暂未实现' },
+              ]} />
+            </Form.Item>
+          </div>
           <Form.Item name="notes" label="备注">
             <Input.TextArea autoSize={{ minRows: 2, maxRows: 4 }} placeholder="为什么建这个版本 / 想验证什么" />
           </Form.Item>

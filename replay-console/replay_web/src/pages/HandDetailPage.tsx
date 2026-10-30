@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import {
-  Alert, App, Button, Card, Divider, Empty, Input, Popover, Select,
+  Alert, App, Button, Card, Divider, Empty, Input, Modal, Popover, Select,
   Skeleton, Space, Spin, Switch, Tag, Tooltip,
 } from 'antd'
 import {
@@ -11,8 +11,8 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate, useParams } from 'react-router-dom'
 import { api, errorMessage } from '../api'
 import type {
-  ComparisonDecision, HandComparison, HandDeleteResult, HandDetail, Meta,
-  Version, VersionBlock,
+  ComparisonDecision, DecisionMeta, HandAdvice, HandComparison,
+  HandDeleteResult, HandDetail, Meta, Version, VersionBlock,
 } from '../types'
 import {
   BoardCards, BucketTag, HandCards, QualityBadge, SourceTag,
@@ -157,7 +157,14 @@ function VersionRow({ block, decision }: { block: VersionBlock; decision: Compar
   )
 }
 
-function DecisionCard({ decision }: { decision: ComparisonDecision }) {
+const REVIEW_LABELS: Record<string, string> = {
+  good: '好决策', bad: '坏决策', unsure: '待定',
+}
+
+function DecisionCard({ decision, onReview }: {
+  decision: ComparisonDecision
+  onReview: (decision: DecisionMeta) => void
+}) {
   const d = decision.decision
   const facts = decision.versions.find((v) => v.summary.facts)?.summary.facts || decision.previewFacts
   const warnings = d.warnings || []
@@ -179,6 +186,18 @@ function DecisionCard({ decision }: { decision: ComparisonDecision }) {
           <span>需跟 <b>{formatAmount(d.callAmount ?? d.toCall)}</b> BB</span>
           <span>筹码 <b>{formatAmount(d.heroStack)}</b> BB</span>
           <span>{d.opponents} 个对手</span>
+        </div>
+        <div className="decision-review">
+          {d.review ? (
+            <Tag color={d.review.verdict === 'good' ? 'green'
+              : d.review.verdict === 'bad' ? 'red' : 'default'}
+              className="mini-tag">
+              复盘 {REVIEW_LABELS[d.review.verdict] || d.review.verdict}
+            </Tag>
+          ) : <Tag className="mini-tag">未复盘</Tag>}
+          <Button size="small" disabled={!d.id} onClick={() => onReview(d)}>
+            复盘
+          </Button>
         </div>
       </div>
 
@@ -207,6 +226,52 @@ function DecisionCard({ decision }: { decision: ComparisonDecision }) {
   )
 }
 
+function AdviceContext({ advice }: { advice: HandAdvice }) {
+  const context = advice.context
+  if (!context) return null
+  const stats = context.table_stats || {}
+  const reads = context.opponent_reads || []
+  const statItems: [string, unknown][] = [
+    ['口径', context.table_stats_scope],
+    ['在局', stats.total_players],
+    ['有画像', stats.players],
+    ['样本', stats.hands],
+    ['VPIP', stats.vpip],
+    ['PFR', stats.pfr],
+    ['3-bet', stats.threebet],
+    ['对 c-bet 弃', stats.fold_to_cbet],
+  ]
+  return (
+    <details className="advice-context">
+      <summary>桌况 / 对手快照</summary>
+      <div className="advice-context-body">
+        <div className="advice-context-row">
+          <span className="fact-label">桌况</span>
+          {statItems.filter(([, value]) => value !== null && value !== undefined && value !== '')
+            .map(([label, value]) => (
+              <Tag className="mini-tag" key={label}>{label} {String(value)}</Tag>
+            ))}
+          {!Object.keys(stats).length ? <span className="muted">没有 table_stats</span> : null}
+        </div>
+        {reads.length ? (
+          <div className="advice-context-row">
+            <span className="fact-label">对手</span>
+            {reads.map((read) => (
+              <Tag className="mini-tag" key={`${read.seat_id}-${read.key}`}>
+                {read.display_name || read.key || read.seat_id} {read.archetype || 'unknown'}
+                {read.n !== undefined ? ` · n=${read.n}` : ''}
+              </Tag>
+            ))}
+          </div>
+        ) : null}
+        {context.table_dynamics ? (
+          <div className="advice-context-dynamics">{context.table_dynamics}</div>
+        ) : null}
+      </div>
+    </details>
+  )
+}
+
 export default function HandDetailPage() {
   const { handId } = useParams()
   const navigate = useNavigate()
@@ -220,6 +285,10 @@ export default function HandDetailPage() {
   const [tags, setTags] = useState<string[]>([])
   const [status, setStatus] = useState<'todo' | 'confirmed' | 'disputed'>('todo')
   const [note, setNote] = useState('')
+  const [reviewTarget, setReviewTarget] = useState<DecisionMeta | null>(null)
+  const [reviewVerdict, setReviewVerdict] = useState<'good' | 'bad' | 'unsure'>('unsure')
+  const [reviewTags, setReviewTags] = useState<string[]>([])
+  const [reviewNote, setReviewNote] = useState('')
 
   const detail = useQuery<HandDetail>({
     queryKey: ['hand', id],
@@ -257,6 +326,26 @@ export default function HandDetailPage() {
     const active = versions.data.items.filter((v) => !v.archived && v.runnable).map((v) => v.id)
     setSelectedVersions(active.slice(0, 4))
   }, [detail.data?.hand.id, versions.data])
+
+  const reviewMutation = useMutation({
+    mutationFn: () => api.patch(`/decisions/${reviewTarget?.id}/mark`, {
+      verdict: reviewVerdict, tags: reviewTags, note: reviewNote,
+    }),
+    onSuccess: () => {
+      message.success('决策复盘已保存')
+      setReviewTarget(null)
+      queryClient.invalidateQueries({ queryKey: ['hand', id] })
+      queryClient.invalidateQueries({ queryKey: ['experiments'] })
+    },
+    onError: (error) => message.error(errorMessage(error)),
+  })
+
+  const openReview = (decision: DecisionMeta) => {
+    setReviewTarget(decision)
+    setReviewVerdict((decision.review?.verdict as typeof reviewVerdict) || 'unsure')
+    setReviewTags(decision.review?.tags || [])
+    setReviewNote(decision.review?.note || '')
+  }
 
   const saveMark = useMutation({
     mutationFn: () => api.patch(`/hands/${id}/mark`, {
@@ -523,9 +612,15 @@ export default function HandDetailPage() {
                   ) : null}
                   {advice.model ? <Tag className="mini-tag">{advice.model}</Tag> : null}
                   {advice.source ? <Tag className="mini-tag">{advice.source}</Tag> : null}
+                  {advice.promptVersion ? <Tag className="mini-tag">{advice.promptVersion}</Tag> : null}
+                  {advice.actionIndex !== null && advice.actionIndex !== undefined ? (
+                    <Tag className="mini-tag">动作 #{advice.actionIndex}</Tag>
+                  ) : null}
+                  {advice.bucket ? <BucketTag bucket={advice.bucket} /> : null}
                 </div>
                 {advice.reason ? <div className="advice-reason">{advice.reason}</div> : null}
                 {advice.plan ? <div className="advice-plan">计划：{advice.plan}</div> : null}
+                <AdviceContext advice={advice} />
               </div>
             ))}
           </div>
@@ -564,7 +659,11 @@ export default function HandDetailPage() {
 
       <div className="decision-list">
         {filteredBlocks.length ? filteredBlocks.map((decision) => (
-          <DecisionCard key={`${decision.decision.street}-${decision.decision.seq}`} decision={decision} />
+          <DecisionCard
+            key={`${decision.decision.street}-${decision.decision.seq}`}
+            decision={decision}
+            onReview={openReview}
+          />
         )) : (
           <Empty
             description={onlyDiverged ? '当前版本之间没有分歧' : '还没有可展示的决策点'}
@@ -572,6 +671,50 @@ export default function HandDetailPage() {
           />
         )}
       </div>
+
+      <Modal
+        open={reviewTarget !== null}
+        title={reviewTarget ? `复盘 D${reviewTarget.seq + 1} · ${STREET_NAMES[reviewTarget.street] || reviewTarget.street}` : '复盘'}
+        okText="保存"
+        cancelText="取消"
+        onCancel={() => setReviewTarget(null)}
+        onOk={() => reviewMutation.mutate()}
+        confirmLoading={reviewMutation.isPending}
+      >
+        <div className="mark-row">
+          <label>结论</label>
+          <Select
+            value={reviewVerdict}
+            onChange={(value) => setReviewVerdict(value)}
+            options={[
+              { value: 'good', label: '好决策' },
+              { value: 'bad', label: '坏决策' },
+              { value: 'unsure', label: '待定' },
+            ]}
+            style={{ width: '100%' }}
+          />
+        </div>
+        <div className="mark-row">
+          <label>标签</label>
+          <Select
+            mode="tags"
+            value={reviewTags}
+            onChange={setReviewTags}
+            placeholder="例如：河牌薄价值 / 弃牌过紧 / 尺寸"
+            options={['河牌薄价值', '弃牌过紧', '尺寸', '读人', '范围'].map((tag) => ({ value: tag, label: tag }))}
+            style={{ width: '100%' }}
+          />
+        </div>
+        <div className="mark-row">
+          <label>备注</label>
+          <Input.TextArea
+            value={reviewNote}
+            onChange={(event) => setReviewNote(event.target.value)}
+            autoSize={{ minRows: 3, maxRows: 6 }}
+            placeholder="当时应该怎么打，为什么"
+          />
+        </div>
+      </Modal>
 
       <RunModal
         open={rerunOpen}

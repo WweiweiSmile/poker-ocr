@@ -18,8 +18,8 @@
 每条记录原样保留，只追加两个字段：
 
   · `session`：第几个 `session_start`（1 起；日志里没有 session_start 时为 0）
-  · `uid`：`s{session:02d}-{hand_id}`。`hand_id` 每次启动都从 h1 重新计数，
-    `uid` 才是跨会话唯一的，适合当字典键。
+  · `uid`：`s{session:02d}-{hand_id}`。`hand_id` 现在是「日期 + 名单摘要」，
+    跨会话通常已经唯一；再加 session 前缀是为了兼容旧日志/极端碰撞。
 
 输出是 JSON 数组（不是 JSONL），保留原字段与原顺序。没有 hand 记录时输出 `[]`。
 注意：`--no-ai-advice` 时不会写 hand 记录，这个脚本自然也只能得到空数组。
@@ -127,7 +127,10 @@ def load_hands(path: Path, *, include_partial: bool = False,
 
             hand = dict(record)
             hand["session"] = session
-            hand["uid"] = f"s{session:02d}-{record.get('hand_id') or '?'}"
+            # 新日志已经带全局唯一的 uid（= hand_id）；旧日志没有 uid，
+            # 才补 session 前缀，避免跨会话 h1 重复。
+            hand["uid"] = (str(record.get("uid") or "").strip()
+                           or f"s{session:02d}-{record.get('hand_id') or '?'}")
             hands.append(hand)
             stats["kept"] += 1
             if _hero_card_count(record) != 2:

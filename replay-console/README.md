@@ -258,6 +258,75 @@ curl -s http://127.0.0.1:8010/api/hands/import \
 
 详细字段映射与样例见 [`docs/导入手牌-格式说明.md`](docs/导入手牌-格式说明.md)。
 
+### 5.1.1 实时 outbox 自动入库
+
+live 默认把**已结束**手牌写进 `data/hand_outbox/pending/`（一手一个 JSON，
+原子写；`--no-hand-outbox` 关闭）。手牌库在线时用工具同步：
+
+```bash
+.venv/bin/python tools/sync_hand_outbox.py \
+  --url http://127.0.0.1:8010 --token "$REPLAY_TOKEN"
+```
+
+它优先调用 `POST /api/hands/ingest`（结构化，直接吃 `HandRecord v2`），
+旧服务端 404 时自动回退到 `/api/hands/import`。成功才移到 `sent/`；失败留在
+`pending/` 并记次数，达到 `--max-failures` 后进 `failed/`，可 `--retry-failed`。
+
+结构化 ingest 会额外写三张表：
+
+| 表 | 内容 |
+| --- | --- |
+| `replay_hand_players` | 每手每个座位的 `player_key/name/position/is_hero`，支持按玩家检索 |
+| `replay_live_advices` | 线上实际给出的建议 + `action_index` + `context_json`（桌况/画像快照）+ 实际动作/bucket |
+| `replay_decision_marks` | 逐决策点 `good/bad/unsure` + 标签 + 备注（复盘用） |
+
+幂等键是 `(user_id, source, external_uid)`；补了 advice/context 不会重复入库。
+版本新增 `contextMode` / `tableStatsMode`（`none/snapshot/recompute`）：
+`snapshot` 时重跑会注入 **线上那一刻** 的 `opponent_reads` / `table_stats`，
+A/B 才是同一上下文；`none` 保持旧行为，可做「有画像 vs 无画像」的对照。
+
+### 5.1.2 离线 A/B（后端）
+
+实验 = 冻结手牌集 + baseline/variant 两个版本 + dev/holdout 切分。切分按
+`sha256(实验名:hand_fingerprint)` 落在**手牌级**，同一手的翻前/翻后不会分到
+两边；两边至少各有一手。创建时冻结 `hand_id + fingerprint`，跑完不漂移。
+
+```bash
+# 1) 创建（scope=hands 或 filter）
+curl -s http://127.0.0.1:8010/api/experiments -H 'Content-Type: application/json' -d '{
+  "name":"ctx-snapshot-vs-none",
+  "hypothesis":"注入当前桌统计能提高一致率",
+  "baselineVersionId":1,
+  "variantVersionId":2,
+  "scope":"filter",
+  "filter":{"source":"live"},
+  "devRatio":0.7,
+  "repeat":3
+}'
+
+# 2) 跑（生成普通 replay_job，带 experiment_id）
+curl -s -X POST http://127.0.0.1:8010/api/experiments/1/run   -H 'Content-Type: application/json' -d '{"confirmLarge":true}'
+
+# 3) 看结果（可加 ?split=dev 只看开发集）
+curl -s 'http://127.0.0.1:8010/api/experiments/1/results?split=dev'
+```
+
+结果按版本返回 `n`、`bucket`（一致/尺度差/动作不同/error）、`source`、
+`violations`、`agreement`，以及人工复盘 `review`（good/bad/unsure）。
+逐决策点标记：
+
+```bash
+curl -s -X PATCH http://127.0.0.1:8010/api/decisions/123/mark   -H 'Content-Type: application/json'   -d '{"verdict":"bad","tags":["河牌薄价值"],"note":"对手是跟注站"}'
+```
+
+前端入口：左侧 **A/B 实验** → 新建（选 baseline/variant、来源、dev 比例、重复次数）
+→ 运行 → 按 dev/holdout 看每版本 `n/agreement/bucket/违规`；手牌详情每个决策点
+右侧 **复盘** 可记 `good/bad/unsure` + 标签 + 备注，A/B 结果页会汇总 review。
+版本管理里新增 `contextMode` / `tableStatsMode` 两个下拉，新版本默认 `snapshot`。
+
+**口径提醒**：`agreement` 只是「与人类实际动作一致」，不是正确率；结论要结合
+人工 review、violation 和样本数（n<30 手不要写显著）。
+
 ### 5.2 删除手牌
 
 入口：列表行内「删除」、勾选底部「删除选中」、详情页「删除这手」。

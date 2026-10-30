@@ -2805,17 +2805,30 @@ def test_short_stack_prompt_dedupes_capped_options() -> None:
     check(len(lines) == 1, f"封顶档位应只显示一个：{lines}")
 
 
-def test_table_stats_label_marks_pool_scope() -> None:
-    """全场数据实际是画像库跨桌统计，标题要写清楚。"""
+def test_table_stats_label_marks_current_table_scope() -> None:
+    """当前桌统计要标明「本手在局」，不能再说「可能跨桌」。"""
     from poker_ocr.opponent_profile import PooledStats
 
-    stats = PooledStats(hands=294, players=30, vpip=38.0, pfr=12.0,
-                        threebet=5.9, limp=46.0, fold_to_cbet=79.0, stab=5.0)
+    stats = PooledStats(hands=294, players=4, total_players=6,
+                        scope="current_table", approx_hands=True,
+                        vpip=38.0, pfr=12.0, threebet=5.9, limp=46.0,
+                        fold_to_cbet=79.0, stab=5.0)
     sit = build_situation(make_point(to_call=4.0, pot=10.0, hero_stack=90.0),
                           table_stats=stats)
     _, user = build_messages(sit)
-    check("画像库" in user and "可能跨桌" in user,
-          f"全场数据应标明画像库口径：\n{user}")
+    check("当前牌桌数据" in user and "本手在局 6 人" in user,
+          f"应标明当前桌口径：\n{user}")
+    check("4 人有画像" in user, f"应给出画像覆盖：\n{user}")
+    check("可能跨桌" not in user and "画像库" not in user,
+          f"不应再出现跨桌免责：\n{user}")
+
+    prior = PooledStats(hands=294, players=30, vpip=38.0, pfr=12.0,
+                        threebet=5.9, limp=46.0, fold_to_cbet=79.0, stab=5.0)
+    _, prior_user = build_messages(build_situation(
+        make_point(to_call=4.0, pot=10.0, hero_stack=90.0),
+        table_stats=prior))
+    check("全场先验" in prior_user and "非本桌" in prior_user,
+          f"冷启动先验要标明不是本桌：\n{prior_user}")
 
 
 def test_system_ante_module_is_conditional() -> None:
