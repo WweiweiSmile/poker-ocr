@@ -60,7 +60,7 @@ HERO_ACTOR = "hero"
 
 # 当前唯一的中文 lean 提示词版本。写入 session_start / advice JSONL，
 # 复盘归因用；改动 system 或事实块时 bump。
-PROMPT_VERSION = "lean-zh-2026-10-30.9"
+PROMPT_VERSION = "lean-zh-2026-10-30.10"
 PROMPT_LANGUAGE = "zh"
 
 # 加注尺度：名字 → 底池倍数。「满池 1.2」是超池，用于需要施压/劝退的场合
@@ -830,7 +830,9 @@ class Situation:
     # None = 翻前/牌面不足/没有可确认的对手范围。
     hand_ranges: "object | None" = None
     # 牌力解析结论：把 hand_ranges 的 behind_any / equity 翻译成
-    # 「大/中/小 + 程度 + 价值/听牌」的一行事实。None = 无 hand_ranges。
+    # 「大/中/小 + 程度 + 价值/听牌」。**只服务离线审计**：live 的
+    # build_situation(include_strength=False) 不计算它，prompt 也不再渲染。
+    # None = 未计算或没有 hand_ranges。
     hand_strength: "object | None" = None
 
     @property
@@ -879,12 +881,14 @@ def build_situation(snap: HandSnapshot,
                     opponent_reads: Iterable[OpponentRead] | None = None,
                     table_stats: "PooledStats | None" = None,
                     previous: "Advice | None" = None,
-                    include_advanced: bool = False
+                    include_advanced: bool = False,
+                    include_strength: bool = True
                     ) -> Situation:
     """把快照整理成一次决策的事实。
 
     `include_advanced=True` 才计算 GTO 近似表与 board equity（离线审计/实验
-    用）；实时 lean 只需要 hand_ranges / hand_strength 这些进入中文事实块的数据。
+    用）。`include_strength=False` 时跳过 hand_strength：实时链路不再需要
+    第 4 套牌力口径，离线审计在需要时自己懒计算。
     `table_dynamics` 是根目录 `.table_dy` 的解析文本（见 table_dynamics.py）。
     由调用方显式传入，而不是在这里读文件：单测和离线重放不会因为仓库里恰好
     有一份动态文件而改变结果。
@@ -1030,12 +1034,15 @@ def build_situation(snap: HandSnapshot,
             pass
     # 牌力解析：在 hand_ranges 之上再加一层纯判定，输出一行 Hand-strength read。
     # 依赖 hand_ranges；缺失时静默跳过，绝不猜。任何异常 fail open。
-    try:
-        from . import hand_strength
-        if hand_strength.enabled():
-            sit = replace(sit, hand_strength=hand_strength.compute_hand_strength(sit))
-    except Exception:  # noqa: BLE001
-        pass
+    # live 传 include_strength=False：这个结论只服务离线审计，不进 prompt。
+    if include_strength:
+        try:
+            from . import hand_strength
+            if hand_strength.enabled():
+                sit = replace(sit,
+                              hand_strength=hand_strength.compute_hand_strength(sit))
+        except Exception:  # noqa: BLE001
+            pass
     return sit
 
 
@@ -1987,6 +1994,14 @@ def audit_advice_tags(sit: Situation, kind: str | None,
     tier = sit.hand_tier
     gt = sit.ground_truth
     hs = sit.hand_strength
+    if hs is None and sit.hand_ranges is not None:
+        # live 不再预计算 hand_strength；离线审计需要 kind/size 时这里懒计算。
+        try:
+            from . import hand_strength
+            if hand_strength.enabled():
+                hs = hand_strength.compute_hand_strength(sit)
+        except Exception:  # noqa: BLE001 — 审计不能拖垮主流程
+            hs = None
     hs_kind = getattr(hs, "kind", None)
     hs_size = getattr(hs, "size", None)
     multiway = (sit.opponents_in_hand or 0) >= 3
@@ -2112,13 +2127,6 @@ _PREFLOP_SHAPE_ZH = {
     "limped": "溜入",
     "single-raise": "单加注",
     "three-bet": "3-bet",
-}
-_SIZE_ZH_LABEL = {
-    "very_big": "很大",
-    "big": "大",
-    "medium": "中",
-    "small": "小",
-    "very_small": "很小",
 }
 _SUIT_ZH = {"s": "黑桃", "h": "红桃", "d": "方块", "c": "梅花"}
 _RANK_ZH = {"T": "10", "J": "J", "Q": "Q", "K": "K", "A": "A"}
@@ -2474,7 +2482,6 @@ def render_hand_strength_zh(sit: Situation) -> list[str]:
     lines = ["## 实时牌力"]
     tier = sit.hand_tier
     is_draw = tier in (STRONG_DRAW, WEAK_DRAW)
-    hs = sit.hand_strength
 
     if is_draw:
         kind = "强听牌" if tier == STRONG_DRAW else "弱听牌"
@@ -2486,12 +2493,9 @@ def render_hand_strength_zh(sit: Situation) -> list[str]:
     elif tier == "空气":
         lines.append("牌力：空气（无成牌、无听牌）")
     elif sit.hand_label:
-        size = _SIZE_ZH_LABEL.get(getattr(hs, "size", ""), "")
-        nuts = sit.ground_truth is not None and sit.ground_truth.hero_is_nuts
-        if nuts:
-            size = "坚果级"
-        label = f"{size}（{sit.hand_label}）" if size else sit.hand_label
-        lines.append(f"牌力：{label}")
+        # 只给牌型标签；「大 / 中 / 小」是 hand_strength 的第 4 套口径，
+        # 已经由 hand_tier / ground_truth / hand_ranges 的数字覆盖，不再重复。
+        lines.append(f"牌力：{sit.hand_label}")
 
     gt = sit.ground_truth
     if gt is not None:

@@ -101,7 +101,7 @@ ROI 识别座位、筹码、下注、动作、庄位、底池和盲注，输出�
 ### AI 实时建议（默认开启）
 
 worker 在**轮到我**时把这一手的完整行动线交给模型（`--no-ai-advice` 可关闭）。
-现在只有一套**中文 lean** 提示词（`advice.PROMPT_VERSION = lean-zh-2026-10-30.9`）：
+现在只有一套**中文 lean** 提示词（`advice.PROMPT_VERSION = lean-zh-2026-10-30.10`）：
 
 - system：输出契约（含 `call`=过牌、`raise-*`=下注的 id 映射）、五级事实优先级、
   翻前/翻后/听牌/多人池/河牌决策顺序、指标口径、筹码深度；不写“永远/绝不”。
@@ -114,10 +114,11 @@ worker 在**轮到我**时把这一手的完整行动线交给模型（`--no-ai-
   上一街 plan、GTO、board equity、技能库。旧 `lean-rules` / `skills` 与
   `--advice-style` 已从 live 链路删除。
 
-实时牌力仍由 `ground_truth.py` / `hand_ranges.py` / `hand_strength.py` 计算，但
-以中文事实呈现：当前牌型、最好五张、坚果（注明“指当前成牌”）、能打败你的牌型、
-听牌 outs、补牌成牌率（四二法则，到河牌）、对范围权益、当前成牌落后至少一家、
-多人池实际/建模人数、范围宽度（不暴露内部 range id / combo 数）。
+实时牌力仍由 `ground_truth.py` / `hand_ranges.py` 计算，以中文事实呈现：
+当前牌型、最好五张、坚果（注明“指当前成牌”）、能打败你的牌型、听牌 outs、
+补牌成牌率（四二法则，到河牌）、对范围权益、当前成牌落后至少一家、多人池
+实际/建模人数、范围宽度（不暴露内部 range id / combo 数）。`hand_strength.py`
+的「大/中/小」不再进入 live prompt，只服务离线 `audit_advice_tags`（需要时懒计算）。
 听牌不再被标成 `VERY SMALL`，也不再用 `NUT STATUS: NOT THE NUTS` 单独否决半诈唬。
 数据质量只保留 1–4 条中文摘要：逐座位 `range unknown` 合并成一句，技术英文告警
 不再逐行塞进 prompt。

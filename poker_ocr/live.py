@@ -1355,7 +1355,8 @@ class LiveProcessor:
                     situation = build_situation(
                         point, table_dynamics=dynamics,
                         opponent_reads=reads.values(),
-                        table_stats=table_stats)
+                        table_stats=table_stats,
+                        include_strength=False)
                 except Exception as exc:      # noqa: BLE001
                     self.log(f"  [建议] 局面构建失败：{type(exc).__name__}: {exc}")
                     return

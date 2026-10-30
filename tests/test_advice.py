@@ -23,7 +23,8 @@ import poker_ocr.advice as advice_mod  # noqa: E402
 from poker_ocr.advice import (  # noqa: E402
     AISettings, AIError, AdviceRunner, EXPLOSIVE_POT_BB_PER_PLAYER, OPTION_ORDER,
     _canonical_choice,
-    advise, build_messages, build_options, build_situation, call_amount,
+    advise, audit_advice_tags, build_messages, build_options,
+    build_situation, call_amount,
     complete_json, is_explosive_pot, math_gate, parse_json_content,
     pot_per_player,
     preset_amounts, preset_targets, previous_street_pot, render_facts_zh,
@@ -1839,6 +1840,29 @@ def test_hand_strength_read_line() -> None:
     check(text.index("## 实时牌力") < text.index("对范围权益："),
           "对范围权益必须在实时牌力段内")
     check("当前成牌落后至少一家：" in text, "应有当前成牌落后比例")
+
+
+def test_live_situation_skips_hand_strength() -> None:
+    """live 不再预计算第 4 套牌力口径；prompt 只留牌型标签。"""
+    point = make_point(hero_cards=("Ah", "Qh"), board=("As", "Ks", "4d"))
+    live = build_situation(point, include_strength=False)
+    check(live.hand_strength is None,
+          f"include_strength=False 时不该计算：{live.hand_strength}")
+    text = render_facts_zh(live)
+    check("牌力：顶对Q踢" in text, f"应保留牌型标签：\n{text}")
+    check("牌力：大" not in text and "牌力：中" not in text,
+          f"prompt 不该再出现大/中/小：\n{text}")
+
+    offline = build_situation(point)
+    check(offline.hand_strength is not None,
+          "默认仍应计算 hand_strength 供离线审计")
+
+    # 离线审计按需懒计算：live 构建的 Situation 也能产出同样的标签。
+    air = build_situation(
+        make_point(hero_cards=("3c", "4c"), board=("Ks", "7d", "2c")),
+        include_strength=False)
+    check("非价值下注" in audit_advice_tags(air, "bet", 3.0),
+          f"懒计算后审计仍应标非价值下注：{air.hand_strength}")
 
 
 def test_hand_strength_absent_without_range() -> None:
