@@ -55,6 +55,10 @@ MIN_OPPS = {
     "check_raise": TENDENCY_MIN_OPPS["check_raise"],
     "fold_to_bet": 10.0,
     "showdown": 5.0,
+    "limp": 8.0,
+    "fold_to_cbet": 8.0,
+    "fold_to_barrel": 5.0,
+    "delay_cbet": 5.0,
 }
 
 COLUMNS = [
@@ -74,9 +78,14 @@ COLUMNS = [
     ("续打", "barrel"),
     ("被过牌后下注", "stab"),
     ("过牌-加注", "check_raise"),
-    ("面对下注弃牌", "fold_to_bet"),
+    ("弃 vs 跟", "fold_to_bet"),
     ("开池中位", "open_median"),
     ("下注中位", "bet_median"),
+    ("溜入", "limp"),
+    ("对c-bet弃", "fold_to_cbet"),
+    ("跟c-bet", "call_to_cbet"),
+    ("转牌再弃", "fold_to_barrel"),
+    ("延迟c-bet", "delay_cbet"),
     ("摊牌", "showdowns"),
     ("弱摊牌", "weak_showdown"),
     ("炸弹池", "bomb"),
@@ -157,10 +166,19 @@ def row_of(name: str, raw: dict, *, pool: str = "") -> dict:
         "stab": _ratio(_num(raw, "stabs"), _num(raw, "stab_opp")),
         "check_raise": _ratio(_num(raw, "check_raises"),
                               _num(raw, "check_raise_opp")),
-        "fold_to_bet": _ratio(_num(raw, "folds"), facing),
+        # 只用「弃 + 跟」做分母：facing_bets 会因为部分下注动作没被记录而
+        # 偏小，出现过 folds > facing_bets 的不可能比值。弃/跟比不依赖那个
+        # 分母，读数稳定。
+        "fold_to_bet": _ratio(_num(raw, "folds"),
+                              _num(raw, "folds") + _num(raw, "calls")),
         "open_median": _median(raw.get("open_sizes") or []),
         "bet_median": _median(raw.get("bet_sizes") or []),
         "showdowns": int(showdowns),
+        "limp": _ratio(_num(raw, "limped"), _num(raw, "limp_opp")),
+        "fold_to_cbet": _ratio(_num(raw, "ftc_fold"), _num(raw, "ftc_opp")),
+        "call_to_cbet": _ratio(_num(raw, "ftc_call"), _num(raw, "ftc_opp")),
+        "fold_to_barrel": _ratio(_num(raw, "ftb_fold"), _num(raw, "ftb_opp")),
+        "delay_cbet": _ratio(_num(raw, "dcb"), _num(raw, "dcb_opp")),
         "weak_showdown": _ratio(_num(raw, "weak_aggressive_showdowns"),
                                 aggressive),
         "bomb": int(_num(raw, "bomb_pot_hands")),
@@ -193,6 +211,9 @@ _KIND = {
     "cbet": "cbet", "barrel": "barrel", "stab": "stab",
     "check_raise": "check_raise", "fold_to_bet": "fold_to_bet",
     "weak_showdown": "showdown",
+    "limp": "limp", "fold_to_cbet": "fold_to_cbet",
+    "call_to_cbet": "fold_to_cbet", "fold_to_barrel": "fold_to_barrel",
+    "delay_cbet": "delay_cbet",
 }
 
 
@@ -201,7 +222,8 @@ def render_markdown(rows: list[dict]) -> str:
     base_cols = ["玩家", "类型", "n", "VPIP", "PFR", "3bet", "AF",
                  "开池EP", "开池MP", "开池LP", "开池盲"]
     line_cols = ["玩家", "c-bet", "续打", "被过牌后下注", "过牌-加注",
-                 "面对下注弃牌", "开池中位", "下注中位", "摊牌", "弱摊牌",
+                 "溜入", "对c-bet弃", "跟c-bet", "转牌再弃", "延迟c-bet",
+                 "弃 vs 跟", "开池中位", "下注中位", "摊牌", "弱摊牌",
                  "炸弹池"]
     reverse = {label: key for label, key in COLUMNS}
 

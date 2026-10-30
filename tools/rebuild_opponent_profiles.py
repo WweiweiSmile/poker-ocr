@@ -191,8 +191,24 @@ def _replay_jsonl(path: Path) -> list[dict]:
                 records.append({**record, "_session": session or 1})
             elif kind == "hand":
                 records.append({**record, "_session": session or 1})
-    # replay_states 自己读文件；这里把它写成一个临时文件不划算。直接内联调用
-    # 一个接收 records 的版本：把 records 暂存到模块级参数里最省事。
+    # 日志里已经带落库的成品手牌时，**直接用**，不要拿 state 帧重放。
+    #
+    # 重放版只有实时链路当场看到的动作；成品在街末做过底池对账，补过跟注和
+    # 加注。用重放版会让依赖完整行动线的统计系统性偏低（实测 fold-to-cbet
+    # 的机会数 24 → 16，摊牌与跟注整段丢失）。
+    stored = [r for r in records if r.get("type") == "hand"]
+    if stored:
+        out: list[dict] = []
+        for record in stored:
+            hand = dict(record)
+            sid = int(hand.get("_session") or 1)
+            hand["session"] = sid
+            hand["uid"] = (f"state:{path.name}:s{sid:02d}-"
+                           f"{hand.get('hand_id')}")
+            out.append(hand)
+        return out
+
+    # 只有 state 帧的旧日志：退回重放。
     return _replay_records(records, path)
 
 
@@ -215,9 +231,13 @@ def _replay_records(records: list[dict], path: Path) -> list[dict]:
         hid = str(hand.get("hand_id") or "")
         matching = original.get((current_session, hid))
         if matching:
-            for key in ("shows", "all_ins"):
-                if matching.get(key) and not hand.get(key):
-                    hand[key] = matching[key]
+            # 落库的手牌记录是**成品**：动作线已经在街末对账时补全过，而重放
+            # 出来的版本只有实时链路当场看到的那几条动作。用重放版会让依赖
+            # 完整行动线的统计系统性偏低 —— 实测 fold-to-cbet 的 24 次机会
+            # 被压成 8 次，摊牌/跟注整段丢失。优先用成品，只把 uid 换成本次
+            # 重建的前缀。
+            hand = dict(matching)
+            hand["session"] = current_session
         hand["uid"] = f"{prefix}:s{current_session:02d}-{hid}"
         hands.append(hand)
 

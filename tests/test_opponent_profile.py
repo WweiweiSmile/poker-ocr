@@ -875,6 +875,55 @@ def test_street_actions_are_reordered_chronologically() -> None:
           f"check-raise 顺序错：{got}")
 
 
+def test_limp_and_cbet_defence_observations() -> None:
+    """溜入、面对 c-bet 的三拆、延迟 c-bet 要能从行动线里拆出来。"""
+    seats = [
+        {"seat_id": "hero", "name": "我", "position": "BB", "stack": 100.0},
+        {"seat_id": "a", "name": "开池者", "position": "SB", "stack": 100.0},
+        {"seat_id": "b", "name": "跟注者", "position": "BTN", "stack": 100.0},
+    ]
+
+    # 前面无人加注时主动跟注 = 溜入
+    limp = make_hand(
+        uid="s01-t4", seats=seats,
+        preflop=[act("hero", "fold", None, is_hero=True),
+                 act("b", "call", 1.0, name="跟注者", position="BTN")],
+        board=("Ad", "7s", "2c"))
+    got = next(o for o in observations_from_hand(limp)
+               if o.opponent_key == "跟注者")
+    check(got.limp_opp and got.limped, f"应记成溜入：{got}")
+
+    # 翻前加注者在翻牌开枪、跟注者弃牌 = 面对 c-bet 弃牌
+    faced = make_hand(
+        uid="s01-t5", seats=seats,
+        preflop=[act("a", "raise", 8.0, name="开池者", position="SB"),
+                 act("hero", "fold", None, is_hero=True),
+                 act("b", "call", 8.0, name="跟注者", position="BTN")],
+        flop=[act("a", "bet", 10.0, name="开池者"),
+              act("b", "fold", None, name="跟注者")],
+        board=("Ad", "7s", "2c"))
+    got = next(o for o in observations_from_hand(faced)
+               if o.opponent_key == "跟注者")
+    check(got.ftc_opp and got.ftc_fold,
+          f"面对 c-bet 弃牌应被记下：{got}")
+    check(not got.ftc_call, f"弃牌不该同时算跟注：{got}")
+
+    # 翻前加注者翻牌过牌、转牌下注 = 延迟 c-bet
+    delayed = make_hand(
+        uid="s01-t6", seats=seats,
+        preflop=[act("a", "raise", 8.0, name="开池者", position="SB"),
+                 act("hero", "fold", None, is_hero=True),
+                 act("b", "call", 8.0, name="跟注者", position="BTN")],
+        flop=[act("a", "check", None, name="开池者"),
+              act("b", "check", None, name="跟注者")],
+        turn=[act("a", "bet", 15.0, name="开池者"),
+              act("b", "fold", None, name="跟注者")],
+        board=("Ad", "7s", "2c", "3h"))
+    got = next(o for o in observations_from_hand(delayed)
+               if o.opponent_key == "开池者")
+    check(got.dcb_opp and got.dcb, f"延迟 c-bet 应被记下：{got}")
+
+
 def run() -> int:
     tests = [
         test_fold_and_check_are_inferred_at_street_end,
@@ -897,6 +946,7 @@ def run() -> int:
         test_postflop_sequence_observations,
         test_tendency_render_and_exploit_hints,
         test_street_actions_are_reordered_chronologically,
+        test_limp_and_cbet_defence_observations,
     ]
     for t in tests:
         before = len(FAILS)

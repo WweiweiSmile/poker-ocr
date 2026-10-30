@@ -36,7 +36,7 @@ from typing import Callable, Iterable, Mapping, Sequence
 from .positions import POSITIONS_BY_TABLE_SIZE
 
 # 分类器版本：规则/阈值改动时递增，画像文件里会记录，重建时能看出差异。
-CLASSIFIER_VERSION = "rules-2026-10-30"
+CLASSIFIER_VERSION = "rules-2026-10-30b"
 
 # 合法类型。与设计文档 6.1 一致。
 ARCHETYPES = ("unknown", "station", "lag", "maniac", "nit", "tag")
@@ -229,6 +229,20 @@ class HandObservation:
     # 过牌-加注：我先过牌，后面有人下注，我加注。
     check_raise_opp: bool = False
     check_raise: bool = False
+    # 溜入：前面无人加注时主动跟注（BB 免费过牌不算机会）。
+    limp_opp: bool = False
+    limped: bool = False
+    # 面对 c-bet：翻牌面对「翻前最后加注者」的第一枪，拆成弃/跟/加。
+    ftc_opp: bool = False
+    ftc_fold: bool = False
+    ftc_call: bool = False
+    ftc_raise: bool = False
+    # 面对转牌续打：翻牌跟了 c-bet 之后，转牌再面对同一个人的下注。
+    ftb_opp: bool = False
+    ftb_fold: bool = False
+    # 延迟 c-bet：翻前加注者翻牌过牌、转牌补一枪。
+    dcb_opp: bool = False
+    dcb: bool = False
     display_name: str | None = None
     seat_id: str | None = None
     position: str | None = None
@@ -566,24 +580,23 @@ def observations_from_hand(hand: Mapping, *,
         fold = sum(1 for a in post_acts if a.get("action") == "fold")
         check = sum(1 for a in post_acts if a.get("action") == "check")
 
-        # 面对下注次数：按街顺序扫，激进动作把 level 抬高；之后该座每次
-        # call/fold/raise 都算一次面对下注。
+        # 面对下注次数：按**还原过顺序**的行动线扫，这条街前面有人下注
+        # 才轮到「面对下注」。
+        #
+        # 原来用原始顺序 + 金额水位判断，有两个问题：推断出来的过牌/弃牌
+        # 是乱序追加的，水位经常还没抬起来就遇到本座的 fold；金额缺失时
+        # 水位永远是 0。结果是分母偏小、出现过 folds > facing_bets 的
+        # 不可能比值（实测 10/9）。
         facing = 0
         for street in _POSTFLOP:
-            level = 0.0
-            for action in actions.get(street) or []:
+            bet_seen = False
+            for action in ordered.get(street) or []:
                 kind = action.get("action")
-                amount = action.get("amount")
-                amount = float(amount) if isinstance(amount, (int, float)) else 0.0
+                mine = str(action.get("seat_id")) == seat_id
+                if mine and bet_seen and kind in ("call", "fold", "raise"):
+                    facing += 1
                 if kind in ("bet", "raise"):
-                    if (str(action.get("seat_id")) == seat_id
-                            and level > 0):
-                        facing += 1
-                    level = max(level, amount)
-                elif kind in ("call", "fold"):
-                    if (str(action.get("seat_id")) == seat_id
-                            and level > 0):
-                        facing += 1
+                    bet_seen = True
 
         inferred = sum(1 for a in seat_actions if a.get("inferred"))
         inferred_ratio = inferred / len(seat_actions) if seat_actions else 0.0
@@ -622,6 +635,60 @@ def observations_from_hand(hand: Mapping, *,
                         a.get("action") in ("bet", "raise")
                         and str(a.get("seat_id")) == seat_id
                         for a in turn_acts)
+
+        # ── 溜入：前面无人加注时主动跟注。BB 的免费过牌不算机会 ──
+        first_pre = pre_acts[0] if pre_acts else None
+        limp_opp = (not passive_entry
+                    and str(info.get("position") or "").upper() != "BB"
+                    and first_pre is not None
+                    and not any(_aggr(a) for a in prior_pre))
+        limped = bool(limp_opp and first_pre.get("action") == "call")
+
+        # ── 面对 c-bet / 转牌续打 / 延迟 c-bet ──
+        flop_seq = ordered.get("flop") or []
+        turn_seq = ordered.get("turn") or []
+        first_aggr = next((a for a in flop_seq
+                           if a.get("action") in ("bet", "raise")), None)
+        is_cbet = bool(first_aggr is not None
+                       and str(first_aggr.get("seat_id")) == aggressor)
+        ftc_opp = ftc_fold = ftc_call = ftc_raise = False
+        ftb_opp = ftb_fold = False
+        if is_cbet and aggressor != seat_id:
+            # 注意别叫 `facing`：下面的 facing_bet 计数用的是同一个变量名，
+            # 在这里覆写会让所有机会计数变成一个 list（实测直接崩）。
+            facing_actions = flop_seq[flop_seq.index(first_aggr) + 1:]
+            mine = next((a for a in facing_actions
+                         if str(a.get("seat_id")) == seat_id), None)
+            if mine is not None:
+                ftc_opp = True
+                kind = mine.get("action")
+                ftc_fold = kind == "fold"
+                ftc_call = kind == "call"
+                ftc_raise = kind in ("bet", "raise")
+                # 只有跟注的人才会在转牌再面对同一个人的续打
+                if ftc_call and turn_seq:
+                    turn_bet = next((a for a in turn_seq
+                                     if a.get("action") in ("bet", "raise")), None)
+                    if (turn_bet is not None
+                            and str(turn_bet.get("seat_id")) == aggressor):
+                        mine_turn = next(
+                            (a for a in turn_seq[turn_seq.index(turn_bet) + 1:]
+                             if str(a.get("seat_id")) == seat_id), None)
+                        if mine_turn is not None:
+                            ftb_opp = True
+                            ftb_fold = mine_turn.get("action") == "fold"
+
+        # ── 延迟 c-bet：翻前加注者翻牌过牌、转牌下注 ──
+        dcb_opp = dcb = False
+        if aggressor == seat_id and flop_seq:
+            mine_flop = next((a for a in flop_seq
+                              if str(a.get("seat_id")) == seat_id), None)
+            mine_turn = next((a for a in turn_seq
+                              if str(a.get("seat_id")) == seat_id), None)
+            if (mine_flop is not None and mine_flop.get("action") == "check"
+                    and mine_turn is not None):
+                dcb_opp = True
+                dcb = mine_turn.get("action") in ("bet", "raise")
 
         # ── 被过牌后下注 / 过牌-加注：按街扫描自己的第一次动作 ──
         stab_opp = stab = False
@@ -689,6 +756,16 @@ def observations_from_hand(hand: Mapping, *,
             stab=stab,
             check_raise_opp=check_raise_opp,
             check_raise=check_raise,
+            limp_opp=limp_opp,
+            limped=limped,
+            ftc_opp=ftc_opp,
+            ftc_fold=ftc_fold,
+            ftc_call=ftc_call,
+            ftc_raise=ftc_raise,
+            ftb_opp=ftb_opp,
+            ftb_fold=ftb_fold,
+            dcb_opp=dcb_opp,
+            dcb=dcb,
             weight=weight,
         ))
     return out
@@ -739,6 +816,17 @@ class OpponentStats:
     check_raises: float = 0.0
     open_by_bucket: dict[str, float] = field(default_factory=dict)
     open_opp_by_bucket: dict[str, float] = field(default_factory=dict)
+    # 溜入 / 防守端 / 延迟 c-bet
+    limp_opp: float = 0.0
+    limped: float = 0.0
+    ftc_opp: float = 0.0
+    ftc_fold: float = 0.0
+    ftc_call: float = 0.0
+    ftc_raise: float = 0.0
+    ftb_opp: float = 0.0
+    ftb_fold: float = 0.0
+    dcb_opp: float = 0.0
+    dcb: float = 0.0
     inferred_weighted: float = 0.0
     weight_total: float = 0.0
     manual_pin: str | None = None
@@ -811,6 +899,31 @@ class OpponentStats:
     def check_raise_pct(self) -> float | None:
         return _pct(self.check_raises, self.check_raise_opp)
 
+    @property
+    def limp_pct(self) -> float | None:
+        """前面没人加注时主动跟注的比例。BB 的免费过牌不计入机会。"""
+        return _pct(self.limped, self.limp_opp)
+
+    @property
+    def fold_to_cbet_pct(self) -> float | None:
+        return _pct(self.ftc_fold, self.ftc_opp)
+
+    @property
+    def call_to_cbet_pct(self) -> float | None:
+        return _pct(self.ftc_call, self.ftc_opp)
+
+    @property
+    def raise_to_cbet_pct(self) -> float | None:
+        return _pct(self.ftc_raise, self.ftc_opp)
+
+    @property
+    def fold_to_barrel_pct(self) -> float | None:
+        return _pct(self.ftb_fold, self.ftb_opp)
+
+    @property
+    def delay_cbet_pct(self) -> float | None:
+        return _pct(self.dcb, self.dcb_opp)
+
     def open_pct(self, bucket: str) -> float | None:
         """某个位置档的开池频率。样本不足返回 None。"""
         return _pct(self.open_by_bucket.get(bucket, 0.0),
@@ -864,6 +977,16 @@ class OpponentStats:
         self.stabs += w if obs.stab else 0.0
         self.check_raise_opp += w if obs.check_raise_opp else 0.0
         self.check_raises += w if obs.check_raise else 0.0
+        self.limp_opp += w if obs.limp_opp else 0.0
+        self.limped += w if obs.limped else 0.0
+        self.ftc_opp += w if obs.ftc_opp else 0.0
+        self.ftc_fold += w if obs.ftc_fold else 0.0
+        self.ftc_call += w if obs.ftc_call else 0.0
+        self.ftc_raise += w if obs.ftc_raise else 0.0
+        self.ftb_opp += w if obs.ftb_opp else 0.0
+        self.ftb_fold += w if obs.ftb_fold else 0.0
+        self.dcb_opp += w if obs.dcb_opp else 0.0
+        self.dcb += w if obs.dcb else 0.0
         if obs.open_opp:
             bucket = position_bucket(obs.position)
             self.open_opp_by_bucket[bucket] = (
@@ -923,6 +1046,16 @@ class OpponentStats:
             "open_by_bucket": {k: _num(v) for k, v in self.open_by_bucket.items()},
             "open_opp_by_bucket": {k: _num(v)
                                    for k, v in self.open_opp_by_bucket.items()},
+            "limp_opp": _num(self.limp_opp),
+            "limped": _num(self.limped),
+            "ftc_opp": _num(self.ftc_opp),
+            "ftc_fold": _num(self.ftc_fold),
+            "ftc_call": _num(self.ftc_call),
+            "ftc_raise": _num(self.ftc_raise),
+            "ftb_opp": _num(self.ftb_opp),
+            "ftb_fold": _num(self.ftb_fold),
+            "dcb_opp": _num(self.dcb_opp),
+            "dcb": _num(self.dcb),
             "inferred_ratio": round(self.inferred_ratio, 4),
             "archetype": read.archetype,
             "confidence": round(read.confidence, 4),
@@ -980,6 +1113,16 @@ class OpponentStats:
             check_raises=f("check_raises"),
             open_by_bucket=_bucket_map(raw.get("open_by_bucket")),
             open_opp_by_bucket=_bucket_map(raw.get("open_opp_by_bucket")),
+            limp_opp=f("limp_opp"),
+            limped=f("limped"),
+            ftc_opp=f("ftc_opp"),
+            ftc_fold=f("ftc_fold"),
+            ftc_call=f("ftc_call"),
+            ftc_raise=f("ftc_raise"),
+            ftb_opp=f("ftb_opp"),
+            ftb_fold=f("ftb_fold"),
+            dcb_opp=f("dcb_opp"),
+            dcb=f("dcb"),
             inferred_weighted=(f("inferred_ratio") * f("hands")),
             weight_total=f("hands"),
             manual_pin=(raw.get("manual_pin")
@@ -1017,6 +1160,11 @@ class OpponentRead:
     stab_pct: float | None = None
     check_raise_pct: float | None = None
     threebet_pct: float | None = None
+    limp_pct: float | None = None
+    fold_to_cbet_pct: float | None = None
+    call_to_cbet_pct: float | None = None
+    fold_to_barrel_pct: float | None = None
+    delay_cbet_pct: float | None = None
 
     @property
     def aggressive(self) -> bool:
@@ -1048,6 +1196,10 @@ TENDENCY_MIN_OPPS = {
     "barrel": 5.0,
     "stab": 6.0,
     "check_raise": 6.0,
+    "limp": 8.0,
+    "fold_to_cbet": 8.0,
+    "fold_to_barrel": 5.0,
+    "delay_cbet": 5.0,
 }
 
 
@@ -1072,6 +1224,15 @@ def _tendencies(stats: OpponentStats) -> dict:
         threebet_pct=(round(stats.threebet_pct, 0)
                       if stats.threebet_pct is not None
                       and stats.threebet_opps >= 6 else None),
+        limp_pct=_tendency(stats.limp_pct, stats.limp_opp, "limp"),
+        fold_to_cbet_pct=_tendency(stats.fold_to_cbet_pct, stats.ftc_opp,
+                                   "fold_to_cbet"),
+        call_to_cbet_pct=_tendency(stats.call_to_cbet_pct, stats.ftc_opp,
+                                   "fold_to_cbet"),
+        fold_to_barrel_pct=_tendency(stats.fold_to_barrel_pct, stats.ftb_opp,
+                                     "fold_to_barrel"),
+        delay_cbet_pct=_tendency(stats.delay_cbet_pct, stats.dcb_opp,
+                                 "delay_cbet"),
     )
 
 
@@ -1371,6 +1532,16 @@ class ProfileStore:
         target.stabs += old.stabs
         target.check_raise_opp += old.check_raise_opp
         target.check_raises += old.check_raises
+        target.limp_opp += old.limp_opp
+        target.limped += old.limped
+        target.ftc_opp += old.ftc_opp
+        target.ftc_fold += old.ftc_fold
+        target.ftc_call += old.ftc_call
+        target.ftc_raise += old.ftc_raise
+        target.ftb_opp += old.ftb_opp
+        target.ftb_fold += old.ftb_fold
+        target.dcb_opp += old.dcb_opp
+        target.dcb += old.dcb
         for bucket, value in old.open_by_bucket.items():
             target.open_by_bucket[bucket] = (
                 target.open_by_bucket.get(bucket, 0.0) + value)
@@ -1686,6 +1857,17 @@ def render_tendencies_zh(read: OpponentRead) -> str:
         parts.append(f"被过牌后下注 {read.stab_pct:.0f}%")
     if read.check_raise_pct is not None:
         parts.append(f"过牌-加注 {read.check_raise_pct:.0f}%")
+    if read.limp_pct is not None:
+        parts.append(f"溜入 {read.limp_pct:.0f}%")
+    if read.fold_to_cbet_pct is not None:
+        seg = f"对 c-bet 弃 {read.fold_to_cbet_pct:.0f}%"
+        if read.call_to_cbet_pct is not None:
+            seg += f" / 跟 {read.call_to_cbet_pct:.0f}%"
+        parts.append(seg)
+    if read.fold_to_barrel_pct is not None:
+        parts.append(f"转牌再弃 {read.fold_to_barrel_pct:.0f}%")
+    if read.delay_cbet_pct is not None:
+        parts.append(f"延迟 c-bet {read.delay_cbet_pct:.0f}%")
     return "｜".join(parts)
 
 
@@ -1711,6 +1893,18 @@ def exploit_hint_zh(read: OpponentRead, *, limit: int = 2) -> str:
             hints.append("c-bet 频率高 —— 可以多 float，转牌他再开枪再决定")
         elif read.cbet_pct <= 40:
             hints.append("c-bet 频率低 —— 翻牌他过牌基本是没中，可以在转牌接管控池")
+
+    if read.fold_to_cbet_pct is not None:
+        if read.fold_to_cbet_pct >= 60:
+            hints.append("对 c-bet 弃得多 —— 干燥面可以高频开火，别只拿强牌下注")
+        elif read.fold_to_cbet_pct <= 30:
+            hints.append("对 c-bet 跟得多 —— 别用空气开火，价值牌打大")
+
+    if read.limp_pct is not None and read.limp_pct >= 25:
+        hints.append("爱溜入 —— 他的溜入范围偏弱，有位置时可以直接隔离加注")
+
+    if read.delay_cbet_pct is not None and read.delay_cbet_pct >= 40:
+        hints.append("翻牌过牌不代表放弃 —— 他会在转牌补一枪，别用中等牌白跟")
 
     if (read.open_lp_pct is not None and read.open_lp_pct >= 40
             and (read.threebet_pct is None or read.threebet_pct <= 8)):
