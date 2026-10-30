@@ -110,6 +110,9 @@ class ActionRecord:
     is_hero: bool = False
     # 视频流漏抓、由街末底池对账补出来的记录。落库时单独标出来，复盘时可区分
     inferred: bool = False
+    # 由「本手中途离桌」补出的弃牌（内部标记，不落库）。弹窗/遮挡让状态层
+    # 误判离桌、随后手牌图标恢复时，只撤销这一类 fold，不碰真实弃牌。
+    left: bool = False
 
     def label(self) -> str:
         if self.action == "check":
@@ -417,7 +420,13 @@ class LiveHandTracker:
         elif board_len >= 3 and board_len >= len(hand.board):
             hand.board = board
 
+        # 弹窗/遮挡让状态层误判离桌、随后图标恢复时，先撤销之前补的离桌弃牌。
+        self._revoke_left_folds(state, hand)
         self._record_actions(state, hand)
+        # 中途离桌的人必然已经弃牌：状态层把他保留成 folded，这里立刻补一条
+        # inferred fold（名字/位置沿用离桌前），让 AI 在当前街的行动线里就能
+        # 看到「这家已经弃牌」。状态层误判恢复时由上一步精确撤销。
+        self._record_left_folds(state, hand)
         # 记录完本帧动作后再更新在局集合：本帧的弃牌徽章已经落成 fold，
         # 街末补弃牌时不会重复补。
         hand.active = set(current_active)
@@ -854,6 +863,45 @@ class LiveHandTracker:
                 level = bet
 
         hand.level[hand.street] = level
+
+    def _record_left_folds(self, state: FrameState, hand: _LiveHand) -> None:
+        """中途离桌 = 已经弃牌：补一条 inferred fold，保留名字/位置。
+
+        只补一次：同座这手已经有 fold 记录（自己弃的或之前补过）就跳过。
+        全下的人不可能弃牌，也跳过。这条记录带 `left=True`，离桌误判恢复时
+        `_revoke_left_folds` 能精确撤销它。
+        """
+        folded = {a.seat_id for a in hand.actions if a.action == "fold"}
+        for p in state.players:
+            if not p.left or p.seat_id in folded:
+                continue
+            if p.seat_id == hand.hero_seat_id or p.seat_id in hand.all_ins:
+                continue
+            hand.actions.append(ActionRecord(
+                street=hand.street, seat_id=p.seat_id, name=p.name,
+                position=p.position, action="fold", is_hero=False,
+                inferred=True, left=True))
+            hand.last_index[(hand.street, p.seat_id)] = len(hand.actions) - 1
+
+    def _revoke_left_folds(self, state: FrameState, hand: _LiveHand) -> None:
+        """撤销误判离桌补出的 fold（手牌图标恢复 = 他一直在这一手）。
+
+        只删 `left=True` 的合成记录，真实弃牌/对账补出的 fold 不受影响。
+        删完重建 `last_index`，避免后续动作指到旧下标。
+        """
+        if not any(a.left for a in hand.actions):
+            return
+        revived = {p.seat_id for p in state.players if not p.left}
+        if not revived:
+            return
+        kept = [a for a in hand.actions
+                if not (a.left and a.seat_id in revived)]
+        if len(kept) == len(hand.actions):
+            return
+        hand.actions = kept
+        hand.last_index = {}
+        for i, a in enumerate(hand.actions):
+            hand.last_index[(a.street, a.seat_id)] = i
 
     # ─────────────────────────── 街末对账 ───────────────────────────
 
@@ -1327,10 +1375,18 @@ class LiveHandTracker:
         return None
 
     def take_current(self) -> dict | None:
-        """取走当前这手牌（会话结束时用：最后一手没等到换手，也要落库）。"""
+        """取走当前这手牌（会话结束时用：最后一手没等到换手，也要落库）。
+
+        退出时也要补一次街末/手末对账：中途离桌、徽章漏读的弃牌和过牌
+        都只能从「街初在局、街末不在局」的差集里补出来；不补的话，
+        在街中间退出，最后这几条会丢。
+        """
         hand = self.hand
         self.hand = None
-        return self._hand_dict(hand) if hand is not None else None
+        if hand is None:
+            return None
+        self._finalize_street(hand, hand.street, None, at_hand_end=True)
+        return self._hand_dict(hand)
 
     def take_finished(self) -> dict | None:
         """取走上一条已结束手牌的完整行动线（换手时才有）。"""

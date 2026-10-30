@@ -66,9 +66,11 @@ def new_stream(**kwargs) -> ss.StateStream:
     return ss.StateStream(PROFILE, engine=object(), **kwargs)
 
 
-def feed(stream: ss.StateStream, frame, t: float = 0.0) -> ss.FrameOutcome:
+def feed(stream: ss.StateStream, frame, t: float = 0.0,
+         extra_signature: tuple | None = None) -> ss.FrameOutcome:
     stream.stream.frames.append(frame)
-    return stream.ingest(np.zeros((4, 4, 3), np.uint8), f"f{int(t * 100):04d}", t)
+    return stream.ingest(np.zeros((4, 4, 3), np.uint8), f"f{int(t * 100):04d}", t,
+                         extra_signature=extra_signature)
 
 
 # ─────────────────────────── 用例 ───────────────────────────
@@ -149,8 +151,8 @@ def test_vanished_seat_needs_max_vanish_frames() -> None:
 def test_departed_seat_with_chip_garbage_recovers() -> None:
     """人走后空座的 chip 槽读成乱码时，也要在 max_vanish 帧后恢复识别。
 
-    之前的失败形态：空座乱码让 NameTracker 沿用旧名字 → 每帧都判在场，
-    vanished 永远不计数，质量闸报 `stack:<seat>` 无限丢帧。
+    没有换手边界（离线/不传 extra_signature）时保持旧口径：空座从 players
+    里消失。实时链路会锁定 roster、保留名字/位置，见下面两个用例。
     """
     with stub_env():
         s = new_stream(max_vanish=3)
@@ -171,6 +173,152 @@ def test_departed_seat_with_chip_garbage_recovers() -> None:
               "退出的座位不能留下旧名字")
         check(s.summary()["discarded_reasons"].get("vanished") == 3,
               f"vanished 计数应为 3：{s.summary()['discarded_reasons']}")
+
+
+def test_exit_mid_hand_keeps_name_position_and_marks_fold() -> None:
+    """9→8 人：中途退出的人本手按弃牌处理，名字/位置保留，其余人不挪位。
+
+    实盘失败形态：非庄位玩家退出后按 8 人重新编号，空位后面的人整体前移
+    （hero UTG+2→LJ），行动顺序和 AI 上下文全错；同时空座的旧名字/筹码
+    抖动会让质量闸每帧报 stack，识别停摆。
+    """
+    with stub_env():
+        s = new_stream(max_vanish=3)
+        sig = (("As", "Kd"), ())
+        first = feed(s, make_frame(), extra_signature=sig)
+        check(first.kind == "record", f"首帧应记录，实际 {first.kind}")
+        check(s.summary()["hand_roster"] == 9,
+              f"应锁定 9 个座位：{s.summary()['hand_roster']}")
+        base_pos = {p.seat_id: p.position for p in first.state.players}
+
+        rows = {k: dict(v) for k, v in BASE.items()}
+        rows["midL"] = {"name": "", "chip": "", "bet": ""}
+        gone = make_frame(rows)
+        outs = [feed(s, gone, t=0.5 * (i + 1), extra_signature=sig)
+                for i in range(5)]
+        check([o.kind for o in outs[:3]] == ["discard"] * 3,
+              f"前 3 帧应因 vanished 丢弃：{[o.kind for o in outs]}")
+        state = outs[-1].state
+        mid = state.player("midL")
+        check(mid.left and mid.in_hand and mid.fold is True
+              and mid.status == "folded",
+              f"离桌应保留在 players 里并按弃牌算：{mid.to_debug()}")
+        check(mid.name == BASE["midL"]["name"],
+              f"离桌后应沿用名字，实际 {mid.name!r}")
+        check(mid.position == "HJ",
+              f"离桌后应保留位置 HJ，实际 {mid.position!r}")
+        check(mid.stack is None and mid.bet == 0.0,
+              f"离桌后不该要求筹码/下注：{mid.to_debug()}")
+        check(state.players_in_hand == 9,
+              f"这一手仍是 9 人局（离桌按弃牌），实际 {state.players_in_hand}")
+        check({p.seat_id: p.position for p in state.players} == base_pos,
+              "有人退出不能让其他人的位置整体挪位："
+              f"{ {p.seat_id: p.position for p in state.players} }")
+        check(not state.errors, f"确认离桌后不该再丢帧：{state.errors}")
+        check(s.summary()["hand_left"] == ["midL"],
+              f"离桌集合不对：{s.summary()['hand_left']}")
+
+        # 下一手：roster 重建，空位不再算进这一手。
+        out = feed(s, gone, t=3.5, extra_signature=(("Qs", "Jd"), ()))
+        check(out.new_hand, "换手应被识别")
+        seat = out.state.player("midL")
+        check(not seat.in_hand and not seat.left and seat.name is None,
+              f"下一手空座应重新识别：{seat.to_debug()}")
+        check(out.state.players_in_hand == 8,
+              f"下一手 8 人局，实际 {out.state.players_in_hand}")
+
+
+def test_new_player_mid_hand_kept_out_until_next_hand() -> None:
+    """本手中途坐下的人：这手继续用上一位玩家的信息，下一手再识别新玩家。"""
+    with stub_env():
+        s = new_stream(max_vanish=3)
+        sig = (("As", "Kd"), ())
+        feed(s, make_frame(), extra_signature=sig)
+
+        # 原玩家 midL 离开，确认离桌。
+        rows = {k: dict(v) for k, v in BASE.items()}
+        rows["midL"] = {"name": "", "chip": "", "bet": ""}
+        for i in range(4):
+            feed(s, make_frame(rows), t=0.5 * (i + 1), extra_signature=sig)
+        check("midL" in s.hand_left, "midL 应先被确认离桌")
+
+        # 新玩家坐进同一个座位：本手仍是上一位的信息。
+        rows["midL"] = {"name": "新玩家", "chip": "150BB", "bet": ""}
+        new_player = make_frame(rows)
+        for i in range(3):
+            out = feed(s, new_player, t=3.0 + 0.5 * i, extra_signature=sig)
+        seat = out.state.player("midL")
+        check(seat.left and seat.fold is True and seat.in_hand,
+              f"本手应继续按离桌/弃牌处理：{seat.to_debug()}")
+        check(seat.name == BASE["midL"]["name"],
+              f"本手应保留上一位玩家的名字，实际 {seat.name!r}")
+        check(seat.position == "HJ",
+              f"本手应保留上一位玩家的位置，实际 {seat.position!r}")
+        check(seat.stack is None,
+              f"新玩家的筹码不该写进这一手：{seat.stack!r}")
+        check(out.state.players_in_hand == 9,
+              f"本手人数不变，实际 {out.state.players_in_hand}")
+
+        # 下一手才识别新玩家。
+        out = feed(s, new_player, t=5.0, extra_signature=(("Qs", "Jd"), ()))
+        seat = out.state.player("midL")
+        check(out.new_hand, "换手应被识别")
+        check(seat.in_hand and not seat.left and seat.name == "新玩家",
+              f"下一手应识别新玩家：{seat.to_debug()}")
+        check(seat.stack == 150.0,
+              f"下一手应读新玩家的筹码，实际 {seat.stack!r}")
+        check(seat.position == "HJ",
+              f"新玩家的位置应正常排出，实际 {seat.position!r}")
+
+
+def test_occluded_player_recovers_when_card_icon_returns() -> None:
+    """整座被弹窗盖住误判离桌后，手牌图标回来要撤销 left，不能一路弃牌到底。"""
+    icon_on = {seat.seat_id: True for seat in PROFILE.seats}
+    with stub_env():
+        s = new_stream(max_vanish=2, detect_fold=True)
+        sig = (("As", "Kd"), ())
+        with patch.object(ss, "read_card_icons", lambda *a, **k: dict(icon_on)):
+            feed(s, make_frame(), extra_signature=sig)
+
+        # 弹窗盖住 midL：三块槽位全空 + 手牌图标连续消失。
+        rows = {k: dict(v) for k, v in BASE.items()}
+        rows["midL"] = {"name": "", "chip": "", "bet": ""}
+        occluded = make_frame(rows)
+        occluded_icons = {**icon_on, "midL": False}
+        with patch.object(ss, "read_card_icons",
+                          lambda *a, **k: dict(occluded_icons)):
+            outs = [feed(s, occluded, t=0.5 * (i + 1), extra_signature=sig)
+                    for i in range(4)]
+        check(outs[-1].state.player("midL").left,
+              f"遮挡超过 max_vanish 帧应暂标离桌：{outs[-1].state.player('midL')}")
+
+        # 弹窗消失：名字/筹码/手牌图标都回来了。
+        with patch.object(ss, "read_card_icons", lambda *a, **k: dict(icon_on)):
+            out = feed(s, make_frame(), t=3.0, extra_signature=sig)
+        mid = out.state.player("midL")
+        check(not mid.left and mid.in_hand
+              and mid.fold is not True and mid.name == BASE["midL"]["name"],
+              f"图标回来后应撤销离桌判定：{mid.to_debug()}")
+        check("midL" not in s.summary()["hand_left"],
+              f"离桌集合应清掉：{s.summary()['hand_left']}")
+
+
+def test_lineup_change_between_hands_does_not_discard() -> None:
+    """换手时座位空出来是正常换人，不能当成本手「整座消失」丢帧。"""
+    with stub_env():
+        s = new_stream(max_vanish=3)
+        feed(s, make_frame(), extra_signature=(("As", "Kd"), ()))
+        rows = {k: dict(v) for k, v in BASE.items()}
+        rows["midL"] = {"name": "", "chip": "", "bet": ""}
+        out = feed(s, make_frame(rows), t=1.0,
+                   extra_signature=(("Qs", "Jd"), ()))
+        check(out.new_hand, "换手应被识别")
+        check(out.kind != "discard" and not out.errors,
+              f"换人后的新手第一帧不该丢：{out.kind} / {out.errors}")
+        check(out.state.players_in_hand == 8,
+              f"新手应为 8 人局，实际 {out.state.players_in_hand}")
+        check(not out.state.player("midL").left,
+              "换手后空座是新阵容，不应标成本手离桌")
 
 
 def test_dead_button_dealer_left_keeps_recording() -> None:
@@ -466,6 +614,10 @@ def main() -> int:
         test_stable_seconds_floor,
         test_vanished_seat_needs_max_vanish_frames,
         test_departed_seat_with_chip_garbage_recovers,
+        test_exit_mid_hand_keeps_name_position_and_marks_fold,
+        test_new_player_mid_hand_kept_out_until_next_hand,
+        test_occluded_player_recovers_when_card_icon_returns,
+        test_lineup_change_between_hands_does_not_discard,
         test_dead_button_dealer_left_keeps_recording,
         test_initial_blinds_carried_when_banner_unreadable,
         test_reset_makes_next_frame_a_new_baseline,

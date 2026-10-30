@@ -17,6 +17,11 @@
   · 新状态要连续出现 `stable_frames` 帧才记录；首帧立即记录当基线。
   · 签名没变不重复记录。
   · 庄位轮转（检出庄位且与上一帧不同）= 新的一手，清空全下继承。
+  · **一手牌内锁定座位身份**（live 传 `extra_signature` 时）：换手第一帧记下
+    在桌的人（名字/位置）。中途有人整座消失连续 `max_vanish` 帧 → 认定离桌，
+    必然已弃牌，本手剩余时间保留名字/位置、按 folded 处理；本手开始后才坐下
+    的人不参与这一手，换手后重新识别。位置按锁定 roster 排，不随人数减少
+    整体挪位。
 """
 
 from __future__ import annotations
@@ -148,6 +153,14 @@ class StateStream:
         self._icon_absent: dict[str, int] = {}
         self.prev_dealer: str | None = None
         self.vanish: dict[str, int] = defaultdict(int)
+        # ── 一手牌内的座位身份锁（只有 live 传 extra_signature 时启用）──
+        # 这一手开始时在桌的人 {seat_id: (名字, 位置)}。中途离桌的人保留在
+        # roster 里，按弃牌处理并继续沿用名字/位置；本手开始后才坐下的人不在
+        # roster 里，这一手不参与，换手后重新识别。位置也按 roster 排，
+        # 否则少一个人会让空位后面的人整体挪位（action order/AI 上下文全错）。
+        self.hand_roster: dict[str, tuple[str | None, str | None]] = {}
+        self.hand_left: set[str] = set()
+        self._roster_locked = False
         # 本手是否见过爆炸底池横幅。横幅只在开局出现 ~2s，之后的帧很可能
         # 已经消失或被质量闸丢弃；一旦看到就钉住，换手时清空。
         self.bomb_pot_seen = False
@@ -211,6 +224,15 @@ class StateStream:
                                  detect_dealer=detect_dealer)
         shown = self._shown_seats(extra_signature)
         icons = self._read_icons(img)
+        # 离桌误判恢复：弹窗/遮挡把整座盖住超过 max_vanish 帧时会把玩家标成
+        # 离桌；等遮挡消失、头像底角的「POKER」手牌图标重新出现，说明他一直在
+        # 这一手（真离桌的人没有图标，本手新坐下的人也没被发牌）。撤销 left，
+        # 让这一帧直接按正常玩家重建，避免留下一条假的弃牌。
+        revived = {sid for sid in self.hand_left if icons.get(sid) is True}
+        if revived:
+            self.hand_left.difference_update(revived)
+            for sid in revived:
+                self.vanish[sid] = 0
         # 先钉这一帧读到的名字/盲注；如果下面查出庄位轮转（换手），
         # _restart_sticky() 会立刻把它们解钉，下一帧重新识别。
         if sticky:
@@ -325,7 +347,14 @@ class StateStream:
             shown_seats=shown,
             prev_fold=prev_fold,
             ante_fallback=self.ante_fallback,
+            hand_roster=(self.hand_roster if self._roster_locked else None),
+            left_seats=(self.hand_left if self._roster_locked else None),
         )
+        # 一手牌的身份锁在**这一手第一帧**建立；之后中途退出/新入座都按
+        # 锁定的 roster 处理（见 _track_vanished / build_state 的说明）。
+        # 只有 live 有可靠换手边界（extra_signature），离线视频不启用。
+        if sticky and not self._roster_locked:
+            self._lock_roster(state)
         # 横幅是瞬时信号（开局 ~2s），但「这手是爆炸底池」要一直有效：
         # 看到就钉住，本手内所有状态都带 bomb_pot=True；换手时
         # _restart_sticky() 清空。被质量闸丢弃的帧也照常读横幅 ——
@@ -341,18 +370,9 @@ class StateStream:
                              if p.in_hand and p.all_in}
 
         # ── 座位整座消失：先当遮挡，连续 max_vanish 帧才认定人走了 ──
-        if self.prev is not None:
-            for p_prev in self.prev.players:
-                if not p_prev.in_hand:
-                    continue
-                p_now = next(p for p in state.players
-                             if p.seat_id == p_prev.seat_id)
-                if p_now.in_hand:
-                    self.vanish[p_prev.seat_id] = 0
-                else:
-                    self.vanish[p_prev.seat_id] += 1
-                    if self.vanish[p_prev.seat_id] <= self.max_vanish:
-                        state.errors.append(f"vanished:{p_prev.seat_id}")
+        # 锁定 roster 里的座位一旦确认离开，就标成 left/folded 并保留名字/
+        # 位置，本手后面不再要求筹码/下注（也不会再报 vanished）。
+        self._track_vanished(state)
 
         if not state.ok:
             for e in state.errors:
@@ -400,6 +420,93 @@ class StateStream:
                             hand_end=badge_ended, new_hand=new_hand)
 
     # ─────────────────────────── 辅助 ───────────────────────────
+
+    def _lock_roster(self, state: FrameState) -> None:
+        """在换手后的第一帧锁定这一手的座位身份。
+
+        锁定的是**这一手开始时在桌的玩家**：名字、位置、座位 id。中途退出的人
+        之后会变成 left/folded 但保留信息；中途坐下的人不在 roster 里，本手
+        不参与，等下一手重新识别。
+
+        要求 hero 已经在本手里：没有 hero 手牌/座位的帧通常是换手空档或摊牌
+        动画，这时候锁 roster 会把轮廓不全的座位当成满桌。只拿质量闸通过的帧
+        锁，避免把发牌动画里还没渲染筹码的人漏掉。
+        """
+        if not state.ok:
+            return
+        hero = next((p for p in state.players
+                     if p.seat_id == state.hero_seat_id), None)
+        if hero is None or not hero.in_hand:
+            return
+        if len([p for p in state.players if p.in_hand]) < 2:
+            return
+        self.hand_roster = {
+            p.seat_id: (p.name, p.position)
+            for p in state.players if p.in_hand
+        }
+        self.hand_left = set()
+        self._roster_locked = True
+
+    def _track_vanished(self, state: FrameState) -> None:
+        """整座消失确认：连续 max_vanish 帧不见才算人走了。
+
+        非 live / 没锁 roster 时保持旧行为：遍历上一帧在场的人，只报 vanished
+        错误、整帧丢弃。锁定 roster 后只跟踪**这一手开始时在桌的人**：
+        确认离开的座位标成 left/folded（离桌必然弃牌），保留名字/位置，
+        本手后续不再参与行动线，也不会再因缺筹码丢帧。
+
+        换手时 roster 已经重建：上一手有、这一手没坐下的人不在新 roster 里，
+        不能算「消失」，否则新一手开局会无谓地丢几帧。
+        """
+        if self.prev is None:
+            return
+        if self._roster_locked:
+            seats = [sid for sid in self.hand_roster
+                     if sid != state.hero_seat_id
+                     and sid not in self.hand_left]
+        else:
+            seats = [p.seat_id for p in self.prev.players
+                     if p.in_hand and not p.left]
+        for sid in seats:
+            p_now = next((p for p in state.players if p.seat_id == sid), None)
+            if p_now is None:
+                continue
+            if p_now.in_hand:
+                self.vanish[sid] = 0
+                continue
+            self.vanish[sid] += 1
+            confirmed_left = (self._roster_locked
+                              and sid in self.hand_roster
+                              and sid != state.hero_seat_id
+                              and self.vanish[sid] > self.max_vanish)
+            if confirmed_left:
+                self._mark_left(state, p_now)
+                self.vanish[sid] = 0
+            elif self.vanish[sid] <= self.max_vanish:
+                state.errors.append(f"vanished:{sid}")
+
+    def _mark_left(self, state: FrameState, p) -> None:
+        """确认中途离桌：按弃牌处理，但保留名字/位置到这一手结束。"""
+        sid = p.seat_id
+        name, position = self.hand_roster.get(sid, (p.name, p.position))
+        self.hand_left.add(sid)
+        p.name = name
+        p.position = position
+        p.in_hand = True
+        p.fold = True
+        p.status = "folded"
+        p.left = True
+        p.stack = None
+        p.bet = 0.0
+        p.action = None
+        p.all_in = False
+        p.equity = None
+        # 空座位的筹码/下注槽常被 rec 读成 `--`/`·`：这些 note 对离桌的人
+        # 没有意义，去掉避免污染状态和画像。
+        p.notes = [n for n in p.notes
+                   if not n.startswith(("chip:", "bet:", "equity:"))]
+        p.notes.append("本手中途离桌，按弃牌处理")
+        state.players_in_hand = sum(1 for q in state.players if q.in_hand)
 
     @staticmethod
     def _shown_seats(extra_signature: tuple | None) -> set[str]:
@@ -480,6 +587,12 @@ class StateStream:
         self.prev_all_in_badges = set()
         self._all_in_gone.clear()
         self._icon_absent.clear()
+        # 换手：上一手的座位身份锁作废，下一帧按当前画面重新锁 roster。
+        # 中途离桌/新入座只在一手内沿用旧信息，换手后必须重新识别。
+        self.hand_roster = {}
+        self.hand_left = set()
+        self._roster_locked = False
+        self.vanish.clear()
         # 换手信号可能比横幅晚一两帧；刚看到过的横幅属于新手，别清掉。
         if self.sampled - self._bomb_seen_sample > BOMB_BANNER_GRACE_SAMPLES:
             self.bomb_pot_seen = False
@@ -523,6 +636,9 @@ class StateStream:
         self._icon_absent.clear()
         self.prev_dealer = None
         self.vanish.clear()
+        self.hand_roster = {}
+        self.hand_left = set()
+        self._roster_locked = False
         self.bomb_pot_seen = False
         self._bomb_seen_sample = -10**9
         self.names = NameTracker(confirm=self.name_confirm)
@@ -555,6 +671,8 @@ class StateStream:
             "discarded_reasons": dict(self.discarded),
             "record_count": self.records,
             "roi_threads": self.roi_threads,
+            "hand_roster": len(self.hand_roster),
+            "hand_left": sorted(self.hand_left),
             "roi_reuse": (self.stream.cache.to_debug()
                           if self.stream.cache is not None else {"disabled": True}),
         }

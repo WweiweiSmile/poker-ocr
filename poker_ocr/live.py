@@ -738,6 +738,7 @@ def _state_line(t: float, body: dict, tail: str = "") -> str:
         f"{p.get('seat_id')}:{p.get('name') or '-'}={p.get('stack')}"
         f"{'/' + str(p.get('bet')) if p.get('bet') else ''}"
         f"{'(' + p.get('action') + ')' if p.get('action') else ''}"
+        f"{'/离桌' if p.get('left') else ''}"
         for p in (body.get("opponents") or [])
     ) or "-"
     return (f"  [{t:7.2f}s] ✅ 记录 #{body.get('index')}  "
@@ -2030,7 +2031,8 @@ def build_parser() -> argparse.ArgumentParser:
                     help="单次会话最多落盘多少份疑惑帧（默认 "
                          f"{DEFAULT_INCIDENT_MAX}；0 = 不限制）")
     ap.add_argument("--max-vanish", type=int, default=3,
-                    help="在场玩家整座空白连续几帧才认定离开（默认 3）")
+                    help="在场玩家整座空白连续几帧才认定离开（默认 3；"
+                         "认定后本手保留名字/位置并按弃牌处理）")
     ap.add_argument("--name-confirm", type=int, default=3,
                     help="名字连续确认几帧才换（默认 3）")
     ap.add_argument("--dealer-carry", type=int, default=4,

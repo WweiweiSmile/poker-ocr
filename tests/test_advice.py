@@ -54,10 +54,10 @@ def player(seat_id: str, *, name: str | None = None, position: str | None = None
            stack: float | None = 100.0, bet: float | None = 0.0,
            action: str | None = None, fold: bool | None = None,
            in_hand: bool = True, all_in: bool = False,
-           status: str = "playing") -> PlayerState:
+           status: str = "playing", left: bool = False) -> PlayerState:
     return PlayerState(seat_id=seat_id, name=name, position=position, stack=stack,
                        bet=bet, action=action, fold=fold, in_hand=in_hand,
-                       all_in=all_in, status=status)
+                       all_in=all_in, status=status, left=left)
 
 
 def state(*players: PlayerState, pot: float = 3.0, pbs: float = 3.0,
@@ -122,6 +122,69 @@ def test_tracker_collects_actions_and_dedupes_frames() -> None:
     check([(a.seat_id, a.action) for a in flop_acts]
           == [("a", "check"), ("b", "check")],
           f"翻牌行动线不对：{[(a.seat_id, a.action) for a in flop_acts]}")
+
+
+def test_tracker_records_fold_when_player_leaves_mid_hand() -> None:
+    """中途离桌 → 立刻补一条 inferred fold，保留名字/位置，且只补一次。"""
+    tr = LiveHandTracker(confirm_frames=1)
+    feed(tr, state(player("hero", position="BTN"),
+                   player("a", name="老王", position="SB", bet=0.5, stack=99.5),
+                   player("b", name="小李", position="BB", bet=1.0, stack=99.0),
+                   pot=1.5, pbs=0.0), ["Ah", "Qd"], [])
+    left = state(
+        player("hero", position="BTN"),
+        player("a", name="老王", position="SB", stack=None, bet=0.0,
+               fold=True, status="folded", left=True),
+        player("b", name="小李", position="BB", bet=1.0, stack=99.0),
+        pot=1.5, pbs=0.0)
+    feed(tr, left, ["Ah", "Qd"], [])
+    feed(tr, left, ["Ah", "Qd"], [])
+    check("a" not in tr.hand.active,
+          f"离桌的人应从 active 排除：{tr.hand.active}")
+
+    folds = [a for a in tr.hand.street_actions("preflop") if a.action == "fold"]
+    check(len(folds) == 1, f"离桌只应补一条弃牌，实际 {len(folds)}")
+    f = folds[0]
+    check(f.inferred and f.name == "老王" and f.position == "SB",
+          f"补出的弃牌应带名字/位置：{f}")
+
+    # 会话在街中间退出：take_current 的对账不能再补一条重复弃牌。
+    hand = tr.take_current()
+    acts = hand["streets"][0]["actions"]
+    folds = [a for a in acts if a["seat_id"] == "a" and a["action"] == "fold"]
+    check(len(folds) == 1, f"落库只应有一条离桌弃牌，实际 {folds}")
+    check(folds[0].get("inferred"), f"离桌弃牌应标 inferred：{folds[0]}")
+
+
+def test_tracker_revokes_fold_when_occluded_player_returns() -> None:
+    """离桌是弹窗遮挡误判时，图标回来要撤销那条合成弃牌。"""
+    tr = LiveHandTracker(confirm_frames=1)
+    feed(tr, state(player("hero", position="BTN"),
+                   player("a", name="老王", position="SB", bet=0.5, stack=99.5),
+                   player("b", name="小李", position="BB", bet=1.0, stack=99.0),
+                   pot=1.5, pbs=0.0), ["Ah", "Qd"], [])
+    left = state(
+        player("hero", position="BTN"),
+        player("a", name="老王", position="SB", stack=None, bet=0.0,
+               fold=True, status="folded", left=True),
+        player("b", name="小李", position="BB", bet=1.0, stack=99.0),
+        pot=1.5, pbs=0.0)
+    feed(tr, left, ["Ah", "Qd"], [])
+    check(any(a.left for a in tr.hand.actions), "离桌后应有一条合成弃牌")
+
+    revived = state(
+        player("hero", position="BTN"),
+        player("a", name="老王", position="SB", bet=0.5, stack=99.5),
+        player("b", name="小李", position="BB", bet=1.0, stack=99.0),
+        pot=1.5, pbs=0.0)
+    feed(tr, revived, ["Ah", "Qd"], [])
+    check(not any(a.left for a in tr.hand.actions),
+          f"恢复后应撤销合成弃牌：{tr.hand.actions}")
+
+    hand = tr.take_current()
+    acts = [a for a in hand["streets"][0]["actions"]
+            if a["seat_id"] == "a" and a["action"] == "fold"]
+    check(not acts, f"恢复后不应留下弃牌：{acts}")
 
 
 def test_tracker_infers_actions_when_badges_are_missed() -> None:
