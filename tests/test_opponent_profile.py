@@ -985,6 +985,52 @@ def test_fold_to_three_bet_and_missing_fold_inference() -> None:
           f"翻牌结束且没有转牌，应补推为面对 c-bet 弃牌：{got}")
 
 
+def test_population_prior_shrinkage() -> None:
+    """低频样本向人群先验收缩，且被收缩过的指标不产生剥削指令。"""
+    from poker_ocr.opponent_profile import (
+        DEFAULT_PRIORS, exploit_hint_zh, pooled_priors, render_tendencies_zh,
+        shrink_pct,
+    )
+
+    # β 收缩：0/2 不该读成 0%，也不该读成先验本身
+    shrunk = shrink_pct(0, 2, 79.0, 8.0)
+    check(0 < shrunk < 79, f"0/2 应被拉向先验但不等于先验：{shrunk}")
+    check(abs(shrunk - 63.2) < 0.5, f"收缩值应为 (0+8*0.79)/10=63.2：{shrunk}")
+
+    # 收缩永远拉向先验，只有 n 很大时才逼近实测值
+    check(abs(shrink_pct(800, 1000, 50.0, 8.0) - 80.0) < 1.0,
+          "样本很大时收缩值应逼近实测比例")
+
+    # 人群先验：样本足够时用合并比例，否则退回默认
+    fake = {
+        "a": {"ftc_fold": 40.0, "ftc_opp": 100.0},
+        "b": {"ftc_fold": 30.0, "ftc_opp": 50.0},
+    }
+    priors = pooled_priors(fake)
+    check(abs(priors["fold_to_cbet"] - 70 / 150 * 100) < 1e-6,
+          f"应取合并比例：{priors['fold_to_cbet']}")
+    check(priors["cbet"] == DEFAULT_PRIORS["cbet"],
+          f"没有数据时应用默认先验：{priors['cbet']}")
+
+    # 被先验收缩的指标：渲染加 ≈，且不产生指令
+    low = OpponentRead(
+        seat_id="a", key="k", display_name="某甲", archetype="station",
+        confidence=0.8, n=20, vpip=40.0, pfr=10.0, af=1.0,
+        source="auto", note="", gate="stable",
+        fold_to_cbet_pct=88.0, prior_dominated=("fold_to_cbet",))
+    check("≈" in render_tendencies_zh(low), "收缩过的指标应带 ≈")
+    check("对 c-bet 弃得多" not in exploit_hint_zh(low),
+          "收缩过的指标不该产生剥削指令")
+
+    confident = OpponentRead(
+        seat_id="b", key="k2", display_name="某乙", archetype="station",
+        confidence=0.8, n=40, vpip=40.0, pfr=10.0, af=1.0,
+        source="auto", note="", gate="stable",
+        fold_to_cbet_pct=88.0, prior_dominated=())
+    check("对 c-bet 弃得多" in exploit_hint_zh(confident),
+          "实测指标应给出剥削指令")
+
+
 def run() -> int:
     tests = [
         test_fold_and_check_are_inferred_at_street_end,
@@ -1009,6 +1055,7 @@ def run() -> int:
         test_street_actions_are_reordered_chronologically,
         test_limp_and_cbet_defence_observations,
         test_fold_to_three_bet_and_missing_fold_inference,
+        test_population_prior_shrinkage,
     ]
     for t in tests:
         before = len(FAILS)

@@ -138,6 +138,99 @@ def _num(value: float | int | None):
     return round(value, 4) if isinstance(value, float) else value
 
 
+# ── 人群先验（β 收缩）──────────────────────────────────────────
+# 单个对手一个月也就几十手，任何「2 次机会弃了 2 次」的原始比例都是噪声。
+# 所以低频样本不直接显示原始比例，而是向**全场均值**收缩：
+#
+#     shrunk = (hit + k * p0) / (opps + k)
+#
+# k 是「先验相当于几次机会」。k 越大越保守，越不容易被 2/2 带跑。
+# 下面的 k 按事件稀有度设：常见事件给 8-10，稀有事件给 4-6（否则永远
+# 收缩到先验上，等于没采）。
+PRIOR_STRENGTH: dict[str, float] = {
+    "open": 8.0,
+    "cbet": 8.0,
+    "barrel": 6.0,
+    "stab": 8.0,
+    "check_raise": 5.0,
+    "limp": 8.0,
+    "fold_to_cbet": 8.0,
+    "fold_to_barrel": 5.0,
+    "delay_cbet": 5.0,
+    "fold_to_3bet": 4.0,
+    "threebet": 6.0,
+    "call_to_cbet": 8.0,
+    "fourbet": 4.0,
+}
+
+# 全场样本不足时的兜底先验（百分比）。数值来自常见现金局的经验值，
+# 只用来在「还没有人群数据」时把低频样本拉回地面。
+DEFAULT_PRIORS: dict[str, float] = {
+    "open": 25.0,
+    "cbet": 65.0,
+    "barrel": 55.0,
+    "stab": 40.0,
+    "check_raise": 12.0,
+    "limp": 20.0,
+    "fold_to_cbet": 45.0,
+    "fold_to_barrel": 45.0,
+    "delay_cbet": 30.0,
+    "fold_to_3bet": 55.0,
+    "threebet": 6.0,
+    "call_to_cbet": 45.0,
+    "fourbet": 5.0,
+}
+
+# 指标 → (命中字段, 机会字段)。人群先验和收缩都靠这张表。
+PRIOR_FIELDS: dict[str, tuple[str, str]] = {
+    "open": ("opened", "open_opp"),
+    "cbet": ("cbets", "cbet_opp"),
+    "barrel": ("barrels", "barrel_opp"),
+    "stab": ("stabs", "stab_opp"),
+    "check_raise": ("check_raises", "check_raise_opp"),
+    "limp": ("limped", "limp_opp"),
+    "fold_to_cbet": ("ftc_fold", "ftc_opp"),
+    "fold_to_barrel": ("ftb_fold", "ftb_opp"),
+    "delay_cbet": ("dcb", "dcb_opp"),
+    "fold_to_3bet": ("f3b_fold", "f3b_opp"),
+    "threebet": ("threebet", "threebet_opps"),
+    "call_to_cbet": ("ftc_call", "ftc_opp"),
+    "fourbet": ("f3b_4bet", "f3b_opp"),
+}
+
+
+def _field(raw, name: str) -> float:
+    """读一个计数字段。`raw` 可能是画像 JSON 的 dict，也可能是 OpponentStats
+    对象 —— 两种都要支持，否则人群先验永远退回默认值（实测就是这么静默
+    失效的）。"""
+    value = (raw.get(name) if isinstance(raw, Mapping)
+             else getattr(raw, name, None))
+    return float(value) if isinstance(value, (int, float)) else 0.0
+
+
+def pooled_priors(players: Mapping) -> dict[str, float]:
+    """从整份画像算人群先验（按机会数加权的合并比例）。
+
+    只在该指标的全场机会数 >= 20 时采用；否则退回 `DEFAULT_PRIORS` ——
+    十来次机会算出来的「全场均值」比经验值更不靠谱。
+    """
+    priors = dict(DEFAULT_PRIORS)
+    for name, (hit_field, opp_field) in PRIOR_FIELDS.items():
+        hit = sum(_field(raw, hit_field) for raw in players.values())
+        opps = sum(_field(raw, opp_field) for raw in players.values())
+        if opps >= 20:
+            priors[name] = hit / opps * 100
+    return priors
+
+
+def shrink_pct(hit: float, opps: float, prior_pct: float,
+               strength: float) -> float:
+    """β 收缩后的比例（百分比）。"""
+    if opps <= 0:
+        return prior_pct
+    return (hit + strength * prior_pct / 100.0) / (opps + strength) * 100
+
+
 def _pct(hit: float, opps: float, *, min_opps: float = 3.0) -> float | None:
     """命中率；机会数不足返回 None —— 3 次机会算出 0% 或 100% 没有信息量。"""
     if opps < min_opps:
@@ -1254,6 +1347,8 @@ class OpponentRead:
     delay_cbet_pct: float | None = None
     fold_to_3bet_pct: float | None = None
     fourbet_pct: float | None = None
+    # 哪些指标是被人群先验收缩过的（不是实测值）。渲染时加 ≈。
+    prior_dominated: tuple[str, ...] = ()
 
     @property
     def aggressive(self) -> bool:
@@ -1290,44 +1385,64 @@ TENDENCY_MIN_OPPS = {
     "fold_to_barrel": 5.0,
     "delay_cbet": 5.0,
     "fold_to_3bet": 5.0,
+    "threebet": 6.0,
+    "call_to_cbet": 8.0,
+    "fourbet": 5.0,
 }
 
 
-def _tendency(value: float | None, opps: float, kind: str) -> float | None:
-    if value is None or opps < TENDENCY_MIN_OPPS[kind]:
-        return None
-    return round(value, 0)
+def _tendency(hit: float, opps: float, kind: str,
+              priors: Mapping[str, float]) -> tuple[float | None, bool]:
+    """(百分比, 是否被先验主导)。
+
+    机会数够了给实测比例；不够但至少有 1 次机会时给收缩后的估计，并标记
+    「这条被先验主导」—— 渲染时加 ≈，让模型知道它不是实测值。完全没有
+    机会就返回 None（不渲染）。
+    """
+    if opps <= 0:
+        return None, False
+    if opps >= TENDENCY_MIN_OPPS[kind]:
+        return round(hit / opps * 100, 0), False
+    if opps < 1.0:
+        return None, False
+    prior = priors.get(kind, DEFAULT_PRIORS.get(kind, 50.0))
+    strength = PRIOR_STRENGTH.get(kind, 8.0)
+    return round(shrink_pct(hit, opps, prior, strength), 0), True
 
 
-def _tendencies(stats: OpponentStats) -> dict:
-    """位置开池与翻后线路。全部按机会数门控，不够就是 None。"""
-    return dict(
-        open_ep_pct=_tendency(stats.open_pct("EP"),
-                              stats.open_opp_by_bucket.get("EP", 0.0), "open"),
-        open_lp_pct=_tendency(stats.open_pct("LP"),
-                              stats.open_opp_by_bucket.get("LP", 0.0), "open"),
-        cbet_pct=_tendency(stats.cbet_pct, stats.cbet_opp, "cbet"),
-        barrel_pct=_tendency(stats.barrel_pct, stats.barrel_opp, "barrel"),
-        stab_pct=_tendency(stats.stab_pct, stats.stab_opp, "stab"),
-        check_raise_pct=_tendency(stats.check_raise_pct,
-                                  stats.check_raise_opp, "check_raise"),
-        threebet_pct=(round(stats.threebet_pct, 0)
-                      if stats.threebet_pct is not None
-                      and stats.threebet_opps >= 6 else None),
-        limp_pct=_tendency(stats.limp_pct, stats.limp_opp, "limp"),
-        fold_to_cbet_pct=_tendency(stats.fold_to_cbet_pct, stats.ftc_opp,
-                                   "fold_to_cbet"),
-        call_to_cbet_pct=_tendency(stats.call_to_cbet_pct, stats.ftc_opp,
-                                   "fold_to_cbet"),
-        fold_to_barrel_pct=_tendency(stats.fold_to_barrel_pct, stats.ftb_opp,
-                                     "fold_to_barrel"),
-        delay_cbet_pct=_tendency(stats.delay_cbet_pct, stats.dcb_opp,
-                                 "delay_cbet"),
-        fold_to_3bet_pct=_tendency(stats.fold_to_3bet_pct, stats.f3b_opp,
-                                   "fold_to_3bet"),
-        fourbet_pct=_tendency(stats.fourbet_pct, stats.f3b_opp,
-                              "fold_to_3bet"),
-    )
+def _tendencies(stats: OpponentStats,
+                priors: Mapping[str, float] | None = None
+                ) -> tuple[dict, tuple[str, ...]]:
+    """位置开池与翻后线路。低频样本向人群先验收缩，并记下哪些被收缩过。"""
+    priors = priors or DEFAULT_PRIORS
+    fields: dict = {}
+    low: list[str] = []
+
+    def put(name: str, hit: float, opps: float, kind: str | None = None) -> None:
+        pct, used_prior = _tendency(hit, opps, kind or name, priors)
+        if pct is None:
+            return
+        fields[f"{name}_pct"] = pct
+        if used_prior:
+            low.append(name)
+
+    put("open_ep", stats.open_by_bucket.get("EP", 0.0),
+        stats.open_opp_by_bucket.get("EP", 0.0), "open")
+    put("open_lp", stats.open_by_bucket.get("LP", 0.0),
+        stats.open_opp_by_bucket.get("LP", 0.0), "open")
+    put("threebet", stats.threebet, stats.threebet_opps)
+    put("cbet", stats.cbets, stats.cbet_opp)
+    put("barrel", stats.barrels, stats.barrel_opp)
+    put("stab", stats.stabs, stats.stab_opp)
+    put("check_raise", stats.check_raises, stats.check_raise_opp)
+    put("limp", stats.limped, stats.limp_opp)
+    put("fold_to_cbet", stats.ftc_fold, stats.ftc_opp)
+    put("call_to_cbet", stats.ftc_call, stats.ftc_opp)
+    put("fold_to_barrel", stats.ftb_fold, stats.ftb_opp)
+    put("delay_cbet", stats.dcb, stats.dcb_opp)
+    put("fold_to_3bet", stats.f3b_fold, stats.f3b_opp)
+    put("fourbet", stats.f3b_4bet, stats.f3b_opp)
+    return fields, tuple(low)
 
 
 def _unknown_read(stats: OpponentStats | None, *, seat_id: str | None = None,
@@ -1350,7 +1465,8 @@ def _unknown_read(stats: OpponentStats | None, *, seat_id: str | None = None,
     )
 
 
-def classify(stats: OpponentStats) -> OpponentRead:
+def classify(stats: OpponentStats,
+             priors: Mapping[str, float] | None = None) -> OpponentRead:
     """规则评分 + softmax。样本不足返回 unknown，缺失特征保持中性。"""
     n = stats.n
     if n < MIN_SAMPLE:
@@ -1414,6 +1530,7 @@ def classify(stats: OpponentStats) -> OpponentRead:
     note_parts.append(f"n={n}")
     if gate == "tentative":
         note_parts.append("tentative")
+    fields, prior_dominated = _tendencies(stats, priors)
     return OpponentRead(
         seat_id=None,
         key=stats.key,
@@ -1424,7 +1541,8 @@ def classify(stats: OpponentStats) -> OpponentRead:
         vpip=round(vpip, 1),
         pfr=round(pfr, 1),
         af=round(af, 2) if af is not None else 0.0,
-        **_tendencies(stats),
+        **fields,
+        prior_dominated=prior_dominated,
         source="auto",
         note=", ".join(note_parts),
         gate=gate,
@@ -1695,12 +1813,16 @@ class ProfileStore:
         self._dirty = True
 
     # ── 读取 ──
+    def _priors(self) -> dict[str, float]:
+        """整份画像算出的全场先验；每次现算，避免「更新了画像但先验没刷新」。"""
+        return pooled_priors(self.players)
+
     def _read_for_stats(self, stats: OpponentStats | None,
                         seat_id: str | None) -> OpponentRead:
         if stats is None:
             return _unknown_read(None, seat_id=seat_id,
                                  note="未匹配到画像")
-        auto = classify(stats)
+        auto = classify(stats, self._priors())
         # 用 replace 而不是重列字段：以后再加倾向指标时，这里不会静默丢字段。
         if stats.manual_pin:
             return replace(
@@ -1932,10 +2054,15 @@ def render_reads_zh(reads: Iterable[OpponentRead],
     return lines
 
 
+def _mark(read: OpponentRead, names: tuple[str, ...], text: str) -> str:
+    """被先验收缩过的指标加 ≈：让模型知道这是估计值，不是实测。"""
+    return f"≈{text}" if any(n in read.prior_dominated for n in names) else text
+
+
 def render_tendencies_zh(read: OpponentRead) -> str:
     """位置开池 + 翻后线路的一行摘要；没有足够样本时返回空串。
 
-    只渲染有样本的指标：宁可不写，也不给模型一个 3 次机会算出来的百分比。
+    `≈` 表示这一项样本不够、已向全场均值收缩 —— 是估计值不是实测值。
     """
     parts: list[str] = []
     opens = []
@@ -1944,76 +2071,93 @@ def render_tendencies_zh(read: OpponentRead) -> str:
     if read.open_lp_pct is not None:
         opens.append(f"LP {read.open_lp_pct:.0f}%")
     if opens:
-        parts.append("开池 " + " / ".join(opens))
+        parts.append(_mark(read, ("open_ep", "open_lp"),
+                           "开池 " + " / ".join(opens)))
     if read.threebet_pct is not None:
-        parts.append(f"3-bet {read.threebet_pct:.0f}%")
+        parts.append(_mark(read, ("threebet",), f"3-bet {read.threebet_pct:.0f}%"))
     if read.cbet_pct is not None:
-        parts.append(f"翻牌 c-bet {read.cbet_pct:.0f}%")
+        parts.append(_mark(read, ("cbet",), f"翻牌 c-bet {read.cbet_pct:.0f}%"))
     if read.barrel_pct is not None:
-        parts.append(f"转牌续打 {read.barrel_pct:.0f}%")
+        parts.append(_mark(read, ("barrel",), f"转牌续打 {read.barrel_pct:.0f}%"))
     if read.stab_pct is not None:
-        parts.append(f"被过牌后下注 {read.stab_pct:.0f}%")
+        parts.append(_mark(read, ("stab",),
+                           f"被过牌后下注 {read.stab_pct:.0f}%"))
     if read.check_raise_pct is not None:
-        parts.append(f"过牌-加注 {read.check_raise_pct:.0f}%")
+        parts.append(_mark(read, ("check_raise",),
+                           f"过牌-加注 {read.check_raise_pct:.0f}%"))
     if read.limp_pct is not None:
-        parts.append(f"溜入 {read.limp_pct:.0f}%")
+        parts.append(_mark(read, ("limp",), f"溜入 {read.limp_pct:.0f}%"))
     if read.fold_to_cbet_pct is not None:
         seg = f"对 c-bet 弃 {read.fold_to_cbet_pct:.0f}%"
         if read.call_to_cbet_pct is not None:
             seg += f" / 跟 {read.call_to_cbet_pct:.0f}%"
-        parts.append(seg)
+        parts.append(_mark(read, ("fold_to_cbet", "call_to_cbet"), seg))
     if read.fold_to_barrel_pct is not None:
-        parts.append(f"转牌再弃 {read.fold_to_barrel_pct:.0f}%")
+        parts.append(_mark(read, ("fold_to_barrel",),
+                           f"转牌再弃 {read.fold_to_barrel_pct:.0f}%"))
     if read.delay_cbet_pct is not None:
-        parts.append(f"延迟 c-bet {read.delay_cbet_pct:.0f}%")
+        parts.append(_mark(read, ("delay_cbet",),
+                           f"延迟 c-bet {read.delay_cbet_pct:.0f}%"))
     if read.fold_to_3bet_pct is not None:
         seg = f"被 3-bet 弃 {read.fold_to_3bet_pct:.0f}%"
         if read.fourbet_pct is not None:
             seg += f" / 4-bet {read.fourbet_pct:.0f}%"
-        parts.append(seg)
+        parts.append(_mark(read, ("fold_to_3bet", "fourbet"), seg))
     return "｜".join(parts)
+
+
+def _confident(read: OpponentRead, *names: str) -> bool:
+    """这条结论能不能拿去剥削：必须是实测值，不能是先验收缩出来的估计。"""
+    return all(name not in read.prior_dominated for name in names)
 
 
 def exploit_hint_zh(read: OpponentRead, *, limit: int = 2) -> str:
     """把倾向翻译成**可执行的剥削方向**，最多两条。
 
-    只在样本足够（render_tendencies_zh 已经门控过）且偏离明显时才给：
-    中间值两边都不站，宁可不说。
+    只采信**实测**指标：被先验收缩过的（低频样本）不产生指令 —— 那只是
+    估计，用来理解对手可以，用来下注不行。中间值两边都不站，也不说。
     """
     hints: list[str] = []
 
-    if read.stab_pct is not None:
+    if _confident(read, "stab") and read.stab_pct is not None:
         if read.stab_pct <= 25:
             hints.append("被过牌后很少下注 —— 他过牌多半没牌，过牌到你时可以更主动偷池")
         elif read.stab_pct >= 60:
             hints.append("被过牌后爱下注 —— 过牌给他要准备 check-raise，别用中等牌白跟")
 
-    if read.check_raise_pct is not None and read.check_raise_pct >= 20:
+    if (_confident(read, "check_raise")
+            and read.check_raise_pct is not None
+            and read.check_raise_pct >= 20):
         hints.append("过牌-加注频繁 —— 别对他的过牌随手开火")
 
-    if read.cbet_pct is not None:
+    if _confident(read, "cbet") and read.cbet_pct is not None:
         if read.cbet_pct >= 75:
             hints.append("c-bet 频率高 —— 可以多 float，转牌他再开枪再决定")
         elif read.cbet_pct <= 40:
             hints.append("c-bet 频率低 —— 翻牌他过牌基本是没中，可以在转牌接管控池")
 
-    if read.fold_to_cbet_pct is not None:
+    if _confident(read, "fold_to_cbet") and read.fold_to_cbet_pct is not None:
         if read.fold_to_cbet_pct >= 60:
             hints.append("对 c-bet 弃得多 —— 干燥面可以高频开火，别只拿强牌下注")
         elif read.fold_to_cbet_pct <= 30:
             hints.append("对 c-bet 跟得多 —— 别用空气开火，价值牌打大")
 
-    if read.limp_pct is not None and read.limp_pct >= 25:
+    if (_confident(read, "limp") and read.limp_pct is not None
+            and read.limp_pct >= 25):
         hints.append("爱溜入 —— 他的溜入范围偏弱，有位置时可以直接隔离加注")
 
-    if read.delay_cbet_pct is not None and read.delay_cbet_pct >= 40:
+    if (_confident(read, "delay_cbet") and read.delay_cbet_pct is not None
+            and read.delay_cbet_pct >= 40):
         hints.append("翻牌过牌不代表放弃 —— 他会在转牌补一枪，别用中等牌白跟")
 
-    if read.fold_to_3bet_pct is not None and read.fold_to_3bet_pct >= 60:
+    if (_confident(read, "fold_to_3bet")
+            and read.fold_to_3bet_pct is not None
+            and read.fold_to_3bet_pct >= 60):
         # 这才是挤压的真实判据：他开池后被 3-bet 会弃。
         hints.append("被 3-bet 就弃 —— 他开池后可以直接挤压，"
                      "身后都弃牌时成功率高")
-    elif (read.open_lp_pct is not None and read.open_lp_pct >= 40
+    elif (_confident(read, "open_lp") and read.open_lp_pct is not None
+            and read.open_lp_pct >= 40
             and (read.threebet_pct is None or read.threebet_pct <= 8)):
         # 兜底：没采到「被 3-bet 的弃牌率」时，用开池宽度做代理。
         hints.append("后位开池宽、3-bet 少 —— 他开池的范围偏弱，"
