@@ -1335,11 +1335,21 @@ class LiveProcessor:
                         self.log(f"  [对手] 画像读取失败："
                                  f"{type(exc).__name__}: {exc}")
                         reads = {}
+                # 全场合并统计：桌子的松紧/被动改成**事实注入**，
+                # 不再靠 `.table_dy` 里的人工形容词。
+                table_stats = None
+                if self.profile_store is not None:
+                    try:
+                        table_stats = self.profile_store.pooled()
+                    except Exception as exc:      # noqa: BLE001
+                        self.log(f"  [对手] 全场统计失败："
+                                 f"{type(exc).__name__}: {exc}")
                 # 一个坏快照不能把整条拉流链路带下去
                 try:
                     situation = build_situation(
                         point, table_dynamics=dynamics,
-                        opponent_reads=reads.values())
+                        opponent_reads=reads.values(),
+                        table_stats=table_stats)
                 except Exception as exc:      # noqa: BLE001
                     self.log(f"  [建议] 局面构建失败：{type(exc).__name__}: {exc}")
                     return

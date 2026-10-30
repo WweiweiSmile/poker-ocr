@@ -1362,6 +1362,37 @@ class OpponentRead:
         return ARCHETYPE_NAMES.get(self.archetype, self.archetype)
 
 
+@dataclass(frozen=True)
+class PooledStats:
+    """全场合并统计：整份画像按机会数加权合并。
+
+    这是「这张桌子是什么局」的**事实**，用来替代 `.table_dy` 里那些
+    「整体偏松 / 多数人不诈唬」的形容词 —— 同一件事，数字比形容词可靠，
+    而且不会在换桌之后过期。
+    """
+
+    hands: int
+    players: int
+    vpip: float | None = None
+    pfr: float | None = None
+    threebet: float | None = None
+    limp: float | None = None
+    fold_to_cbet: float | None = None
+    stab: float | None = None
+    cbet: float | None = None
+
+    @property
+    def loose(self) -> bool | None:
+        """入池宽不宽。和 `table_dynamics.is_loose_table` 的语义一致：
+        只说「入池宽」，不说被动。"""
+        return None if self.vpip is None else self.vpip >= 32.0
+
+    @property
+    def passive(self) -> bool | None:
+        """加注少不少。只看 3-bet 频率：这一桌 3-bet 少就是被动。"""
+        return None if self.threebet is None else self.threebet <= 8.0
+
+
 def _gate(n: int, confidence: float) -> str:
     if n < MIN_SAMPLE:
         return "unknown"
@@ -1813,6 +1844,29 @@ class ProfileStore:
         self._dirty = True
 
     # ── 读取 ──
+    def pooled(self) -> PooledStats:
+        """全场合并统计（按机会加权）。"""
+        players = list(self.players.values())
+
+        def agg(hit_field: str, opp_field: str) -> float | None:
+            hit = sum(_field(raw, hit_field) for raw in players)
+            opps = sum(_field(raw, opp_field) for raw in players)
+            return hit / opps * 100 if opps > 0 else None
+
+        # hands 用**去重后的手数**（seen_hands），不是各玩家 hands 之和 ——
+        # 一手牌会让 4-8 个对手各记一次，求和会把 294 手说成 1100 多手。
+        return PooledStats(
+            hands=len(self.seen_hands),
+            players=len(players),
+            vpip=agg("vpip", "preflop_opps"),
+            pfr=agg("pfr", "preflop_opps"),
+            threebet=agg("threebet", "threebet_opps"),
+            limp=agg("limped", "limp_opp"),
+            fold_to_cbet=agg("ftc_fold", "ftc_opp"),
+            stab=agg("stabs", "stab_opp"),
+            cbet=agg("cbets", "cbet_opp"),
+        )
+
     def _priors(self) -> dict[str, float]:
         """整份画像算出的全场先验；每次现算，避免「更新了画像但先验没刷新」。"""
         return pooled_priors(self.players)

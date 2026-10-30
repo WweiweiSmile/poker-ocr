@@ -1520,26 +1520,46 @@ def test_table_dynamics_parse_and_load() -> None:
 
 
 def test_table_dynamics_in_prompt() -> None:
-    """有动态时进 user facts，并告诉模型怎么按桌风调整；没有时不多出这段。"""
-    dyn = "新手玩家，比较松弱，诈唬很少。"
+    """`.table_dy` 现在只写**现场观察**，段落标题也要跟着改；没有时不多出这段。"""
+    dyn = "3 号位上头了，连续三把全下。"
     sit = build_situation(make_point(to_call=4.0, pot=10.0, hero_stack=90.0),
                           table_dynamics=dyn)
-    check(sit.table_dynamics == dyn, "Situation 应保存动态原文")
+    check(sit.table_dynamics == dyn, "Situation 应保存观察原文")
     system, user = build_messages(sit)
-    check("## 桌面动态（桌级；逐座位画像优先）" in user,
-          f"user facts 应含桌风段：\n{user}")
-    check(dyn in user, f"动态原文应进入提示词：\n{user}")
-    check("## Table context" not in user,
-          f"不该再包一层策略性的 Table context：\n{user}")
+    check("## 人工观察" in user, f"user facts 应含人工观察段：\n{user}")
+    check("## 桌面动态" not in user,
+          f"旧的「桌面动态」段应该已经移除：\n{user}")
+    check(dyn in user, f"观察原文应进入提示词：\n{user}")
     check("逐座位对手画像 > 桌级桌风" in system,
           "system 应说明逐座位画像优先于桌级桌风")
 
     blank = build_situation(make_point(to_call=4.0, pot=10.0, hero_stack=90.0),
                             table_dynamics="  \n ")
-    check(blank.table_dynamics is None, "空白动态应归一成 None")
+    check(blank.table_dynamics is None, "空白观察应归一成 None")
     _, plain_user = build_messages(blank)
-    check("## 桌面动态" not in plain_user,
-          f"没有动态时不该多出这段：\n{plain_user}")
+    check("## 人工观察" not in plain_user,
+          f"没有观察时不该多出这段：\n{plain_user}")
+
+
+def test_table_stats_come_from_profiles() -> None:
+    """桌子的松紧改成**事实注入**：全场合并统计进提示词，不再是形容词。"""
+    from poker_ocr.opponent_profile import PooledStats
+
+    stats = PooledStats(hands=294, players=30, vpip=38.0, pfr=12.0,
+                        threebet=5.9, limp=46.0, fold_to_cbet=79.0, stab=5.0)
+    sit = build_situation(make_point(to_call=4.0, pot=10.0, hero_stack=90.0),
+                          table_stats=stats)
+    _, user = build_messages(sit)
+    check("## 全场数据" in user, f"应渲染全场数据段：\n{user}")
+    check("VPIP 38%" in user and "对 c-bet 弃 79%" in user,
+          f"应写出具体比例：\n{user}")
+    check("整体：松、被动" in user, f"应给出松/被动的结论：\n{user}")
+
+    # 样本太小时不渲染：十手牌算出来的「全场 VPIP」比没有更误导
+    thin = PooledStats(hands=12, players=3, vpip=60.0)
+    _, small_user = build_messages(build_situation(
+        make_point(to_call=4.0, pot=10.0, hero_stack=90.0), table_stats=thin))
+    check("## 全场数据" not in small_user, f"样本太小时不该渲染：\n{small_user}")
 
 
 def test_value_heavy_aggression_flags() -> None:

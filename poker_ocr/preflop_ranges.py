@@ -542,7 +542,9 @@ class Verdict:
 def range_verdict(position: str | None, cards,
                   table_dynamics: str | None = None,
                   limpers: int = 0,
-                  stack_bb: float | None = None) -> Verdict | None:
+                  stack_bb: float | None = None,
+                  loose: bool | None = None,
+                  passive: bool | None = None) -> Verdict | None:
     """位置 + 两张手牌 → 范围归属。
 
     `table_dynamics` 只影响「默认线」的渲染：桌风明确「松」时，开池表按**默认值**
@@ -556,8 +558,13 @@ def range_verdict(position: str | None, cards,
     """
     if not position or not cards or len(cards) != 2:
         return None
-    loose = is_loose_table(table_dynamics)
-    passive = is_passive_table(table_dynamics)
+    # 桌风优先用调用方给的**算出来的**结论（全场 VPIP / 3-bet）；没有统计时
+    # 才退回 `.table_dy` 的关键词。`.table_dy` 现在只写现场观察，关键词经常
+    # 匹配不到，所以这个先后顺序决定了松桌结论还灵不灵。
+    if loose is None:
+        loose = is_loose_table(table_dynamics)
+    if passive is None:
+        passive = is_passive_table(table_dynamics)
     limpers = max(int(limpers or 0), 0)
     pos = position.strip().upper().replace("+", "+")
     if pos not in RFI:

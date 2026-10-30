@@ -46,11 +46,12 @@ from .coach import (
 from .ground_truth import GroundTruth, card_text, compute_ground_truth
 from .hand_track import ActionRecord, FLOP, HandSnapshot, PREFLOP, RIVER, TURN
 from .opponent_profile import (AGGRESSIVE_ARCHETYPES, PASSIVE_ARCHETYPES,
-                               OpponentRead, render_reads, render_reads_zh)
+                               OpponentRead, PooledStats, render_reads,
+                               render_reads_zh)
 from .positions import BB, POSITIONS_BY_TABLE_SIZE, SB
 from .preflop_ranges import range_verdict, sb_completable
 from .table_dynamics import (is_aggressive_table, is_loose_table,
-                             value_heavy_aggression)
+                             is_passive_table, value_heavy_aggression)
 
 # ─────────────────────────── 选项 ───────────────────────────
 
@@ -59,7 +60,7 @@ HERO_ACTOR = "hero"
 
 # 当前唯一的中文 lean 提示词版本。写入 session_start / advice JSONL，
 # 复盘归因用；改动 system 或事实块时 bump。
-PROMPT_VERSION = "lean-zh-2026-10-30.4"
+PROMPT_VERSION = "lean-zh-2026-10-30.5"
 PROMPT_LANGUAGE = "zh"
 
 # 加注尺度：名字 → 底池倍数。「满池 1.2」是超池，用于需要施压/劝退的场合
@@ -706,8 +707,11 @@ class Situation:
     opponent_strength_en: dict | None = None
     # 四二法则估的成牌率（0-100）。给提示词做「赔率 vs 胜率」比较用
     equity_pct: float | None = None
-    # 人工维护的牌桌动态（根目录 .table_dy）。空/None = 按「未知对手」标准线。
+    # 人工维护的**现场观察**（根目录 .table_dy）。只写统计算不出来的东西：
+    # 「3 号位上头了」「这桌有人合伙」。桌子的松紧/被动由 table_stats 给数字。
     table_dynamics: str | None = None
+    # 全场合并统计（人群画像）。这是「这桌是什么局」的事实来源。
+    table_stats: "PooledStats | None" = None
     # 爆炸底池：上一街底池 ÷ 实际参与人数（BB/人）及其是否刚好 5BB。
     # 见 previous_street_pot() / is_explosive_pot()。
     pot_per_player: float | None = None
@@ -796,6 +800,7 @@ def _precise_texture_en(gt: GroundTruth | None, texture: str | None) -> str | No
 def build_situation(snap: HandSnapshot,
                     table_dynamics: str | None = None,
                     opponent_reads: Iterable[OpponentRead] | None = None,
+                    table_stats: "PooledStats | None" = None,
                     previous: "Advice | None" = None,
                     include_advanced: bool = False
                     ) -> Situation:
@@ -853,12 +858,21 @@ def build_situation(snap: HandSnapshot,
         p = read.beat_pct
         beat_pct = round(p * 100, 1)
         beat_at_least = round((1.0 - (1.0 - p) ** max(n_opp, 1)) * 100, 1)
+    # 桌子的松紧优先用**算出来的**全场统计；没有统计（第一晚、新桌）才退回
+    # `.table_dy` 的关键词。`.table_dy` 现在只写现场观察，关键词多数时候匹配
+    # 不到，所以这里的先后顺序很关键。
+    loose_flag = (table_stats.loose
+                  if table_stats is not None and table_stats.loose is not None
+                  else is_loose_table(table_dynamics))
+    passive_flag = (table_stats.passive
+                    if table_stats is not None
+                    and table_stats.passive is not None
+                    else is_passive_table(table_dynamics))
     sit = Situation(
         snap=snap,
         options=build_options(snap,
                               open_bonus=(LOOSE_OPEN_BONUS
-                                          if is_loose_table(table_dynamics)
-                                          else 0.0)),
+                                          if loose_flag else 0.0)),
         hand_label=read.label if read else None,
         hand_tier=read.tier if read else None,
         category=read.category if read else None,
@@ -872,6 +886,7 @@ def build_situation(snap: HandSnapshot,
         opponent_strength_en=opp_en,
         equity_pct=read.equity_pct if read else None,
         table_dynamics=(table_dynamics or "").strip() or None,
+        table_stats=table_stats,
         pot_per_player=per_player,
         explosive_pot=is_explosive_pot(snap),
         beat_pct=beat_pct,
@@ -880,7 +895,8 @@ def build_situation(snap: HandSnapshot,
         # 翻前范围结论只在无人入池/溜入时渲染；面对加注不给 RFI 结论，
         # 否则模型会把「开池范围」当成「跟注/3-bet 范围」。
         range_verdict=(
-            _range_conclusion_zh(snap, table_dynamics)
+            _range_conclusion_zh(snap, table_dynamics, loose_flag,
+                                 passive_flag)
             if snap.street == PREFLOP and snap.preflop_shapes
             and set(snap.preflop_shapes) <= {"unopened", "limped"}
             else None),
@@ -2058,7 +2074,9 @@ def _playable_depth(snap: HandSnapshot) -> float | None:
 
 
 def _range_conclusion_zh(snap: HandSnapshot,
-                         table_dynamics: str | None) -> str | None:
+                         table_dynamics: str | None,
+                         loose: bool | None = None,
+                         passive: bool | None = None) -> str | None:
     """翻前开池归属的一句话中文结论（只在无人入池/溜入时使用）。
 
     `preflop_ranges.Verdict.render()` 是英文长句；模型只需要「在/不在 +
@@ -2067,7 +2085,8 @@ def _range_conclusion_zh(snap: HandSnapshot,
     verdict = range_verdict(snap.hero_position, snap.hero_cards,
                             table_dynamics=table_dynamics,
                             limpers=count_limpers(snap),
-                            stack_bb=_playable_depth(snap))
+                            stack_bb=_playable_depth(snap),
+                            loose=loose, passive=passive)
     if verdict is None:
         return None
     if verdict.in_range is None:
@@ -2389,6 +2408,40 @@ def render_preflop_zh(sit: Situation) -> list[str]:
     return lines
 
 
+def render_table_stats_zh(stats: "PooledStats | None") -> list[str]:
+    """全场合并统计：替代 `.table_dy` 里「整体偏松」那类形容词。
+
+    同一件事，数字比形容词可靠，而且不会在换桌之后过期。样本太小时不渲染 ——
+    十手牌算出来的「全场 VPIP」比没有更误导。
+    """
+    if stats is None or stats.hands < 20:
+        return []
+    parts: list[str] = []
+    for label, value in (("VPIP", stats.vpip), ("PFR", stats.pfr),
+                         ("3-bet", stats.threebet), ("溜入", stats.limp),
+                         ("对 c-bet 弃", stats.fold_to_cbet),
+                         ("被过牌后下注", stats.stab)):
+        if value is not None:
+            parts.append(f"{label} {value:.0f}%")
+    if not parts:
+        return []
+    lines = ["## 全场数据"]
+    lines.append(f"{stats.players} 人 / {stats.hands} 手："
+                 + "｜".join(parts))
+    tags: list[str] = []
+    if stats.loose is True:
+        tags.append("松")
+    elif stats.loose is False:
+        tags.append("紧")
+    if stats.passive is True:
+        tags.append("被动")
+    elif stats.passive is False:
+        tags.append("有加注")
+    if tags:
+        lines.append("整体：" + "、".join(tags))
+    return lines
+
+
 def render_explosive_zh(sit: Situation) -> list[str]:
     """炸弹池的结构与打法事实。
 
@@ -2529,9 +2582,14 @@ def render_facts_zh(sit: Situation) -> str:
         lines.append("")
         lines.extend(reads)
 
+    table_stats = render_table_stats_zh(sit.table_stats)
+    if table_stats:
+        lines.append("")
+        lines.extend(table_stats)
+
     if sit.table_dynamics:
         lines.append("")
-        lines.append("## 桌面动态（桌级；逐座位画像优先）")
+        lines.append("## 人工观察（现场记录；统计算不出来的东西）")
         lines.append(sit.table_dynamics)
 
     gaps = [_gap_zh(w) for w in sit.warnings]
