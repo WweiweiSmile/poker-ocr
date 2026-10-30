@@ -3228,6 +3228,151 @@ def test_bomb_pot_shallow_spr_top_pair_is_a_stackoff_hand() -> None:
 
 
 
+def _limped_point(*, board=("As", "7d", "2c"), cards=("Kd", "Qd"),
+                  hero_position="BTN", checks=True,
+                  shapes=("limped",)) -> "HandSnapshot":
+    """溜入池、翻牌全部过牌到 Hero 的最小快照。"""
+    from poker_ocr.hand_track import (
+        ActionRecord, OpponentSnapshot, StreetRecord,
+    )
+    flop_actions = ()
+    if checks:
+        flop_actions = (
+            ActionRecord("flop", "bb", "BB", "BB", "check", None, False, False),
+            ActionRecord("flop", "utg", "UTG", "UTG", "check", None, False,
+                         False),
+            ActionRecord("flop", "co", "CO", "CO", "check", None, False, False),
+        )
+    return make_point(
+        street="flop", board=board, hero_cards=cards,
+        hero_position=hero_position, hero_stack=100.0, hero_bet=0.0,
+        to_call=0.0, pot=5.5, pot_before_street=5.5, table_size=9,
+        players_dealt=4, preflop_shapes=shapes,
+        opponents=(OpponentSnapshot("bb", "BB", "BB", 100.0, 0.0, False),
+                   OpponentSnapshot("utg", "UTG", "UTG", 100.0, 0.0, False),
+                   OpponentSnapshot("co", "CO", "CO", 100.0, 0.0, False)),
+        streets=(StreetRecord("preflop", 4.0, ()),
+                 StreetRecord("flop", 5.5, flop_actions)))
+
+
+def test_attack_fact_for_limped_pot_checked_to_hero() -> None:
+    """溜入池、全过牌到收尾的 Hero：给「高频小注攻击」事实，别只按权益过牌。"""
+    from poker_ocr.opponent_profile import PooledStats
+
+    stats = PooledStats(
+        hands=105, players=4, total_players=5, scope="current_table",
+        approx_hands=True, vpip=48.0, pfr=10.0, threebet=4.0, limp=60.0,
+        fold_to_cbet=44.0, stab=10.0, fold_to_bet_flop=73.0,
+        opportunities={"flop": 20.0, "turn": 10.0, "river": 8.0,
+                       "limp": 50.0, "fcbet": 10.0, "stab": 10.0})
+    dynamics = ("- 本池对手看到公共牌有 A 时抵抗力明显下降，容易弃牌："
+                "A 高面可以更频繁下注。")
+    sit = build_situation(_limped_point(), table_stats=stats,
+                          table_dynamics=dynamics)
+    text = render_facts_zh(sit)
+    check("## 攻击机会（宽范围/死钱）" in text,
+          f"溜入池全过牌应给攻击机会：\n{text}")
+    check("本街全部过牌到 Hero" in text,
+          f"要写清 Hero 收尾：\n{text}")
+    check("对手面对翻牌下注弃 73%" in text,
+          f"弃牌率要进事实：\n{text}")
+    check("A 高面：人工观察说本池对手见 A 抵抗力下降" in text,
+          f"A 高面要引用人工观察：\n{text}")
+
+    # 非溜入池（单加注）不触发：对手范围不是封顶的宽范围。
+    raised = build_situation(_limped_point(shapes=("single-raise",)),
+                             table_stats=stats, table_dynamics=dynamics)
+    check("攻击机会" not in render_facts_zh(raised),
+          "单加注池不该给「宽范围死钱」攻击事实")
+
+    # Hero 不是收尾（OOP 先行动）不触发。
+    oop = build_situation(_limped_point(hero_position="BB"),
+                          table_stats=stats, table_dynamics=dynamics)
+    check("攻击机会" not in render_facts_zh(oop),
+          "Hero 不是最后一个行动时不该宣称对手都过牌")
+
+    # 没写人工观察时不能编「本池怕 A」；只能给通用的 A 高面事实。
+    no_note = build_situation(_limped_point(), table_stats=stats)
+    no_note_text = render_facts_zh(no_note)
+    check("人工观察说本池对手见 A" not in no_note_text,
+          f"没有人工观察不能编池级结论：\n{no_note_text}")
+    check("A 高面：A 是牌面最大张" in no_note_text,
+          f"没人工观察时给通用 A 高面事实即可：\n{no_note_text}")
+
+    # 牌面有花/顺可能时要给「降低开火频率」的相反约束。
+    wet = build_situation(
+        _limped_point(board=("8s", "7s", "6d"), cards=("Kd", "Qd")),
+        table_stats=stats, table_dynamics=dynamics)
+    wet_text = render_facts_zh(wet)
+    check("牌面有花/顺可能" in wet_text and "降低开火频率" in wet_text,
+          f"湿牌面要提醒降低频率：\n{wet_text}")
+
+    # 弃牌率样本不足时要标机会数。
+    small = PooledStats(
+        hands=105, players=4, total_players=5, scope="current_table",
+        approx_hands=True, fold_to_bet_flop=80.0,
+        opportunities={"flop": 6.0})
+    small_text = render_facts_zh(build_situation(
+        _limped_point(), table_stats=small))
+    check("仅 6 次机会" in small_text, f"小样本要标机会数：\n{small_text}")
+
+
+def test_attack_fact_checks_opponent_xc_xr() -> None:
+    """对手跟 c-bet 多 / 过牌-加注频繁时，宽范围死钱也要跟着过牌。"""
+    from poker_ocr.opponent_profile import OpponentRead, PooledStats
+
+    def read(seat: str, **kw) -> OpponentRead:
+        base = dict(seat_id=seat, key=seat, display_name=seat,
+                    archetype="station", confidence=0.85, n=100,
+                    vpip=45.0, pfr=8.0, af=0.7, source="auto",
+                    note="", gate="stable")
+        base.update(kw)
+        return OpponentRead(**base)
+
+    point = _limped_point()
+    xc = read("co", call_to_cbet_pct=70.0)
+    xc_text = render_facts_zh(build_situation(point, opponent_reads=(xc,)))
+    check("## 剥削判断（宽范围/死钱）" in xc_text,
+          f"对手跟 c-bet 多要给剥削判断：\n{xc_text}")
+    check("CO 跟 c-bet 70%" in xc_text, f"要写清是谁：\n{xc_text}")
+    check("跟着过牌" in xc_text, f"结论应是跟注过牌：\n{xc_text}")
+    check("高频小注攻击" not in xc_text,
+          f"xc 高时不能再说高频开火：\n{xc_text}")
+
+    xr = read("bb", check_raise_pct=25.0)
+    xr_text = render_facts_zh(build_situation(point, opponent_reads=(xr,)))
+    check("BB 过牌-加注 25%" in xr_text, f"要写清 xr：\n{xr_text}")
+    check("过牌控池" in xr_text and "跟着过牌" in xr_text,
+          f"xr 高时结论应是控池过牌：\n{xr_text}")
+
+    # 被先验收缩过的估计（≈）不能驱动硬结论：仍然按攻击机会走。
+    prior = read("co", call_to_cbet_pct=70.0,
+                 prior_dominated=("call_to_cbet",))
+    prior_text = render_facts_zh(build_situation(point, opponent_reads=(prior,)))
+    check("攻击机会" in prior_text,
+          f"先验主导的 xc 不能拦住开火：\n{prior_text}")
+    check("剥削判断" not in prior_text, f"不该给剥削判断：\n{prior_text}")
+
+    # 桌级「对 c-bet 弃得少」也算反向证据：没人跟画像时仍要看桌况。
+    sticky = PooledStats(
+        hands=105, players=4, total_players=5, scope="current_table",
+        approx_hands=True, fold_to_cbet=25.0,
+        opportunities={"fcbet": 25.0, "flop": 20.0})
+    sticky_text = render_facts_zh(build_situation(
+        point, table_stats=sticky))
+    check("本桌对 c-bet 只弃 25%" in sticky_text,
+          f"桌级 sticky 要写出来：\n{sticky_text}")
+    check("跟着过牌" in sticky_text, f"桌级 sticky 也应过牌：\n{sticky_text}")
+
+def test_ace_weakness_only_when_observation_says_so() -> None:
+    from poker_ocr.advice import _notes_ace_weakness
+
+    check(_notes_ace_weakness("看到公共牌有 A 时抵抗力下降"), "应识别池级观察")
+    check(_notes_ace_weakness("见 A 容易弃牌"), "应识别「见 A 弃牌」")
+    check(not _notes_ace_weakness(""), "空文本不识别")
+    check(not _notes_ace_weakness("A 高面很难打"), "只有 A 高、没有弱点描述时不识别")
+    check(not _notes_ace_weakness("LAG 很凶"), "LAG 不是 A 高面观察")
+
 def main() -> int:
     # 自动收集本模块的 test_*，避免删掉旧用例后手工清单漂移。
     tests = [value for name, value in sorted(globals().items())

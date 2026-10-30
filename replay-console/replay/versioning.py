@@ -43,7 +43,10 @@ from poker_ocr.table_dynamics import (  # noqa: E402
 #                位置事实写明先/后行动；炸弹池浅 SPR 顶对按套池价值牌；
 #                对手类型补「松弱=加注窄」语义与 stab 指标改名；
 #                RFI 补 QTo/JTo（BTN 的 Q8o+/J8o+），范围结论中文修正。
-CURRENT_ADVICE_VERSION = "advice-2026-10-30.13"
+# 2026-10-31.1：溜入池+本街全过牌到收尾 Hero 时给「高频小注攻击」事实；
+#               对手 xc/xr 高时改成「剥削判断→跟着过牌」；A 高面按 .table_dy
+#               的现场观察提高开火频率。
+CURRENT_ADVICE_VERSION = "advice-2026-10-31.1"
 # 改动 decisions.py 的重建语义时 bump。
 # recon-3：翻前底池补上盲注（实时 pbs 只记前注，h39 4.5 → 6.0）。
 CURRENT_RECONSTRUCT_VERSION = "recon-3"

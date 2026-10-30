@@ -3146,6 +3146,153 @@ def render_explosive_zh(sit: Situation) -> list[str]:
     return lines
 
 
+def _notes_ace_weakness(text: str | None) -> bool:
+    """人工观察里是否写了「见 A 抵抗力下降」这类池级剥削。
+
+    这是用户 2026-10-31 的现场口径，不是程序统计算出来的：写进 `.table_dy`
+    后，这里只负责在 A 高面把它翻译成一条**条件事实**，没写就不编。
+    """
+    if not text:
+        return False
+    compact = str(text).replace(" ", "").lower()
+    if not any(k in compact for k in ("见a", "有a", "a高", "a面",
+                                      "a的", "a时")):
+        return False
+    return any(k in compact for k in ("抵抗", "弃", "怕", "弱", "fold"))
+
+
+def _attack_trap_reads(sit: Situation) -> tuple[list[str], list[str]]:
+    """活对手里「跟 c-bet 多」/「过牌-加注频繁」的人（先验估计不算硬结论）。
+
+    剥削不能只看「对手范围宽」：如果对手 xc（过牌-跟注）/xr（过牌-加注）
+    频率高，翻牌小注诈唬没有弃牌率，还会被加注惩罚 —— 这时正确动作是
+    跟着过牌，而不是高频开火。
+    """
+    live = {o.seat_id: o for o in sit.snap.opponents if not o.folded}
+    callers: list[str] = []
+    raisers: list[str] = []
+    for read in sit.opponent_reads:
+        seat = read.seat_id
+        if seat not in live or read.archetype == "unknown":
+            continue
+        position = live[seat].position or seat
+        call = read.call_to_cbet_pct
+        fold = read.fold_to_cbet_pct
+        if ("call_to_cbet" not in read.prior_dominated
+                and call is not None and call >= 55):
+            callers.append(f"{position} 跟 c-bet {call:.0f}%")
+        elif ("fold_to_cbet" not in read.prior_dominated
+                and fold is not None and fold <= 30):
+            callers.append(f"{position} 对 c-bet 只弃 {fold:.0f}%")
+        xr = read.check_raise_pct
+        if ("check_raise" not in read.prior_dominated
+                and xr is not None and xr >= 20):
+            raisers.append(f"{position} 过牌-加注 {xr:.0f}%")
+    return callers, raisers
+
+
+def render_attack_zh(sit: Situation) -> list[str]:
+    """宽范围/死钱局的剥削判断（程序判断「范围封顶 + Hero 收尾」）。
+
+    触发条件很窄：**翻前溜入池 + 本街没人下注 + Hero 最后一个行动**。
+    这时底池是死钱、Hero 收尾，但「能不能开火」还要看对手：
+
+      · 对手 xc（跟 c-bet 多）或 xr（过牌-加注频繁）时，小注诈唬没有
+        弃牌率、还会被加注惩罚 → 事实默认改成「跟着过牌」；
+      · 没有这些反向证据时才给「高频小注攻击」。
+
+    用户 2026-10-31 口径：这个池子的人看到公共牌有 A 时抵抗力明显下降，
+    A 高面要多打。人工观察写在 `.table_dy`，这里只在 A 高面引用它；
+    但对手 xc/xr 高时，A 高面也不硬开。
+    """
+    snap = sit.snap
+    street = snap.street
+    if street == PREFLOP or sit.pot_type != "limped pot":
+        return []
+    if (snap.to_call or 0.0) > 0 or sit.players_left_to_act != 0:
+        return []
+    opponents = sit.opponents_in_hand or 0
+    if opponents < 2:
+        return []
+
+    dead_money = (
+        f"翻前 {opponents + 1} 人溜入、没人加注；本街全部过牌到 Hero"
+        "（你收尾）→ 对手范围宽，底池是死钱。")
+    callers, raisers = _attack_trap_reads(sit)
+    stats = sit.table_stats
+    cbet_opps = (stats.opportunities or {}).get("fcbet", 0.0) if stats else 0.0
+    table_sticky = bool(
+        stats is not None and stats.fold_to_cbet is not None
+        and cbet_opps >= _TABLE_SMALL_OPPS and stats.fold_to_cbet <= 35)
+
+    if raisers or callers or table_sticky:
+        lines = ["## 剥削判断（宽范围/死钱）", dead_money]
+        lines.append("但他们的过牌不一定是放弃：")
+        if raisers:
+            lines.append(
+                "、".join(raisers) + " —— 过牌-加注频繁，这是「过牌控池」点，"
+                "不是开火点；用中等牌/空气下注会被 xr 惩罚。")
+        if callers:
+            lines.append(
+                "、".join(callers) + " —— 跟 c-bet 多，小注诈唬没有弃牌率。")
+        if table_sticky:
+            lines.append(
+                f"本桌对 c-bet 只弃 {stats.fold_to_cbet:.0f}%"
+                f"（{_fmt_num(cbet_opps)} 次机会）—— 诈唬没有弃牌率。")
+        lines.append(
+            "结论：跟着过牌，看免费牌；只有强牌/强听可以下注拿价值，"
+            "别用空气/中等牌硬开。")
+        if (any(str(card)[:1].upper() == "A" for card in snap.board)
+                and _notes_ace_weakness(sit.table_dynamics)):
+            lines.append("A 高面也一样：对手 xc/xr 高时，怕 A 不等于会弃牌。")
+        return lines
+
+    lines = ["## 攻击机会（宽范围/死钱）"]
+    lines.append(dead_money[:-1] + "，下注不会被身后加注惩罚。")
+    if street == RIVER:
+        lines.append(
+            "这是高频小注攻击的位置：河牌用 1/3–1/2 池下注诈唬/薄价值，"
+            "别只拿成牌下注；没有未来牌，被跟注就摊牌。当前权益低不是过牌的"
+            "理由 —— 诈唬看的是对手弃牌率和范围封顶。")
+    else:
+        lines.append(
+            "这是高频小注攻击的位置：用 1/3–1/2 池下注，别只拿成牌下注；"
+            "当前权益低不是过牌的理由 —— 诈唬看的是对手弃牌率和范围封顶，"
+            "被跟注后按下一街权益继续。")
+
+    if stats is not None:
+        value = getattr(stats, f"fold_to_bet_{street}", None)
+        if value is not None:
+            opps = (stats.opportunities or {}).get(street, 0.0)
+            cn = {"flop": "翻牌", "turn": "转牌", "river": "河牌"}.get(
+                street, street)
+            line = f"对手面对{cn}下注弃 {value:.0f}%"
+            if opps < _TABLE_SMALL_OPPS:
+                line += f"（仅 {_fmt_num(opps)} 次机会）"
+            lines.append(line + " → 弃牌率支持开火。")
+
+    gt = sit.ground_truth
+    wet = (gt is not None and (
+        gt.board_info.flush_draw_possible
+        or gt.board_info.flush_made_possible
+        or gt.board_info.straight_possible))
+    if wet:
+        lines.append(
+            "牌面有花/顺可能：对手范围更容易连上，降低开火频率；"
+            "优先用有后门/阻断的牌，纯空气别硬开。")
+
+    if any(str(card)[:1].upper() == "A" for card in snap.board):
+        if _notes_ace_weakness(sit.table_dynamics):
+            lines.append(
+                "A 高面：人工观察说本池对手见 A 抵抗力下降（容易弃牌）→ "
+                "这是最值得借 A 开火的面，自己没 A 也照打。")
+        else:
+            lines.append(
+                "A 高面：A 是牌面最大张，对手的过牌/溜入范围很难承受 A 高面的"
+                "压力 → 小注攻击比平时更有效。")
+    return lines
+
+
 def _select_reads(sit: Situation, active: dict,
                   limit: int = 3) -> list[OpponentRead]:
     """只把最相关的 2–3 家画像交给模型，避免 9 人桌 20+ 行画像。
@@ -3332,6 +3479,11 @@ def render_facts_zh(sit: Situation) -> str:
         lines.append("")
         lines.append("## 人工观察（现场记录；统计算不出来的东西）")
         lines.append(sit.table_dynamics)
+
+    attack = render_attack_zh(sit)
+    if attack:
+        lines.append("")
+        lines.extend(attack)
 
     gaps = [_gap_zh(w) for w in sit.warnings]
     if sit.hand_ranges is not None:
