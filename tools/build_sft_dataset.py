@@ -44,7 +44,9 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from poker_ocr.advice import build_messages, build_situation  # noqa: E402
+from poker_ocr.advice import (  # noqa: E402
+    PROMPT_VERSION, build_messages, build_situation,
+)
 from tools.replay_live_decisions import (  # noqa: E402
     build_snap, find_state, load,
 )
@@ -92,13 +94,22 @@ def iter_rows(log_path: Path, hands_path: Path):
 
 
 def build(log_path: Path, hands_path: Path,
-          with_reason: bool, eval_frac: float, seed: int):
+          with_reason: bool, eval_frac: float, seed: int,
+          prompt_version: str | None = None):
+    """`prompt_version` 非空时只保留同一版提示词下的 advice 标签。
+
+    训练集和线上推理必须同构：旧 prompt 的标签是在另一个 system/事实块下
+    产生的，拿来训练新 prompt 等于把「另一个任务的最优解」喂给模型。
+    """
     rows, stats = [], Counter()
     seen = set()
 
     for adv, snap, sit, skip in iter_rows(log_path, hands_path):
         if skip:
             stats[skip] += 1
+            continue
+        if prompt_version and adv.get("prompt_version") != prompt_version:
+            stats["stale-prompt"] += 1
             continue
         label = str((adv.get("option") or {}).get("id") or "")
         legal = {o.id for o in sit.options}
@@ -170,6 +181,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="按手牌切出的 eval 比例；0 = 不切")
     ap.add_argument("--seed", type=int, default=17)
     ap.add_argument("--dry-run", action="store_true", help="只打印统计，不写文件")
+    ap.add_argument("--allow-stale-prompt", action="store_true",
+                    help="允许旧 prompt_version 的 advice（默认只导出当前版本）")
     args = ap.parse_args(argv)
 
     if not args.log.exists():
@@ -177,10 +190,18 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     rows, train, evals, stats = build(
-        args.log, args.hands, args.with_reason, args.eval_frac, args.seed)
+        args.log, args.hands, args.with_reason, args.eval_frac, args.seed,
+        prompt_version=(None if args.allow_stale_prompt else PROMPT_VERSION))
 
     if not rows:
-        print("一条都没转出来。检查日志里有没有 advice 记录。", file=sys.stderr)
+        if stats.get("stale-prompt"):
+            print(f"没有当前 prompt（{PROMPT_VERSION}）的样本；"
+                  f"{stats['stale-prompt']} 条来自旧版本。"
+                  "确认要混训旧标签时加 --allow-stale-prompt。",
+                  file=sys.stderr)
+        else:
+            print("一条都没转出来。检查日志里有没有 advice 记录。",
+                  file=sys.stderr)
         return 1
 
     labels = Counter(r["meta"]["label"] for r in rows)

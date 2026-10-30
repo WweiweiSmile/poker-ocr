@@ -2253,7 +2253,7 @@ def render_reads(reads: Iterable[OpponentRead],
     lines = [header] if header else []
     for position, read in rows:
         name = read.display_name or read.key
-        gate = " [tentative]" if read.gate == "tentative" else ""
+        gate = "（暂定）" if read.gate == "tentative" else ""
         source = ""
         if read.source == "pin":
             source = ", manual pin"
@@ -2270,7 +2270,7 @@ def render_reads(reads: Iterable[OpponentRead],
 def render_reads_zh(reads: Iterable[OpponentRead],
                     positions: Mapping[str, str],
                     *,
-                    header: str = "## 对手画像（逐座位，优先于桌级桌风）") -> list[str]:
+                    header: str = "## 对手画像（逐座位，优先于全场统计/人工观察）") -> list[str]:
     """按座位渲染中文画像行，供中文 lean 事实块使用。
 
     `positions` 只含本手还在局的座位（seat_id → 位置）：不在其中（已弃牌）或
@@ -2290,7 +2290,7 @@ def render_reads_zh(reads: Iterable[OpponentRead],
     lines = [header] if header else []
     for position, read in rows:
         name = read.display_name or read.key
-        gate = " [tentative]" if read.gate == "tentative" else ""
+        gate = "（暂定）" if read.gate == "tentative" else ""
         source = ""
         if read.source == "pin":
             source = "，人工 pin"

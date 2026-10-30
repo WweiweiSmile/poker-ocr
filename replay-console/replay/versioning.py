@@ -29,7 +29,10 @@ from poker_ocr.table_dynamics import (  # noqa: E402
 #               价值指令、Math gate、plan 回灌与 GTO；旧版完整 lean 改为 lean-rules。
 # 2026-10-29.1：只保留一套中文 lean；新增中文事实块（SPR/位置/赔率门槛/爆炸底池/
 #               转河变化/多人池实际人数）与 all-in 选项；skills/lean-rules 下线。
-CURRENT_ADVICE_VERSION = "advice-2026-10-30.8"
+# 2026-10-30.9：system 拆 core + 前注条件模块；五级事实优先级与指标口径；
+#               all-in 几何门控/有效筹码金额；缺失底池后手不再伪造下注；
+#               选项 id 别名与 reason 截断；数据质量中文摘要；范围内部 id 下线。
+CURRENT_ADVICE_VERSION = "advice-2026-10-30.9"
 # 改动 decisions.py 的重建语义时 bump。
 # recon-3：翻前底池补上盲注（实时 pbs 只记前注，h39 4.5 → 6.0）。
 CURRENT_RECONSTRUCT_VERSION = "recon-3"

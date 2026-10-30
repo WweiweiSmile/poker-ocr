@@ -78,8 +78,13 @@ def main() -> int:
 
         got, train, evals, stats = build(
             log, hands, with_reason=False, eval_frac=0.5, seed=1)
+        strict, _, _, strict_stats = build(
+            log, hands, with_reason=False, eval_frac=0.5, seed=1,
+            prompt_version="lean-zh-future")
 
     assert len(got) == 2, f"应保留 2 条，实际 {len(got)}"
+    assert not strict and strict_stats["stale-prompt"] >= 1, (
+        "指定 prompt_version 后，旧/缺失版本的 advice 应被跳过")
     assert stats["stale"] == 1, f"陈旧帧应跳过 1 条：{dict(stats)}"
     assert stats["label-not-in-options"] == 1, f"非法 id 应跳过 1 条：{dict(stats)}"
     assert len(train) + len(evals) == 2

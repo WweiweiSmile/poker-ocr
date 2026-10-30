@@ -22,10 +22,12 @@ from unittest.mock import patch  # noqa: E402
 import poker_ocr.advice as advice_mod  # noqa: E402
 from poker_ocr.advice import (  # noqa: E402
     AISettings, AIError, AdviceRunner, EXPLOSIVE_POT_BB_PER_PLAYER, OPTION_ORDER,
+    _canonical_choice,
     advise, build_messages, build_options, build_situation, call_amount,
-    complete_jev, complete_json, is_explosive_pot, is_jev_model, jev_decisions,
-    jev_headers, jev_payload, math_gate, parse_json_content, pot_per_player,
+    complete_json, is_explosive_pot, math_gate, parse_json_content,
+    pot_per_player,
     preset_amounts, preset_targets, previous_street_pot, render_facts_zh,
+    render_options_zh,
     render_hand_facts, uncalled_excess, value_directive, winnable_pot,
 )
 from poker_ocr.frame_state import FrameState, PlayerState  # noqa: E402
@@ -1167,9 +1169,11 @@ def test_options_preflop_uses_bb_sizing() -> None:
     check("raise-1/3" not in by, f"翻前不该出现底池倍数选项：{list(by)}")
     check(by["call"].kind == "call" and "平跟" in by["call"].label,
           f"无人加注应允许平跟：{by['call']}")
-    # 后位基础 3.5-4，无前注、底池 1.5BB；本桌 5.5BB 下限把它们全部抬到 5.5
-    check(by["open-3.5"].amount == 5.5 and by["open-4"].amount == 5.5,
-          f"后位开池应被 5.5BB 下限抬到 5.5：{ {k: v.amount for k, v in by.items()} }")
+    # 后位基础 3.5-4 会被 5.5BB 下限压成同一个数；这时改给
+    # 5.5 / 6.5 / 7.5 三个真正不同的尺度，而不是三个同额选项。
+    amounts = sorted(o.amount for o in by.values() if o.kind == "raise")
+    check(amounts == [5.5, 6.5, 7.5],
+          f"下限塌缩时应给三个不同尺度：{amounts}")
     check(all(o.amount >= 5.5 for o in by.values() if o.kind == "raise"),
           f"翻前加注不得低于 5.5BB：{ {k: v.amount for k, v in by.items()} }")
 
@@ -1530,8 +1534,8 @@ def test_table_dynamics_in_prompt() -> None:
     check("## 桌面动态" not in user,
           f"旧的「桌面动态」段应该已经移除：\n{user}")
     check(dyn in user, f"观察原文应进入提示词：\n{user}")
-    check("逐座位对手画像 > 桌级桌风" in system,
-          "system 应说明逐座位画像优先于桌级桌风")
+    check("逐座位对手画像" in system,
+          "system 应说明逐座位画像的优先级")
 
     blank = build_situation(make_point(to_call=4.0, pot=10.0, hero_stack=90.0),
                             table_dynamics="  \n ")
@@ -1732,12 +1736,15 @@ def test_value_directive_aggressive_table_checks_two_pair() -> None:
 
 
 def test_lean_system_priorities() -> None:
-    """中文 system 的优先级：计算事实 > 逐座位画像 > 桌风 > 通用经验。"""
+    """中文 system 的优先级：硬事实 > 计算 > 逐座位画像 > 全场/观察 > 经验。"""
     sit = build_situation(make_point())
     system, _ = build_messages(sit)
     check("事实优先级" in system, "system 应含事实优先级")
-    check("逐座位对手画像 > 桌级桌风" in system,
-          "system 应说明逐座位画像优先于桌风")
+    check("硬事实" in system and "逐座位对手画像" in system,
+          "system 应说明硬事实与逐座位画像的优先级")
+    check("全场统计/人工观察" in system,
+          "system 应给全场统计/人工观察排位")
+    check("规则提示" in system, "system 应说明规则提示不能覆盖硬事实")
     check("哪些更差的牌会跟" in system,
           "system 的翻后决策顺序应问「哪些更差的牌会跟」")
     check("不要因为“当前未成牌不是坚果”就否决半诈唬" in system,
@@ -1896,13 +1903,17 @@ def test_street_change_is_chinese() -> None:
     check("牌面警告：" in text, "应有牌面警告行")
 
 
-def test_all_in_option_follows_depth_rules() -> None:
-    """深码翻后追加 all-in；100BB 普通开池不追加；短码翻前追加。"""
-    flop = build_options(make_point(to_call=4.0, pot=10.5, hero_stack=94.0))
-    by = {o.id: o for o in flop}
-    check(flop[-1].id == "all-in", f"all-in 应在最后：{[o.id for o in flop]}")
-    check(by["all-in"].amount == 94.0 and by["all-in"].kind == "allin",
+def test_all_in_option_follows_geometry() -> None:
+    """all-in 只在几何合理时出现：短码/套池给，深码超池不给。"""
+    short = build_options(make_point(to_call=4.0, pot=10.5, hero_stack=25.0))
+    by = {o.id: o for o in short}
+    check(short[-1].id == "all-in", f"all-in 应在最后：{[o.id for o in short]}")
+    check(by["all-in"].amount == 25.0 and by["all-in"].kind == "allin",
           f"all-in 金额应是后手：{by['all-in']}")
+
+    deep = build_options(make_point(to_call=4.0, pot=10.5, hero_stack=94.0))
+    check("all-in" not in [o.id for o in deep],
+          f"深码 9 倍池不应挂 all-in：{[o.id for o in deep]}")
 
     deep_open = build_options(make_point(
         street="preflop", board=(), to_call=0.0, pot=1.5, hero_position="BTN",
@@ -1913,10 +1924,17 @@ def test_all_in_option_follows_depth_rules() -> None:
 
     short_open = build_options(make_point(
         street="preflop", board=(), to_call=0.0, pot=1.5, hero_position="BTN",
-        hero_bet=0.0, hero_stack=30.0, preflop_shapes=("unopened",),
+        hero_bet=0.0, hero_stack=15.0, preflop_shapes=("unopened",),
         cbet_spot=False))
     check("all-in" in [o.id for o in short_open],
           "短码翻前应给 all-in")
+
+    mid_open = build_options(make_point(
+        street="preflop", board=(), to_call=0.0, pot=1.5, hero_position="BTN",
+        hero_bet=0.0, hero_stack=30.0, preflop_shapes=("unopened",),
+        cbet_spot=False))
+    check("all-in" not in [o.id for o in mid_open],
+          "30BB 普通开池不该给超池 all-in")
 
 
 def test_option_labels_use_actual_amounts() -> None:
@@ -1925,8 +1943,10 @@ def test_option_labels_use_actual_amounts() -> None:
     check("加注到 8.83BB" in by["raise-1/3"].label
           and "1/3 池加注" in by["raise-1/3"].label,
           f"加注标签应带实际金额：{by['raise-1/3']}")
-    check("全下 94BB" == by["all-in"].label,
-          f"全下标签应是实际后手：{by['all-in']}")
+    short = {o.id: o for o in build_options(
+        make_point(to_call=4.0, pot=10.5, hero_stack=25.0))}
+    check("全下 25BB" == short["all-in"].label,
+          f"全下标签应是实际后手：{short['all-in']}")
 
 
 def test_facts_include_spot_spr_and_position() -> None:
@@ -2044,132 +2064,6 @@ def test_advise_fallback_without_settings() -> None:
           f"没配置时应给过牌：{advice.option}")
 
 
-# ─────────────────────────── JEV 协议 ───────────────────────────
-
-JEV = AISettings(api_key="or-key",
-                 base_url="https://openrouter.ai/api/alpha/decisions",
-                 model="typesafe/jev-1.14",
-                 referer="https://example.com", title="poker-ocr")
-
-
-def test_is_jev_model() -> None:
-    cases = {
-        "jev-1.14": True,
-        "typesafe/jev-1.14": True,       # OpenRouter 的 vendor/model 写法
-        "JEV-2": True,
-        "deepseek-flash": False,
-        "my-jev-model": False,           # 只认路径分段，不认子串
-        "": False,
-    }
-    for model, want in cases.items():
-        check(is_jev_model(model) == want,
-              f"{model!r} 应 {'是' if want else '不是'} JEV，实际 {is_jev_model(model)}")
-
-
-def test_jev_payload_and_headers() -> None:
-    state = ["系统提示", {"type": "image_url",
-                          "image_url": {"url": "data:image/png;base64,AAA"}}]
-    questions = {"matches_listing": {"type": "noul",
-                                     "instructions": "?"}}
-    payload = jev_payload(JEV, state, questions)
-    check(payload["model"] == "typesafe/jev-1.14", f"model 不对：{payload}")
-    check(payload["state"] == state, f"state 应原样传递：{payload}")
-    check(payload["questions"] == questions, f"questions 应原样传递：{payload}")
-
-    headers = jev_headers(JEV)
-    check(headers["Authorization"] == "Bearer or-key", f"鉴权头不对：{headers}")
-    check(headers["Content-Type"] == "application/json", f"内容头不对：{headers}")
-    check(headers["HTTP-Referer"] == "https://example.com", f"Referer 不对：{headers}")
-    check(headers["X-OpenRouter-Title"] == "poker-ocr", f"Title 不对：{headers}")
-
-    # 没配可选头时不应发空字段
-    bare = jev_headers(AISettings("k", "https://x/decisions", "jev-1"))
-    check("HTTP-Referer" not in bare and "X-OpenRouter-Title" not in bare,
-          f"可选头不该为空值发送：{bare}")
-
-
-def test_jev_decisions_posts_sample_schema() -> None:
-    seen: dict = {}
-
-    def fake_post(url, payload, headers, timeout):
-        seen.update(url=url, payload=payload, headers=headers, timeout=timeout)
-        return json.dumps({"answers": {"matches_listing": {"noul": 0.91}}}).encode()
-
-    answers = jev_decisions(
-        JEV, ["Listing: vintage red bicycle"],
-        {"matches_listing": {"type": "noul", "instructions": "?",
-                             "criteria": {"true": "shown", "false": "not shown"}}},
-        request=fake_post)
-    check(answers["matches_listing"]["noul"] == 0.91, f"answers 解析不对：{answers}")
-    check(seen["url"] == JEV.base_url, f"JEV 应直接 POST 配置的 URL：{seen}")
-    check(seen["payload"]["model"] == JEV.model, f"model 没带上：{seen}")
-    check(seen["payload"]["questions"]["matches_listing"]["type"] == "noul",
-          f"questions 没带上：{seen}")
-    check(seen["headers"]["Authorization"] == "Bearer or-key", f"鉴权头没带上：{seen}")
-
-
-def test_complete_jev_builds_choice_question_and_reason() -> None:
-    options = [
-        {"id": "fold", "label": "Fold", "kind": "fold"},
-        {"id": "raise-1/2", "label": "Raise to 1/2 pot", "kind": "raise",
-         "amount_bb": 10.25},
-    ]
-    seen: dict = {}
-
-    def fake_post(url, payload, headers, timeout):
-        seen.update(payload)
-        return json.dumps({"answers": {"option": {
-            "choice": "raise-1/2",
-            "probabilities": {"raise-1/2": 0.72, "fold": 0.28},
-        }}}).encode()
-
-    got = complete_jev(JEV, "系统", "用户", options=options, request=fake_post)
-    check(got["option"] == "raise-1/2", f"choice 解析不对：{got}")
-    check(got["confidence"] == 0.72, f"概率没转成 confidence：{got}")
-    check("72%" in got["reason"], f"reason 应带概率：{got}")
-    check(got["reason"].startswith("JEV chose"), f"reason 结构不对：{got}")
-
-    question = seen["questions"]["option"]
-    check(question["type"] == "choice", f"应是 choice 题：{question}")
-    check(set(question["criteria"]) == {"fold", "raise-1/2"},
-          f"criteria 的 key 必须是选项 id：{question}")
-    check("10.25BB" in question["criteria"]["raise-1/2"],
-          f"criteria 应带金额：{question}")
-    check(seen["state"] == ["系统", "用户"], f"system/user 应进 state：{seen}")
-
-
-def test_complete_jev_rejects_unknown_choice() -> None:
-    def fake_post(url, payload, headers, timeout):
-        return json.dumps({"answers": {"option": {"choice": "all-in"}}}).encode()
-
-    try:
-        complete_jev(JEV, "s", "u", options=[{"id": "fold", "label": "弃牌"}],
-                     request=fake_post)
-    except AIError as exc:
-        check("选项" in str(exc), f"报错应说明不在选项里：{exc}")
-    else:
-        FAILS.append("JEV 返回不在选项里的 choice 应抛 AIError")
-
-
-def test_complete_json_dispatches_by_model_name() -> None:
-    options = [{"id": "fold", "label": "弃牌", "kind": "fold"}]
-    from unittest.mock import MagicMock
-    jev = MagicMock(return_value={"option": "fold", "reason": "jev"})
-    with patch.object(advice_mod, "complete_jev", jev):
-        got = complete_json(JEV, "s", "u", options=options)
-    check(got["option"] == "fold", f"JEV 模型应走 complete_jev：{got}")
-    check(jev.called, "complete_jev 没被调用")
-
-    with patch.object(advice_mod, "complete_jev") as jev:
-        try:
-            # 非 JEV 模型走 chat/completions；没网会报错，但绝不该进 complete_jev
-            complete_json(AISettings("k", "http://127.0.0.1:1", "deepseek-chat"),
-                          "s", "u", options=options, request=lambda *a: b"{}")
-        except Exception:                # noqa: BLE001 — 这里只关心分发路径
-            pass
-    check(not jev.called, "非 JEV 模型不该走 JEV 分支")
-
-
 def test_post_json_reuses_connection() -> None:
     """连续两次建议复用同一条连接 —— 握手实测能占到一次建议的一半时间。"""
     import threading
@@ -2222,8 +2116,8 @@ def test_post_json_reuses_connection() -> None:
 
 
 def test_ai_settings_reads_referer_and_title() -> None:
-    env = {"AI_SERVER_API_KEY": "k", "AI_SERVER_BASE_URL": "https://x/decisions",
-           "AI_SERVER_MODEL": "typesafe/jev-1.14",
+    env = {"AI_SERVER_API_KEY": "k", "AI_SERVER_BASE_URL": "https://openrouter.ai/api/v1",
+           "AI_SERVER_MODEL": "openai/gpt-5.6-luna",
            "AI_SERVER_REFERER": "https://site", "AI_SERVER_TITLE": "t"}
     settings = AISettings.from_env(env)
     check(settings.referer == "https://site" and settings.title == "t",
@@ -2712,6 +2606,171 @@ def test_playable_depth_uses_deepest_opponent() -> None:
           "对手只有 100BB 时不该按深码切范围")
     check("深码" in conclusion(300.0, 300.0),
           "双方都 300BB 时应按深码调整范围")
+
+
+def test_unknown_opponent_stack_suppresses_effective_and_spr() -> None:
+    """有对手筹码未读出时，不能把有效筹码算成 Hero 自己的后手。"""
+    from poker_ocr.hand_track import OpponentSnapshot
+
+    sit = build_situation(make_point(
+        hero_stack=300.0,
+        opponents=(OpponentSnapshot("a", "x", "BB", None, 0.0, False),)))
+    check(sit.spr is None, f"未知短码时不该算 SPR：{sit.spr}")
+    text = render_facts_zh(sit)
+    check("有效筹码：300BB" not in text,
+          f"不该把 300BB 当有效筹码：\n{text}")
+    check("SPR 50" not in text, f"不该出现错误的 SPR：\n{text}")
+    check("对手筹码未读出" in text, f"数据质量应说明筹码缺失：\n{text}")
+
+
+def test_missing_pot_or_stack_has_only_safe_options() -> None:
+    """底池/后手缺失时不能伪造 1BB 下注，只保留过牌/跟注/弃牌。"""
+    for kwargs in ({"pot": 0.0}, {"hero_stack": None}):
+        snap = make_point(to_call=0.0, **kwargs)
+        sit = build_situation(snap)
+        check({o.id for o in sit.options} <= {"call", "fold"},
+              f"缺失底池/后手时只该有 call/fold：{kwargs} {sit.options}")
+        check(not any(o.kind in ("bet", "raise", "allin")
+                      for o in sit.options),
+              f"不该伪造下注选项：{kwargs} {sit.options}")
+        check("已隐藏下注选项" in render_facts_zh(sit),
+              f"数据质量应说明下注被隐藏：{kwargs}")
+
+
+def test_choice_aliases_are_canonicalized() -> None:
+    """check/bet-1/3/allin 是同一动作的常见别名，不能直接 fallback。"""
+    by_id = {o.id: o for o in build_options(
+        make_point(to_call=0.0, pot=10.0, hero_stack=90.0))}
+    check(_canonical_choice("check", by_id) == ("call", "check"),
+          "check 应映射到过牌 id call")
+    check(_canonical_choice("bet-1/3", by_id) == ("raise-1/3", "bet-1/3"),
+          "bet-1/3 应映射到 raise-1/3")
+
+    short = {o.id: o for o in build_options(
+        make_point(to_call=4.0, pot=10.5, hero_stack=25.0))}
+    check(_canonical_choice("allin", short) == ("all-in", "allin"),
+          "allin 应映射到 all-in")
+
+    sit = build_situation(make_point(to_call=0.0, pot=10.0, hero_stack=90.0))
+
+    def fake(settings, system, user, timeout=20.0, options=None):
+        return {"option": "check", "reason": "没人下注，过牌看转牌"}
+
+    advice = advise(sit, SETTINGS, complete=fake)
+    check(advice.option.id == "call" and advice.alias_from == "check",
+          f"别名应被记录并转成 call：{advice.option.id}/{advice.alias_from}")
+    check(advice.to_dict().get("alias_from") == "check",
+          "JSONL 应记录 alias_from，便于发现 id 歧义")
+
+
+def test_reason_is_clipped_to_contract() -> None:
+    """system 说 reason ≤30 字，代码必须真的截断，避免撑爆 max_tokens。"""
+    sit = build_situation(make_point(to_call=4.0, pot=10.0, hero_stack=90.0))
+
+    def fake(settings, system, user, timeout=20.0, options=None):
+        return {"option": "call", "reason": "理由" * 40}
+
+    advice = advise(sit, SETTINGS, complete=fake)
+    check(len(advice.reason) <= 30,
+          f"reason 应截到 30 字以内，实际 {len(advice.reason)}：{advice.reason}")
+
+
+def test_data_quality_is_chinese_and_summarized() -> None:
+    """逐座位 range unknown 要合并成中文，不能再逐行 [EN]。"""
+    from poker_ocr.hand_track import OpponentSnapshot
+
+    sit = build_situation(make_point(
+        hero_cards=("Ah", "Qh"), board=("As", "Ks", "4d"),
+        opponents=(OpponentSnapshot("a", "x", None, 100.0, 0.0, False),)))
+    text = render_facts_zh(sit)
+    check("[EN]" not in text, f"prompt 不应再出现英文告警：\n{text}")
+    check("名对手范围未知" in text, f"应合并成一句中文：\n{text}")
+
+
+def test_prompt_has_no_internal_range_ids() -> None:
+    """范围行只给位置/动作/宽度；range id、combo 数、[check] 不进入 prompt。"""
+    sit = build_situation(make_point(hero_cards=("Ah", "Qh"),
+                                     board=("As", "Ks", "4d")))
+    system, user = build_messages(sit)
+    check("BB_DEF_" not in user, f"不应暴露内部 range id：\n{user}")
+    check("[check]" not in user and "[call]" not in user,
+          f"不应暴露英文 range mode：\n{user}")
+    check("个可用组合" not in user, f"不应把 combo 数塞进 prompt：\n{user}")
+    check("过牌范围" in user or "跟注范围" in user,
+          f"范围 mode 应中文化：\n{user}")
+
+
+def test_system_has_id_mapping_and_budget() -> None:
+    """system 必须交代 check/bet 的 id 映射，并保持可读长度。"""
+    sit = build_situation(make_point(to_call=4.0, pot=10.0, hero_stack=90.0))
+    system, _ = build_messages(sit)
+    check("id 映射" in system, "system 应说明 option id 映射")
+    check("过牌返回 call" in system, "system 应说明过牌用 call")
+    check("下注也返回 raise-*" in system, "system 应说明下注用 raise-*")
+    check(len(system) <= 1400, f"system 不应重新膨胀，实际 {len(system)}")
+
+
+def test_short_stack_prompt_dedupes_capped_options() -> None:
+    """后手不足时多个档位封顶到同一金额，prompt 只显示一个。"""
+    sit = build_situation(make_point(to_call=4.0, pot=10.5, hero_stack=5.0))
+    lines = [line for line in render_options_zh(sit)
+             if line.startswith("- raise-")]
+    check(len(lines) == 1, f"封顶档位应只显示一个：{lines}")
+
+
+def test_table_stats_label_marks_pool_scope() -> None:
+    """全场数据实际是画像库跨桌统计，标题要写清楚。"""
+    from poker_ocr.opponent_profile import PooledStats
+
+    stats = PooledStats(hands=294, players=30, vpip=38.0, pfr=12.0,
+                        threebet=5.9, limp=46.0, fold_to_cbet=79.0, stab=5.0)
+    sit = build_situation(make_point(to_call=4.0, pot=10.0, hero_stack=90.0),
+                          table_stats=stats)
+    _, user = build_messages(sit)
+    check("画像库" in user and "可能跨桌" in user,
+          f"全场数据应标明画像库口径：\n{user}")
+
+
+def test_system_ante_module_is_conditional() -> None:
+    """前注局只在有前注时追加，不再让无前注桌读一段无关规则。"""
+    from poker_ocr.parse import Blinds
+
+    plain, _ = build_messages(build_situation(make_point()))
+    ante, _ = build_messages(build_situation(
+        make_point(blinds=Blinds(0.5, 1.0, 0.5, "1/2(1)"))))
+    check("前注局" not in plain, "无前注桌不该出现前注局")
+    check("前注局" in ante, "有前注时应追加前注局")
+    check(len(ante) < 1500, f"前注局 system 不应过长：{len(ante)}")
+
+
+def test_all_in_amount_uses_effective_stack() -> None:
+    """对手更短时，全下标「能进底池的有效金额」，不是 Hero 的 240BB。"""
+    from poker_ocr.hand_track import OpponentSnapshot
+
+    sit = build_situation(make_point(
+        hero_stack=240.0, to_call=0.0, pot=45.0,
+        opponents=(OpponentSnapshot("a", "x", "BB", 91.5, 0.0, False),)))
+    by = {o.id: o for o in sit.options}
+    check("all-in" in by, f"短码对手应给 all-in：{[o.id for o in sit.options]}")
+    check(by["all-in"].amount == 91.5,
+          f"全下金额应封顶到有效筹码：{by['all-in']}")
+    check("实际后手 240BB" in by["all-in"].note,
+          f"note 应说明实际后手：{by['all-in'].note}")
+
+
+def test_complete_json_returns_usage_and_finish_reason() -> None:
+    """usage/finish_reason 要带回来，才能判断截断和 prompt token 成本。"""
+    def fake(url, payload, headers, timeout):
+        return json.dumps({
+            "choices": [{"message": {"content": '{"option": "call", '
+                                                 '"reason": "x"}'},
+                          "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 123, "completion_tokens": 7},
+        }).encode()
+
+    got = complete_json(SETTINGS, "s", "u", request=fake)
+    check(got["_meta"]["finish_reason"] == "stop", f"finish_reason 丢了：{got}")
+    check(got["_meta"]["usage"]["prompt_tokens"] == 123, f"usage 丢了：{got}")
 
 
 def main() -> int:

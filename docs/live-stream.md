@@ -4,6 +4,10 @@
 JSONL。本文是**当前方案的完整说明**：架构、功能、标定流程、启动命令、输出格式
 和排障。
 
+> 2026-10-30.9 更新：提示词 system 已拆成 core + 前注条件模块；新增五级事实优先级、
+> 指标口径、all-in 几何门控、缺失底池/后手不伪造下注、数据质量中文摘要；范围内部
+> range id / combo 数不再进入 prompt。下文示例按当前 `lean-zh-2026-10-30.9` 更新。
+
 ---
 
 ## 1. 方案总览
@@ -178,10 +182,10 @@ ROI 路线只裁固定槽位、只跑 rec，不跑全图检测，是实时链路
   `inferred: true`）。金额是底池精确反解出来的，但加注者身份只能按行动顺序取
   「最后一个已记录动作之后最早能行动的人」，无法由底池唯一确定。专门覆盖最后
   位置预设动作、视频流没抓到那一帧就换街的情况；两种模型都对不上账就不猜。
-- **提示词（只有一套中文 lean，`PROMPT_VERSION=lean-zh-2026-10-29.1`）**：
-  system 给输出契约、事实优先级、决策顺序与常见错误；user 给中文事实块：
+- **提示词（只有一套中文 lean，`PROMPT_VERSION=lean-zh-2026-10-30.9`）**：
+  system 给输出契约、五级事实优先级、决策顺序、指标口径与筹码深度；user 给中文事实块：
   当前局面（含有效筹码/SPR/底池类型/赔率门槛/可争夺底池/短码/本手已投入/
-  爆炸底池）、翻前信息、实时牌力、逐座位画像、桌级桌风、数据缺口、行动线、
+  爆炸底池）、翻前信息、实时牌力、逐座位画像、全场画像库统计、人工观察、数据质量、行动线、
   带实际金额的中文选项。**不含** RFI/3-bet/冷跟范围、翻后纹理与尺度、
   `Value directive`、`Math gate`、上一街 plan、GTO、board equity、技能库；
   `--advice-style` 与 `lean-rules`/`skills` 已从 live 链路删除。
@@ -223,7 +227,7 @@ ROI 路线只裁固定槽位、只跑 rec，不跑全图检测，是实时链路
 - **执行**：模型调用在后台线程，单次超时 `--ai-timeout`。生成建议期间主循环
   **暂停识别新帧**（新帧只丢弃），结果返回后直接处理邮箱里的最新帧 —— 等待期间
   画面只会越来越旧，继续 OCR 既浪费 CPU 也会让下一步决策基于过时画面。
-  暂停期间每秒打一行 `[建议] 生成中… Ns` 心跳（实测 JEV 一次 1.7–3.4s），
+  暂停期间每秒打一行 `[建议] 生成中… Ns` 心跳（实测一次 1.0–2.0s），
   避免控制台先静默、再把建议和恢复后的识别日志一次性吐出来；建议行同时带上
   本次耗时，慢在模型还是识别一眼可见。失败时回退到最保守动作并记录原因。
 - **自动点击（`--auto-click`，默认开启）**：先用
@@ -249,13 +253,10 @@ ROI 路线只裁固定槽位、只跑 rec，不跑全图检测，是实时链路
   写在项目根目录的 `.env`（模板 `.env.example`）或直接设为环境变量，环境变量优先。
   `.env` 找不到时退到启动 CWD；`ENV_FILE` 可显式指定路径（读不到直接启动失败）。
   启动日志会打印命中的 `.env` 路径与凭据来源，但**不打印 Key**。
-- **协议按模型名选**：名字里带 `jev`（`jev-1.14` / `typesafe/jev-1.14`）走
-  OpenRouter 的 decisions 接口 —— `POST AI_SERVER_BASE_URL`，请求体是
-  `{"model", "state", "questions"}`，候选动作变成一道 `choice` 题
-  （criteria 的 key 是选项 id），从 `answers.option` 取选择与概率。
-  其他模型走 OpenAI 兼容的 `{BASE_URL}/chat/completions`，包括 OpenRouter 上的
-  GPT（`AI_SERVER_BASE_URL=https://openrouter.ai/api/v1`）。
-  两套协议对下游输出相同的 `{option, reason}`。
+- **协议**：统一走 OpenAI 兼容的 `{AI_SERVER_BASE_URL}/chat/completions`，
+  `AI_SERVER_BASE_URL` 填供应商基址（DeepSeek 用 `https://api.deepseek.com`，
+  OpenRouter 用 `https://openrouter.ai/api/v1`）。响应解析成
+  `{option, reason, confidence}`，非法 id 走保守兜底。
   `AI_SERVER_REFERER` / `AI_SERVER_TITLE` 是 OpenRouter 的可选排名头。
 - **OpenRouter 推理**：`AI_SERVER_REASONING=enabled` 时请求体带
   `{"reasoning": {"enabled": true}}`（`AI_SERVER_REASONING_EFFORT` 会嵌成
@@ -654,7 +655,7 @@ cd ~/codes/poker-ocr
  "url":"cam:auto","profile":"table_wpk_live.json",
  "recognizer":"roi","full_config":null,"every":0.5,
  "stable":{"frames":2,"seconds":0.0,"reset_on_discard":true},
- "ai_advice":true,"prompt_version":"lean-zh-2026-10-29.1","prompt_lang":"zh",
+ "ai_advice":true,"prompt_version":"lean-zh-2026-10-30.9","prompt_lang":"zh",
  "resolution":null}
 ```
 
@@ -663,7 +664,7 @@ cd ~/codes/poker-ocr
 - `table_dynamics`：仅当启动时读到非空的 `.table_dy` 才出现，值是解析后的原文。
   没有这个键表示本次会话按「未知对手」标准线。
 - `prompt_version` / `prompt_lang`：仅 `--ai-advice` 时出现；当前固定为
-  `lean-zh-2026-10-29.1` / `zh`。旧日志里的 `advice_style` 保留只读。
+  `lean-zh-2026-10-30.9` / `zh`。旧日志里的 `advice_style` 保留只读。
 - `record_without_hero`：仅 `--ai-advice` 时出现，表示是否会记录没有 hero 手牌
   的手牌（`--record-without-hero` / `RECORD_WITHOUT_HERO`）；默认 `false`。
 
@@ -757,7 +758,7 @@ cd ~/codes/poker-ocr
            "kind":"raise","amount_bb":25.75},
  "reason":"顶对顶踢，牌面干燥，加注拿价值",
  "source":"model","model":"deepseek-chat",
- "prompt_version":"lean-zh-2026-10-29.1","prompt_lang":"zh",
+ "prompt_version":"lean-zh-2026-10-30.9","prompt_lang":"zh",
  "skill_codes":[],
  "duration_ms":1840,
  "click":{"status":"clicked","action":"raise","preset":"raise-1/2",
@@ -787,7 +788,7 @@ cd ~/codes/poker-ocr
 | `hand_id` | 第几手（换手时 +1） |
 | `option.id` | 模型选的选项。翻后：`fold` / `call` / `raise-1/3` / `raise-1/2` / `raise-2/3` / `raise-1` / `raise-1.2` / `all-in`（没人下注时 `call` 表示**过牌**）；翻前：`fold` / `call` / `open-2.5`…`open-4` / `raise-3x` / `raise-4x` / `all-in` |
 | `option.amount_bb` | 加注后的**本街总额**；跟注为需跟额 |
-| `prompt_version` | 生成建议时的中文 lean 版本（`lean-zh-2026-10-29.1`） |
+| `prompt_version` | 生成建议时的中文 lean 版本（`lean-zh-2026-10-30.9`） |
 | `source` | `model` = 模型选的；`fallback` = 超时/报错/非法选项，按最保守动作 |
 | `skill_codes` | 兼容字段，恒为空数组（旧技能库已删除） |
 | `error` | 仅 `fallback` 时出现，说明原因 |
@@ -840,8 +841,8 @@ cd ~/codes/poker-ocr
    {"hand_id":"h6","street":"flop","hero_cards":["Ah","Kd"],
     "board":["Ks","7d","2c"],"pot":19.5,"to_call":22.0,
     "option":{"id":"call","label":"Call 22BB","kind":"call"},
-    "reason":"...","source":"model","model":"typesafe/jev-1.14",
-    "prompt_version":"lean-zh-2026-10-29.1","skill_codes":[],"duration_ms":1840}
+    "reason":"...","source":"model","model":"deepseek-flash",
+    "prompt_version":"lean-zh-2026-10-30.9","skill_codes":[],"duration_ms":1840}
  ]}
 ```
 

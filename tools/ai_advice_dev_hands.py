@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""把 dev 库导出的复盘手牌喂给 AI 模型（JEV/chat），和**实际动作**逐决策点对比。
+"""把 dev 库导出的复盘手牌喂给 AI 模型，和**实际动作**逐决策点对比。
 
 `replay_dev_hands.py` 是同一批手牌喂给 coach **规则引擎**的版本；本脚本喂给
-AI 模型（advice.py 的 `advise`）。模型名决定协议：名字里带 jev 走 OpenRouter
-decisions，其余走 OpenAI 兼容的 /chat/completions，凭据都来自 .env 的 AI_SERVER_*。
+AI 模型（advice.py 的 `advise`），走 OpenAI 兼容的 /chat/completions，
+凭据都来自 .env 的 AI_SERVER_*。
 
 用法：
     # 1) 从 dev 库导出（在 ~/codes/call-back 目录下）
@@ -46,7 +46,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from poker_ocr.advice import (  # noqa: E402
-    AISettings, advise, build_situation, is_jev_model, render_facts_zh,
+    AISettings, advise, build_situation, render_facts_zh,
 )
 from poker_ocr.env import load_env  # noqa: E402
 from poker_ocr.hand_track import (  # noqa: E402
@@ -255,7 +255,7 @@ def main(path: str, limit: int, timeout: float, verbose: bool = False,
     else:                                      # JSONL：一行一手
         hands = [normalize(json.loads(l)) for l in raw.splitlines() if l.strip()]
 
-    proto = "JEV decisions" if is_jev_model(settings.model) else "chat/completions"
+    proto = "chat/completions"
     print(f"模型: {settings.model}（{proto}）")
 
     seen_sig: set[str] = set()

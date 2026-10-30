@@ -2,8 +2,8 @@
 """把 ai_advice_dev_hands.py --json 的输出渲染成按街对比的静态 HTML 报告。
 
 用法：
-    .venv/bin/python tools/ai_advice_report.py /tmp/jev_compare.json \
-        -o /tmp/jev_compare.html [--analysis verdict.json]
+    .venv/bin/python tools/ai_advice_report.py /tmp/ai_advice_compare.json \
+        -o /tmp/ai_advice_compare.html [--analysis verdict.json]
 
 报告内容：
   · 概览 KPI（决策点数、三档计数、跳过）
@@ -370,14 +370,14 @@ def build(data: dict, analysis: dict | None) -> str:
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>JEV 模型 vs 实际操作 · 按街对比</title>
+<title>AI 模型 vs 实际操作 · 按街对比</title>
 <style>{CSS}</style>
 </head>
 <body>
 <div class="wrap">
   <header>
     <div>
-      <h1>JEV 模型 vs 我的实际操作</h1>
+      <h1>AI 模型 vs 我的实际操作</h1>
       <p class="sub">模型 <code>{e(data.get('model'))}</code> ·
          数据源 <code>{e(data.get('source'))}</code> ·
          生成于 {e(data.get('generated_at'))}</p>
@@ -411,7 +411,7 @@ def build(data: dict, analysis: dict | None) -> str:
     <h2>口径</h2>
     <p class="muted" style="font-size:12px;margin:0">
       只评翻后决策（模型不覆盖翻前）；底池由盲注 + 各街 amountBb 重建，误差 ≤1BB；
-      allin 的 amountBb 按「本街加到总额」处理；模型理由为 JEV 返回的原文（英文）。
+      allin 的 amountBb 按「本街加到总额」处理；模型理由为模型返回的原文。
       判定只看动作类别与尺度，不代表 EV 结论——谁更好见上面的综合评价。
     </p>
     {caveats}
@@ -426,7 +426,7 @@ def build(data: dict, analysis: dict | None) -> str:
 def main() -> int:
     ap = argparse.ArgumentParser(description="把 AI 对比结果渲染成按街对比的 HTML")
     ap.add_argument("json", help="ai_advice_dev_hands.py --json 的输出")
-    ap.add_argument("-o", "--output", default="/tmp/jev_compare.html")
+    ap.add_argument("-o", "--output", default="/tmp/ai_advice_compare.html")
     ap.add_argument("--analysis", default=None,
                     help="可选的综合评价 JSON（见模块 docstring）")
     args = ap.parse_args()

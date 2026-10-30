@@ -66,7 +66,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from poker_ocr.advice import (  # noqa: E402
-    AISettings, advise, audit_advice_tags, build_situation, is_jev_model,
+    AISettings, advise, audit_advice_tags, build_situation,
 )
 from poker_ocr.env import load_env  # noqa: E402
 from poker_ocr.hand_track import (  # noqa: E402
@@ -345,7 +345,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.model_name:
             from dataclasses import replace
             settings = replace(settings, model=args.model_name)
-        proto = "JEV decisions" if is_jev_model(settings.model) else "chat/completions"
+        proto = "chat/completions"
         print(f"模型: {settings.model}（{proto}）")
 
     seen: set[str] = set()

@@ -1,7 +1,7 @@
 """实时 AI 决策建议：把算好的中文事实交给模型，只回一个选项。
 
 现在只保留一套中文 `lean` 提示词：system 给决策顺序与输出契约，user 给状态、
-几何/价格/牌力/牌面/对手事实、桌风、行动线与**带实际金额的中文选项**。
+几何/价格/牌力/牌面/对手事实、全场统计/人工观察、行动线与**带实际金额的中文选项**。
 不再加载技能库、范围表、价值指令、Math gate 或 GTO；模型只看事实自己做选择。
 
 为什么输出是「选项编号」而不是自由文本：
@@ -60,7 +60,7 @@ HERO_ACTOR = "hero"
 
 # 当前唯一的中文 lean 提示词版本。写入 session_start / advice JSONL，
 # 复盘归因用；改动 system 或事实块时 bump。
-PROMPT_VERSION = "lean-zh-2026-10-30.8"
+PROMPT_VERSION = "lean-zh-2026-10-30.9"
 PROMPT_LANGUAGE = "zh"
 
 # 加注尺度：名字 → 底池倍数。「满池 1.2」是超池，用于需要施压/劝退的场合
@@ -109,12 +109,20 @@ def _round_bb(v: float) -> float:
     return round(v, 2)
 
 
-def _all_in_option(snap: HandSnapshot) -> Option | None:
-    """按 §5.2 生成 all-in 选项；不满足条件时返回 None。
+# all-in 只有在几何上说得通时才挂进选项：深码顶对局面挂一个 10 倍池的
+# 「全下」只会污染动作空间，模型还得自己判断它是不是正常尺度。阈值按
+# 跟注后底池和 SPR 双重判断；短码推弃（≤20BB）和已经套池（SPR≤3）不受限。
+ALL_IN_MAX_POT_MULTIPLE = 2.5
+PREFLOP_ALLIN_MAX_STACK_BB = 20.0
 
-    翻后：后手能被完整投入、且金额高于现有最大档位时追加。
-    翻前：只有后手 ≤ 40BB 或已经面对 3-bet 时才追加 —— 100BB 的普通开池
-    也挂一个 all-in，会诱导模型把它当默认尺度。
+
+def _all_in_option(snap: HandSnapshot) -> Option | None:
+    """生成 all-in 选项；几何上不合理时返回 None。
+
+    · 翻前：只给短码推弃（≤20BB）或面对 3-bet 且金额没有离谱到超池的局面；
+      100BB 普通开池、40BB 普通开池都不再挂 all-in。
+    · 翻后：金额超过「跟注后底池」2.5 倍、且 SPR > 3、又不是在被大注
+      逼着套池时，不追加。
     `to_call >= hero_stack` 时走「跟全下/弃牌」分支，不重复生成。
     """
     stack = snap.hero_stack
@@ -126,19 +134,41 @@ def _all_in_option(snap: HandSnapshot) -> Option | None:
     hero_max = _round_bb((snap.hero_bet or 0.0) + stack)
     if hero_max <= 0:
         return None
+
     if snap.street == PREFLOP:
-        if not (stack <= 40 or "three-bet" in (snap.preflop_shapes or ())):
+        short_stack = stack <= PREFLOP_ALLIN_MAX_STACK_BB
+        facing_threebet = "three-bet" in (snap.preflop_shapes or ())
+        if not (short_stack or facing_threebet):
             return None
     else:
         presets = preset_targets(snap)
         if presets and hero_max <= max(a for a, _ in presets.values()) + 1e-9:
             return None
-    note = "剩余后手全部投入"
+
     effective = _effective_stack(snap)
+    hero_bet = snap.hero_bet or 0.0
+    # 只能被 effective stack 跟到；把「全下」标成真正能进底池的金额，
+    # 避免 240BB 后手对 91.5BB 对手写出「全下 240BB」这种噪声。
+    all_in_amount = hero_max
     if effective is not None and effective < hero_max - 1e-9:
-        note += (f"；有效筹码只有 {effective:g}BB，"
-                 f"多出的 {hero_max - effective:g}BB 不会被跟")
-    return Option("all-in", f"全下 {hero_max:g}BB", "allin", hero_max, note)
+        all_in_amount = _round_bb(hero_bet + effective)
+
+    pot_after = winnable_pot(snap)
+    if pot_after > 0 and stack > PREFLOP_ALLIN_MAX_STACK_BB:
+        pot_before = pot_after - call_amount(snap)
+        spr = (effective / pot_before
+               if effective is not None and pot_before > 0 else None)
+        committing = to_call >= 0.5 * stack
+        too_big = all_in_amount > ALL_IN_MAX_POT_MULTIPLE * pot_after
+        if too_big and not committing and (spr is None or spr > 3.0):
+            return None
+
+    note = ""
+    if effective is not None and effective < hero_max - 1e-9:
+        note = (f"实际后手 {hero_max:g}BB；有效筹码只有 {effective:g}BB，"
+                f"多出的 {hero_max - effective:g}BB 不会被跟")
+    return Option("all-in", f"全下 {all_in_amount:g}BB", "allin",
+                  all_in_amount, note)
 
 
 # 翻前开池的基础倍数（bb），按位置分档，来自 preflop-open.md：
@@ -336,12 +366,30 @@ def build_preflop_options(snap: HandSnapshot,
     # 「底池涨一次、尺度再涨一次」的重复计算。
     pot_now = max(float(snap.pot or 0.0), 1.5 * bb)
     scale = (pot_now / (1.5 * bb)) ** OPEN_POT_EXPONENT
+    rows: list[tuple[float, str, float]] = []
     for b in base:
         target = b * scale + max(open_bonus, 0.0)
         target, note = _cap(target, hero_max, min_raise_to, min_note)
+        rows.append((target, note, b))
+
+    # 5.5BB 下限会把 2.5/2.75/3.0 三个基础尺度一起抬成同一个金额。
+    # 三个 id、同一个金额不是选择，是噪声：改成下限、下限+1、下限+2 三个
+    # 真正不同的尺度（仍然走 _cap，后手不足时会封顶/去重）。
+    if len({target for target, _note, _b in rows}) <= 2:
+        floor = max(min_raise_to, table_min_raise_to)
+        rows = []
+        for b, step in zip(base, (0.0, 1.0, 2.0)):
+            target, note = _cap(floor + step, hero_max, min_raise_to, min_note)
+            rows.append((target, note, b))
+
+    seen_targets: set[float] = set()
+    for target, note, base_size in rows:
+        if target in seen_targets:
+            continue
+        seen_targets.add(target)
         table_min = "（本桌最低加注）" if target >= table_min_raise_to \
             and target == table_min_raise_to else ""
-        options.append(Option(f"open-{b:g}",
+        options.append(Option(f"open-{base_size:g}",
                               f"开池到 {target:g}BB{table_min}",
                               "raise", target, note))
     extra = _all_in_option(snap)
@@ -396,6 +444,29 @@ def preset_amounts(snap: HandSnapshot) -> dict[str, float]:
     return {oid: amount for oid, (amount, _note) in preset_targets(snap).items()}
 
 
+def _unsized_options(snap: HandSnapshot) -> list[Option]:
+    """底池/后手未读全时的保守选项：只给过牌/跟注/弃牌。
+
+    没有底池就算不出任何合法尺度；这时硬塞 1BB 的「下注」等于伪造事实。
+    """
+    to_call = max(snap.to_call or 0.0, 0.0)
+    stack = snap.hero_stack
+    options: list[Option] = []
+    if to_call > 0:
+        amount = call_amount(snap)
+        label = (f"跟全下 {amount:g}BB"
+                 if stack is not None and stack <= amount + 1e-9
+                 else f"跟注 {amount:g}BB")
+        options.append(Option("call", label, "call", amount,
+                              "底池/后手未读全，只保留跟注/弃牌"))
+        options.append(Option("fold", "弃牌", "fold"))
+    else:
+        options.append(Option("call", "过牌", "check", None,
+                              "底池/后手未读全，暂不下注"))
+    by_id = {o.id: o for o in options}
+    return [by_id[i] for i in OPTION_ORDER if i in by_id]
+
+
 def build_options(snap: HandSnapshot,
                   open_bonus: float = 0.0) -> list[Option]:
     """按现场底池与下注算出全部可执行选项。
@@ -414,7 +485,10 @@ def build_options(snap: HandSnapshot,
     金额全部由本模块算好，模型只选档位。两处**必须**的修正：
     低于最小加注额的档位要抬到合法值（否则给出一个牌桌上做不出来的动作），
     超过后手的要封顶并注明等同全下。深码/短码场景在末尾追加 `all-in`。
+    底池或后手缺失时只给过牌/跟注/弃牌：算不出尺度就不要伪造尺度。
     """
+    if snap.pot is None or snap.pot <= 0 or snap.hero_stack is None:
+        return _unsized_options(snap)
     if snap.street == PREFLOP:
         return build_preflop_options(snap, open_bonus=open_bonus)
 
@@ -612,8 +686,11 @@ def spr(snap: HandSnapshot) -> float | None:
 
     分母与赔率同口径：先扣掉对手无人能跟的超额下注（`winnable_pot - call`），
     但不把「我的跟注」算进去 —— 与牌桌语言的 SPR 一致（94 / 10.5 = 9.0）。
+    任一在局对手筹码未读出时返回 None：忽略它会把短码局算成深码局。
     """
     if snap.street == PREFLOP or not snap.pot or snap.hero_stack is None:
+        return None
+    if _unknown_stack_opponents(snap):
         return None
     pot_before_call = winnable_pot(snap) - call_amount(snap)
     if pot_before_call <= 0:
@@ -818,6 +895,12 @@ def build_situation(snap: HandSnapshot,
     reads = tuple(opponent_reads or ())
     read = _read(snap)
     warnings: list[str] = list(snap.warnings)
+    unknown_stacks = _unknown_stack_opponents(snap)
+    if unknown_stacks:
+        warnings.append(
+            f"{len(unknown_stacks)} 名对手筹码未读出，有效筹码/SPR 未计算")
+    if snap.pot is None or snap.pot <= 0 or snap.hero_stack is None:
+        warnings.append("底池/后手未读全，已隐藏下注选项，只保留过牌/跟注/弃牌")
     n_opp = sum(1 for o in snap.opponents if not o.folded)
 
     # 事实块只算一次：牌面结构、最好五张、精确排名、坚果校验全从这里出。
@@ -1251,8 +1334,8 @@ def value_directive(sit: Situation) -> str | None:
     **legacy offline only**：`build_messages` / `advise` 不再调用；只给
     tools/compare_review_hands 与 replay 审计历史决策用。
 
-    为什么放在 user 事实里、而不是只写在 system 技能里：JEV 是选择题，
-    技能目录很长，模型容易只抓到最近的一条「对手弱可以过牌」；一条紧跟
+    为什么放在 user 事实里、而不是只写在 system 技能里：模型只做选择题，
+    技能目录很长时容易只抓最近的一条「对手弱可以过牌」；一条紧跟
     「My hand strength」的具体指令，比让它自己翻方法论可靠得多。
     """
     if sit.street == PREFLOP:
@@ -1963,51 +2046,59 @@ def audit_advice_tags(sit: Situation, kind: str | None,
 
 # ─────────────────────── 中文 lean 提示词 ───────────────────────
 
-# 唯一保留的 system。风格与旧 lean-rules 的区别：只给决策顺序和常见错误，
-# 不写「永远/绝不」，不注入任何具体牌表或价值指令。
-SYSTEM_ZH = """\
-你是一名德州扑克现金局实时教练。Hero 只有几秒钟，需要你从「可选动作」中选一个能直接执行的动作。
+# 唯一保留的 system core。只给输出契约、事实优先级、决策顺序和指标口径；
+# 前注局按局面条件追加，避免无前注桌也读一段无关规则。
+SYSTEM_CORE_ZH = """你是一名德州扑克现金局实时教练。Hero 只有几秒钟，需要你从「可选动作」中选一个能直接执行的动作。
 
 ## 输出
 只输出一个 JSON 对象，不要 Markdown，不要前后解释：
 {"option": "<选项 id>", "reason": "<中文一句话，不超过 30 字>", "confidence": <可选 0-1>}
 - option 必须严格来自「可选动作」，不得编造选项 id 或金额。
-- reason 必须引用输入中的具体事实（牌力、赔率、位置、对手画像、桌风）；不要引用未提供的规则、图表、概率或“价值指令”。
+- id 映射：没人下注时，过牌返回 call；下注也返回 raise-*；翻前开池返回 open-*，面对加注返回 raise-3x/raise-4x；全下是 all-in。不要自造 check/bet-*。
+- reason 必须引用输入里的具体事实（牌力、赔率、位置、对手画像）；不要引用未提供的规则、图表、概率或“价值指令”。
 - 关键事实缺失时，选最保守的合法动作，并在 reason 里说明缺什么。
 
 ## 事实优先级
-1. 程序计算的事实：底池、需跟、有效筹码、SPR、赔率门槛、牌型/坚果/听牌、多人池人数。它们是权威，不要重算或矛盾。
-2. 逐座位对手画像 > 桌级桌风；桌风不能覆盖计算事实。
-3. 通用扑克经验只在事实不足时兜底。
+1. 硬事实：牌、公共牌、底池、需跟、在局人数、后手。
+2. 程序计算：SPR、赔率门槛、牌型/坚果/听牌、范围权益、当前落后比例。
+3. 逐座位对手画像；4. 全场统计/人工观察；5. 通用扑克经验。
+冲突时高优先级覆盖低优先级；范围结论、可剥削等规则提示不能覆盖硬事实。
 
 ## 决策顺序
-- 翻前：看位置、前面行动（无人入池/溜入/单加注/3-bet）、有效筹码和范围。不要因为“便宜”用垃圾牌入池；面对加注看价格、位置和对手范围。
-- 翻后：先问“哪些更差的牌会跟、哪些更好的牌会加”，再决定价值、诈唬、过牌或弃牌；然后比较权益与赔率门槛。
+- 翻前：看位置、前面行动（无人入池/溜入/单加注/3-bet）、有效筹码和范围；不要因为“便宜”用垃圾牌入池。
+- 翻后：先问“哪些更差的牌会跟、哪些更好的牌会加”，再比较权益与赔率门槛，决定价值、诈唬、过牌或弃牌。
 - 听牌：按 outs、价格、弃牌率、公对面/成花风险判断；不要因为“当前未成牌不是坚果”就否决半诈唬。
 - 多人池：顶对/超对降级；没有弃牌率时不要用听牌硬下注。
 - 河牌：没有未来牌，听牌等同空气；跟注看赔率和对手线路，价值下注看更差的牌会不会跟。
-- 尺度只能从「可选动作」里选，金额由程序算好，不要自己算。
-- all-in 是最后手段：只有赔率、筹码深度和底池几何都合理时才用，不要用它代替正常的价值下注。
+- 尺度只能从「可选动作」里选，金额由程序算好；all-in 是最后手段，只在赔率、筹码深度和底池几何都合理时用。
 
-## 前注局（桌况里带前注时）
-- 前注是死钱：翻前底池比无前注局大，入池赔率更好，范围应该放宽而不是收紧；在前注局里收紧范围等于白交前注。
-- 加注尺度按**底池**定：前注和溜入者把底池做大，开池尺度就跟着变大（本桌 9 人各 0.5BB 前注 → 翻前底池 6BB → 后位开池 8-9BB；溜入者越多越大）。选项金额已按这个口径算好，不要因为「比 3BB 大」就当成算错；只用最小加注开池，等于把全桌送进底池。
-- 溜入者多的桌子隔离加注收不到弃牌，不要为了提高加注率去加注垃圾牌；用多人池里能成坚果的牌入池，位置越好越宽。
-- 前注大 → 底池大 → SPR 低：翻前选牌时就要想好翻后能不能打完。
+## 指标口径
+- 补牌成牌率（四二法则）= 听牌到河牌成牌的概率，不是胜率。
+- 对范围权益 = 对建模范围的河牌胜率；当前成牌落后 = 按当前五张至少一家领先。
+- 跟注看权益与门槛；下注看更差的牌会不会跟；不要用“当前落后”单独否决听牌。
 
-## 筹码深度（先看有效筹码，再看自己的后手）
-- 有效筹码 = min(我, 对手)。我 300BB、对手 100BB 时，这一手打的是 100BB 的牌；只有对手也深才是深码局。判断深度用有效筹码，不要用自己的后手。
-- SPR 高（>6）：一对不做大底池。深码的利润来自「成坚果 + 对手付钱」，不是把顶对打光；听牌的隐含赔率和位置价值都放大。
-- SPR 低（<3）：单挑或 3 人池里顶对/超对就是套池牌，按权益和赔率打光，不要因为「怕被反超」弃牌；4 人以上的多人池仍然降级，因为总有人有两对以上。
-- 后手 <20BB：翻前进入推/弃区。小加注没有意义，要么全下要么弃牌；20–40BB 仍然是正常加注，只是翻后基本一枪定生死。
-
-## 常见错误
-- 牌型名字不等于牌型排名；两对、三条、顺子都要看牌面和对手范围。
-- 不要因为“已经投入”而跟注；不要因为“怕被反超”而弃掉明显领先的牌。
-- 有前注时按无前注的范围收紧，是这类局最常见的失血方式。
-- 拿自己的后手当有效筹码，忽略对手更浅：深码的名头会骗你去打一个其实只有 100BB 的底池。
-- 不要编造对手手牌，不要给不存在的范围表/规则找理由。
+## 筹码深度
+- 有效筹码 = min(我, 对手)；判断深度用它，不要用自己的后手。
+- SPR 高（>6）：一对通常不做大底池；SPR 低（<3）：单挑/3 人池顶对通常可以套池，4 人以上降级。
+- 后手 <20BB：翻前进入推/弃区；20–40BB 仍是正常加注，只是翻后基本一枪定生死。
 """
+
+# 只有桌况带前注时追加。前注局的核心差异是「底池更大、开池要收费」，
+# 不需要把 9 人/0.5BB 这类具体牌桌写死进 system。
+SYSTEM_ANTE_ZH = """## 前注局
+- 前注是死钱：翻前底池比无前注局大，入池赔率更好，范围通常放宽而不是收紧。
+- 开池尺度按底池放大；选项金额已按这个口径算好，不要用固定 3BB 去质疑它。
+- 前注大 → 底池大 → SPR 低：翻前选牌时就要想好翻后能不能打完。
+"""
+
+
+def build_system(sit: "Situation") -> str:
+    """按局面拼 system：core 恒定，前注局只在有前注时追加。"""
+    parts = [SYSTEM_CORE_ZH.rstrip()]
+    blinds = sit.snap.blinds
+    if blinds is not None and blinds.ante:
+        parts.append(SYSTEM_ANTE_ZH.rstrip())
+    return "\n\n".join(parts)
 
 _STREET_ZH = {"preflop": "翻前", "flop": "翻牌", "turn": "转牌", "river": "河牌"}
 _POT_TYPE_ZH = {
@@ -2048,9 +2139,18 @@ def _fmt_num(value: float | None) -> str:
     return f"{value:.2f}".rstrip("0").rstrip(".")
 
 
+def _unknown_stack_opponents(snap: HandSnapshot) -> list:
+    """在局但筹码没读出来的对手。有效筹码/SPR 必须把它们当成未知。"""
+    return [o for o in snap.opponents if not o.folded and o.stack is None]
+
+
 def _effective_stack(snap: HandSnapshot) -> float | None:
-    """有效筹码 = min(Hero 后手, 所有未弃牌对手后手)。"""
-    if snap.hero_stack is None:
+    """有效筹码 = min(Hero 后手, 所有未弃牌对手后手)。
+
+    有对手筹码未读出时返回 None，而不是忽略它。忽略未知对手会把
+    「300BB 对 100BB」算成 300BB，让深码建议出现在短码局。
+    """
+    if snap.hero_stack is None or _unknown_stack_opponents(snap):
         return None
     stacks = [o.stack for o in snap.opponents
               if not o.folded and o.stack is not None]
@@ -2091,8 +2191,9 @@ def _range_conclusion_zh(snap: HandSnapshot,
         return None
     if verdict.in_range is None:
         return f"{verdict.hand} 在 {verdict.position} 没有开池范围（盲注位不是开池点）"
-    head = ("在开池范围内，默认加注"
-            if verdict.in_range else "不在开池范围内，默认弃牌")
+    head = ("在开池范围内（参考，不覆盖价格/对手/筹码）"
+            if verdict.in_range
+            else "不在开池范围内（参考，不覆盖价格/对手/筹码）")
     text = f"{verdict.hand} 在 {verdict.position} {head}"
     if verdict.limpers > 0 and verdict.isolation_ok is not None:
         iso = ("仍在收紧后的范围内" if verdict.isolation_ok
@@ -2190,80 +2291,152 @@ def _draws_zh(gt: GroundTruth) -> str:
 
 def render_gt_warnings_zh(gt: GroundTruth | None,
                           draw_focus: bool = False) -> list[str]:
-    """把 ground_truth 的英文警告映射成中文；没覆盖的保留原文并标 `[EN]`。
+    """把 ground_truth 的英文警告映射成中文牌面提示。
 
-    `draw_focus=True` 时丢掉「你不是坚果」这类只描述当前未成牌的警告，
-    避免模型用「当前不是坚果」否决半诈唬（§4.4）。
+    只保留**当前牌面特有**的风险（成花、公对、三条、顺子可能、花听）。
+    「你不是坚果 / 这是听牌 / 河牌没有后续牌」这类通用句已经在
+    「坚果」「牌力」「街道」里说过，再渲染只会重复并放大恐惧。
+
+    `draw_focus` 保留参数兼容旧调用；听牌的通用警告现在一律不渲染。
     """
     if gt is None:
         return []
-    skip = ("You are NOT the nuts",) if draw_focus else ()
+    low_signal = (
+        "You are the ABSOLUTE NUTS", "You are the NUTS",
+        "You are NOT the nuts", "This is a DRAW, not a made hand",
+        "River: no more cards",
+    )
     out: list[str] = []
+    unknown = 0
     for warning in gt.warnings:
-        if warning.startswith(skip):
+        if warning.startswith(low_signal):
             continue
-        if warning.startswith("You are the ABSOLUTE NUTS"):
-            text = ("你是绝对坚果：没有任何对手持牌能打败你，也没有平局。"
-                    "不要把更大的牌说成可能；不要弃牌。")
-        elif warning.startswith("You are the NUTS"):
-            text = ("你是坚果：没有对手持牌能打败你，但部分持牌与你平局（分池）。"
-                    "不要把更大的牌说成可能；不要弃牌。")
-        elif warning.startswith("You are NOT the nuts. Hands that beat you:"):
-            raw = warning.split(":", 1)[-1].strip().rstrip(".")
-            names = "、".join(
-                _CATEGORY_EN_ZH.get(name.strip(), name.strip())
-                for name in raw.split(",") if name.strip())
-            text = f"你不是坚果；能打败你的牌型：{names}。"
-        elif warning.startswith("A flush is ALREADY possible"):
-            text = ("牌面已成花：任何同花都打败你的当前成牌；不要把它当坚果，"
-                    "也不要当作不可打败而加注。")
+        if warning.startswith("A flush is ALREADY possible"):
+            text = "牌面已成花：同花打败当前成牌，不能当坚果"
         elif warning.startswith("The board is paired"):
-            text = "牌面成对：葫芦或四条可能，当前成牌打不过这些牌。"
+            text = "牌面成对：葫芦或四条可能"
         elif warning.startswith("One of your two pairs is the BOARD pair"):
-            text = ("你的一对来自公对面，所有人共享；更大的口袋对也能组成更大的两对，"
-                    "这是抓诈牌，不是价值怪兽。")
+            text = "两对里有一对来自公对面，所有人共享；这是抓诈牌"
         elif warning.startswith("There are trips on the board"):
-            text = "牌面有三条：四条可能。"
+            text = "牌面有三条：四条可能"
         elif warning.startswith("An opponent can complete a straight"):
-            text = "对手可以用两张牌补成顺子；当前成牌不是坚果。"
+            text = "对手可以用两张牌补成顺子"
         elif warning.startswith("At most 2 of any suit are on the river board"):
-            text = "河牌最多两张同花：不存在同花；不要称其为花面。"
+            text = "河牌最多两张同花：不存在同花"
         elif warning.startswith("Only a flush DRAW is possible"):
-            text = "牌面最多两张同花：没有成花，只是花听；不要称其为花面。"
+            text = "牌面最多两张同花：只有花听，没有成花"
         elif warning.startswith("You are the nuts NOW"):
-            text = ("你现在是坚果，但后续街的第三张同花可以成花；"
-                    "如果花牌能让价值被价格劝退，不要慢玩。")
-        elif warning.startswith("This is a DRAW, not a made hand"):
-            text = ("这是听牌，不是成牌；上面的排名描述的是当前未成牌，"
-                    "请按 outs 和赔率判断。")
+            text = "现在是坚果，但后续第三张同花可以成花"
         elif warning.startswith("Your flush draw is on a paired board"):
-            text = "花听在公对面上：葫芦可能已经存在，中花也未必是坚果。"
-        elif warning.startswith("River: no more cards"):
-            text = "河牌：没有后续牌，牌力已定。"
+            text = "花听在公对面上：葫芦可能已经存在，中花未必是坚果"
         else:
-            text = f"[EN] {warning}"
+            unknown += 1
+            continue
         out.append(text)
+    if out:
+        # 去重但保留顺序：同一条牌面风险只提醒一次。
+        out = list(dict.fromkeys(out))
+    if unknown:
+        out.append(f"另有 {unknown} 条牌面提示（技术细节见日志）")
     return out
 
 
 def _gap_zh(text: str) -> str:
-    """数据缺口：中文原样，纯英文技术告警标 `[EN]`。"""
+    """把数据缺口翻成一句可读中文；未知英文告警不再原样塞进 prompt。"""
+    text = (text or "").strip()
+    if not text:
+        return ""
     if any("\u4e00" <= ch <= "\u9fff" for ch in text):
         return text
-    return f"[EN] {text}"
+    if "range unknown" in text or "range not found" in text:
+        return "某座位范围未知"
+    if "ranges unavailable" in text or "contradict" in text:
+        return "翻前动作与形态矛盾，范围不可用"
+    if "only the first" in text and "modeled" in text:
+        return "只建模前 4 名对手；其余对手按随机牌处理"
+    if "bet size without an action badge" in text:
+        return "有下注额但没抓到动作徽章，范围按更宽处理"
+    if "no range table" in text or "4-bet+ pot" in text:
+        return "4-bet+ 池没有范围表，范围未知"
+    return "技术性数据告警（详见日志）"
+
+
+def _summarize_gaps(gaps: list[str]) -> list[str]:
+    """把逐座位/技术告警压成 1–4 条中文，避免 5 行同义的 range unknown。"""
+    ordered = [g for g in dict.fromkeys(gaps) if g]
+    range_unknown = sum(1 for g in ordered if g == "某座位范围未知")
+    rest = [g for g in ordered if g != "某座位范围未知"]
+    out: list[str] = []
+    if range_unknown:
+        out.append(f"{range_unknown} 名对手范围未知，未计入范围权益（按随机牌处理）")
+    # 硬事实缺口（底池/后手/筹码未读全）优先于普通技术告警，不能被 cap 挤掉。
+    hard = [g for g in rest if "未读全" in g or "筹码未读出" in g]
+    out.extend(hard)
+    out.extend(g for g in rest if g not in hard)
+    return out[:4]
+
+# 这些 note 只是解释动作本身，标签已经说清楚；写两遍只会占 token。
+_GENERIC_OPTION_NOTES = {
+    "还没人下注，可以过牌",
+    "剩余后手全部投入",
+    "第一个入池通常应该加注",
+    "对手下注已覆盖我的后手，跟注即全下",
+}
+
+
+def _option_note(option: Option) -> str:
+    """只在 note 提供约束信息时附加；重复/废话 note 丢掉。"""
+    note = (option.note or "").strip()
+    if not note or note in option.label:
+        return ""
+    if note in _GENERIC_OPTION_NOTES:
+        return ""
+    # 标签已经有「（本桌最低加注）」，再补一句「已抬到本桌最低加注」是重复。
+    if "（" in option.label and "最低加注" in note:
+        return ""
+    return f"；{note}" if "）" in option.label else f"（{note}）"
 
 
 def render_options_zh(sit: Situation) -> list[str]:
-    """「可选动作」：`- id｜中文标签（实际金额已在标签里）`。"""
+    """「可选动作」：`- id｜中文标签`，只保留有约束意义的 note。
+
+    后手不足时五个档位会封顶成同一个金额；prompt 里只显示一个，避免
+    「五个 id、同一个动作」的伪选择。`sit.options` 仍保留全部 id 供点击器
+    和 preset 映射使用。
+    """
     lines = ["## 可选动作"]
+    seen: set[tuple] = set()
     for option in sit.options:
-        note = f"（{option.note}）" if option.note and option.note not in option.label else ""
-        lines.append(f"- {option.id}｜{option.label}{note}")
+        if option.amount is not None:
+            key = (option.kind, option.amount)
+            if key in seen:
+                continue
+            seen.add(key)
+        lines.append(f"- {option.id}｜{option.label}{_option_note(option)}")
     return lines
 
 
+_RANGE_MODE_ZH = {
+    "call": "跟注范围",
+    "bet": "下注范围",
+    "check": "过牌范围",
+    "raise": "加注范围",
+}
+
+
+def _range_label(edge) -> str:
+    """`BTN [check]` → `BTN 过牌范围`；内部 range id / combo 数不进 prompt。"""
+    position = edge.position or edge.seat_id
+    mode = _RANGE_MODE_ZH.get(edge.mode or "", edge.mode or "")
+    return f"{position} {mode}".strip()
+
+
 def render_ranges_zh(sit: Situation) -> list[str]:
-    """`Hand vs ranges` 的中文事实：范围宽度 + 逐家领先比例。"""
+    """`Hand vs ranges` 的中文事实：范围宽度 + 逐家领先比例。
+
+    只给模型能用的语义（位置 + 动作范围 + 宽度 + 领先比例）。range id、
+    combo 数、mode 英文串是内部实现，留在 JSONL，不进 prompt。
+    """
     hr = sit.hand_ranges
     if hr is None:
         return []
@@ -2277,13 +2450,12 @@ def render_ranges_zh(sit: Situation) -> list[str]:
         shown = tuple(sorted(shown, key=lambda e: -e.behind)[:3])
         more = len(hr.opponents) - 3
     ranges = "｜".join(
-        f"{o.label} {o.range_id} {o.width_pct:.1f}%"
-        f"（{o.combos_after_removal} 个可用组合）" for o in shown)
+        f"{_range_label(o)} {o.width_pct:.1f}%" for o in shown)
     if more:
         ranges += f"｜另有 {more} 家只计入权益"
     lines = [f"范围：{ranges}"]
     for edge in shown:
-        lines.append(f"- {edge.label}：当前成牌领先我 {edge.behind:.1%}"
+        lines.append(f"- {_range_label(edge)}：当前成牌领先我 {edge.behind:.1%}"
                      f"（平局 {edge.tie:.1%}）")
     if modeled < actual:
         lines.append(f"- 建模 {modeled} 家，实际 {actual} 家；未建模对手按随机牌处理")
@@ -2293,8 +2465,8 @@ def render_ranges_zh(sit: Situation) -> list[str]:
 def render_hand_strength_zh(sit: Situation) -> list[str]:
     """「实时牌力」中文事实块；翻前返回空列表。
 
-    听牌永远按「听牌」渲染，不降级成 VERY SMALL，也不让「当前未成牌不是坚果」
-    单独否决半诈唬（§4.4）。
+    顺序按决策相关性排：我有什么 → 坚果/听牌/成牌率 → 对范围强弱 →
+    牌面会怎么变 → 牌面警告。听牌永远按「听牌」渲染，不降级成 VERY SMALL。
     """
     snap = sit.snap
     if snap.street == PREFLOP:
@@ -2343,16 +2515,16 @@ def render_hand_strength_zh(sit: Situation) -> list[str]:
         else:
             nuts = "否（有更好的成牌存在）"
         lines.append(f"坚果：{nuts}")
+        if not gt.hero_is_nuts:
+            stronger = [b.name for b in gt.rank.beaten_by
+                        if b.category >= TWO_PAIR]
+            if stronger:
+                names = "、".join(_CATEGORY_EN_ZH.get(n, n) for n in stronger)
+                lines.append(f"能打败你的牌型：{names}")
         lines.append(f"听牌：{_draws_zh(gt)}")
         if gt.draws.total_outs:
-            lines.append(f"四二法则权益：{gt.draws.equity_pct:.0f}%")
-        lines.append(f"牌面结构：{_board_structure_zh(gt)}")
-        lines.append(f"转河变化：{_street_change_zh(gt)}")
-        warnings = [w.rstrip("。；")
-                    for w in render_gt_warnings_zh(gt, draw_focus=is_draw)]
-        lines.append("牌面警告：" + ("；".join(warnings) + "。" if warnings else "无"))
-    elif sit.equity_pct is not None and is_draw:
-        lines.append(f"四二法则权益：{sit.equity_pct:.0f}%")
+            lines.append(f"补牌成牌率（四二法则，到河牌）："
+                         f"{gt.draws.equity_pct:.0f}%")
 
     hr = sit.hand_ranges
     if hr is None and gt is not None:
@@ -2375,15 +2547,21 @@ def render_hand_strength_zh(sit: Situation) -> list[str]:
         if is_draw:
             behind += "（当前未成牌，不代表最终胜率）"
         lines.append(behind)
-        # 「范围建模」按 §4.3 的口径 = len(hand_ranges.opponents)，最多 4；
-        # 公平份额按桌上的实际总人数（含 Hero）算。
         lines.append(f"多人池：实际 {actual_players} 人 / "
                      f"范围建模 {len(hr.opponents)} 人 / "
                      f"公平份额 {1.0 / actual_players:.1%}")
         lines.extend(render_ranges_zh(sit))
+    elif sit.equity_pct is not None and is_draw:
+        lines.append(f"补牌成牌率（四二法则，到河牌）：{sit.equity_pct:.0f}%")
 
-    # 只有标题、没有任何事实时整段省略：一张「## 实时牌力」后面空空如也，
-    # 模型会以为牌力未知是「没算」而不是「没手牌」。
+    if gt is not None:
+        lines.append(f"牌面结构：{_board_structure_zh(gt)}")
+        lines.append(f"转河变化：{_street_change_zh(gt)}")
+        warnings = [w.rstrip("。；")
+                    for w in render_gt_warnings_zh(gt, draw_focus=is_draw)]
+        lines.append("牌面警告：" + ("；".join(warnings) + "。" if warnings else "无"))
+
+    # 只有标题、没有任何事实时整段省略。
     return lines if len(lines) > 1 else []
 
 
@@ -2401,10 +2579,16 @@ def render_preflop_zh(sit: Situation) -> list[str]:
     limpers = count_limpers(snap)
     if limpers:
         lines.append(f"前面溜入人数：{limpers}")
-    if any(o.kind in ("raise", "bet") for o in sit.options):
-        lines.append(f"本桌翻前最低加注：{PREFLOP_MIN_RAISE_BB:g}BB —— 这是牌桌"
-                     "下限（更小的会被客户端拒绝），不是建议尺度；"
-                     "开池尺度已按底池放大，以上面的选项金额为准")
+    raises = sorted({o.amount for o in sit.options
+                     if o.kind in ("raise", "bet") and o.amount is not None})
+    if raises:
+        if len(raises) > 1 or raises[0] > PREFLOP_MIN_RAISE_BB + 1e-9:
+            lines.append(f"本桌翻前最低加注：{PREFLOP_MIN_RAISE_BB:g}BB —— 这是牌桌"
+                         "下限（更小的会被客户端拒绝）；开池尺度按底池放大，"
+                         "以上面的选项金额为准")
+        else:
+            lines.append(f"本桌翻前最低加注：{PREFLOP_MIN_RAISE_BB:g}BB；"
+                         "当前可选开池金额都受这个下限约束")
     return lines
 
 
@@ -2425,7 +2609,7 @@ def render_table_stats_zh(stats: "PooledStats | None") -> list[str]:
             parts.append(f"{label} {value:.0f}%")
     if not parts:
         return []
-    lines = ["## 全场数据"]
+    lines = ["## 全场数据（同盲注/人数画像库，可能跨桌）"]
     lines.append(f"{stats.players} 人 / {stats.hands} 手："
                  + "｜".join(parts))
     street = [f"{label} {value:.0f}%"
@@ -2467,13 +2651,17 @@ def render_explosive_zh(sit: Situation) -> list[str]:
     if spr is None:
         return ["炸弹池结构：SPR 未知，按有效筹码和底池几何自行判断能否套池。"]
 
+    players = (sit.opponents_in_hand + 1
+               if sit.opponents_in_hand is not None
+               else (sit.snap.players_dealt or sit.snap.table_size or 0))
+    players_text = f"{players} 人" if players else "多人"
     if spr > 3.0:
         return [
             f"炸弹池结构：SPR {spr:.1f} —— 底池虽大，后手仍然很深，这不是套池局面；"
             "按常规深码翻后打，不要因为「是炸弹池」就默认打完。",
             "炸弹池深码：一对不做大底池，深码的利润来自成坚果和对手付钱；"
             "顶对强踢可以正常下注/跟注，听牌、组合听牌和位置的价值都放大。",
-            "炸弹池深码多人池：9 人看翻牌时仍然要小心「总有人有两对以上」，"
+            f"炸弹池深码{players_text}池：仍然要小心「总有人有两对以上」，"
             "但不要套用短码炸弹池「只看坚果」那套 —— 后手够深时中等牌有正常价值。",
         ]
 
@@ -2483,7 +2671,7 @@ def render_explosive_zh(sit: Situation) -> list[str]:
         "这里没有「跟注再看一条街」的选项，翻牌跟注等于承诺打光。",
         "炸弹池中等牌：牌力分档为顶对弱踢、中对、底对、弱听牌的，不投入底池；"
         "顶对强踢和超对在干燥面可以用小注拿薄价值，但不要为了套池造大底池"
-        "——9 人池里就算牌力标成「大」，也按中等牌处理。"
+        f"——{players_text}池里就算牌力标成「大」，也按中等牌处理。"
         "只用「打到全下还舒服」的牌做大底池（三条、两对、成顺/成花、组合听牌）。"
         "已经投入的钱是沉没成本，不要因为底池大、不跟可惜而用中等牌追。",
         "炸弹池读牌：默认按「下注=强、过牌=中等」处理（桌风或画像另有说明时以它们为准）。"
@@ -2492,6 +2680,27 @@ def render_explosive_zh(sit: Situation) -> list[str]:
         "收池（强牌价值、听牌半诈唬、无摊牌价值的牌偷）；有摊牌价值的中等牌优先过牌兑现。"
         "被加注通常等于坚果，除了强牌和坚果听牌直接弃。",
     ]
+
+
+def _select_reads(sit: Situation, active: dict,
+                  limit: int = 3) -> list[OpponentRead]:
+    """只把最相关的 2–3 家画像交给模型，避免 9 人桌 20+ 行画像。
+
+    优先：当前街最后加注者 > 身后还有行动的人 > stable > 置信度/样本。
+    """
+    reads = [r for r in sit.opponent_reads
+             if r.archetype != "unknown" and r.seat_id in active]
+    if len(reads) <= limit:
+        return reads
+    aggressor = last_aggressor_seat(sit.snap)
+    behind = set(_after_hero(sit.snap))
+
+    def rank(read: OpponentRead) -> tuple:
+        position = active.get(read.seat_id)
+        return (read.seat_id == aggressor, position in behind,
+                read.gate == "stable", read.confidence, read.n)
+
+    return sorted(reads, key=rank, reverse=True)[:limit]
 
 
 def render_facts_zh(sit: Situation) -> str:
@@ -2508,11 +2717,15 @@ def render_facts_zh(sit: Situation) -> str:
         blinds = "未知"
     lines.append(f"桌况：{table}｜盲注 {blinds}")
     hero_cards = " ".join(snap.hero_cards) or "未知"
+    stack_text = (f"{_fmt_num(snap.hero_stack)}BB"
+                  if snap.hero_stack is not None else "未知")
     lines.append(f"Hero：{snap.hero_position or '位置未知'}｜底牌 {hero_cards}｜"
-                 f"后手 {_fmt_num(snap.hero_stack)}BB")
+                 f"后手 {stack_text}")
     board = " ".join(snap.board) or "无"
+    pot_text = (f"{_fmt_num(snap.pot)}BB"
+                if snap.pot is not None and snap.pot > 0 else "未知")
     lines.append(f"街道：{_STREET_ZH.get(snap.street, snap.street)}｜"
-                 f"公共牌 {board}｜底池 {_fmt_num(snap.pot)}BB｜"
+                 f"公共牌 {board}｜底池 {pot_text}｜"
                  f"需跟 {_fmt_num(call_amount(snap))}BB")
 
     geometry: list[str] = []
@@ -2540,7 +2753,7 @@ def render_facts_zh(sit: Situation) -> str:
     if owed > 0 and winnable > 0:
         lines.append(f"赔率门槛：{_fmt_num(owed)}BB / 可争夺底池 "
                      f"{_fmt_num(winnable)}BB = {owed / winnable * 100:.1f}%")
-    if snap.pot is not None:
+    if snap.pot is not None and snap.pot > 0:
         excess = uncalled_excess(snap)
         pot_line = f"可争夺底池：{_fmt_num(winnable)}BB" + (
             "（含我的跟注）" if owed > 0 else "")
@@ -2557,6 +2770,8 @@ def render_facts_zh(sit: Situation) -> str:
                           for o in short)
         lines.append(f"短码/side pot：{detail}（side pot 未建模；"
                      "只能与他们争夺各自的后手）")
+    elif _unknown_stack_opponents(snap):
+        lines.append("短码/side pot：未知（有对手筹码未读出）")
     else:
         lines.append("短码/side pot：无")
     if snap.hero_invested is not None:
@@ -2586,11 +2801,17 @@ def render_facts_zh(sit: Situation) -> str:
 
     active = {o.seat_id: (o.position or o.seat_id)
               for o in snap.opponents if not o.folded}
-    reads = render_reads_zh(sit.opponent_reads, active,
-                            header="## 对手画像（逐座位，优先于桌级桌风）")
+    shown_reads = _select_reads(sit, active, limit=3)
+    reads = render_reads_zh(
+        shown_reads, active,
+        header="## 对手画像（逐座位，优先于全场统计/人工观察）")
     if reads:
         lines.append("")
         lines.extend(reads)
+        eligible = [r for r in sit.opponent_reads
+                    if r.archetype != "unknown" and r.seat_id in active]
+        if len(eligible) > len(shown_reads):
+            lines.append("（只显示最相关 3 家；其余画像略）")
 
     table_stats = render_table_stats_zh(sit.table_stats)
     if table_stats:
@@ -2608,13 +2829,14 @@ def render_facts_zh(sit: Situation) -> str:
                   if sit.opponents_in_hand is not None
                   else snap.opponents_in_hand)
         modeled = len(sit.hand_ranges.opponents)
-        if actual > modeled:
+        if actual > modeled and not any("只建模前" in g for g in gaps):
             gaps.append(f"只建模前 {modeled} 名对手；其余对手按随机牌计入 "
                         "equity 之外")
     lines.append("")
-    lines.append("## 数据缺口")
-    if gaps:
-        lines.extend(f"- {gap}" for gap in gaps)
+    lines.append("## 数据质量（硬事实缺失会影响可用动作；范围缺口只降低范围可信度）")
+    summary = _summarize_gaps(gaps)
+    if summary:
+        lines.extend(f"- {gap}" for gap in summary)
     else:
         lines.append("无")
 
@@ -2635,8 +2857,8 @@ def render_facts_zh(sit: Situation) -> str:
 
 
 def build_messages(sit: Situation) -> tuple[str, str]:
-    """返回唯一的中文 lean `(system, user facts)`。"""
-    return SYSTEM_ZH, render_facts_zh(sit)
+    """返回中文 lean `(system, user facts)`；system 按前注与否拼装。"""
+    return build_system(sit), render_facts_zh(sit)
 
 
 # ─────────────────────────── 模型调用 ───────────────────────────
@@ -2667,7 +2889,7 @@ class AISettings:
     base_url: str
     model: str
     source: str = "env"              # env | dotenv，只用于启动日志
-    # OpenRouter 的可选排名头（JEV 走 OpenRouter 时用）
+    # OpenRouter 的可选排名头（走 OpenRouter 时用）
     referer: str = ""
     title: str = ""
     # 采样/思考参数。None = 不传，用服务端默认。
@@ -2744,24 +2966,6 @@ class AIError(RuntimeError):
     """模型调用失败。消息面向用户，不含供应商原文（可能回显 Key 片段）。"""
 
 
-def is_jev_model(model: str) -> bool:
-    """模型名是不是 JEV 系列。
-
-    覆盖两种写法：`jev-1.14`（模型名本身）和 `typesafe/jev-1.14`（OpenRouter
-    的 vendor/model 形式，也是请求样例里的写法）。只看路径分段，所以
-    `my-jev-model` 不会被误判。
-
-    这类模型不走 `/chat/completions`：它是 OpenRouter 的 decisions 接口，
-    输入是 state + 带类型的 questions，输出是 answers。
-    """
-    name = (model or "").strip().lower()
-    if not name:
-        return False
-    if name.startswith("jev"):
-        return True
-    return any(part.startswith("jev") for part in name.split("/") if part)
-
-
 # 一次建议的模型本身只要几百毫秒，但国内到 OpenRouter 的 TLS 握手实测
 # 0.4–1.4s —— urllib 每次 urlopen 都新建连接，等于每给一次建议就多付一次
 # 握手钱。这里按 host 缓存一条 HTTP/1.1 长连接。只在没配代理时用：
@@ -2821,6 +3025,9 @@ def _post_json(url: str, payload: dict, headers: dict, timeout: float) -> bytes:
     if not _proxy_configured():
         try:
             return _post_keepalive(url, data, headers, timeout)
+        except TimeoutError as exc:
+            # 超时不能悄悄落到 urllib 再等一轮：调用方需要 AIError 才能出兜底建议。
+            raise AIError(f"调用模型超时：{exc}") from exc
         except (http.client.HTTPException, ConnectionError):
             # 长连接被服务端按空闲超时关掉是最常见的情况：丢掉它，走 urllib
             # 新建连接重试一次。模型请求是幂等的选择题，重试不会产生副作用。
@@ -2895,7 +3102,7 @@ def chat_payload(settings: AISettings, messages: list[dict],
 
 def chat_message(settings: AISettings, messages: list[dict],
                  timeout: float = 20.0, request=None,
-                 json_mode: bool = False) -> dict:
+                 json_mode: bool = False, return_meta: bool = False):
     """POST `{BASE_URL}/chat/completions`，返回 assistant message 原对象。
 
     返回的 message 可能带 `reasoning` / `reasoning_details`。**多轮续推**时把
@@ -2931,42 +3138,43 @@ def chat_message(settings: AISettings, messages: list[dict],
 
     try:
         body = json.loads(raw)
-        message = body["choices"][0]["message"]
+        choice = body["choices"][0]
+        message = choice["message"]
     except (ValueError, KeyError, IndexError, TypeError) as exc:
         raise AIError("模型响应结构不对") from exc
     if not isinstance(message, dict):
         raise AIError("模型响应结构不对")
-    return message
+    if not return_meta:
+        return message
+    return message, {
+        "usage": body.get("usage") if isinstance(body, dict) else None,
+        "finish_reason": choice.get("finish_reason"),
+    }
 
 
 def complete_json(settings: AISettings, system: str, user: str,
-                  timeout: float = 20.0, options: list[dict] | None = None,
+                  timeout: float = 20.0,
                   request=None, history: list[dict] | None = None) -> dict:
-    """调用模型并解析成 `{"option": ..., "reason": ...}`。失败抛 AIError。
+    """调用 OpenAI 兼容的 `/chat/completions` 并解析成 `{option, reason}`。
 
-    **模型名决定协议**：JEV 系列（`jev-*` / `vendor/jev-*`）走 OpenRouter 的
-    decisions 接口（见 `complete_jev`），其余走 OpenAI 兼容的
-    `/chat/completions`。`options` 是 JEV 需要的候选动作；chat 模式忽略它。
+    失败抛 AIError。这里刻意不引 SDK、不走流式：一次只回几十个 token，
+    urllib 足够，也避免给实时链路增加依赖。
 
     `history` 是多轮对话里位于 system 之后、本轮 user 之前的消息。要续接
     推理模型的思考，把上一次的 assistant message（含 `reasoning_details`）
     原样放进去；返回值也会带上本次的 `reasoning_details`。
 
-    chat 模式刻意不引 SDK、不走流式：一次只回几十个 token，urllib 足够，
-    也避免给实时链路增加依赖。`response_format=json_object` 能显著降低
-    「返回一段带 markdown 围栏的散文」的概率。
+    `response_format=json_object` 能显著降低「返回一段带 markdown 围栏的
+    散文」的概率；供应商不认这个字段时会自动退回普通模式重试一次。
     """
-    if is_jev_model(settings.model):
-        return complete_jev(settings, system, user, timeout=timeout,
-                            options=options, request=request)
-
     messages = [{"role": "system", "content": system}]
     if history:
         messages.extend(history)
     messages.append({"role": "user", "content": user})
 
-    message = chat_message(settings, messages, timeout=timeout,
-                           request=request, json_mode=True)
+    message, meta = chat_message(settings, messages, timeout=timeout,
+                                 request=request, json_mode=True,
+                                 return_meta=True)
     content = message.get("content")
     if not isinstance(content, str):
         # 推理模型偶尔只回 reasoning、content 为空；这不能当成合法选项
@@ -2976,106 +3184,9 @@ def complete_json(settings: AISettings, system: str, user: str,
     # 保留原样的 reasoning_details：调用方续推时直接回传，不做任何改写
     if message.get("reasoning_details") is not None:
         data["reasoning_details"] = message["reasoning_details"]
+    # 观测字段：prompt/ completion token 与是否被 max_tokens 截断。
+    data["_meta"] = meta
     return data
-
-
-# ─────────────────────────── JEV decisions ───────────────────────────
-
-def jev_headers(settings: AISettings) -> dict:
-    """JEV（OpenRouter decisions）请求头，与 chat 模式共用同一套鉴权/排名头。"""
-    return chat_headers(settings)
-
-
-def jev_payload(settings: AISettings, state: list, questions: dict) -> dict:
-    """JEV 请求体：state 是文本/图片项的列表，questions 是带类型的提问。
-
-    与请求样例一一对应：
-        {"model": ..., "state": [...], "questions": {...}}
-    """
-    return {"model": settings.model, "state": list(state),
-            "questions": dict(questions)}
-
-
-def jev_decisions(settings: AISettings, state: list, questions: dict,
-                  timeout: float = 20.0, request=None) -> dict:
-    """按 JEV decisions 协议提问，返回 `answers`。
-
-    `state` 里每项可以是字符串，也可以是样例里的
-    `{"type": "image_url", "image_url": {"url": "data:...;base64,..."}}`。
-    `questions` 的结构见请求样例（noul / choice / score）。
-
-    `request` 可注入，签名 `(url, payload, headers, timeout) -> bytes`；
-    默认走 urllib。返回的是原始 answers 字典，类型判断交给调用方。
-    """
-    payload = jev_payload(settings, state, questions)
-    post = request or _post_json
-    try:
-        raw = post(settings.base_url, payload, jev_headers(settings), timeout)
-    except urllib.error.HTTPError as exc:
-        raise _http_error(exc) from exc
-
-    try:
-        body = json.loads(raw)
-        answers = body["answers"]
-    except (ValueError, KeyError, TypeError) as exc:
-        raise AIError("模型响应结构不对（缺少 answers）") from exc
-    if not isinstance(answers, dict):
-        raise AIError("模型响应里的 answers 不是对象")
-    return answers
-
-
-def _option_criterion(option: dict) -> str:
-    parts = [str(option.get("label") or option.get("id") or "")]
-    if option.get("amount_bb") is not None:
-        parts.append(f"{option['amount_bb']}BB")
-    if option.get("note"):
-        parts.append(str(option["note"]))
-    return ", ".join(p for p in parts if p)
-
-
-def complete_jev(settings: AISettings, system: str, user: str,
-                 timeout: float = 20.0, options: list[dict] | None = None,
-                 request=None) -> dict:
-    """JEV 版本的一次选择：把候选动作变成一道 choice 题。
-
-    返回结构与 `complete_json` 对齐（`option` / `reason`），这样 `advise()`
-    不需要知道模型走的是哪套协议。JEV 没有自由文本，`reason` 用选择 +
-    概率拼出来；概率同时放进 `confidence`，只用于日志。
-    """
-    if not options:
-        raise AIError("JEV 调用缺少候选选项")
-
-    criteria = {str(o["id"]): _option_criterion(o) for o in options}
-    answers = jev_decisions(
-        settings,
-        state=[system, user],
-        questions={
-            "option": {
-                "type": "choice",
-                "instructions": "It is Hero's turn to act. Choose the single most "
-                                "appropriate action from the candidates based on the "
-                                "supplied state and facts.",
-                "criteria": criteria,
-            },
-        },
-        timeout=timeout,
-        request=request,
-    )
-
-    answer = answers.get("option")
-    if not isinstance(answer, dict):
-        raise AIError("模型没有返回 option 答案")
-    choice = str(answer.get("choice") or "").strip()
-    if choice not in criteria:
-        raise AIError(f"模型给了不在选项里的答案：{choice!r}")
-
-    reason = f"JEV chose {criteria[choice]}"
-    confidence = None
-    probs = answer.get("probabilities")
-    if isinstance(probs, dict) and isinstance(probs.get(choice), (int, float)):
-        confidence = float(probs[choice])
-        reason += f" (probability {confidence:.0%})"
-    return {"option": choice, "reason": reason, "confidence": confidence}
 
 
 def parse_json_content(content: str) -> dict:
@@ -3159,6 +3270,12 @@ class Advice:
     confidence: float | None = None
     # 生成这条建议时的中文 lean 提示词版本，复盘归因用。
     prompt_version: str = PROMPT_VERSION
+    # 模型返回的结束原因与 token 用量；只有 chat/completions 路径有。
+    finish_reason: str | None = None
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    # 模型用了别名（check/bet-1/3/allin）时记下原词，便于发现 id 歧义。
+    alias_from: str | None = None
 
     def to_dict(self) -> dict:
         reads = [
@@ -3189,7 +3306,61 @@ class Advice:
             **({"plan": self.plan} if self.plan else {}),
             **({"confidence": round(self.confidence, 3)}
                if self.confidence is not None else {}),
+            **({"finish_reason": self.finish_reason}
+               if self.finish_reason else {}),
+            **({"prompt_tokens": self.prompt_tokens}
+               if self.prompt_tokens is not None else {}),
+            **({"completion_tokens": self.completion_tokens}
+               if self.completion_tokens is not None else {}),
+            **({"alias_from": self.alias_from}
+               if self.alias_from else {}),
         }
+
+
+# 模型偶尔会按语义造 id：过牌写成 check、下注写成 bet-1/3、全下写成 allin。
+# 这些都是同一个动作，不该因为 id 拼写不同就退化成弃牌/过牌；记下别名，
+# 用日志反过来找 prompt 里没写清楚的地方。
+_OPTION_ALIASES = {
+    "check": "call",
+    "allin": "all-in",
+    "all_in": "all-in",
+    "bet-1/3": "raise-1/3",
+    "bet-1/2": "raise-1/2",
+    "bet-2/3": "raise-2/3",
+    "bet-1": "raise-1",
+    "bet-1.2": "raise-1.2",
+}
+
+
+def _canonical_choice(choice: str, by_id: dict) -> tuple[str, str | None]:
+    """把常见别名映射回合法 id；返回 (canonical, alias_from)。"""
+    raw = (choice or "").strip()
+    if raw in by_id:
+        return raw, None
+    key = raw.lower().replace(" ", "")
+    target = _OPTION_ALIASES.get(key)
+    if target is None and key.startswith("bet-"):
+        target = "raise-" + key[4:]
+    if target not in by_id:
+        return raw, None
+    if key == "check" and by_id[target].kind != "check":
+        return raw, None
+    if key.startswith("bet") and by_id[target].kind not in ("bet", "raise"):
+        return raw, None
+    return target, raw
+
+
+def _clip_reason(text: str, limit: int = 30) -> str:
+    """reason 截到 limit 字：优先在标点处断，避免 JSON 被长理由撑爆。"""
+    text = " ".join(str(text or "").split())
+    if len(text) <= limit:
+        return text
+    cut = text[:limit]
+    for mark in "。；，、":
+        idx = cut.rfind(mark)
+        if idx >= limit // 2:
+            return cut[:idx + 1]
+    return cut[:max(1, limit - 1)] + "…"
 
 
 def advise(sit: Situation, settings: AISettings | None,
@@ -3203,8 +3374,12 @@ def advise(sit: Situation, settings: AISettings | None,
 
     def make(option: Option, reason: str, source: str,
              error: str | None = None, *, plan: str = "",
-             confidence: float | None = None) -> Advice:
+             confidence: float | None = None,
+             alias_from: str | None = None,
+             meta: dict | None = None) -> Advice:
         snap = sit.snap
+        meta = meta or {}
+        usage = meta.get("usage") or {}
         return Advice(snap.hand_id, snap.street, option, reason, source,
                       settings.model if settings else None,
                       (),
@@ -3215,7 +3390,11 @@ def advise(sit: Situation, settings: AISettings | None,
                       preset_amounts=tuple(preset_amounts(snap).items()),
                       opponent_reads=tuple(sit.opponent_reads),
                       plan=plan, confidence=confidence,
-                      prompt_version=PROMPT_VERSION)
+                      prompt_version=PROMPT_VERSION,
+                      finish_reason=meta.get("finish_reason"),
+                      prompt_tokens=usage.get("prompt_tokens"),
+                      completion_tokens=usage.get("completion_tokens"),
+                      alias_from=alias_from)
 
     if settings is None:
         return make(by_id[fallback_option(sit)],
@@ -3226,20 +3405,21 @@ def advise(sit: Situation, settings: AISettings | None,
     caller = complete or complete_json
 
     def ask(prompt: str) -> dict:
-        # options 只给 JEV 用：它需要把候选动作变成一道 choice 题。
-        # chat/completions 模式会忽略这个参数
-        return caller(settings, system, prompt, timeout=timeout,
-                      options=[o.to_dict() for o in sit.options])
+        return caller(settings, system, prompt, timeout=timeout)
 
     try:
         data = ask(user)
-        choice = str(data.get("option", "")).strip()
+        choice, alias_from = _canonical_choice(
+            str(data.get("option", "")).strip(), by_id)
         if choice not in by_id:
-            raise AIError(f"模型给了不在选项里的答案：{choice!r}")
-        reason = str(data.get("reason", "")).strip() or "（模型未给理由）"
+            raise AIError(f"模型给了不在选项里的答案：{data.get('option')!r}")
+        reason = _clip_reason(
+            str(data.get("reason", "")).strip() or "（模型未给理由）")
         plan = str(data.get("plan", "") or "").strip()[:160]
         return make(by_id[choice], reason, "model", plan=plan,
-                    confidence=_confidence(data.get("confidence")))
+                    confidence=_confidence(data.get("confidence")),
+                    alias_from=alias_from,
+                    meta=data.get("_meta") if isinstance(data, dict) else None)
     except AIError as exc:
         return make(by_id[fallback_option(sit)],
                     "模型不可用，按最保守的默认动作",

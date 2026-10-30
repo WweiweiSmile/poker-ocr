@@ -134,7 +134,7 @@ def execute_unit(
     captured: dict[str, Any] = {"system": None, "user": None, "raw": None}
     attempts = 0
 
-    def complete(settings_, system, user, timeout=timeout, options=None):
+    def complete(settings_, system, user, timeout=timeout):
         nonlocal attempts
         captured["system"] = system
         captured["user"] = user
@@ -143,7 +143,7 @@ def execute_unit(
             limiter.acquire()
             try:
                 data = complete_json(settings_, system, user,
-                                     timeout=timeout, options=options)
+                                     timeout=timeout)
                 try:
                     captured["raw"] = json.dumps(data, ensure_ascii=False)
                 except (TypeError, ValueError):

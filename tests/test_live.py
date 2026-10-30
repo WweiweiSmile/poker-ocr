@@ -1142,7 +1142,7 @@ def test_hand_memory_keeps_action_line_and_advices() -> None:
     def advice(hand_id: str, reason: str) -> Advice:
         return Advice(hand_id=hand_id, street="flop",
                       option=Option("call", "Call 4BB", "call"),
-                      reason=reason, source="model", model="jev-1.14",
+                      reason=reason, source="model", model="deepseek-flash",
                       duration_ms=1800, pot=10.0, to_call=4.0,
                       hero_cards=("Ah", "Kd"), board=("Ks", "7d", "2c"))
 
@@ -1306,13 +1306,14 @@ def test_hand_gap_without_hero_is_skipped_by_default() -> None:
 def _click_advice(*, kind: str = "fold", option_id: str | None = None,
                   amount: float | None = None, source: str = "model",
                   error: str | None = None, hand_id: str = "h1",
-                  key: tuple | None = None):
+                  key: tuple | None = None, confidence: float | None = None):
     from poker_ocr.advice import Advice, Option
     oid = option_id or kind
     opt = Option(oid, kind.title(), kind, amount)
     return Advice(hand_id, "flop", opt, "reason", source, error=error,
                   decision_key=key or (hand_id, "flop", 0, 6.0, 0.0,
-                                       ("Ah", "Kd")))
+                                       ("Ah", "Kd")),
+                  confidence=confidence)
 
 
 class FakeClicker:
@@ -1368,7 +1369,8 @@ def _drain_click(advice, *, clicker, state=None, allow_click: bool = True,
                  pending: bool = True, current_hand: str = "h1",
                  clock=None, confirm_click: bool = False,
                  confirm_answer: bool | None = None,
-                 logs: list[str] | None = None):
+                 logs: list[str] | None = None,
+                 min_confidence: float = 0.0):
     writer = StubWriter()
     tracker = SimpleNamespace(
         hand=SimpleNamespace(hand_id=current_hand),
@@ -1377,6 +1379,7 @@ def _drain_click(advice, *, clicker, state=None, allow_click: bool = True,
     proc = LiveProcessor(StubStateStream(), writer, quiet=True,
                          hand_tracker=tracker, clicker=clicker,
                          confirm_click=confirm_click,
+                         min_advice_confidence=min_confidence,
                          advice_runner=OneShotRunner([advice]),
                          log=(logs.append if logs is not None
                               else (lambda *_: None)), **kwargs)
@@ -1571,6 +1574,26 @@ def test_auto_click_skips_fallback_and_error() -> None:
         check(clicker.calls == [], f"{want} 不应点击")
         check(rows[0]["click"]["reason"] == want,
               f"应记录 {want}：{rows[0]}")
+
+
+def test_auto_click_skips_low_confidence() -> None:
+    """配置阈值后，低置信度只显示不点；没给 confidence 不拦。"""
+    clicker = FakeClicker()
+    proc, rows = _drain_click(
+        _click_advice(confidence=0.2), clicker=clicker, min_confidence=0.5)
+    check(clicker.calls == [], "低置信度不应自动点击")
+    check(rows[0]["click"]["reason"] == "low_confidence",
+          f"应记录 low_confidence：{rows[0]}")
+
+    clicker2 = FakeClicker()
+    proc2, rows2 = _drain_click(
+        _click_advice(confidence=None), clicker=clicker2, min_confidence=0.5)
+    check(len(clicker2.calls) == 1, "没给 confidence 时不应因阈值被拦")
+
+    clicker3 = FakeClicker()
+    proc3, rows3 = _drain_click(
+        _click_advice(confidence=0.8), clicker=clicker3, min_confidence=0.5)
+    check(len(clicker3.calls) == 1, "高置信度应正常点击")
 
 
 def test_auto_click_allows_fallback_when_configured() -> None:

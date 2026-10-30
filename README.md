@@ -75,6 +75,8 @@ ROI 识别座位、筹码、下注、动作、庄位、底池和盲注，输出�
 - `--auto-click` 默认开启；只要 AI 建议、不要自动点击时加 `--no-auto-click`。
 - 自动点击默认是**交互确认**模式：模型给出建议后终端问 `y` 确认 / `n` 拒绝。
   想回到「结果返回立刻点」的无人值守模式，加 `--no-confirm`。
+- 可选 `--min-advice-confidence 0.5`：模型给了置信度且低于该值时，建议照常显示
+  但**不自动点击**；0（默认）关闭。模型没给 `confidence` 时不受此限。
 - 关闭 AI 建议时（`--no-ai-advice`）自动点击会跟着关闭。
 - 没有 `config/clicker_local.json` 时启动会明确报错，先跑第 0 步。
 - 真实点击需要 macOS「辅助功能」权限，见下方自动点击小节。
@@ -99,31 +101,39 @@ ROI 识别座位、筹码、下注、动作、庄位、底池和盲注，输出�
 ### AI 实时建议（默认开启）
 
 worker 在**轮到我**时把这一手的完整行动线交给模型（`--no-ai-advice` 可关闭）。
-现在只有一套**中文 lean** 提示词（`advice.PROMPT_VERSION = lean-zh-2026-10-29.1`）：
+现在只有一套**中文 lean** 提示词（`advice.PROMPT_VERSION = lean-zh-2026-10-30.9`）：
 
-- system：输出契约、事实优先级、翻前/翻后决策顺序、常见错误；不写“永远/绝不”。
+- system：输出契约（含 `call`=过牌、`raise-*`=下注的 id 映射）、五级事实优先级、
+  翻前/翻后/听牌/多人池/河牌决策顺序、指标口径、筹码深度；不写“永远/绝不”。
+- system 按局面拼装：core 恒定，只有桌况带前注时才追加“前注局”，不再写死
+  “本桌 9 人/0.5BB 前注”这类具体牌桌。
 - user：当前局面（桌况/盲注/位置/底牌/后手/街道/公共牌/底池/需跟/有效筹码/SPR/
   底池类型/赔率门槛/可争夺底池/短码/本手已投入/爆炸底池）、翻前信息、实时牌力、
-  逐座位对手画像、桌级桌风、数据缺口、中文行动线、带实际金额的中文选项。
+  逐座位对手画像、全场画像库统计、人工观察、数据质量、中文行动线、带实际金额的中文选项。
 - **不再注入** RFI/3-bet 范围表、翻后纹理/尺度、`Value directive`、`Math gate`、
   上一街 plan、GTO、board equity、技能库。旧 `lean-rules` / `skills` 与
   `--advice-style` 已从 live 链路删除。
 
 实时牌力仍由 `ground_truth.py` / `hand_ranges.py` / `hand_strength.py` 计算，但
-以中文事实呈现：当前牌型、最好五张、坚果（注明“指当前成牌”）、听牌 outs、
-四二法则权益、对范围权益、当前成牌落后至少一家、多人池实际/建模人数。
+以中文事实呈现：当前牌型、最好五张、坚果（注明“指当前成牌”）、能打败你的牌型、
+听牌 outs、补牌成牌率（四二法则，到河牌）、对范围权益、当前成牌落后至少一家、
+多人池实际/建模人数、范围宽度（不暴露内部 range id / combo 数）。
 听牌不再被标成 `VERY SMALL`，也不再用 `NUT STATUS: NOT THE NUTS` 单独否决半诈唬。
+数据质量只保留 1–4 条中文摘要：逐座位 `range unknown` 合并成一句，技术英文告警
+不再逐行塞进 prompt。
 
 模型从固定选项里选一个（中文标签 + 程序算好的实际金额）：
 
 ```
 翻后：弃牌 / 跟注（没人下注时是过牌）/ 下注或加注到 1/3、1/2、2/3、1、1.2 倍池 / all-in
-翻前：弃牌 / 平跟（或过牌）/ 开池到 5.5BB 起（按位置档；低于本桌 5.5BB 下限的档位一律抬到 5.5BB）/ 面对加注时 3× 或 4× 上家加注 / all-in（后手 ≤40BB 或面对 3-bet）
+翻前：弃牌 / 平跟（或过牌）/ 开池到 5.5BB 起（按位置档；低于本桌 5.5BB 下限的档位一律抬到 5.5BB；三个基础档全被下限压成同一个数时，改成 5.5 / 6.5 / 7.5 三个不同尺度）/ 面对加注时 3× 或 4× 上家加注 / all-in（后手 ≤20BB 或面对 3-bet 且几何合理）
 ```
 
-`all-in` 是可选选项（id 仍为 `all-in`，kind 为 `allin`）：深码翻后金额 = 后手；
-翻前 100BB 普通开池不追加，避免诱导。点击器配置里可以没有 `allin` 矩形：没有时
-建议照常显示，但 `plan_clicks` 返回 `missing_button:allin`，不会误点别的按钮。
+`all-in` 是可选选项（id 仍为 `all-in`，kind 为 `allin`）：只在几何合理时出现——
+翻后金额不超过跟注后底池的 2.5 倍，或 SPR ≤3 / 被大注逼着套池；翻前只给 ≤20BB
+推弃区或面对 3-bet 的合理 shove。对手更短时，标签写“全下 91.5BB”而不是
+“全下 240BB”，note 说明实际后手 240BB、多出的部分不会被跟。点击器配置里可以没有 `allin`
+矩形：没有时建议照常显示，但 `plan_clicks` 返回 `missing_button:allin`，不会误点别的按钮。
 
 翻前不用底池倍数：底池只有盲注那么大。金额由程序按现场底池/加注算好（含最小
 加注额、5.5BB 桌规与后手封顶），模型只返回选项 id，所以它不可能给出做不出来的尺度。
@@ -217,18 +227,18 @@ unknown 基线**。`n<8` 一律 unknown；8–14 只标 `tentative`，
 超对只是中等牌** —— 不主动加注、不 stack off，面对加注/大注/多街连续下注
 直接弃，没人下注时小注控池；两对/三条/顺子/同花等强成牌仍正常拿价值。
 
-**模型协议由模型名决定**：
+**模型协议**：统一走 OpenAI 兼容的 `/chat/completions`，`AI_SERVER_BASE_URL`
+填供应商基址（不要带 `/chat/completions`）。DeepSeek、OpenRouter 上的 GPT
+都用同一套调用与解析；不再按模型名切换协议。
 
-| `AI_SERVER_MODEL` | 协议 | `AI_SERVER_BASE_URL` |
+| 供应商 | `AI_SERVER_BASE_URL` 示例 | 备注 |
 |---|---|---|
-| `typesafe/jev-1.14`、`jev-*`（名字里带 jev） | JEV decisions：`state` + 带类型的 `questions` → `answers` | **完整**地址，如 `https://openrouter.ai/api/alpha/decisions` |
-| 其他（`deepseek-flash` 等） | OpenAI 兼容 `/chat/completions` | 基址，如 `https://api.deepseek.com` |
-| OpenRouter 上的 GPT（如 `openai/gpt-5.6-luna`） | 同上，额外支持 `reasoning` | 基址 `https://openrouter.ai/api/v1` |
+| DeepSeek | `https://api.deepseek.com` | 默认；`deepseek-flash` 等 |
+| OpenRouter | `https://openrouter.ai/api/v1` | GPT 等；额外支持 `reasoning` |
 
-JEV 模式下候选动作会被转成一道 `choice` 题（criteria 的 key 就是选项 id），
-返回值仍是 `{option, reason}`，所以下游与 DeepSeek 完全一致；`confidence`
-（选择概率）只写日志，不进 JSONL。`AI_SERVER_REFERER` / `AI_SERVER_TITLE`
-是 OpenRouter 的可选排名头（JEV 和 chat 模式都会带）。
+`AI_SERVER_REFERER` / `AI_SERVER_TITLE` 是 OpenRouter 的可选排名头，其他供应商
+会忽略。响应里的 `usage` / `finish_reason` 会写进 advice JSONL，便于看成本和
+是否被 `max_tokens` 截断。
 
 **OpenRouter GPT 的推理**：`.env` 里设 `AI_SERVER_REASONING=enabled`，请求体发
 `"reasoning": {"enabled": true}`（配了 `AI_SERVER_REASONING_EFFORT` 时会嵌成
@@ -238,8 +248,6 @@ message，多轮续推时把它连同 `reasoning_details` 放回 `messages` 即�
 推理，不要裁剪或改写这个字段。开推理会明显拉长单次耗时，实时链路记得把
 `AI_SERVER_TIMEOUT` 调到 15–30 秒；推理模型通常只接受默认 temperature，
 这一段不要设 `AI_SERVER_TEMPERATURE` / 太小的 `AI_SERVER_MAX_TOKENS`。
-`.env` / `.env.example` 里都有可直接取消注释的 GPT 配置段（与 JEV 共用同一个
-OpenRouter Key）。
 
 **403 `provider Terms Of Service` 不是 Key 错**：同一把 Key 调 `/api/v1/key`
 和 Llama/DeepSeek 都正常、只有 OpenAI 模型被拒时，是 OpenRouter 账号/地区/
@@ -332,7 +340,8 @@ iTerm / IDE**（不是 Python 本身），然后完全退出并重开它。也�
 
 **安全闸**：只有当前帧仍然 `hero_turn=true`、`state.ok`、决策点与投递时一致、
 手牌一致、牌面可靠、且这条建议没点过，**并且终端确认了 y**（`--no-confirm`
-时跳过最后一条），才会执行；模型超时/回退建议默认不点
+时跳过最后一条），才会执行；配置了 `--min-advice-confidence` 时还会检查模型
+自评置信度。模型超时/回退建议默认不点
 （`clicker_local.json` 里 `allow_fallback: true` 可打开）。退出/换手/断流重连
 的 drain 只落库不点击。每次点击结果写在 `advice` 记录的 `click` 字段里；
 用户按 `n` 时记为 `status=skipped, reason=user_rejected`。

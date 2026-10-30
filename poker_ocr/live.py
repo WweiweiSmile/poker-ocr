@@ -959,6 +959,7 @@ class LiveProcessor:
                  advice_runner: AdviceRunner | None = None,
                  clicker: Clicker | None = None,
                  confirm_click: bool = False,
+                 min_advice_confidence: float = 0.0,
                  table_dynamics_loader: Callable[[], TableDynamics] | None = None,
                  table_dynamics_text: str = "",
                  profile_store: ProfileStore | None = None,
@@ -1007,6 +1008,11 @@ class LiveProcessor:
         # 默认不询问（保持程序化调用/单测的旧行为）；CLI 默认开启询问，
         # 只有显式 `--no-confirm` 才直接执行。自动点击关闭时该开关无意义。
         self.confirm_click = bool(confirm_click)
+        confidence = float(min_advice_confidence)
+        if not 0.0 <= confidence <= 1.0:
+            raise ValueError("min_advice_confidence 应在 0–1 之间")
+        # 0 = 不启用。>0 时，模型给了置信度且低于阈值的建议只显示不自动点。
+        self.min_advice_confidence = confidence
         self._pending_decision_key: tuple | None = None
         self._clicked_keys: set[tuple] = set()
         self.click_count = 0
@@ -1600,6 +1606,10 @@ class LiveProcessor:
             return "advice_error"
         if advice.source != "model" and not self.clicker.config.allow_fallback:
             return "fallback_advice"
+        if (self.min_advice_confidence > 0
+                and advice.confidence is not None
+                and advice.confidence < self.min_advice_confidence):
+            return "low_confidence"
         if not allow_click:
             return "frame_not_clickable"
         if state is None or not getattr(state, "ok", False):
@@ -1621,7 +1631,9 @@ class LiveProcessor:
 
     def _log_click(self, result) -> None:
         if result.status == "skipped":
-            reason = {"user_rejected": "用户拒绝"}.get(
+            reason = {"user_rejected": "用户拒绝",
+                      "low_confidence": "置信度低于阈值",
+                      "fallback_advice": "兜底建议"}.get(
                 result.reason, result.reason)
             self.log(f"  [点击] 跳过：{reason}")
             return
@@ -2075,6 +2087,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help="自动点击的按钮坐标 JSON（默认 config/clicker_local.json）")
     ap.add_argument("--clicker-dry-run", action="store_true",
                     help="只打印将要点到的随机坐标，不发送真实鼠标事件")
+    ap.add_argument("--min-advice-confidence", type=float, default=0.0,
+                    help="自动点击的最低置信度（0 = 关闭）；低于该值时只显示建议，"
+                         "不自动点击。模型没给 confidence 时不受此限")
     ap.add_argument("--quiet", action="store_true", help="只打状态行和最终汇总")
     return ap
 
@@ -2119,6 +2134,8 @@ def _validate_args(ap: argparse.ArgumentParser, args) -> None:
         ap.error("--clicker-dry-run 需要配合 --auto-click 使用")
     if args.clicker_config is not None and not args.auto_click:
         ap.error("--clicker-config 需要配合 --auto-click 使用")
+    if not 0.0 <= args.min_advice_confidence <= 1.0:
+        ap.error("--min-advice-confidence 应在 0–1 之间")
     if args.roi_threads < 1:
         ap.error("--roi-threads 至少为 1（1 = 串行）")
 
@@ -2402,6 +2419,7 @@ def main(argv: list[str] | None = None) -> int:
         hand_tracker=hand_tracker, advice_runner=advice_runner,
         record_without_hero=args.record_without_hero,
         clicker=clicker, confirm_click=not args.no_confirm,
+        min_advice_confidence=args.min_advice_confidence,
         table_dynamics_loader=load_table_dynamics if args.ai_advice else None,
         table_dynamics_text=table_dynamics_text,
         profile_store=profile_store,

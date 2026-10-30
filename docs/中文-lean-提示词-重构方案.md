@@ -1,7 +1,10 @@
 # 中文 lean 提示词重构方案
 
-> 状态：已实施（2026-10-29）  
+> 状态：已实施（2026-10-29）；2026-10-30.9 后续优化见 README 与 `advice.py`
 > 日期：2026-10-29  
+> 后续变更：system 已拆成 core + 前注条件模块；新增五级事实优先级、指标口径、
+> all-in 几何门控、缺失底池/后手不伪造下注、数据质量中文摘要、范围内部 id 下线。
+> 本文件 3.1 的 system 文本是历史版本，以代码 `SYSTEM_CORE_ZH` 为准。
 > 适用代码：当前 `main`（`advice.py` 的 `lean` / `lean-rules` / `skills` 三套提示词）  
 > 结论：按推荐方案 **1A / 2A / 3A / 4A / 5A / 6B** 实施
 
@@ -608,7 +611,7 @@ fold / call / raise-1/3 / raise-1/2 / raise-2/3 / raise-1 / raise-1.2 / all-in
 
 | 风险 | 影响 | 应对 |
 |---|---|---|
-| 中文 prompt 对 JEV 不友好 | JEV 决策质量下降 | 当前 `.env` 是 deepseek-flash；若保留 JEV，先做中文 A/B；不通过则 JEV 不再作为正式模型 |
+| 中文 prompt 对旧模型不友好 | 决策质量下降 | 当前统一走 OpenAI 兼容 chat；模型切换用 `.env`，不再按模型名切协议 |
 | `max_tokens=160` 截断中文 reason | JSON 不完整 → fallback | 中文 reason 限 30 字；必要时把 `AI_SERVER_MAX_TOKENS` 提到 220 |
 | 删除旧 prompt 导致旧 replay 不能重跑 | 历史任务不可复现 | 旧 job 只读；如必须重跑，另存 frozen legacy |
 | all-in 没有点击器按钮 | 建议显示但无法自动点 | 可选 `allin` 标定；缺省 skip，不误点 |
