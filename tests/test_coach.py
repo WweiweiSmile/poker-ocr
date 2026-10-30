@@ -112,10 +112,14 @@ def test_two_overcards_get_future_outs() -> None:
           f"QQ7 面高张不能算反超 outs：outs={paired.outs} "
           f"over={paired.overcard_outs}")
 
-    # 但公对在顶对之下（Q77）：顶对只是两对，高张配对仍能反超，照算。
+    # 公对已经给 Hero 一对（Q77 上 AK 的成牌是一对 7、打牌面），
+    # 当前牌型不是高张：高张配对只改善踢脚，不构成反超 outs。
     low_pair = read_hand(parse_cards("AcKc"), parse_cards("Qs7d7h"))
-    check(low_pair.overcard_outs == 6,
-          f"Q77 面高张仍应算 6 张反超 outs，实际 {low_pair.overcard_outs}")
+    check(low_pair.overcard_outs == 0 and low_pair.outs == 0,
+          f"Q77 面已是打牌面的一对，不算高张反超：outs={low_pair.outs} "
+          f"over={low_pair.overcard_outs}")
+    check(low_pair.tier == "打牌面",
+          f"AK 在 Q77 上应是打牌面的一对，实际 {low_pair.tier}")
 
 
 def test_relative_strength_by_board() -> None:
