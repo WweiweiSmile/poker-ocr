@@ -214,7 +214,7 @@ def _role_prior(snap: HandSnapshot, opp, raises: list[ActionRecord],
 def _mode(snap: HandSnapshot, opp, warnings: list[str]) -> str:
     """当前街动作 → 牌面范围 mode。"""
     if snap.street == PREFLOP:
-        return "check"
+        return "unacted"
     acts = [a for a in snap.actions_of(snap.street)
             if a.seat_id == opp.seat_id]
     if acts:
@@ -236,7 +236,8 @@ def _mode(snap: HandSnapshot, opp, warnings: list[str]) -> str:
                         "using call range (wider of bet/call, keeps preflop prior)")
         return "call"
     # 还没行动 / 过牌但徽章没读到：没有新信息，保留翻前范围。
-    return "check"
+    # 不能叫 "check"：本街完全没动作时写「过牌范围」等于凭空造事实。
+    return "unacted"
 
 
 def resolve(snap: HandSnapshot) -> Field:
@@ -296,6 +297,10 @@ def resolve(snap: HandSnapshot) -> Field:
         mode = _mode(snap, opp, warnings)
         if mode == "fold":
             continue
+        if mode == "unacted" and snap.street != PREFLOP:
+            warnings.append(
+                f"seat {opp.seat_id}: no action this street; "
+                "range kept at preflop prior")
         if prior_id is None and not unreliable_raise:
             warnings.append(f"seat {opp.seat_id}: range unknown ({role})")
         specs.append(OpponentRangeSpec(

@@ -53,7 +53,12 @@ from poker_ocr.table_dynamics import (  # noqa: E402
 # 2026-10-31.3：位置只看座位（身后是否还有在局对手），不再把「有位置」写成
 #               「本轮最后行动」；补充加注会重新打开行动、已过牌/跟注者仍可
 #               再行动；「保守动作」改为缺关键事实时的兜底定义。
-CURRENT_ADVICE_VERSION = "advice-2026-10-31.3"
+# 2026-10-31.4：翻前 BB option 计入待行动；位置拆「翻前行动/翻后位置」；本街
+#               无动作的范围改「未行动范围」；Hero 后手未知/PFR 三态；攻击块
+#               先结论后依据并与桌级剥削统一；座位画像可剥削合并；炸弹池/
+#               combo draw/听牌价格口径；单挑标签、JSON 契约、raise id、
+#               A 高面条件化。
+CURRENT_ADVICE_VERSION = "advice-2026-10-31.4"
 # 改动 decisions.py 的重建语义时 bump。
 # recon-3：翻前底池补上盲注（实时 pbs 只记前注，h39 4.5 → 6.0）。
 CURRENT_RECONSTRUCT_VERSION = "recon-3"

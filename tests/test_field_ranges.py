@@ -74,7 +74,9 @@ def test_single_raise_roles_and_position() -> None:
     check(m["co"].prior_id == "COLD_CALL_IP_vs_EP",
           f"CO 在后位冷跟应用 IP，实际 {m['co'].prior_id}")
     check(m["bb"].role == "bb_def" and m["co"].role == "cold_call", "角色不对")
-    check(all(s.mode == "check" for s in m.values()), "无人行动时 mode 应为 check")
+    check(all(s.mode == "unacted" for s in m.values()), "无人行动时 mode 应为 unacted")
+    check(any("no action this street" in w for w in field.warnings),
+          f"本街无动作要进数据质量：{field.warnings}")
 
 
 def test_three_bet_roles() -> None:
@@ -92,7 +94,7 @@ def test_three_bet_roles() -> None:
     check(m["bb"].prior_id == "3BET_CALL_vs_LP",
           f"跟 3-bet 的 BB 应用 3BET_CALL，实际 {m['bb'].prior_id}")
     check(m["co"].mode == "bet", f"CO 下注 mode 应为 bet，实际 {m['co'].mode}")
-    check(m["bb"].mode == "check", f"BB 未行动 mode 应为 check，实际 {m['bb'].mode}")
+    check(m["bb"].mode == "unacted", f"BB 未行动 mode 应为 unacted，实际 {m['bb'].mode}")
 
 
 def test_limped_and_bomb_pots() -> None:

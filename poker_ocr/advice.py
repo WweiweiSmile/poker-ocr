@@ -62,7 +62,7 @@ HERO_ACTOR = "hero"
 
 # 当前唯一的中文 lean 提示词版本。写入 session_start / advice JSONL，
 # 复盘归因用；改动 system 或事实块时 bump。
-PROMPT_VERSION = "lean-zh-2026-10-31.4"
+PROMPT_VERSION = "lean-zh-2026-10-31.5"
 PROMPT_LANGUAGE = "zh"
 
 # 加注尺度：名字 → 底池倍数。「满池 1.2」是超池，用于需要施压/劝退的场合
@@ -671,6 +671,35 @@ def _same_actor(action: ActionRecord, opponent) -> bool:
                 and action.position == opponent.position)
 
 
+def _big_blind_option_pending(snap: HandSnapshot):
+    """翻前 BB 还没主动行动时，即使已投满 1BB 也仍有加注选项。
+
+    `behind_opponents()` 的有下注分支只数「还没跟到最高注」的人。BB 已经
+    投了 1BB，Hero 平跟/补盲到 1BB 后 BB 的已投注正好等于最高注，会被过滤
+    掉；但 BB 在这一轮仍有 check/raise 的选项，Hero 并没有收尾。
+    """
+    if snap.street != PREFLOP or (snap.to_call or 0.0) <= 0:
+        return None
+    if snap.hero_position == BB:
+        return None
+    bb_opp = next((o for o in snap.opponents
+                   if o.position == BB and _can_act(o)), None)
+    if bb_opp is None:
+        return None
+    pre = snap.actions_of(PREFLOP)
+    # BB 已经主动行动过（过牌/跟注/加注），或者已经有人加注：前者没有
+    # option 了，后者 BB 的 1BB 低于最高注，正常逻辑会把它算进来。
+    if any(_same_actor(a, bb_opp) for a in pre):
+        return None
+    if any(a.action in ("raise", "bet")
+           or (a.action == "call" and a.all_in) for a in pre):
+        return None
+    max_bet = (snap.hero_bet or 0.0) + float(snap.to_call or 0.0)
+    if _street_bet(snap, bb_opp) >= max_bet - 1e-9:
+        return bb_opp
+    return None
+
+
 def behind_opponents(snap: HandSnapshot) -> list:
     """本街 Hero 之后还要行动的对手。
 
@@ -703,6 +732,10 @@ def behind_opponents(snap: HandSnapshot) -> list:
                 if not checked:
                     continue
             behind.append(o)
+        bb_option = _big_blind_option_pending(snap)
+        if bb_option is not None and bb_option not in behind:
+            behind.append(bb_option)
+        behind.sort(key=lambda o: order.index(o.position))
         return behind
     return [o for o in live if order.index(o.position) > idx]
 
@@ -2204,44 +2237,46 @@ def audit_advice_tags(sit: Situation, kind: str | None,
 SYSTEM_CORE_ZH = """你是一名德州扑克现金局实时教练。Hero 只有几秒钟，需要你从「可选动作」中选一个能直接执行的动作。
 
 ## 输出
-只输出一个 JSON 对象，不要 Markdown，不要前后解释：
-{"option": "<选项 id>", "reason": "<中文一句话，不超过 40 字>", "confidence": <可选 0-1>}
-- option 必须严格来自「可选动作」，不得编造选项 id 或金额。
+只输出一个 JSON 对象（不要 Markdown/解释）：
+{"option": "<id>", "reason": "<中文一句话，≤40 字>"}
+需要置信度时（可选）：
+{"option": "<id>", "reason": "...", "confidence": 0.7}
+- option 必须严格来自「可选动作」，不得编造 id 或金额。
 - id 映射（以「可选动作」为准）：
-  翻前无人入池用 open-*/call（平跟、补盲、BB 过牌）；翻前面对加注用 raise-3x/raise-4x。
+  翻前无人入池用 open-*/call（平跟、补盲、BB 过牌）；翻前面对加注用 raise-3x/raise-4x（3x/4x=上家加注的 3/4 倍；3-bet 池标签写 4-bet，id 不变）。
   翻后无人下注 call=过牌、raise-1/3…1.2=下注；翻后面对下注 call=跟注、raise-1/3…1.2=加注；全下 all-in。
 - 不要自造 check/bet-*。
-- reason 必须引用输入里的具体事实（牌力、赔率、位置、对手画像、SPR、底池类型、牌面结构）；不要引用未提供的规则、图表、概率或“价值指令”。
-- reason 不得与事实矛盾：无位置就不能说「有位置」，没人行动过就不能写「对手过牌」。
-- 关键事实缺失时，选最保守的合法动作，并在 reason 里说明缺什么。保守 = 能过牌就过牌；面对下注且缺的是牌力/赔率/筹码等关键事实时默认弃牌；不主动下注/加注/诈唬。关键事实齐全时按正常决策，不要把“保守”当无条件弃牌。
+- reason 引用输入事实（牌力/赔率/位置/画像/SPR/底池类型/牌面）；不要引用未提供的规则、图表或概率。
+- reason 不得与事实矛盾：无位置不能说「有位置」，没人行动过不能写「对手过牌」。
+- 关键事实缺失时选最保守的合法动作并说明缺什么；保守=能过牌就过牌、面对下注缺牌力/赔率/筹码则弃、不主动下注/加注/诈唬。事实齐全时正常决策。
 
 ## 事实优先级
-1. 硬事实：牌、公共牌、底池、需跟、在局人数、后手。
-2. 程序计算：SPR、赔率门槛、牌型/坚果/听牌、范围权益、当前落后比例。
-3. 逐座位对手画像；4. 当前牌桌统计/全场先验/人工观察；5. 通用扑克经验。
+1. 硬事实：牌/公共牌/底池/需跟/在局人数/后手/位置/行动线/有效筹码/底池类型。
+2. 程序计算：SPR、赔率门槛、牌型/坚果/听牌、范围权益、当前落后比例、听牌价格。
+3. 逐座位对手画像；4. 当前牌桌统计/全场先验/人工观察；5. 通用经验。
 冲突时高优先级覆盖低优先级；范围结论、可剥削等规则提示不能覆盖硬事实。
-事实块中的建议性段落（攻击机会、炸弹池建议、剥削判断、结论、听牌价格）是启发式，不是硬事实；与牌力/赔率/人数冲突时以硬事实为准。
+建议性段落（攻击机会、炸弹池、剥削判断、结论）是启发式，冲突时以硬事实为准；听牌价格是程序参考值，仍受「只有全下/后面不再下注才可直接比门槛」约束。
 
 ## 决策顺序
-- 翻前：看位置、前面行动（无人入池/溜入/单加注/3-bet）、有效筹码和范围；不要因为“便宜”用垃圾牌入池。
-- 翻后：先问“哪些更差的牌会跟、哪些更好的牌会加”，再比较权益与赔率门槛，决定价值、诈唬、过牌或弃牌。
+- 翻前：看位置、前面行动（未开池/溜入/单加注/3-bet）、有效筹码和范围；不要因为“便宜”用垃圾牌入池。
+- 翻后：先问哪些更差的牌会跟、哪些更好的牌会加，再比权益与赔率门槛，决定价值/诈唬/过牌/弃牌。
 - 听牌：按 outs、价格、弃牌率、公对面/成花风险判断；不要因为“当前未成牌不是坚果”就否决半诈唬。
-- 多人池：顶对/超对降级；没有弃牌率时不要用听牌硬下注。
-- 位置只看座位：身后还有在局对手 = 无位置；身后没有在局对手 = 有位置。位置不是「本轮最后行动」。
+- 多人池：4 人以上顶对/超对降级；3 人池按 SPR（<3 可套池）。没有弃牌率时不要用听牌硬下注。
+- 位置=翻后座位顺序：身后还有在局对手=无位置，没有=有位置；翻前行动顺序另看「翻前行动」，BB 可能还没说话。
 - 下注/加注会重新打开行动：已过牌/跟注/下注的对手仍可再行动；「有位置」不等于「没人能加注」。
-- 河牌：没有未来牌，未成牌的纯听牌等同空气；已成对的听牌仍有摊牌价值。跟注看赔率和对手线路，价值下注看更差的牌会不会跟。
+- 河牌：纯听牌等同空气，已成对的牌仍有摊牌价值；跟注看赔率/线路，价值下注看更差的牌会不会跟。
 - 尺度只能从「可选动作」里选，金额由程序算好；深码不要用 all-in 代替正常尺度，后手 ≤20BB 的翻前推/弃区全下是标准动作。
-- 炸弹池：按正常翻后规则打，底池大不等于必须打光；遇到加注/过牌-加注/多街连开或对手明显过度激进时，只用超强范围（两对、三条、顺子、同花、葫芦/四条，或坚果听牌且有合适价格）继续，顶对/超对降级。
+- 炸弹池：按正常翻后规则打，底池大不等于必须打光；遇加注/过牌-加注/多街连开或对手过度激进时，只用超强范围（两对、三条、顺子、同花、葫芦/四条，或坚果听牌且有合适价格）继续，顶对/超对降级。
 
 ## 指标口径
-- 补牌成牌率（四二法则）= 听牌到河牌成牌的概率，不是胜率；翻牌时是两街，不能直接和单街赔率门槛比，只有全下/后面不再下注时才可直接比。
-- 对范围权益 = 对建模范围（未建模对手按随机牌计入）的河牌胜率；它同样假设后面不再下注，只有全下/后面不再下注时才可直接比即时门槛，否则要按后续下注折价。
+- 补牌成牌率（四二法则）= 听牌到河牌成牌的概率，不是胜率；翻牌是两街，不能直接和单街门槛比，只有全下/后面不再下注时才可直接比。
+- 对范围权益 = 对建模范围（未建模对手按随机牌计入）的河牌胜率；同样假设后面不再下注，只有全下/后面不再下注时才可直接比即时门槛，否则按后续下注折价。
 - 当前成牌落后 = 按当前五张至少一家领先，不是输牌概率/权益。
 - 跟注看权益与门槛；下注看更差的牌会不会跟；不要用“当前落后”单独否决听牌，对成牌它也不是输牌概率。
 
 ## 筹码深度
-- 有效筹码 = min(我, 对手) 的「后手 + 本街已下注」；翻后套池/SPR 用它，不要用自己的后手。
-- 可玩深度 = min(我的后手, 最深未弃牌对手的后手)；翻前开池/单挑范围用它，它不含本街已下注。
+- 有效筹码 = min(我,对手) 的「后手+本街已下注」；翻后套池/SPR 用它，不用自己的后手。
+- 可玩深度 = min(我的后手, 最深未弃牌对手的后手)；翻前开池/单挑范围用它，不含本街已下注。
 - SPR 高（>6）一对不做大底池；SPR 低（<3）单挑/3 人池顶对可套池，4 人以上降级；炸弹池按事实块几何。
 - 20–40BB 仍是正常加注，只是翻后基本一枪定生死。
 """
@@ -2558,6 +2593,8 @@ def _gap_zh(text: str) -> str:
         return "只建模前 4 名对手；其余范围未知"
     if "bet size without an action badge" in text:
         return "有下注额但没抓到动作徽章，范围按更宽处理"
+    if "no action this street" in text:
+        return "本街行动线缺失，范围按未行动处理（不是已过牌）"
     if "no range table" in text or "4-bet+ pot" in text:
         return "4-bet+ 池没有范围表，范围未知"
     return "技术性数据告警（详见日志）"
@@ -2575,8 +2612,10 @@ def _summarize_gaps(gaps: list[str], *, has_range_equity: bool = False) -> list[
         out.append(f"{range_unknown} 名对手范围未知，{tail}")
     # 硬事实缺口（底池/后手/筹码未读全）优先于普通技术告警，不能被 cap 挤掉。
     hard = [g for g in rest if "未读全" in g or "筹码未读出" in g]
+    unacted = [g for g in rest if "本街行动线缺失" in g]
     out.extend(hard)
-    out.extend(g for g in rest if g not in hard)
+    out.extend(unacted)
+    out.extend(g for g in rest if g not in hard and g not in unacted)
     return out[:4]
 
 # 这些 note 只是解释动作本身，标签已经说清楚；写两遍只会占 token。
@@ -2625,6 +2664,7 @@ _RANGE_MODE_ZH = {
     "bet": "下注范围",
     "check": "过牌范围",
     "raise": "加注范围",
+    "unacted": "未行动范围",
 }
 
 
@@ -2659,6 +2699,8 @@ def render_ranges_zh(sit: Situation) -> list[str]:
     if more:
         ranges += f"｜另有 {more} 家只计入权益"
     lines = [f"范围：{ranges}" if ranges else "范围：全部按随机牌计入"]
+    if any(getattr(o, "mode", None) == "unacted" for o in hr.opponents):
+        lines.append("- 本街还没有动作：范围沿用翻前先验，不是已过牌")
     for edge in shown:
         lines.append(f"- {_range_label(edge)}：当前成牌领先我 {edge.behind:.1%}"
                      f"（平局 {edge.tie:.1%}）")
@@ -2756,10 +2798,13 @@ def render_hand_strength_zh(sit: Situation) -> list[str]:
             kind = ("两高张" if gt.draws.overcard_outs >= 6 else "单高张")
             lines.append(f"反超 outs：{kind} {gt.draws.overcard_outs} 张")
         if combo_draw:
+            combo_tail = ("只有范围权益高于公平份额时，才提高下注频率"
+                          if sit.hand_ranges is not None
+                          else "没有范围权益时不要假设自己领先")
             lines.append(
                 "有牌又有听：成牌 + 强听（combo draw，不是纯听牌）；"
-                "权益高于公平份额时默认下注 1/3–2/3 池，"
-                "不要只因为这手“落后至少一家”就过牌")
+                "可作为保护/半诈唬下注，不是默认；多人池或没有弃牌率时优先过牌。"
+                + combo_tail)
         if gt.draws.total_outs:
             # 纯两高张不是「补牌成牌」，是反超当前顶对的权益；分开写，
             # 免得模型把 24% 当成「已经能跟任何下注」的胜率。
@@ -2792,9 +2837,13 @@ def render_hand_strength_zh(sit: Situation) -> list[str]:
         actual_players = opponents + 1
         fair_share = 1.0 / actual_players if actual_players > 0 else 0.0
         equity_note = f"按河牌、未计后续下注，{total_players} 人池"
+        unacted = any(getattr(o, "mode", None) == "unacted"
+                      for o in hr.opponents)
+        if unacted:
+            equity_note += "；对手本街未行动，按沿用翻前范围估算"
         if random_fill:
-            equity_note += (f"（范围建模 {len(hr.opponents)} 家 + "
-                            f"随机牌 {random_fill} 家）")
+            equity_note += (f"；范围建模 {len(hr.opponents)} 家 + "
+                            f"随机牌 {random_fill} 家")
         elif actual_players > modeled_players:
             equity_note += f"；按建模 {len(hr.opponents)} 名对手"
         if total_players != actual_players:
@@ -2817,7 +2866,8 @@ def render_hand_strength_zh(sit: Situation) -> list[str]:
             extra.append("当前五张被至少一家压过的概率，"
                          "不是输牌概率/权益")
         lines.append(behind + "（" + "；".join(extra) + "）")
-        multiway = (f"多人池：实际 {actual_players} 人 / "
+        pool_label = "单挑" if actual_players == 2 else "多人池"
+        multiway = (f"{pool_label}：实际 {actual_players} 人 / "
                     f"范围建模 {len(hr.opponents)} 名对手")
         if random_fill:
             multiway += f" / 随机牌 {random_fill} 家"
@@ -2840,12 +2890,22 @@ def render_hand_strength_zh(sit: Situation) -> list[str]:
             eq = gt.draws.equity_pct
         if eq is not None and owed > 0 and winnable > 0:
             bep = owed / winnable * 100
-            verdict = "够" if eq >= bep else "直接赔率不够"
-            lines.append(
-                f"听牌价格：跟注 {_fmt_num(owed)}BB / 可争夺底池 "
-                f"{_fmt_num(winnable)}BB = {bep:.0f}% 门槛；四二法则 {eq:.0f}% "
-                f"→ {verdict}；SPR {sit.spr:.1f} 时对手通常已套池，弃牌率低，"
-                "只有对手全下/后面不再下注时，四二权益才可直接比门槛")
+            # 四二法则是「到河牌」的两街成牌率，只有跟注即全下、或所有
+            # 对手都已全下（后面不再下注）时，才能和单街门槛直接比。
+            call_is_all_in = (snap.hero_stack is not None
+                              and owed >= snap.hero_stack - 1e-9)
+            no_more_betting = not any(_can_act(o) for o in snap.opponents)
+            direct = call_is_all_in or no_more_betting
+            base = (f"听牌价格：跟注 {_fmt_num(owed)}BB / 可争夺底池 "
+                    f"{_fmt_num(winnable)}BB = {bep:.0f}% 门槛；"
+                    f"四二法则 {eq:.0f}%")
+            if direct:
+                verdict = "够" if eq >= bep else "直接赔率不够"
+                lines.append(base + f" → {verdict}（跟注即全下/后面不再下注）")
+            else:
+                lines.append(
+                    base + "；参考值，不可直接与单街门槛比较"
+                    "（未全下，后面还可能下注）")
 
     if gt is not None:
         lines.append(f"牌面结构：{_board_structure_zh(gt)}")
@@ -3068,6 +3128,18 @@ def _facing_raise_zh(sit: Situation) -> list[str]:
     return lines
 
 
+def _pfr_label_zh(snap: HandSnapshot) -> str:
+    """最后翻前加注者的三态；`hero_is_pfr` 本身只是 bool，读不出「未知」。"""
+    if snap.hero_is_pfr:
+        return "是（Hero 是最后一个翻前加注者）"
+    pre = snap.actions_of(PREFLOP)
+    if not pre:
+        return "未知（翻前动作线缺失）"
+    if any(a.is_hero and a.action in ("raise", "bet") for a in pre):
+        return "否（Hero 加注后被再加注）"
+    return "否"
+
+
 def render_preflop_zh(sit: Situation) -> list[str]:
     """「翻前信息」；只在翻前渲染。面对加注给继续范围，不给 RFI 结论。"""
     if sit.street != PREFLOP:
@@ -3076,7 +3148,7 @@ def render_preflop_zh(sit: Situation) -> list[str]:
     lines = ["## 翻前信息"]
     shapes = [ _PREFLOP_SHAPE_ZH.get(s, s) for s in (snap.preflop_shapes or ())]
     lines.append("翻前形态：" + ("、".join(shapes) if shapes else "未知"))
-    lines.append("Hero 是否翻前加注者：" + ("是" if snap.hero_is_pfr else "否"))
+    lines.append("最后翻前加注者（PFR）：" + _pfr_label_zh(snap))
     if sit.range_verdict:
         lines.append(f"翻前范围结论：{sit.range_verdict}")
     lines.extend(_facing_raise_zh(sit))
@@ -3109,7 +3181,9 @@ def _table_stat_zh(label: str, value: float,
 
 
 def render_table_stats_zh(stats: "PooledStats | None",
-                          opponents_in_hand: int | None = None) -> list[str]:
+                          opponents_in_hand: int | None = None,
+                          street: str | None = None,
+                          suppress_cbet: bool = False) -> list[str]:
     """桌况事实：`current_table` 是本手在局对手，`population` 是冷启动先验。
 
     替代 `.table_dy` 里「整体偏松」那类形容词。样本太小时不渲染 ——
@@ -3167,7 +3241,7 @@ def render_table_stats_zh(stats: "PooledStats | None",
     else:
         lines.append(f"{stats.players} 人 / {stats.hands} 手："
                      + "｜".join(parts))
-    street = [
+    street_stats = [
         _table_stat_zh(label, value, opportunities.get(key))
         for label, value, key in (
             ("翻牌", stats.fold_to_bet_flop, "flop"),
@@ -3176,8 +3250,8 @@ def render_table_stats_zh(stats: "PooledStats | None",
         )
         if value is not None
     ]
-    if street:
-        lines.append("面对下注弃：" + "｜".join(street))
+    if street_stats:
+        lines.append("面对下注弃：" + "｜".join(street_stats))
     tags: list[str] = []
     if stats.loose is True:
         tags.append("松")
@@ -3198,7 +3272,8 @@ def render_table_stats_zh(stats: "PooledStats | None",
     allow_exploit = (stats.scope != "current_table"
                      or all_known or enough_coverage)
     if allow_exploit:
-        exploit = table_exploit_zh(stats)
+        exploit = table_exploit_zh(stats, street=street,
+                                   suppress_cbet=suppress_cbet)
         if exploit:
             label = ("当前桌可剥削" if stats.scope == "current_table"
                      else "全场可剥削")
@@ -3235,8 +3310,8 @@ def render_explosive_zh(sit: Situation) -> list[str]:
     else:
         lines.append(
             "炸弹池浅码：后手少、底池大，但顶对/超对仍按赔率和对范围权益决定；"
-            "顶对强踢/超对在干燥面且价格合适时可以打光，顶对弱踢/中对/底对/"
-            "弱听牌不要为了套池主动造大底池。")
+            "无加注、干燥面、价格合适时可以继续，但不主动造大底池；"
+            "顶对弱踢/中对/底对/弱听牌不要为了套池主动造大底池。")
     lines.append(
         "遇到加注/过牌-加注/多街连开，或对手明显过度激进时，只用超强范围继续："
         "两对、三条、顺子、同花、葫芦/四条，或坚果听牌且有合适价格；"
@@ -3354,7 +3429,11 @@ def _checkraise_note(checked: list) -> str:
 
 
 def _xr_data_known(sit: Situation) -> bool:
-    """是否至少有一名活对手的过牌-加注频率是实测值。"""
+    """是否至少有一名活对手的过牌-加注频率是实测值。
+
+    只判断「有没有数据」；xr 高不高由 `_attack_trap_reads()` 判断，
+    后者命中时整个攻击块会走「跟着过牌」分支。
+    """
     live = {o.seat_id for o in sit.snap.opponents if not o.folded}
     return any(
         r.seat_id in live and r.archetype != "unknown"
@@ -3363,56 +3442,70 @@ def _xr_data_known(sit: Situation) -> bool:
         for r in sit.opponent_reads)
 
 
-def _attack_tail(sit: Situation, stats: "PooledStats | None", street: str,
-                 scope_label: str, *, aggressive: bool) -> list[str]:
-    """攻击块的共同尾巴：弃牌率、湿牌面、A 高面。
+def _attack_fold(stats: "PooledStats | None", street: str):
+    """当前街「面对下注弃牌率」的值和机会数。"""
+    value = getattr(stats, f"fold_to_bet_{street}", None) if stats else None
+    opps = (stats.opportunities or {}).get(street, 0.0) if stats else 0.0
+    return value, opps
 
-    弃牌率必须过阈值才说「支持开火」；低于阈值/机会数不足时明确说不能
-    单独作为开火理由。`aggressive=False` 时连 A 高面也不给高频结论。
-    """
-    lines: list[str] = []
-    if stats is not None:
-        value = getattr(stats, f"fold_to_bet_{street}", None)
-        if value is not None:
-            opps = (stats.opportunities or {}).get(street, 0.0)
-            cn = {"flop": "翻牌", "turn": "转牌", "river": "河牌"}.get(
-                street, street)
-            line = f"{scope_label}：对手面对{cn}下注弃 {value:.0f}%"
-            if opps < _TABLE_SMALL_OPPS:
-                line += f"（仅 {_fmt_num(opps)} 次机会）"
-                verdict = "机会数不足，不能单独作为开火理由"
-            elif value >= _ATTACK_FOLD_SUPPORT_PCT:
-                verdict = "弃牌率支持开火"
-            elif value <= _ATTACK_FOLD_WEAK_PCT:
-                verdict = "弃牌率不足，不支持开火"
-            else:
-                verdict = "弃牌率一般，不能单独作为开火理由"
-            lines.append(line + f" → {verdict}")
 
+def _attack_fold_verdict(value: float | None, opps: float) -> str:
+    """只看弃牌率这一项的结论；最终开火/不开火由攻击块统一裁决。"""
+    if value is None:
+        return "unknown"
+    if opps < _TABLE_SMALL_OPPS:
+        return "small"
+    if value >= _ATTACK_FOLD_SUPPORT_PCT:
+        return "support"
+    if value <= _ATTACK_FOLD_WEAK_PCT:
+        return "weak"
+    return "neutral"
+
+
+def _board_wet(sit: Situation) -> bool:
     gt = sit.ground_truth
-    wet = (gt is not None and (
+    return bool(gt is not None and (
         gt.board_info.flush_draw_possible
         or gt.board_info.flush_made_possible
         or gt.board_info.straight_possible))
-    if wet:
+
+
+def _attack_evidence(sit: Situation, stats: "PooledStats | None", street: str,
+                     scope_label: str) -> list[str]:
+    """攻击块的「依据」：只陈述单项事实，不再给第二套结论。"""
+    lines: list[str] = []
+    value, opps = _attack_fold(stats, street)
+    if value is not None:
+        cn = {"flop": "翻牌", "turn": "转牌", "river": "河牌"}.get(
+            street, street)
+        line = f"{scope_label}：对手面对{cn}下注弃 {value:.0f}%"
+        if opps < _TABLE_SMALL_OPPS:
+            line += f"（仅 {_fmt_num(opps)} 次机会）"
+            verdict = "机会数不足，不能单独作为开火理由"
+        elif value >= _ATTACK_FOLD_SUPPORT_PCT:
+            verdict = "弃牌率支持开火"
+        elif value <= _ATTACK_FOLD_WEAK_PCT:
+            verdict = "弃牌率不足，不支持开火"
+        else:
+            verdict = "弃牌率一般，不能单独作为开火理由"
+        # 「只描述这一项」避免和上面的总裁决读成两句相反建议。
+        lines.append(line + f" → {verdict}（只描述这一项，结论见上）")
+
+    if _board_wet(sit):
         lines.append(
             "牌面有花/顺可能：对手范围更容易连上，降低开火频率；"
             "优先用有后门/阻断的牌，纯空气别硬开。")
 
     if any(str(card)[:1].upper() == "A" for card in sit.snap.board):
         if _notes_ace_weakness(sit.table_dynamics):
-            tail = ("这是最值得借 A 开火的面，自己没 A 也照打。"
-                    if aggressive else
-                    "可以先小注施压；但没有 xr 数据，不要默认高频开火。")
             lines.append(
                 "A 高面：人工观察说本池对手见 A 抵抗力下降（容易弃牌）→ "
-                + tail)
+                "可以借 A 施压；仍受上面的弃牌率/xr 约束。")
         else:
-            tail = ("小注攻击比平时更有效。" if aggressive else
-                    "先小注/强牌施压；没有 xr 数据，不要默认高频开火。")
+            # 没有现场观察时只给事实，不断言「A 高面一定更有效」。
             lines.append(
-                "A 高面：A 是牌面最大张，对手的过牌/溜入范围很难承受 A 高面的"
-                "压力 → " + tail)
+                "A 高面：A 是牌面最大张；对手会不会弃牌要看上面的弃牌率"
+                "和画像，不能只凭 A 高默认开火。")
     return lines
 
 
@@ -3420,12 +3513,8 @@ def render_attack_zh(sit: Situation) -> list[str]:
     """宽范围/死钱局的剥削判断（程序判断「范围封顶 + Hero 收尾」）。
 
     触发条件很窄：**翻前溜入池 + 本街没人下注 + Hero 最后一个行动**。
-    这时底池是死钱、Hero 收尾，但「能不能开火」还要看对手：
-
-      · 对手 xc（跟 c-bet 多）或 xr（过牌-加注频繁）时，小注诈唬没有
-        弃牌率、还会被加注惩罚 → 事实默认改成「跟着过牌」；
-      · 没有 xr 实测值时不给「高频小注攻击」默认，只说强牌/强听可以下注；
-      · 前面已经过牌的人仍会在 Hero 下注后再行动，可以 check-raise。
+    这里只输出**一个结论**（不开火 / 仅强牌下注 / 可小注 / 可高频小注），
+    依据里的弃牌率、xr、牌面、A 高面都只描述单项，不另下结论。
 
     用户 2026-10-31 口径：这个池子的人看到公共牌有 A 时抵抗力明显下降，
     A 高面要多打。人工观察写在 `.table_dy`，这里只在 A 高面引用它；
@@ -3458,6 +3547,9 @@ def render_attack_zh(sit: Situation) -> list[str]:
         and stats.fold_to_cbet is not None
         and cbet_opps >= _TABLE_SMALL_OPPS and stats.fold_to_cbet <= 35)
     xr_known = _xr_data_known(sit)
+    fold_value, fold_opps = _attack_fold(stats, street)
+    fold_verdict = _attack_fold_verdict(fold_value, fold_opps)
+    wet = _board_wet(sit)
 
     if raisers or callers or table_sticky:
         lines = ["## 剥削判断（宽范围/死钱）", dead_money]
@@ -3486,19 +3578,29 @@ def render_attack_zh(sit: Situation) -> list[str]:
     lines.append(_checkraise_note(checked))
     if not xr_known:
         lines.append(
-            "没有对手过牌-加注数据，不能把这里当无风险开火点；"
-            "默认只用强牌/强听下注，中等牌/空气优先过牌，"
-            "除非有明确弃牌率证据。")
-        lines.extend(_attack_tail(sit, stats, street, scope_label,
-                                  aggressive=False))
-        return lines
+            "没有对手过牌-加注数据，不能把这里当无风险开火点。")
 
-    lines.append(
-        "这是高频小注攻击的位置：用 1/3–1/2 池下注，别只拿成牌下注；"
-        "当前权益低不是过牌的理由 —— 诈唬看的是对手弃牌率和范围封顶，"
-        "被跟注后按下一街权益继续；被加注要放弃。")
-    lines.extend(_attack_tail(sit, stats, street, scope_label,
-                              aggressive=True))
+    if fold_verdict == "support" and xr_known and not wet:
+        conclusion = "可高频小注攻击（1/3–1/2 池），别只拿成牌下注"
+    elif fold_verdict == "support" and xr_known:
+        conclusion = ("可小注，但牌面有花/顺可能，降低频率；"
+                      "别只拿成牌下注")
+    elif fold_verdict == "support":
+        conclusion = ("可小注，但不默认高频（没有 xr 数据）；"
+                      "只用强牌/强听，中等牌/空气优先过牌")
+    elif fold_verdict == "weak":
+        conclusion = "不开火：只用强牌/强听下注，中等牌/空气过牌"
+    elif fold_verdict == "small":
+        conclusion = "仅强牌/强听下注（弃牌率样本不足，不能当开火理由）"
+    else:
+        conclusion = "仅强牌/强听下注（没有该街弃牌率，不能默认开火）"
+    lines.append("结论：" + conclusion)
+    lines.append("依据：")
+    lines.extend(_attack_evidence(sit, stats, street, scope_label))
+    if fold_verdict == "support" and xr_known and not wet:
+        lines.append(
+            "范围封顶 + 弃牌率达标 + 没有高 xr/高跟注证据；"
+            "被跟注后按下一街权益继续，被加注要放弃。")
     return lines
 
 
@@ -3523,7 +3625,8 @@ def _select_reads(sit: Situation, active: dict,
     return sorted(reads, key=rank, reverse=True)[:limit]
 
 
-def _behind_detail_zh(snap: HandSnapshot) -> str:
+def _behind_detail_zh(snap: HandSnapshot,
+                      prefix: str = "跟注/过牌后待行动") -> str:
     """「跟注/过牌后待行动」一行：人数 + 位置名 + 谁还没跟到当前注。
 
     只写人数（旧口径）会让模型忽略「溜入者还没响应加注」这种关键约束；
@@ -3538,16 +3641,20 @@ def _behind_detail_zh(snap: HandSnapshot) -> str:
     pending = [o for o in behind
                if 1e-9 < _street_bet(snap, o) < max_bet - 1e-9]
     pending_ids = {o.seat_id for o in pending}
+    bb_option = _big_blind_option_pending(snap)
     parts = []
     if pending:
         pending_names = "、".join(o.position or o.seat_id for o in pending)
         parts.append(f"{pending_names} 还没跟到 {_fmt_num(max_bet)}BB")
     rest = [o.position or o.seat_id for o in behind
-            if o.seat_id not in pending_ids]
+            if o.seat_id not in pending_ids
+            and (bb_option is None or o.seat_id != bb_option.seat_id)]
     if rest:
         shown = "、".join(rest[:4]) + ("…" if len(rest) > 4 else "")
         parts.append(f"{shown} 还没行动")
-    text = f"跟注/过牌后待行动：{len(behind)} 人"
+    if bb_option is not None:
+        parts.append("BB 还没行动，你跟注后 BB 仍有加注选项")
+    text = f"{prefix}：{len(behind)} 人"
     if parts:
         text += "（" + "；".join(parts) + "）"
     return text
@@ -3610,17 +3717,26 @@ def render_facts_zh(sit: Situation) -> str:
         # 状态帧把对手全标成弃牌时，任何「有位置/先行动」都是假的。
         position.append("位置：无在局对手（状态帧异常，翻后建议不可信）")
     elif sit.in_position is not None:
+        # 位置永远是翻后座位顺序。翻前另有行动顺序（BB 可能还没说话），
+        # 所以翻前的这行必须标成「翻后位置」，不能只写「位置」。
+        label = "翻后位置" if snap.street == PREFLOP else "位置"
         if sit.in_position:
-            position.append("位置：Hero 有位置（身后没有在局对手）")
+            position.append(f"{label}：Hero 有位置（按座位顺序最后行动）")
         elif hero_first_to_act(snap):
-            position.append("位置：Hero 无位置（翻后先行动）")
+            position.append(f"{label}：Hero 无位置（翻后先行动）")
         else:
-            position.append("位置：Hero 无位置（身后还有在局对手）")
+            position.append(f"{label}：Hero 无位置（翻后身后还有在局对手）")
     if sit.players_left_to_act is not None:
-        position.append(_behind_detail_zh(snap)
-                        or f"跟注/过牌后待行动：{sit.players_left_to_act} 人")
+        if snap.street == PREFLOP:
+            position.insert(0, _behind_detail_zh(snap, prefix="翻前行动")
+                            or f"翻前行动：{sit.players_left_to_act} 人")
+        else:
+            position.append(_behind_detail_zh(snap)
+                            or f"跟注/过牌后待行动：{sit.players_left_to_act} 人")
         position.append("下注/加注会重新打开行动，已过牌/跟注/下注的对手仍可再行动"
                         "（位置优势≠没人能加注）")
+    elif snap.street == PREFLOP:
+        position.insert(0, "翻前行动：未知（有对手位置未读出）")
     if position:
         lines.append("｜".join(position))
 
@@ -3653,6 +3769,9 @@ def render_facts_zh(sit: Situation) -> str:
             for o, total in short)
         lines.append(f"短码/side pot：{detail}（side pot 未建模；"
                      "能争夺的是他们本手还能投入的总额 = 后手 + 本街已下注）")
+    elif hero_total is None:
+        # 自己的后手没读出来时，不能写「无」：短码关系根本没算过。
+        lines.append("短码/side pot：未知（Hero 后手未读出）")
     elif _unknown_stack_opponents(snap):
         lines.append("短码/side pot：未知（有对手筹码未读出）")
     else:
@@ -3696,8 +3815,12 @@ def render_facts_zh(sit: Situation) -> str:
         if len(eligible) > len(shown_reads):
             lines.append("（只显示最相关 3 家；其余画像略）")
 
+    # 攻击块会给出本街弃牌率的最终裁决；有攻击块时，桌级 c-bet 建议不再
+    # 单独出现，避免同一份 prompt 里两个「能不能开火」的来源。
+    attack = render_attack_zh(sit)
     table_stats = render_table_stats_zh(
-        sit.table_stats, opponents_in_hand=sit.opponents_in_hand)
+        sit.table_stats, opponents_in_hand=sit.opponents_in_hand,
+        street=snap.street, suppress_cbet=bool(attack))
     if table_stats:
         lines.append("")
         lines.extend(table_stats)
@@ -3707,7 +3830,6 @@ def render_facts_zh(sit: Situation) -> str:
         lines.append("## 人工观察（现场记录；统计算不出来的东西）")
         lines.append(sit.table_dynamics)
 
-    attack = render_attack_zh(sit)
     if attack:
         lines.append("")
         lines.extend(attack)

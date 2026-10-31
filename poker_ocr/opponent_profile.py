@@ -1574,7 +1574,9 @@ def pooled_stats_to_dict(stats: "PooledStats | None") -> dict | None:
     }
 
 
-def table_exploit_zh(stats: PooledStats, *, limit: int = 2) -> str:
+def table_exploit_zh(stats: PooledStats, *, limit: int = 2,
+                     street: str | None = None,
+                     suppress_cbet: bool = False) -> str:
     """**桌级**的剥削方向：这桌整体该怎么打。
 
     与逐座位的 `exploit_hint_zh` 是两层：那个回答「这个人怎么打」，这个回答
@@ -1583,23 +1585,34 @@ def table_exploit_zh(stats: PooledStats, *, limit: int = 2) -> str:
 
     低 3-bet 不再直接推「前位放宽」：低 3-bet + 高溜入/高 VPIP 的桌子，
     前位放宽只会多打多人底池。只有「紧桌 + 低 3-bet」才值得放宽前位。
+
+    `street` 用于按当前街过滤：翻牌 prompt 不该出现「后位多隔离加注」，
+    河牌 prompt 也不该出现「翻牌可以高频开火」。None = 不过滤（离线工具）。
     """
     def enough(key: str) -> bool:
         return stats.opportunities.get(key, 0.0) >= TABLE_MIN_OPPS[key]
 
+    def on(*streets: str) -> bool:
+        return street is None or street in streets
+
     table_word = "本桌" if stats.scope == "current_table" else "全场"
     hints: list[str] = []
-    if (stats.fold_to_bet_river is not None and enough("river")
-            and stats.fold_to_bet_river >= 80):
+    if (on("river") and stats.fold_to_bet_river is not None
+            and enough("river") and stats.fold_to_bet_river >= 80):
         hints.append("河牌大注基本没人跟 —— 没摊牌价值时可以诈唬收池；"
                      "自己有强牌反而要收小注，指望被跟")
-    if (stats.fold_to_cbet is not None and enough("fcbet")
+    if (not suppress_cbet and on("flop")
+            and stats.fold_to_cbet is not None and enough("fcbet")
             and stats.fold_to_cbet >= 70):
-        hints.append("对 c-bet 弃得多 —— 翻牌可以高频开火，别只拿强牌下注")
-    if (stats.limp is not None and enough("limp") and stats.limp >= 40):
+        # 只给「弃牌率来源」，不直接给「高频开火」：能不能开火由攻击块
+        # 按 xr/跟注数据统一裁决，避免同一份 prompt 里两句相反建议。
+        hints.append("对 c-bet 弃得多 —— 翻牌小注有弃牌率"
+                     "（能不能开火还要看 xr/跟注数据）")
+    if on("preflop") and stats.limp is not None and enough("limp") \
+            and stats.limp >= 40:
         hints.append(f"{table_word}爱溜入 —— 有位置时多隔离加注")
-    if (stats.threebet is not None and enough("threebet")
-            and stats.threebet <= 8):
+    if (on("preflop") and stats.threebet is not None
+            and enough("threebet") and stats.threebet <= 8):
         loose_callers = ((stats.limp is not None and stats.limp >= 40)
                          or (stats.vpip is not None and stats.vpip >= 32))
         tight_table = (stats.vpip is not None and stats.vpip < 28
@@ -2528,77 +2541,130 @@ def exploit_hint_zh(read: OpponentRead, *, limit: int = 2) -> str:
 
     只采信**实测**指标：被先验收缩过的（低频样本）不产生指令 —— 那只是
     估计，用来理解对手可以，用来下注不行。中间值两边都不站，也不说。
-    """
-    hints: list[str] = []
 
-    if _confident(read, "stab") and read.stab_pct is not None:
-        if read.stab_pct <= 25:
-            hints.append("别人过牌后他很少下注 —— 过牌给他基本能免费看下一张；"
-                          "他过牌后你可以在下一街主动偷池")
-        elif read.stab_pct >= 60:
-            hints.append("别人过牌后他爱下注 —— 你过牌给他要准备 check-raise，"
-                          "别用中等牌白跟")
+    同一个座位只留一个方向：有「别开火」证据（xr 高、跟 c-bet 多、对
+    c-bet 弃得少、第二枪会被跟）时，丢掉所有「可以开火」的提示，避免
+    「别对他的过牌开火」和「他过牌说明没中，可以接管」同时出现。
+    """
+    # (priority, kind, text)：priority 越小越重要；kind 决定冲突时留哪类。
+    candidates: list[tuple[int, str, str]] = []
 
     if (_confident(read, "check_raise")
             and read.check_raise_pct is not None
             and read.check_raise_pct >= 20):
-        hints.append("过牌-加注频繁 —— 别对他的过牌随手开火")
+        candidates.append((10, "block",
+                           "过牌-加注频繁 —— 别对他的过牌随手开火"))
 
-    if _confident(read, "cbet") and read.cbet_pct is not None:
-        if read.cbet_pct >= 75:
-            hints.append("c-bet 频率高 —— 可以多 float，转牌他再开枪再决定")
-        elif read.cbet_pct <= 40:
-            hints.append("c-bet 频率低 —— 翻牌他过牌基本是没中，可以在转牌接管控池")
+    if (_confident(read, "call_to_cbet")
+            and read.call_to_cbet_pct is not None
+            and read.call_to_cbet_pct >= 55):
+        candidates.append((11, "block",
+                           "跟 c-bet 多 —— 别用空气开火，价值牌打大"))
 
-    if _confident(read, "fold_to_cbet") and read.fold_to_cbet_pct is not None:
-        if read.fold_to_cbet_pct >= 60:
-            hints.append("对 c-bet 弃得多 —— 干燥面可以高频开火，别只拿强牌下注")
-        elif read.fold_to_cbet_pct <= 30:
-            hints.append("对 c-bet 跟得多 —— 别用空气开火，价值牌打大")
+    if (_confident(read, "fold_to_cbet")
+            and read.fold_to_cbet_pct is not None
+            and read.fold_to_cbet_pct <= 30):
+        candidates.append((12, "block",
+                           "对 c-bet 跟得多 —— 别用空气开火，价值牌打大"))
 
     if (_confident(read, "barrel_call")
             and read.barrel_call_pct is not None
             and read.barrel_call_pct >= 60):
-        hints.append("翻牌跟注后转牌还会跟 —— 第二枪别用空气开，等真牌再打")
+        candidates.append((13, "block",
+                           "翻牌跟注后转牌还会跟 —— 第二枪别用空气开，等真牌再打"))
 
     if (_confident(read, "fold_to_bet_turn")
-            and read.fold_to_bet_turn_pct is not None):
-        if read.fold_to_bet_turn_pct >= 65:
-            hints.append("转牌弃得多 —— 翻牌跟注之后可以连开第二枪")
-        elif read.fold_to_bet_turn_pct <= 40:
-            hints.append("转牌很少弃 —— 第二枪要拿真牌，别拿空气硬开")
+            and read.fold_to_bet_turn_pct is not None
+            and read.fold_to_bet_turn_pct <= 40):
+        candidates.append((14, "block",
+                           "转牌很少弃 —— 第二枪要拿真牌，别拿空气硬开"))
 
     if (_confident(read, "fold_to_bet_river")
-            and read.fold_to_bet_river_pct is not None):
-        if read.fold_to_bet_river_pct >= 80:
-            hints.append("河牌面对下注弃得多 —— 河牌下注很少被跟，"
-                         "没摊牌价值的牌可以在河牌开一枪")
-        elif read.fold_to_bet_river_pct <= 40:
-            hints.append("河牌跟得多 —— 河牌诈唬无效，只用价值下注")
-
-    if (_confident(read, "limp") and read.limp_pct is not None
-            and read.limp_pct >= 25):
-        hints.append("爱溜入 —— 他的溜入范围偏弱，有位置时可以直接隔离加注")
+            and read.fold_to_bet_river_pct is not None
+            and read.fold_to_bet_river_pct <= 40):
+        candidates.append((15, "block",
+                           "河牌跟得多 —— 河牌诈唬无效，只用价值下注"))
 
     if (_confident(read, "delay_cbet") and read.delay_cbet_pct is not None
             and read.delay_cbet_pct >= 40):
-        hints.append("翻牌过牌不代表放弃 —— 他会在转牌补一枪，别用中等牌白跟")
+        candidates.append((16, "block",
+                           "翻牌过牌不代表放弃 —— 他会在转牌补一枪，"
+                           "别用中等牌白跟"))
+
+    if (_confident(read, "fold_to_cbet")
+            and read.fold_to_cbet_pct is not None
+            and read.fold_to_cbet_pct >= 60):
+        candidates.append((20, "support",
+                           "对 c-bet 弃得多 —— 干燥面可以开火，"
+                           "但先确认没有高 xr/跟注"))
+
+    if (_confident(read, "fold_to_bet_turn")
+            and read.fold_to_bet_turn_pct is not None
+            and read.fold_to_bet_turn_pct >= 65):
+        candidates.append((21, "support",
+                           "转牌弃得多 —— 翻牌跟注之后可以连开第二枪"))
+
+    if (_confident(read, "fold_to_bet_river")
+            and read.fold_to_bet_river_pct is not None
+            and read.fold_to_bet_river_pct >= 80):
+        candidates.append((22, "support",
+                           "河牌面对下注弃得多 —— 没摊牌价值的牌"
+                           "可以在河牌开一枪"))
+
+    if (_confident(read, "cbet") and read.cbet_pct is not None
+            and read.cbet_pct <= 40):
+        candidates.append((23, "support",
+                           "c-bet 频率低 —— 他翻牌过牌更可能是放弃/控池；"
+                           "没有摊牌价值时可在转牌施压，"
+                           "但别把过牌一律读成没中"))
+
+    if (_confident(read, "cbet") and read.cbet_pct is not None
+            and read.cbet_pct >= 75):
+        candidates.append((30, "other",
+                           "c-bet 频率高 —— 可以多 float，转牌他再开枪再决定"))
+
+    if _confident(read, "stab") and read.stab_pct is not None:
+        if read.stab_pct <= 25:
+            candidates.append((31, "other",
+                               "别人过牌后他很少下注 —— 过牌给他基本能免费"
+                               "看下一张；他过牌后你可以在下一街主动偷池"))
+        elif read.stab_pct >= 60:
+            candidates.append((31, "other",
+                               "别人过牌后他爱下注 —— 你过牌给他要准备 "
+                               "check-raise，别用中等牌白跟"))
+
+    if (_confident(read, "limp") and read.limp_pct is not None
+            and read.limp_pct >= 25):
+        candidates.append((32, "other",
+                           "爱溜入 —— 他的溜入范围偏弱，有位置时可以直接"
+                           "隔离加注"))
 
     if (_confident(read, "fold_to_3bet")
             and read.fold_to_3bet_pct is not None
             and read.fold_to_3bet_pct >= 60):
         # 这才是挤压的真实判据：他开池后被 3-bet 会弃。
-        hints.append("被 3-bet 就弃 —— 他开池后可以直接挤压，"
-                     "身后都弃牌时成功率高")
+        candidates.append((40, "other",
+                           "被 3-bet 就弃 —— 他开池后可以直接挤压，"
+                           "身后都弃牌时成功率高"))
     elif (_confident(read, "open_lp") and read.open_lp_pct is not None
             and read.open_lp_pct >= 40
             and (read.threebet_pct is None or read.threebet_pct <= 8)):
         # 兜底：没采到「被 3-bet 的弃牌率」时，用开池宽度做代理。
-        hints.append("后位开池宽、3-bet 少 —— 他开池的范围偏弱，"
-                     "身后没人入池时可以有一定频率 3-bet 挤压"
-                     "（还没采到被 3-bet 的弃牌率）")
+        candidates.append((41, "other",
+                           "后位开池宽、3-bet 少 —— 他开池的范围偏弱，"
+                           "身后没人入池时可以有一定频率 3-bet 挤压"
+                           "（还没采到被 3-bet 的弃牌率）"))
 
-    return "；".join(hints[:limit])
+    blocks = [c for c in candidates if c[1] == "block"]
+    supports = [c for c in candidates if c[1] == "support"]
+    others = [c for c in candidates if c[1] == "other"]
+    if blocks:
+        # 有反向证据时，「可以开火」的建议全部丢掉。
+        chosen = blocks + others
+    else:
+        chosen = supports + others
+    chosen.sort(key=lambda item: item[0])
+    return "；".join(text for _p, _kind, text in chosen[:limit])
 
 
 def format_read_line(read: OpponentRead, position: str | None = None) -> str:

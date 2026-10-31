@@ -296,6 +296,7 @@ def feature_weight(score: float, mode: str) -> float:
 
 MODE_MIN_WEIGHT: dict[str, float] = {
     "check": 0.0,       # 不按牌面筛
+    "unacted": 0.0,     # 本街还没行动：同样不按牌面筛，保留翻前先验
     "call": 0.30,
     "bet": 0.75,
     "raise": 0.85,
@@ -341,7 +342,7 @@ def build(board, mode: str = "call", prior: ranges.Range | str | None = None,
           preflop_range: ranges.Range | str | None = None) -> ranges.Range | None:
     """构建动作条件范围。
 
-    `board` 3–5 张；`mode` 取 check/call/bet/raise/allin/unknown；
+    `board` 3–5 张；`mode` 取 check/unacted/call/bet/raise/allin/unknown；
     `prior` 是翻前先验（Range 或 ID），None 时降级为均匀牌面范围（board-only）。
     `preflop_range` 是旧文档的别名。
     """
@@ -364,11 +365,11 @@ def build(board, mode: str = "call", prior: ranges.Range | str | None = None,
     # 不能拿翻前先验假装知道他收窄到哪一档。
     if mode == "unknown":
         prior = None
-    # 过牌不按牌面筛：没有新信息，保留翻前范围里的空气。
-    if mode == "check":
+    # 过牌/本街还没行动都不按牌面筛：没有新信息，保留翻前范围里的空气。
+    if mode in ("check", "unacted"):
         if prior is not None:
             return prior
-        return ranges.uniform_range("board:check:uniform",
+        return ranges.uniform_range(f"board:{mode}:uniform",
                                     note="board-only (any two cards)")
 
     if min_weight is None:

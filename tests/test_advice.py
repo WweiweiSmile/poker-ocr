@@ -1651,10 +1651,17 @@ def test_table_stats_come_from_profiles() -> None:
     check("整体：松、3-bet 少" in user, f"应给出松/3-bet 少的结论：\n{user}")
     check("被动" not in user, f"3-bet 少不能写成整体被动：\n{user}")
     check("河牌 92%" in user, f"分街弃牌率应包含河牌：\n{user}")
-    check("河牌大注基本没人跟" in user,
-          f"全场级剥削应指出河牌没人跟：\n{user}")
-    check("价值下注要收小" in user or "收小注" in user,
-          f"应同时提示价值下注要收小：\n{user}")
+    # 河牌建议只能出现在河牌 prompt，不能穿越到翻牌。
+    check("河牌大注基本没人跟" not in user,
+          f"翻牌 prompt 不该出现河牌建议：\n{user}")
+    river = build_situation(make_point(
+        street="river", board=("2c", "3d", "4h", "5s", "9c"),
+        to_call=4.0, pot=10.0, hero_stack=90.0), table_stats=stats)
+    _, river_user = build_messages(river)
+    check("河牌大注基本没人跟" in river_user,
+          f"河牌 prompt 应指出河牌没人跟：\n{river_user}")
+    check("价值下注要收小" in river_user or "收小注" in river_user,
+          f"应同时提示价值下注要收小：\n{river_user}")
 
     # 机会数不够时不给全场级结论
     thin_river = PooledStats(hands=30, players=9, vpip=40.0,
@@ -1922,8 +1929,10 @@ def test_combo_draw_facts_show_combo_and_fair_share_ratio() -> None:
     text = render_facts_zh(combo)
     check("有牌又有听：成牌 + 强听（combo draw，不是纯听牌）" in text,
           f"combo draw 应有「有牌又有听」：\n{text}")
-    check("权益高于公平份额时默认下注" in text,
-          f"combo draw 应给默认下注指引：\n{text}")
+    check("可作为保护/半诈唬下注，不是默认" in text,
+          f"combo draw 不能给默认下注：\n{text}")
+    check("多人池或没有弃牌率时优先过牌" in text,
+          f"combo draw 要提示多人池/无弃牌率先过牌：\n{text}")
     check("公平份额 20.0%，权益是它的" in text,
           f"combo draw 应给权益/公平份额倍数：\n{text}")
 
@@ -2167,7 +2176,7 @@ def test_facts_include_spot_spr_and_position() -> None:
     check(pending.players_left_to_act == 1,
           f"BB 未跟到 4BB，应算身后 1 人：{pending.players_left_to_act}")
     pending_text = render_facts_zh(pending)
-    check("位置：Hero 有位置（身后没有在局对手）" in pending_text,
+    check("位置：Hero 有位置（按座位顺序最后行动）" in pending_text,
           f"位置只看座位，不看当前下注状态：\n{pending_text}")
     check("跟注/过牌后待行动：1 人（BB 还没跟到 4BB）" in pending_text,
           f"有未响应玩家时要单独写行动状态：\n{pending_text}")
@@ -2192,7 +2201,7 @@ def test_facts_include_spot_spr_and_position() -> None:
             OpponentSnapshot("utg", "UTG", "UTG", 100.0, 0.0, False),
             OpponentSnapshot("btn", "BTN", "BTN", 100.0, 0.0, False))))
     middle_text = render_facts_zh(middle)
-    check("Hero 无位置（身后还有在局对手）" in middle_text,
+    check("Hero 无位置（翻后身后还有在局对手）" in middle_text,
           f"CO 在 UTG 之后、BTN 之前，不能写先行动：\n{middle_text}")
     check("Hero 无位置（翻后先行动）" not in middle_text,
           f"CO 不是全场第一个行动：\n{middle_text}")
@@ -2949,7 +2958,7 @@ def test_prompt_has_no_internal_range_ids() -> None:
     check("[check]" not in user and "[call]" not in user,
           f"不应暴露英文 range mode：\n{user}")
     check("个可用组合" not in user, f"不应把 combo 数塞进 prompt：\n{user}")
-    check("过牌范围" in user or "跟注范围" in user,
+    check("过牌范围" in user or "跟注范围" in user or "未行动范围" in user,
           f"范围 mode 应中文化：\n{user}")
 
 
@@ -3020,7 +3029,8 @@ def test_table_stats_counts_hero_and_flags_small_samples() -> None:
         opportunities={"preflop": 50.0, "threebet": 22.5, "limp": 21.0,
                        "fcbet": 5.5, "stab": 9.0, "river": 4.5})
     _, user = build_messages(build_situation(
-        make_point(to_call=4.0, pot=10.0, hero_stack=90.0,
+        make_point(street="preflop", board=(), to_call=4.0, pot=10.0,
+                   hero_stack=90.0,
                    opponents=(
                        OpponentSnapshot("a", "老王", "BB", 97.0, 0.0, False),
                        OpponentSnapshot("b", "小李", "CO", 97.0, 0.0, False))),
@@ -3131,7 +3141,8 @@ def test_table_stats_low_3bet_with_limpers_does_not_widen_early_open() -> None:
         vpip=35.0, threebet=5.0, limp=50.0,
         opportunities={"preflop": 80.0, "threebet": 80.0, "limp": 80.0})
     _, user = build_messages(build_situation(
-        make_point(to_call=4.0, pot=10.0, hero_stack=90.0),
+        make_point(street="preflop", board=(), to_call=4.0, pot=10.0,
+                   hero_stack=90.0),
         table_stats=stats))
     check("3-bet 很少，但溜入/入池多" in user,
           f"低 3-bet + 溜入多应提示前位收紧：\n{user}")
@@ -3260,7 +3271,7 @@ def test_players_left_to_act_counts_unmatched_limpers() -> None:
     check(sit.players_left_to_act == 2,
           f"两个溜入者还没跟注，身后应是 2：{sit.players_left_to_act}")
     user = render_facts_zh(sit)
-    check("跟注/过牌后待行动：2 人（HJ、CO 还没跟到 6.5BB）" in user,
+    check("翻前行动：2 人（HJ、CO 还没跟到 6.5BB）" in user,
           f"身后要写清是谁：\n{user}")
     check("HJ、CO 还没跟到 6.5BB" in user,
           f"要写清还没跟到的金额：\n{user}")
@@ -3615,6 +3626,262 @@ def test_ace_weakness_only_when_observation_says_so() -> None:
     check(not _notes_ace_weakness("见A不弃"), "否定词不能读反")
     check(not _notes_ace_weakness("A高不怕"), "「不怕」不能读成会弃")
     check(not _notes_ace_weakness("A面抵抗强"), "「抵抗强」不能读成弱点")
+
+def test_preflop_bb_option_is_counted_as_pending() -> None:
+    """翻前 BB 投了 1BB 但还没行动：Hero 平跟/补盲后 BB 仍有加注选项。"""
+    from poker_ocr.hand_track import ActionRecord, OpponentSnapshot, StreetRecord
+
+    btn = build_situation(make_point(
+        street="preflop", board=(), hero_position="BTN", hero_stack=100.0,
+        hero_bet=0.0, to_call=1.0, pot=1.5, pot_before_street=1.5,
+        table_size=6, players_dealt=2,
+        opponents=(OpponentSnapshot("bb", "老王", "BB", 99.0, 1.0, False),),
+        streets=(StreetRecord("preflop", 1.5, ()),),
+        preflop_shapes=("unopened",), hero_is_pfr=False))
+    check(btn.players_left_to_act == 1,
+          f"BB 还没行动，身后应是 1：{btn.players_left_to_act}")
+    text = render_facts_zh(btn)
+    check("翻前行动：1 人（BB 还没行动，你跟注后 BB 仍有加注选项）" in text,
+          f"翻前要单独写 BB option：\n{text}")
+    check("翻后位置：Hero 有位置（按座位顺序最后行动）" in text,
+          f"翻前位置必须标成翻后位置：\n{text}")
+    check("翻后位置：Hero 有位置（身后没有在局对手）" not in text,
+          f"不能再说「身后没有在局对手」：\n{text}")
+
+    sb = build_situation(make_point(
+        street="preflop", board=(), hero_position="SB", hero_stack=99.5,
+        hero_bet=0.5, to_call=0.5, pot=1.5, pot_before_street=1.5,
+        table_size=6, players_dealt=2,
+        opponents=(OpponentSnapshot("bb", "老王", "BB", 99.0, 1.0, False),),
+        streets=(StreetRecord("preflop", 1.5, ()),),
+        preflop_shapes=("limped",), hero_is_pfr=False))
+    check(sb.players_left_to_act == 1,
+          f"SB 补盲后 BB 仍有选项：{sb.players_left_to_act}")
+
+    bb = build_situation(make_point(
+        street="preflop", board=(), hero_position="BB", hero_stack=99.0,
+        hero_bet=1.0, to_call=2.0, pot=4.0, pot_before_street=4.0,
+        table_size=6, players_dealt=2,
+        opponents=(OpponentSnapshot("btn", "BTN", "BTN", 97.0, 3.0, False),),
+        streets=(StreetRecord("preflop", 1.5, (
+            ActionRecord("preflop", "btn", None, "BTN", "raise", 3.0,
+                         False, False),)),),
+        preflop_shapes=("single-raise",), hero_is_pfr=False))
+    bb_text = render_facts_zh(bb)
+    check("翻前行动：0 人" in bb_text, f"BB 面对加注是收尾：\n{bb_text}")
+    check("翻后位置：Hero 无位置（翻后先行动）" in bb_text,
+          f"BB 翻后先行动，但翻前是最后行动：\n{bb_text}")
+
+
+def test_unacted_range_is_not_called_check_range() -> None:
+    """本街没有动作时范围是「未行动」，不能凭空写成「过牌范围」。"""
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    from poker_ocr.hand_track import OpponentSnapshot
+
+    point = make_point(
+        hero_cards=("Ah", "Kd"), opponents=(
+            OpponentSnapshot("bb", "老王", "BB", 97.0, 0.0, False),))
+    sit = build_situation(point)
+    edge = SimpleNamespace(position="BB", seat_id="bb", mode="unacted",
+                           width_pct=44.8, behind=0.552, tie=0.01,
+                           combos_after_removal=400)
+    hr = SimpleNamespace(opponents=(edge,), equity=0.62, behind_any=0.552,
+                         random_opponents=0, warnings=())
+    sit = replace(sit, hand_ranges=hr, warnings=list(sit.warnings) + [
+        "seat bb: no action this street; range kept at preflop prior"])
+    text = render_facts_zh(sit)
+    check("未行动范围" in text, f"范围应标成未行动：\n{text}")
+    check("过牌范围" not in text, f"不能写「过牌范围」：\n{text}")
+    check("本街还没有动作：范围沿用翻前先验" in text,
+          f"要说明范围沿用翻前先验：\n{text}")
+    check("对手本街未行动，按沿用翻前范围估算" in text,
+          f"范围权益要带假设说明：\n{text}")
+    check("本街行动线缺失，范围按未行动处理" in text,
+          f"数据质量要标行动线缺失：\n{text}")
+
+
+def test_hero_unknown_stack_short_stack_is_unknown() -> None:
+    text = render_facts_zh(build_situation(make_point(hero_stack=None)))
+    check("短码/side pot：无" not in text,
+          f"Hero 后手未知时不能写「无」：\n{text}")
+    check("短码/side pot：未知（Hero 后手未读出）" in text,
+          f"应写 Hero 后手未读出：\n{text}")
+
+
+def test_pfr_label_has_unknown_and_three_bet_case() -> None:
+    from poker_ocr.hand_track import ActionRecord, StreetRecord
+
+    no_action = render_facts_zh(build_situation(make_point(
+        street="preflop", board=(), hero_position="BTN", to_call=1.0,
+        pot=1.5, pot_before_street=1.5, hero_is_pfr=False,
+        streets=(StreetRecord("preflop", 1.5, ()),))))
+    check("最后翻前加注者（PFR）：未知（翻前动作线缺失）" in no_action,
+          f"没有动作线时 PFR 应是未知：\n{no_action}")
+
+    hero_raise = ActionRecord("preflop", "hero", None, "BTN", "raise", 3.0,
+                              False, True)
+    three_bet = ActionRecord("preflop", "bb", None, "BB", "raise", 9.0,
+                             False, False)
+    opened = render_facts_zh(build_situation(make_point(
+        street="preflop", board=(), hero_position="BTN", hero_is_pfr=True,
+        streets=(StreetRecord("preflop", 1.5, (hero_raise,)),))))
+    check("最后翻前加注者（PFR）：是" in opened,
+          f"Hero 开池应标 PFR 是：\n{opened}")
+    reraised = render_facts_zh(build_situation(make_point(
+        street="preflop", board=(), hero_position="BTN", hero_is_pfr=False,
+        streets=(StreetRecord("preflop", 1.5, (hero_raise, three_bet)),))))
+    check("最后翻前加注者（PFR）：否（Hero 加注后被再加注）" in reraised,
+          f"Hero 开池被 3-bet 要写清：\n{reraised}")
+
+
+def test_heads_up_is_not_called_multiway() -> None:
+    from dataclasses import replace
+    from types import SimpleNamespace
+    from poker_ocr.hand_track import OpponentSnapshot
+
+    point = make_point(opponents=(
+        OpponentSnapshot("bb", "老王", "BB", 97.0, 0.0, False),))
+    edge = SimpleNamespace(position="BB", seat_id="bb", mode="call",
+                           width_pct=30.0, behind=0.4, tie=0.01,
+                           combos_after_removal=300)
+    hr = SimpleNamespace(opponents=(edge,), equity=0.55, behind_any=0.4,
+                         random_opponents=0, warnings=())
+    text = render_facts_zh(replace(build_situation(point), hand_ranges=hr))
+    check("单挑：实际 2 人" in text, f"单挑应写单挑：\n{text}")
+    check("多人池：实际 2 人" not in text, f"单挑不能写多人池：\n{text}")
+
+
+def test_draw_price_verdict_only_when_no_more_betting() -> None:
+    from poker_ocr.hand_track import ActionRecord, OpponentSnapshot, StreetRecord
+
+    def draw_point(stack: float):
+        return make_point(
+            street="flop", board=("7s", "2s", "Kd"), hero_cards=("As", "6s"),
+            hero_position="BB", hero_stack=stack, hero_bet=0.0, to_call=4.0,
+            pot=10.0, pot_before_street=6.0, players_dealt=2,
+            opponents=(OpponentSnapshot("btn", "BTN", "BTN", 30.0, 4.0,
+                                        False),),
+            streets=(StreetRecord("preflop", 1.5, ()),
+                     StreetRecord("flop", 6.0, (
+                         ActionRecord("flop", "btn", None, "BTN", "bet", 4.0,
+                                      False, False),))),
+            preflop_shapes=("single-raise",), hero_is_pfr=False)
+
+    text = render_facts_zh(build_situation(draw_point(12.0)))
+    check("参考值，不可直接与单街门槛比较" in text,
+          f"未全下时不能给「够」：\n{text}")
+    check("→ 够" not in text, f"未全下时不能写够：\n{text}")
+
+    all_in = render_facts_zh(build_situation(draw_point(4.0)))
+    check("跟注即全下/后面不再下注" in all_in,
+          f"跟注即全下才可直接比：\n{all_in}")
+    check("→ 够" in all_in, f"全下时可以直接比：\n{all_in}")
+
+
+def test_attack_outputs_one_conclusion() -> None:
+    from poker_ocr.opponent_profile import OpponentRead, PooledStats
+
+    read = OpponentRead(
+        seat_id="co", key="co", display_name="co", archetype="station",
+        confidence=0.85, n=100, vpip=45.0, pfr=8.0, af=0.7, source="auto",
+        note="", gate="stable", check_raise_pct=10.0)
+
+    def stats(fold: float) -> PooledStats:
+        return PooledStats(
+            hands=120, players=4, total_players=5, scope="population",
+            fold_to_bet_flop=fold,
+            opportunities={"flop": 60.0, "turn": 40.0, "river": 30.0})
+
+    low = render_facts_zh(build_situation(
+        _limped_point(), table_stats=stats(25.0), opponent_reads=(read,)))
+    check("结论：不开火" in low, f"弃牌率不足应不开火：\n{low}")
+    check("高频小注攻击" not in low, f"弃牌率不足不能高频：\n{low}")
+    check("弃牌率不足，不支持开火（只描述这一项，结论见上）" in low,
+          f"依据要和结论分开：\n{low}")
+
+    high = render_facts_zh(build_situation(
+        _limped_point(), table_stats=stats(73.0), opponent_reads=(read,)))
+    check("结论：可高频小注攻击" in high, f"73% + 低 xr 才可高频：\n{high}")
+
+    no_xr = render_facts_zh(build_situation(
+        _limped_point(), table_stats=stats(73.0)))
+    check("结论：可小注，但不默认高频" in no_xr,
+          f"没有 xr 数据不能默认高频：\n{no_xr}")
+    check("高频小注攻击" not in no_xr, f"没有 xr 数据不能写高频：\n{no_xr}")
+
+
+def test_table_exploit_is_filtered_by_street() -> None:
+    from poker_ocr.opponent_profile import PooledStats
+
+    stats = PooledStats(
+        hands=120, players=5, total_players=5, scope="current_table",
+        vpip=35.0, threebet=5.0, limp=50.0, fold_to_cbet=75.0,
+        fold_to_bet_river=90.0,
+        opportunities={"preflop": 80.0, "threebet": 80.0, "limp": 80.0,
+                       "fcbet": 40.0, "river": 40.0})
+    flop = render_facts_zh(build_situation(make_point(), table_stats=stats))
+    check("对 c-bet 弃得多" in flop, f"翻牌应给 c-bet 事实：\n{flop}")
+    check("翻牌可以高频开火" not in flop,
+          f"桌级事实不能再直接推高频：\n{flop}")
+    check("后位多隔离加注" not in flop,
+          f"翻牌 prompt 不该出现翻前隔离建议：\n{flop}")
+
+    river = render_facts_zh(build_situation(
+        make_point(street="river", board=("2c", "3d", "4h", "5s", "9c")),
+        table_stats=stats))
+    check("河牌大注基本没人跟" in river, f"河牌应给河牌建议：\n{river}")
+    check("对 c-bet 弃得多" not in river,
+          f"河牌 prompt 不该出现翻牌 c-bet 建议：\n{river}")
+
+
+def test_bomb_pot_does_not_say_you_can_stack_off() -> None:
+    from dataclasses import replace
+
+    point = make_point(
+        street="flop", board=("Ks", "7d", "2c"), hero_cards=("Kh", "Qd"),
+        pot=40.0, pot_before_street=40.0, bomb_pot=True, hero_stack=50.0)
+    sit = replace(build_situation(point), spr=1.5, explosive_pot=True)
+    from poker_ocr.advice import render_explosive_zh
+    text = "\n".join(render_explosive_zh(sit))
+    check("可以打光" not in text, f"不能再写可以打光：\n{text}")
+    check("可以继续，但不主动造大底池" in text,
+          f"应改成可继续但不造大底池：\n{text}")
+
+
+def test_system_contract_has_valid_json_examples_and_mappings() -> None:
+    system, _ = build_messages(build_situation(make_point()))
+    examples = [line for line in system.splitlines()
+                if line.startswith('{"option"')]
+    check(len(examples) == 2, f"应给两个合法示例：{examples}")
+    for line in examples:
+        json.loads(line)
+    check("3x/4x=上家加注" in system, "应说明 raise-3x/4x 是上家加注倍数")
+    check("位置/行动线/有效筹码/底池类型" in system,
+          "硬事实优先级应包含位置/行动线/有效筹码/底池类型")
+    check("4 人以上顶对/超对降级" in system, "多人池要定义 4 人以上")
+
+
+def test_ace_high_is_conditional_not_automatic() -> None:
+    from poker_ocr.opponent_profile import PooledStats
+
+    stats = PooledStats(
+        hands=120, players=4, total_players=5, scope="population",
+        fold_to_bet_flop=73.0, opportunities={"flop": 60.0})
+    no_note = render_facts_zh(build_situation(
+        _limped_point(), table_stats=stats))
+    check("不能只凭 A 高默认开火" in no_note,
+          f"没有现场观察时 A 高面不能绝对化：\n{no_note}")
+    check("小注攻击比平时更有效" not in no_note,
+          f"不能无条件说 A 高面更有效：\n{no_note}")
+
+    with_note = render_facts_zh(build_situation(
+        _limped_point(), table_stats=stats,
+        table_dynamics="- 本池对手看到公共牌有 A 时抵抗力明显下降，容易弃牌。"))
+    check("可以借 A 施压" in with_note,
+          f"有现场观察时才可借 A 施压：\n{with_note}")
+
 
 def main() -> int:
     # 自动收集本模块的 test_*，避免删掉旧用例后手工清单漂移。

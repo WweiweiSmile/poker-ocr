@@ -1177,6 +1177,33 @@ def test_facing_bet_by_street() -> None:
           f"牌面到河牌就不该把转牌补推成弃牌：{got.face_fold}")
 
 
+def test_exploit_hints_do_not_contradict_each_other() -> None:
+    """xr/跟 c-bet 高时，「可以开火」的提示必须让位。"""
+    from poker_ocr.opponent_profile import OpponentRead, exploit_hint_zh
+
+    sticky = OpponentRead(
+        seat_id="a", key="k", display_name="某甲", archetype="station",
+        confidence=0.8, n=60, vpip=45.0, pfr=8.0, af=0.7,
+        source="auto", note="", gate="stable",
+        check_raise_pct=25.0, cbet_pct=30.0, fold_to_cbet_pct=65.0,
+        call_to_cbet_pct=70.0)
+    hints = exploit_hint_zh(sticky)
+    check("过牌-加注频繁" in hints, f"xr 高应优先：{hints}")
+    check("跟 c-bet 多" in hints, f"call-to-cbet 高也应保留：{hints}")
+    check("对 c-bet 弃得多" not in hints,
+          f"xr/跟注高时不能再说对 c-bet 弃得多：{hints}")
+    check("c-bet 频率低" not in hints,
+          f"xr 高时不能再说「过牌=没中」：{hints}")
+
+    thin = OpponentRead(
+        seat_id="b", key="k2", display_name="某乙", archetype="tag",
+        confidence=0.8, n=60, vpip=24.0, pfr=20.0, af=1.6,
+        source="auto", note="", gate="stable", cbet_pct=30.0)
+    low_cbet = exploit_hint_zh(thin)
+    check("别把过牌一律读成没中" in low_cbet,
+          f"低 c-bet 不能读成「基本没中」：{low_cbet}")
+
+
 def run() -> int:
     tests = [
         test_fold_and_check_are_inferred_at_street_end,
@@ -1200,6 +1227,7 @@ def run() -> int:
         test_prompt_renders_opponent_reads,
         test_postflop_sequence_observations,
         test_tendency_render_and_exploit_hints,
+        test_exploit_hints_do_not_contradict_each_other,
         test_street_actions_are_reordered_chronologically,
         test_limp_and_cbet_defence_observations,
         test_fold_to_three_bet_and_missing_fold_inference,
