@@ -153,6 +153,10 @@ def test_fold_badge_is_best_effort() -> None:
     check(is_fold_badge("奔牌", 0.92) is True, "奔牌(0.92) 应判弃牌")
     check(is_fold_badge("弃牌", 0.9) is True, "弃牌 应判弃牌")
     check(is_fold_badge("奔#", 0.5) is True, "奔#(0.5) 应判弃牌")
+    check(is_fold_badge("奔跑的蜗牛", 0.95) is False,
+          "名字以「奔」开头不能判弃牌")
+    check(is_fold_badge("弃疗", 0.95) is False,
+          "名字以「弃」开头不能判弃牌")
     check(is_fold_badge("", 0.9) is None, "空读数应报 None（≠ 没弃牌）")
     check(is_fold_badge("奔牌", 0.2) is None, "分数太低应报 None")
     check(is_fold_badge("国", 0.9) is False, "头像照片的噪声不该判弃牌")

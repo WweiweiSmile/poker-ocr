@@ -226,11 +226,15 @@ def _mode(snap: HandSnapshot, opp, warnings: list[str]) -> str:
         action = last.action
         if action in ("bet", "raise", "call", "check", "allin"):
             return action
-    # 有下注额但没有动作徽章：不能当成过牌，牌面范围会放宽。
+    # 有下注额但没有动作徽章：分不清是 bet 还是 call。
+    # 退回 "call"（两者里更宽的那个），**不是** "unknown"：unknown 会让
+    # board_range.build 把 prior 置空、退化成「按牌面筛的随机牌」，实测同一
+    # 局面范围从 11.1% 膨胀到 50.1%、我方权益从 5.9% 虚高到 15.8%。
+    # 丢掉翻前先验没有任何依据 —— 他进池跟到这一街，就不可能拿着任意两张。
     if opp.bet is not None and float(opp.bet) > 1e-9:
         warnings.append(f"seat {opp.seat_id}: bet size without an action badge; "
-                        "using unknown mode (wider board range)")
-        return "unknown"
+                        "using call range (wider of bet/call, keeps preflop prior)")
+        return "call"
     # 还没行动 / 过牌但徽章没读到：没有新信息，保留翻前范围。
     return "check"
 

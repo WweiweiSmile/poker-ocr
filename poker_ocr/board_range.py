@@ -272,6 +272,28 @@ def score(features: Features) -> float:
 
 # ─────────────────────────── 构建范围 ───────────────────────────
 
+# 跟注倾向**不是**强度的单调函数。
+#
+# `score` 是「牌面连接度」，最高 1.8：两对/三条拿到 1.4–1.8，顶对只有 ~1.0。
+# 直接拿它当权重，等于假设「两对跟注的概率是顶对的 1.6 倍」。真实情况相反：
+# 两对以上更可能**加注**，跟注频率最高的是顶对/中对和强听。实测这个偏差让
+# 跟注范围里强成牌占到 11–17%（真实约 4–6%），范围整体偏向「强而窄」。
+#
+# 所以只对 `call` 把峰值之后的分数折回来；bet/raise/allin 保持单调——越强越
+# 可能主动下注，这个方向是对的。峰值和坡度是先验，不追求精确。
+CALL_PEAK_SCORE = 1.0
+CALL_TAIL = 1.0
+CALL_TAIL_FLOOR = 0.25
+
+
+def feature_weight(score: float, mode: str) -> float:
+    """牌面分数 → 该动作下的相对权重（1.0 量级，不是概率）。"""
+    if mode != "call" or score <= CALL_PEAK_SCORE:
+        return score
+    return max(CALL_TAIL_FLOOR,
+               CALL_PEAK_SCORE - CALL_TAIL * (score - CALL_PEAK_SCORE))
+
+
 MODE_MIN_WEIGHT: dict[str, float] = {
     "check": 0.0,       # 不按牌面筛
     "call": 0.30,
@@ -367,10 +389,11 @@ def build(board, mode: str = "call", prior: ranges.Range | str | None = None,
     for combo, _feat, feat_score in _features_for_board(bkey):
         if feat_score < min_weight:
             continue
+        fw = feature_weight(feat_score, mode)
         if prior_weights is None:
-            w = feat_score
+            w = fw
         else:
-            w = feat_score * prior_weights.get(combo, 0.0)
+            w = fw * prior_weights.get(combo, 0.0)
         if w > 0:
             weights[combo] = w
 
@@ -380,7 +403,8 @@ def build(board, mode: str = "call", prior: ranges.Range | str | None = None,
             if prior is not None else
             f"board-only, min {min_weight:g}")
     built = ranges.make_range(f"board:{mode}:{base_id}", weights,
-                              source=source, note=note)
+                              source=source, note=note,
+                              prior_id=prior.id if prior is not None else None)
     if len(_BUILD_CACHE) >= _BUILD_CACHE_MAX:
         _BUILD_CACHE.clear()
     _BUILD_CACHE[ckey] = built

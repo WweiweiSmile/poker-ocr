@@ -34,12 +34,16 @@ def check(cond: bool, msg: str) -> None:
 
 
 def card(code: str, *, rank_score: float = 0.9, confidence: float = 0.9,
-         back: bool = False, occluded: bool = False) -> Card:
+         back: bool = False, occluded: bool = False,
+         rank_margin: float | None = None) -> Card:
     rank, suit = code[:-1], code[-1]
+    evidence = {"card_back": back, "occluded": occluded,
+                "rank_scores": {}, "ink_pixels": 900}
+    if rank_margin is not None:
+        evidence["rank_margin"] = rank_margin
     return Card(rank=rank, suit=suit, confidence=confidence,
                 rank_score=rank_score, rect=(0, 0, 10, 10),
-                evidence={"card_back": back, "occluded": occluded,
-                          "rank_scores": {}, "ink_pixels": 900})
+                evidence=evidence)
 
 
 def slot_read(name: str, cards: list[Card]) -> CardSlotRead:
@@ -130,6 +134,23 @@ def test_no_majority_keeps_last_good_but_unreliable() -> None:
     check(out.reliable is True, f"恢复干净后应可靠：{out.warnings}")
 
 
+def test_low_confidence_rank_does_not_win_by_votes() -> None:
+    """A/K 混淆：低 rank_score + 小 margin 的候选不能靠 4 票转正。
+
+    2026-10-29 21:55 的实际事故：A♠ 被裂纹动画读成 Ks（rank_score 0.506、
+    margin 0.07），仲裁 4/4 采用了错误 Ks。
+    """
+    s = established()
+    bad = [card("Kd", rank_score=0.506, confidence=0.51,
+                rank_margin=0.07), card("7c"), card("2s")]
+    for i, t in enumerate((0.2, 0.3, 0.4, 0.5, 0.8)):
+        out = s.update(frame(bad), now=t)
+        check(out.board_codes == FLOP,
+              f"低置信度候选不能替换 last-good（第 {i+1} 帧）：{out.board_codes}")
+    check(any("低置信度候选不参与仲裁" in w for w in out.warnings),
+          f"应写低置信度候选警告：{out.warnings}")
+
+
 def test_card_back_challenger_never_wins() -> None:
     """牌背/遮挡是结构性疑点：票数再多也不能转正。"""
     s = established()
@@ -210,6 +231,7 @@ def main() -> int:
         test_flagged_correct_reading_wins_after_window,
         test_last_good_wins_when_more_frames_match,
         test_no_majority_keeps_last_good_but_unreliable,
+        test_low_confidence_rank_does_not_win_by_votes,
         test_card_back_challenger_never_wins,
         test_clean_frames_end_the_window_early,
         test_current_flagged_frame_is_unreliable,

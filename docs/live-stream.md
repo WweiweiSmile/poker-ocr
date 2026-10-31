@@ -6,7 +6,7 @@ JSONL。本文是**当前方案的完整说明**：架构、功能、标定流�
 
 > 2026-10-30.10 更新：提示词 system 已拆成 core + 前注条件模块；新增五级事实优先级、
 > 指标口径、all-in 几何门控、缺失底池/后手不伪造下注、数据质量中文摘要；范围内部
-> range id / combo 数不再进入 prompt。下文示例按当前 `lean-zh-2026-10-31.1` 更新。
+> range id / combo 数不再进入 prompt。下文示例按当前 `lean-zh-2026-10-31.2` 更新。
 
 ---
 
@@ -198,7 +198,7 @@ ROI 路线只裁固定槽位、只跑 rec，不跑全图检测，是实时链路
   `inferred: true`）。金额是底池精确反解出来的，但加注者身份只能按行动顺序取
   「最后一个已记录动作之后最早能行动的人」，无法由底池唯一确定。专门覆盖最后
   位置预设动作、视频流没抓到那一帧就换街的情况；两种模型都对不上账就不猜。
-- **提示词（只有一套中文 lean，`PROMPT_VERSION=lean-zh-2026-10-31.1`）**：
+- **提示词（只有一套中文 lean，`PROMPT_VERSION=lean-zh-2026-10-31.2`）**：
   system 给输出契约、五级事实优先级、决策顺序、指标口径与筹码深度；user 给中文事实块：
   当前局面（含有效筹码/SPR/底池类型/赔率门槛/可争夺底池/短码/本手已投入/
   爆炸底池；有效筹码 = 后手 + 本街已下注，位置写明先/后行动与身后待行动
@@ -675,7 +675,7 @@ cd ~/codes/poker-ocr
  "url":"cam:auto","profile":"table_wpk_live.json",
  "recognizer":"roi","full_config":null,"every":0.5,
  "stable":{"frames":2,"seconds":0.0,"reset_on_discard":true},
- "ai_advice":true,"prompt_version":"lean-zh-2026-10-31.1","prompt_lang":"zh",
+ "ai_advice":true,"prompt_version":"lean-zh-2026-10-31.2","prompt_lang":"zh",
  "resolution":null}
 ```
 
@@ -684,7 +684,7 @@ cd ~/codes/poker-ocr
 - `table_dynamics`：仅当启动时读到非空的 `.table_dy` 才出现，值是解析后的原文。
   没有这个键表示本次会话按「未知对手」标准线。
 - `prompt_version` / `prompt_lang`：仅 `--ai-advice` 时出现；当前固定为
-  `lean-zh-2026-10-31.1` / `zh`。旧日志里的 `advice_style` 保留只读。
+  `lean-zh-2026-10-31.2` / `zh`。旧日志里的 `advice_style` 保留只读。
 - `record_without_hero`：仅 `--ai-advice` 时出现，表示是否会记录没有 hero 手牌
   的手牌（`--record-without-hero` / `RECORD_WITHOUT_HERO`）；默认 `false`。
 
@@ -779,7 +779,7 @@ cd ~/codes/poker-ocr
            "kind":"raise","amount_bb":25.75},
  "reason":"顶对顶踢，牌面干燥，加注拿价值",
  "source":"model","model":"deepseek-chat",
- "prompt_version":"lean-zh-2026-10-31.1","prompt_lang":"zh",
+ "prompt_version":"lean-zh-2026-10-31.2","prompt_lang":"zh",
  "skill_codes":[],
  "duration_ms":1840,
  "click":{"status":"clicked","action":"raise","preset":"raise-1/2",
@@ -809,7 +809,7 @@ cd ~/codes/poker-ocr
 | `hand_id` | 第几手（换手时 +1） |
 | `option.id` | 模型选的选项。翻后：`fold` / `call` / `raise-1/3` / `raise-1/2` / `raise-2/3` / `raise-1` / `raise-1.2` / `all-in`（没人下注时 `call` 表示**过牌**）；翻前：`fold` / `call` / `open-2.5`…`open-4` / `raise-3x` / `raise-4x` / `all-in` |
 | `option.amount_bb` | 加注后的**本街总额**；跟注为需跟额 |
-| `prompt_version` | 生成建议时的中文 lean 版本（`lean-zh-2026-10-31.1`） |
+| `prompt_version` | 生成建议时的中文 lean 版本（`lean-zh-2026-10-31.2`） |
 | `source` | `model` = 模型选的；`fallback` = 超时/报错/非法选项，按最保守动作 |
 | `skill_codes` | 兼容字段，恒为空数组（旧技能库已删除） |
 | `error` | 仅 `fallback` 时出现，说明原因 |
@@ -871,7 +871,7 @@ cd ~/codes/poker-ocr
     "option":{"id":"call","label":"Call 22BB","kind":"call"},
     "action_index":3,
     "reason":"...","source":"model","model":"deepseek-flash",
-    "prompt_version":"lean-zh-2026-10-31.1","skill_codes":[],"duration_ms":1840,
+    "prompt_version":"lean-zh-2026-10-31.2","skill_codes":[],"duration_ms":1840,
     "context":{"table_stats_scope":"current_table",
                "table_stats":{"scope":"current_table","players":2,
                               "total_players":2,"vpip":38.0,"pfr":12.0,

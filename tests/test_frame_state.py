@@ -204,6 +204,30 @@ def test_card_icon_decides_fold_without_ocr() -> None:
           "没给图标的座位应保持未知")
 
 
+def test_card_icon_missing_does_not_fold_a_bettor() -> None:
+    """本街已下注 >BB 的人不能被「图标缺失」判成弃牌。
+
+    0c2e 的 LJ 已 3-bet 到 20BB，图标在动画里消失，旧逻辑连续两帧判弃牌，
+    翻后事实写成「本手在局 1 人」。下注是比图标更硬的事实。
+    """
+    rows = {k: dict(v) for k, v in BASE.items()}
+    rows["lowL"] = {"name": "YKY", "chip": "234.5BB", "bet": "20BB"}
+    s = build_state(make_frame(rows), PROFILE,
+                    card_icons={"lowL": False})
+    low = s.player("lowL")
+    check(low.fold is False and low.in_hand,
+          f"已下注 20BB 的玩家不能判弃牌：{low.to_debug()}")
+    check(any("图标缺失不判弃牌" in n for n in low.notes),
+          f"应留下覆盖原因：{low.to_debug()}")
+
+    # 头像是明确的「弃牌」遮罩时，即使本街下过注也要信头像（下注后弃牌）。
+    folded = build_state(make_frame(rows), PROFILE,
+                         card_icons={"lowL": False},
+                         avatar_reads={"lowL": ("弃牌", 0.9)})
+    check(folded.player("lowL").fold is True,
+          f"头像明确弃牌应保留：{folded.player('lowL').to_debug()}")
+
+
 def test_card_icon_overrides_fold_text() -> None:
     """看到图标就不能判弃牌：rec 把「跟注」误读成弃牌时以此兜底。"""
     rows = {k: dict(v) for k, v in BASE.items()}

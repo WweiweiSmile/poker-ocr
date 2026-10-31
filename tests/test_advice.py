@@ -1404,6 +1404,26 @@ def test_covered_stack_has_only_fold_or_all_in() -> None:
     check(by["call"].amount == 10.0, f"翻前跟注应封顶到后手 10：{by['call']}")
 
 
+def test_pot_odds_equity_includes_my_call() -> None:
+    """a334：底池 67.5、跟 22.5，正确权益门槛是 25%（22.5/90），不是 33%。
+
+    旧复盘把 22.5/67.5=33% 当门槛，得出「32% 不够、该弃」；但跟注后
+    底池是 90，32% 权益的 EV = 0.32×90−22.5 = +6.3BB。价格事实必须
+    用「含我跟注的可争夺底池」当分母。
+    """
+    from poker_ocr.hand_track import OpponentSnapshot
+
+    point = make_point(
+        street="flop", board=("6s", "2c", "7h"), hero_cards=("5h", "4c"),
+        hero_position="BB", hero_stack=46.5, hero_bet=5.0, hero_invested=0.0,
+        to_call=22.5, pot=67.5, pot_before_street=35.0, cbet_spot=False,
+        opponents=(OpponentSnapshot("co", "CO", "CO", 24.0, 27.5, False),))
+    user = render_facts_zh(build_situation(point))
+    check("赔率门槛：22.5BB / 可争夺底池 90BB = 25.0%" in user,
+          f"门槛应含我的跟注：\n{user}")
+    check("= 33.3%" not in user, f"不能再用 22.5/67.5 当权益门槛：\n{user}")
+
+
 def test_covered_all_in_uses_winnable_pot_not_table_pot() -> None:
     """990036：对手 491 全下 cover 我 168 后手，超出的 303.5 会退回。
 
@@ -2014,6 +2034,11 @@ def test_multiway_facts_show_actual_and_modeled_players() -> None:
     check("爆炸底池：是" in text, f"应标爆炸底池：\n{text}")
     check("只建模前 4 名对手" in text, f"数据缺口应说明建模上限：\n{text}")
     check("5-way avg" not in text, "不该再出现建模人数平均份额")
+    # 炸弹池权益的公平份额也必须按实际人数，不能和上面的 12.5% 打架。
+    check("实际 8 人公平份额 12.5%" in text,
+          f"炸弹池权益应按实际人数算公平份额：\n{text}")
+    check("建模 5 人公平份额" not in text,
+          f"不能拿建模人数当公平份额分母：\n{text}")
 
 
 def test_street_change_is_chinese() -> None:
@@ -2101,6 +2126,32 @@ def test_facts_include_spot_spr_and_position() -> None:
     check("Hero 无位置" in render_facts_zh(oop),
           "事实里应写明没位置")
 
+    # 中间位置：不是最后一个行动，也不是全场第一个。旧文案会写成「先行动」。
+    middle = build_situation(make_point(
+        hero_position="CO", table_size=9, players_dealt=9,
+        opponents=(
+            OpponentSnapshot("utg", "UTG", "UTG", 100.0, 0.0, False),
+            OpponentSnapshot("btn", "BTN", "BTN", 100.0, 0.0, False))))
+    middle_text = render_facts_zh(middle)
+    check("Hero 无位置（翻后不是最后行动）" in middle_text,
+          f"CO 在 UTG 之后、BTN 之前，不能写先行动：\n{middle_text}")
+    check("Hero 无位置（翻后先行动）" not in middle_text,
+          f"CO 不是全场第一个行动：\n{middle_text}")
+
+    # 多人池短码：有效筹码是主池上限，可玩深度要单独给。
+    depth = build_situation(make_point(
+        street="preflop", board=(), hero_position="BTN", hero_stack=203.0,
+        hero_bet=0.0, to_call=1.0, pot=6.5, pot_before_street=4.0,
+        table_size=9, players_dealt=8,
+        opponents=(
+            OpponentSnapshot("lj", "LJ", "LJ", 29.0, 0.0, False),
+            OpponentSnapshot("utg", "UTG", "UTG", 185.0, 1.0, False))))
+    depth_text = render_facts_zh(depth)
+    check("有效筹码：29BB" in depth_text,
+          f"短码应压主池有效筹码：\n{depth_text}")
+    check("可玩深度：185BB" in depth_text,
+          f"应给对最深对手的可玩深度：\n{depth_text}")
+
     # 位置读不出来时宁可不给结论，也不能说「我是最后一个行动」
     unknown = build_situation(make_point(
         opponents=(OpponentSnapshot("b", "小李", None, 100.0, 0.0, False),)))
@@ -2114,6 +2165,21 @@ def test_facts_include_spot_spr_and_position() -> None:
         opponents=(OpponentSnapshot("b", "小李", "CO", 0.0, 0.0, False),)))
     check(allin.players_left_to_act == 0,
           f"全下对手不该算身后人数：{allin.players_left_to_act}")
+
+
+def test_postflop_zero_opponents_is_flagged() -> None:
+    """状态帧把对手全标弃牌时，翻后事实必须显式警告，不能按单挑打。"""
+    sit = build_situation(make_point(
+        street="flop", board=("2c", "4d", "4c"), hero_cards=("Kh", "Ad"),
+        hero_stack=134.0, pot=125.5, pot_before_street=125.5,
+        opponents=()))
+    text = render_facts_zh(sit)
+    check("本手在局：1 人（Hero + 0 名对手）" in text,
+          f"应如实写在局人数：\n{text}")
+    check("翻后状态帧显示在局对手为 0" in text,
+          f"应给数据异常警告：\n{text}")
+    check("位置：无在局对手" in text,
+          f"无对手时不能写有位置/先行动：\n{text}")
 
 
 def test_short_stack_is_flagged_not_silently_effective() -> None:
@@ -2850,18 +2916,22 @@ def test_short_stack_prompt_dedupes_capped_options() -> None:
 
 def test_table_stats_label_marks_current_table_scope() -> None:
     """当前桌统计要标明「本手在局」，不能再说「可能跨桌」。"""
+    from poker_ocr.hand_track import OpponentSnapshot
     from poker_ocr.opponent_profile import PooledStats
 
     stats = PooledStats(hands=294, players=4, total_players=6,
                         scope="current_table", approx_hands=True,
                         vpip=38.0, pfr=12.0, threebet=5.9, limp=46.0,
                         fold_to_cbet=79.0, stab=5.0)
-    sit = build_situation(make_point(to_call=4.0, pot=10.0, hero_stack=90.0),
-                          table_stats=stats)
+    point = make_point(
+        to_call=4.0, pot=10.0, hero_stack=90.0,
+        opponents=tuple(OpponentSnapshot(f"o{i}", "", pos, 100.0, 0.0, False)
+                        for i, pos in enumerate(("BB", "UTG", "LJ", "CO"))))
+    sit = build_situation(point, table_stats=stats)
     _, user = build_messages(sit)
-    check("当前牌桌数据" in user and "本手在局 6 人" in user,
+    check("当前牌桌数据" in user and "本手在局" in user,
           f"应标明当前桌口径：\n{user}")
-    check("4 名对手有画像" in user, f"应给出画像覆盖：\n{user}")
+    check("4 名在局对手有画像" in user, f"应给出画像覆盖：\n{user}")
     check("可能跨桌" not in user and "画像库" not in user,
           f"不应再出现跨桌免责：\n{user}")
 
@@ -2876,6 +2946,7 @@ def test_table_stats_label_marks_current_table_scope() -> None:
 
 def test_table_stats_counts_hero_and_flags_small_samples() -> None:
     """当前桌：人数含 Hero；小样本指标要标机会数；3-bet 少不写成被动。"""
+    from poker_ocr.hand_track import OpponentSnapshot
     from poker_ocr.opponent_profile import PooledStats
 
     stats = PooledStats(
@@ -2886,11 +2957,14 @@ def test_table_stats_counts_hero_and_flags_small_samples() -> None:
         opportunities={"preflop": 50.0, "threebet": 22.5, "limp": 21.0,
                        "fcbet": 5.5, "stab": 9.0, "river": 4.5})
     _, user = build_messages(build_situation(
-        make_point(to_call=4.0, pot=10.0, hero_stack=90.0),
+        make_point(to_call=4.0, pot=10.0, hero_stack=90.0,
+                   opponents=(
+                       OpponentSnapshot("a", "老王", "BB", 97.0, 0.0, False),
+                       OpponentSnapshot("b", "小李", "CO", 97.0, 0.0, False))),
         table_stats=stats))
-    check("本手在局 3 人（含 Hero）" in user,
+    check("本手在局：3 人（Hero + 2 名对手）" in user,
           f"人数必须含 Hero：\n{user}")
-    check("2 名对手有画像" in user and "单人最多约 66 手" in user,
+    check("2 名在局对手有画像" in user and "单人最多约 66 手" in user,
           f"样本口径要写单人不写整桌：\n{user}")
     check("对 c-bet 弃 82%（仅 5.5 次机会）" in user,
           f"5.5 次机会的 82% 必须标样本：\n{user}")
@@ -2907,16 +2981,23 @@ def test_table_stats_counts_hero_and_flags_small_samples() -> None:
 
 def test_table_stats_low_coverage_suppresses_table_exploit() -> None:
     """9 人在局只有 1 人有画像时，不给「当前桌可剥削」的整桌结论。"""
+    from poker_ocr.hand_track import OpponentSnapshot
     from poker_ocr.opponent_profile import PooledStats
 
+    seats = ("SB", "BB", "UTG", "UTG+1", "UTG+2", "LJ", "HJ", "CO")
+    opponents = tuple(
+        OpponentSnapshot(f"o{i}", "", pos, 100.0, 0.0, False)
+        for i, pos in enumerate(seats))
+    point = make_point(
+        to_call=4.0, pot=10.0, hero_stack=90.0,
+        hero_position="BTN", table_size=9, players_dealt=9,
+        opponents=opponents)
     stats = PooledStats(
         hands=66, players=1, total_players=9,
         scope="current_table", approx_hands=True,
         vpip=45.0, threebet=5.0, limp=50.0,
         opportunities={"preflop": 50.0, "threebet": 50.0, "limp": 50.0})
-    _, user = build_messages(build_situation(
-        make_point(to_call=4.0, pot=10.0, hero_stack=90.0),
-        table_stats=stats))
+    _, user = build_messages(build_situation(point, table_stats=stats))
     check("另外 7 名在局对手没有画像" in user,
           f"覆盖率要写清：\n{user}")
     check("当前桌可剥削" not in user,
@@ -2928,11 +3009,36 @@ def test_table_stats_low_coverage_suppresses_table_exploit() -> None:
         scope="current_table", approx_hands=True,
         vpip=45.0, threebet=5.0, limp=50.0,
         opportunities={"preflop": 50.0, "threebet": 50.0, "limp": 50.0})
-    _, partial_user = build_messages(build_situation(
-        make_point(to_call=4.0, pot=10.0, hero_stack=90.0),
-        table_stats=partial))
+    _, partial_user = build_messages(
+        build_situation(point, table_stats=partial))
     check("当前桌可剥削" not in partial_user,
           f"2/8 覆盖也不该给整桌结论：\n{partial_user}")
+
+
+def test_table_stats_uses_main_in_hand_count() -> None:
+    """桌况标题不能再用另一套在局人数，和主事实块打架。"""
+    from poker_ocr.hand_track import OpponentSnapshot
+    from poker_ocr.opponent_profile import PooledStats
+
+    seats = ("SB", "BB", "UTG", "UTG+1", "UTG+2", "LJ", "HJ", "CO")
+    opponents = tuple(
+        OpponentSnapshot(f"o{i}", "", pos, 100.0, 0.0, False)
+        for i, pos in enumerate(seats))
+    stats = PooledStats(
+        hands=66, players=2, total_players=3,
+        scope="current_table", approx_hands=True,
+        vpip=45.0, threebet=5.0, limp=50.0,
+        opportunities={"preflop": 50.0, "threebet": 50.0, "limp": 50.0})
+    point = make_point(
+        hero_position="BTN", table_size=9, players_dealt=9,
+        opponents=opponents)
+    _, user = build_messages(build_situation(point, table_stats=stats))
+    check("本手在局：9 人（Hero + 8 名对手）" in user,
+          f"主事实人数应含 Hero：\n{user}")
+    check("本手在局 3 人" not in user,
+          f"桌况标题不能再写另一套人数：\n{user}")
+    check("另外 6 名在局对手没有画像" in user,
+          f"未知对手数应按主事实算：\n{user}")
 
 
 def test_table_stats_low_3bet_with_limpers_does_not_widen_early_open() -> None:
@@ -3158,8 +3264,10 @@ def test_preflop_facing_raise_facts_cover_dominated_calls() -> None:
     check("面对 3-bet 的继续范围" in ak_text,
           f"AKo 要给 3-bet 继续范围：\n{ak_text}")
     check("可以跟注或 4-bet" in ak_text, f"AKo 是价值牌：\n{ak_text}")
-    check("位置：Hero 无位置（翻后先行动）" in ak_text,
+    check("位置：Hero 无位置" in ak_text,
           f"UTG 被 LJ 3-bet 必须写无位置：\n{ak_text}")
+    check("有位置" not in ak_text.split("## 翻前信息")[0],
+          f"UTG 不能写成有位置：\n{ak_text}")
 
     # BB 的 AKo 面对单加注：AK 必须被认成强牌（AK 不带 s/o 的 token
     # 在 expand() 里是空集，曾经把 AKo 漏出强牌集合）。
@@ -3214,12 +3322,18 @@ def test_bomb_pot_shallow_spr_top_pair_is_a_stackoff_hand() -> None:
         street="flop", board=("Qc", "6s", "5c"), hero_cards=("Qs", "9h"),
         hero_position="CO", hero_stack=182.5, hero_bet=0.0, to_call=0.0,
         pot=45.0, pot_before_street=45.0, table_size=9, players_dealt=9,
+        bomb_pot=True,
         opponents=(OpponentSnapshot("utg2", "UTG+2", "UTG+2", 58.5, 0.0,
                                     False),))
     sit = build_situation(point)
     check(sit.explosive_pot, "fixture 应是炸弹池")
+    check(sit.pot_type == "bomb pot", f"炸弹池类型应是 bomb pot：{sit.pot_type}")
     check((sit.spr or 9) <= 2.0, f"fixture SPR 应 ≤2：{sit.spr}")
     text = render_facts_zh(sit)
+    check("底池类型：炸弹池（强制前注）" in text,
+          f"炸弹池不能写成无人入池：\n{text}")
+    check("底池类型：无人入池" not in text,
+          f"炸弹池不能写成无人入池：\n{text}")
     check("套池价值牌" in text, f"浅码炸弹池顶对要按套池价值牌：\n{text}")
     check("翻牌直接按 1/2–2/3 池下注" in text,
           f"要写清翻牌就下注：\n{text}")

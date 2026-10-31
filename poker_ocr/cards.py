@@ -131,6 +131,10 @@ DEFAULT_DOUBT_WINDOW = 0.5
 # 的份额不低于 _DOUBT_WIN_SHARE，才允许替换 last-good。
 _DOUBT_MIN_VOTES = 2
 _DOUBT_WIN_SHARE = 0.6
+# 低置信度候选即使多帧一致，也不该仅凭票数转正：2026-10-29 21:55 的
+# A♠ 被裂纹动画读成 Ks（rank_score 0.506、margin 0.07），4/4 票把
+# 错误读数扶正。候选必须达到稳定闸的点数门槛，或分数略低但 margin 足够。
+_DOUBT_MIN_RANK_MARGIN = 0.15
 
 # 牌背分类：POKER 牌背的白色边框仍会被检出成牌面矩形，但内部是大面积高饱和
 # 图案（实测 S 中位数≈150、高饱和像素占 82%–85%，V 中位数≈170）；真牌是白底，
@@ -952,9 +956,28 @@ class StableCards:
             self._reset_tracks()
             warnings.append("hero_cards: 换了一组手牌，已清空上一手牌面")
 
-        board, board_reset, _, board_stale = self._update_slot(
-            result.board, self._board, "board", self.BOARD_COUNTS,
-            anomalies, warnings, board=True, now=now)
+        # 公共牌和 hero 手牌不可能出现同一张牌。牌区重叠/牌背动画会把 hero
+        # 的一张牌漏进 board ROI（2026-10-30 22:02:52 的 Kh、22:32:44 等
+        # 四个「疑惑帧无多数」都是这种）。这不是公共牌挑战者，不能开仲裁：
+        # 直接忽略本帧 board 读数，保留 last-good。
+        duplicate = set(result.board.codes) & set(result.hero_codes)
+        if duplicate:
+            warnings.append(
+                "board: 与 hero 手牌重复（"
+                + "/".join(sorted(duplicate)) + "），忽略本帧牌面读数")
+            if self._board.read is not None:
+                board = self._board.read
+                board_stale = True
+            else:
+                board = CardSlotRead(
+                    name=result.board.name, slot=result.board.slot,
+                    rect=result.board.rect)
+                board_stale = False
+            board_reset = False
+        else:
+            board, board_reset, _, board_stale = self._update_slot(
+                result.board, self._board, "board", self.BOARD_COUNTS,
+                anomalies, warnings, board=True, now=now)
         if board_reset:
             # 新一手：hero 的上一手牌不能继续沿用。
             self._hero = _StableSlot()
@@ -1226,11 +1249,31 @@ class StableCards:
         last = tuple(track.read.codes) if track.read is not None else ()
         last_votes = sum(1 for c, _hard, _clean, _read in samples if c == last)
 
-        # 只有结构性干净的样本才能给挑战者投票：牌背/遮挡/? 再多票也不能转正。
+        def candidate_ok(read: CardSlotRead) -> bool:
+            """低置信度候选不能只靠票数转正。"""
+            for c in read.cards:
+                if (c.evidence.get("card_back")
+                        or c.evidence.get("occluded") or c.rank == "?"):
+                    return False
+                if c.rank_score >= _MIN_RANK_SCORE:
+                    continue
+                margin = c.evidence.get("rank_margin")
+                if margin is None or float(margin) < _DOUBT_MIN_RANK_MARGIN:
+                    return False
+            return True
+
+        # 只有结构性干净、且点数足够可信的样本才能给挑战者投票：
+        # 牌背/遮挡/? 再多票也不能转正；低置信度的 K/A 混淆也不行。
         by_codes: dict[tuple[str, ...], list[CardSlotRead]] = {}
+        rejected = False
         for c, hard_clean, _clean, read in samples:
             if hard_clean and c != last:
-                by_codes.setdefault(c, []).append(read)
+                if candidate_ok(read):
+                    by_codes.setdefault(c, []).append(read)
+                else:
+                    rejected = True
+        if rejected:
+            warnings.append(f"{name}: 低置信度候选不参与仲裁")
         top = max(by_codes.items(), key=lambda kv: len(kv[1]), default=None)
         cand_votes = 0
         if top is not None:

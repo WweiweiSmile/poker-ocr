@@ -77,6 +77,28 @@ def test_board_needs_two_equal_frames() -> None:
     check(out.reliable, f"稳定后的牌面应可靠：{out.warnings}")
 
 
+def test_board_duplicate_hero_card_is_ignored() -> None:
+    """board 读出 hero 的牌（牌区重叠/牌背）时不能开疑惑帧仲裁。
+
+    2026-10-30 22:02:52 hero Kc Kh，board 候选 Kh；四个「仲裁无多数」
+    都是这种重叠。公共牌和手牌不可能同一张，直接忽略 board 读数。
+    """
+    s = StableCards(confirm_frames=2, doubt_window=0.5)
+    hero = [card("Kh"), card("Ad")]
+    # 先建立一个空 board 的 last-good
+    out = s.update(frame([], hero), now=0.0)
+    check(out.board_codes == [], f"空 board 应保持：{out.board_codes}")
+    # 牌区重叠的 challenger 连续两帧：不能进 doubt，也不能采用
+    out = s.update(frame([card("Kh")], hero), now=0.1)
+    check(out.board_codes == [], f"重复 hero 牌不能当公共牌：{out.board_codes}")
+    check(out.reliable is True, f"重复牌被忽略后不应标不可靠：{out.warnings}")
+    check(any("与 hero 手牌重复" in w for w in out.warnings),
+          f"应写重复警告：{out.warnings}")
+    out = s.update(frame([card("Kh")], hero), now=0.2)
+    check(out.board_codes == [], f"第二帧也不能采用：{out.board_codes}")
+    check(not s._board.doubt_open, "重复牌不该打开疑惑帧仲裁")
+
+
 def test_board_regression_is_rejected() -> None:
     """4→3 / 5→4 一律不采用，哪怕连续多帧；只记异常。"""
     s = StableCards()

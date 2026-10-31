@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import itertools
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 from types import MappingProxyType
@@ -111,6 +111,10 @@ class Range:
     note: str = ""
     weighted_width: float = 0.0
     combo_count: int = 0
+    # 这个范围是从哪个翻前先验收窄来的（board_range.build 填）。条件弃牌率
+    # 要用它做绝对水平的校准：先验范围上的平均弃牌率应该等于历史观测值。
+    # compare=False：范围相等不该因为来源不同而变。
+    prior_id: str | None = field(default=None, compare=False, repr=False)
 
     def __post_init__(self) -> None:
         positive = {c: w for c, w in self.combo_weights.items() if w > 0}
@@ -139,7 +143,7 @@ class Range:
 
 
 def make_range(id: str, combo_weights: Mapping[Combo, float], *,
-               source: str = "", note: str = "",
+               source: str = "", note: str = "", prior_id: str | None = None,
                version: int = RANGE_VERSION) -> Range | None:
     """过滤负数/零权重并归一化。空范围返回 None（不要返回空范围让权益变 0）。"""
     raw = {canon_combo(*c): float(w) for c, w in combo_weights.items()
@@ -159,6 +163,7 @@ def make_range(id: str, combo_weights: Mapping[Combo, float], *,
         note=note,
         weighted_width=total / TOTAL_COMBOS * 100,
         combo_count=len(weights),
+        prior_id=prior_id,
     )
 
 

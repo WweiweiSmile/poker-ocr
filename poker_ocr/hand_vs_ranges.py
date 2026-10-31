@@ -26,7 +26,7 @@ import random
 import threading
 import zlib
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Iterable, Sequence
 
 from . import board_range, field_ranges, ranges
@@ -65,6 +65,10 @@ class OpponentEdge:
     position: str | None = None
     mode: str = "call"
     combos_after_removal: int = 0
+    # 本手收窄后的范围（翻前先验 × 当前街动作过滤）。fold_equity 要用它按
+    # 权重算条件弃牌率；compare=False 是为了不改变 dataclass 的相等语义
+    # （Range 里带 dict，参与比较会又慢又容易误判）。
+    rng: "ranges.Range | None" = field(default=None, compare=False, repr=False)
 
     @property
     def label(self) -> str:
@@ -298,6 +302,7 @@ def _exact_edge(seat_id: str, position: str | None, rng: ranges.Range,
         position=position,
         mode=mode,
         combos_after_removal=len(weights),
+        rng=rng,
     )
 
 

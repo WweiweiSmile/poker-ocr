@@ -62,7 +62,7 @@ HERO_ACTOR = "hero"
 
 # 当前唯一的中文 lean 提示词版本。写入 session_start / advice JSONL，
 # 复盘归因用；改动 system 或事实块时 bump。
-PROMPT_VERSION = "lean-zh-2026-10-31.1"
+PROMPT_VERSION = "lean-zh-2026-10-31.2"
 PROMPT_LANGUAGE = "zh"
 
 # 加注尺度：名字 → 底池倍数。「满池 1.2」是超池，用于需要施压/劝退的场合
@@ -717,8 +717,32 @@ def hero_in_position(snap: HandSnapshot) -> bool | None:
     return not _after_hero(snap, street=FLOP)
 
 
+def hero_first_to_act(snap: HandSnapshot) -> bool | None:
+    """翻后我是不是**全场第一个**行动。
+
+    `hero_in_position=False` 只表示「我不是最后一个」，中间位置也满足；
+    旧文案把它写成「翻后先行动」，CO 在 BTN 之前、UTG 之后时会说错。
+    """
+    order = _action_order(snap, street=FLOP)
+    hero = snap.hero_position
+    if (order is None or hero not in order
+            or not _positions_known(snap, order)):
+        return None
+    idx = order.index(hero)
+    return all(order.index(o.position) > idx
+               for o in snap.opponents
+               if _can_act(o) and o.position in order)
+
+
 def pot_type(snap: HandSnapshot) -> str | None:
-    """底池类型：翻前动作线决定翻后的范围宽度与 SPR 语义。"""
+    """底池类型：翻前动作线决定翻后的范围宽度与 SPR 语义。
+
+    炸弹池没有翻前动作，`preflop_shapes` 会是 `unopened`；但「无人入池」
+    与屏幕上的 BOMB POT 是两回事，模型会因此把强制前注池当普通未开池池。
+    横幅/5BB 强制前注已经记在 `bomb_pot` 上，优先用它。
+    """
+    if snap.bomb_pot:
+        return "bomb pot"
     shapes = set(snap.preflop_shapes)
     if "three-bet" in shapes:
         return "3-bet+ pot"
@@ -895,6 +919,9 @@ class Situation:
     # build_situation(include_strength=False) 不计算它，prompt 也不再渲染。
     # None = 未计算或没有 hand_ranges。
     hand_strength: "object | None" = None
+    # 条件弃牌率：用本手收窄后的范围按权重算「他会不会弃」，并给出各尺寸的
+    # 盈亏平衡弃牌率与 EV。见 fold_equity 模块。None = 翻前/无范围/已关闭。
+    fold_eq: "object | None" = None
 
     @property
     def street(self) -> str:
@@ -967,6 +994,11 @@ def build_situation(snap: HandSnapshot,
     if snap.pot is None or snap.pot <= 0 or snap.hero_stack is None:
         warnings.append("底池/后手未读全，已隐藏下注选项，只保留过牌/跟注/弃牌")
     n_opp = sum(1 for o in snap.opponents if not o.folded)
+    # 翻后只剩 Hero、底池却很大：状态帧把对手全标成弃牌（0c2e 的
+    # 22:07:59 帧）。这种事实会自相矛盾（「本手在局 1 人」却有人全下），
+    # 必须让模型看到「翻后建议不可信」，而不是按单挑打。
+    if snap.street != PREFLOP and n_opp == 0 and (snap.pot or 0) > 0:
+        warnings.append("翻后状态帧显示在局对手为 0（数据异常，翻后建议不可信）")
 
     # 事实块只算一次：牌面结构、最好五张、精确排名、坚果校验全从这里出。
     # 实时建议和复盘共用同一个 GroundTruth，避免「一个说听牌没成、一个说成对」。
@@ -1108,6 +1140,16 @@ def build_situation(snap: HandSnapshot,
                               hand_strength=hand_strength.compute_hand_strength(sit))
         except Exception:  # noqa: BLE001
             pass
+    # 条件弃牌率：历史弃牌率是「全范围平均」，这手牌里对手已经用动作收窄了
+    # 范围。这里用同一个收窄范围算加权弃牌率 + 各尺寸的盈亏平衡点。
+    # 依赖 hand_ranges；缺失或出错时静默跳过（fail open）。
+    try:
+        from . import fold_equity
+        report = fold_equity.lookup(sit)
+        if report is not None:
+            sit = replace(sit, fold_eq=report)
+    except Exception:  # noqa: BLE001
+        pass
     return sit
 
 
@@ -1395,6 +1437,11 @@ def _no_fold_equity(sit: Situation) -> bool:
     效果是把底池做大、把跟注站留在手里。h31 就是这么输的（4 家、8 张顺子听、
     下注 1/2 池），模型还把它解释成「为权益而打」，所以不能只靠提示词。
     """
+    report = getattr(sit, "fold_eq", None)
+    if report is not None:
+        # 有本手范围算出来的数就用数：多人池里「全部弃牌」是连乘，
+        # 3 家各弃 40% 只剩 6%，2 家各弃 60% 还有 36%，不能用人数一刀切。
+        return report.fold_equity < 0.15
     return (sit.street != PREFLOP
             and (sit.opponents_in_hand or 0) >= 3
             and sit.hand_tier in (STRONG_DRAW, WEAK_DRAW))
@@ -1988,6 +2035,11 @@ def render_hand_facts(sit: Situation) -> str:
         if sit.hand_ranges is not None:
             lines.append("")
             lines.append(sit.hand_ranges.render())
+        if sit.fold_eq is not None:
+            # 紧跟在「他的范围是什么」之后：范围决定他现在还剩什么牌，
+            # 弃牌率决定这些牌里有多少会被打走，两件事必须连着读。
+            lines.append("")
+            lines.append(sit.fold_eq.render())
         if sit.hand_strength is not None:
             # 牌力解析是「主答案」：behind/equity 三个正交数合成的一行结论。
             # 位置刻意放在 Hand vs ranges 之后、Board structure 之前。
@@ -2191,6 +2243,7 @@ _POT_TYPE_ZH = {
     "single-raised pot": "单加注池",
     "limped pot": "溜入池",
     "unopened pot": "无人入池",
+    "bomb pot": "炸弹池（强制前注）",
 }
 _PREFLOP_SHAPE_ZH = {
     "unopened": "无人入池",
@@ -2424,7 +2477,21 @@ def render_gt_warnings_zh(gt: GroundTruth | None,
         elif warning.startswith("The board is paired"):
             text = "牌面成对：葫芦或四条可能"
         elif warning.startswith("One of your two pairs is the BOARD pair"):
-            text = "两对里有一对来自公对面，所有人共享；这是抓诈牌"
+            # 公对只是两对里的一对；另一对如果是自己的口袋对/手牌对，
+            # 仍是真两对，能拿价值。旧文案一律写「抓诈牌」，f2f 的
+            # 66 在 99T 转牌就被劝成过牌。
+            hero_ranks = {r for r, _ in (gt.hero if gt is not None else ())}
+            counts: dict[int, int] = {}
+            for rank, _suit in (gt.made.best_five if gt is not None else ()):
+                counts[rank] = counts.get(rank, 0) + 1
+            pair_ranks = {r for r, n in counts.items() if n >= 2}
+            # 两对里只要有一对用到了 Hero 的底牌（口袋对或手牌对），
+            # 就不是纯「打牌面」；只有两对都来自公面才是抓诈牌。
+            own_pair = any(r in hero_ranks for r in pair_ranks)
+            text = ("两对里有一对来自公对面；另一对用到了你的底牌，仍是真两对，"
+                    "可以下注拿价值，但别当坚果（更大口袋对/顶对能压过）"
+                    if own_pair else
+                    "两对都来自公面/你只共享公对，这是抓诈牌")
         elif warning.startswith("There are trips on the board"):
             text = "牌面有三条：四条可能"
         elif warning.startswith("An opponent can complete a straight"):
@@ -2593,7 +2660,11 @@ def render_hand_strength_zh(sit: Situation) -> list[str]:
                             if sit.ground_truth is not None else None)
         lines.append(f"牌力：{kind}" + (f"（{outs} outs）" if outs else ""))
     elif tier == "打牌面":
-        lines.append("牌力：打牌面（最好的五张全部来自公共牌）")
+        # 「打牌面」在本项目指「没有自己的对子/三条，只共享公对」；不是
+        # 字面意义的「五张全来自公共牌」。0c2e 的 AK 在 442 上仍有 A/K
+        # 踢脚，旧文案会让模型把它当空气。
+        lines.append("牌力：打牌面（只共享公对/公三条，没有自己的成牌；"
+                     "高张/踢脚仍参与比牌，不等于空气）")
     elif tier == "空气":
         if sit.outs:
             lines.append("牌力：空气（无成牌、无听牌；有高张反超 outs）")
@@ -2823,7 +2894,9 @@ def _facing_raise_zh(sit: Situation) -> list[str]:
     behind = behind_opponents(snap)
     tight_reasons: list[str] = []
     if limpers:
-        tight_reasons.append(f"{limpers} 个溜入者")
+        tight_reasons.append(
+            f"{limpers} 人溜入（含你）" if hero_limped
+            else f"{limpers} 个溜入者")
     if callers:
         tight_reasons.append(f"{callers} 人跟注这次加注")
     if behind:
@@ -2883,8 +2956,8 @@ def _facing_raise_zh(sit: Situation) -> list[str]:
     amount_text = f" {_fmt_num(raise_amt)}BB" if raise_amt else ""
     spot = f"{kind}，{raise_pos or '对手'} {verb}{amount_text}"
     detail = []
-    if limpers:
-        detail.append(f"{limpers} 个溜入者之后")
+    if other_limpers:
+        detail.append(f"{other_limpers} 个溜入者之后")
     if hero_limped:
         detail.append("你已溜入 1BB")
     if detail:
@@ -2973,11 +3046,18 @@ def _table_stat_zh(label: str, value: float,
     return text
 
 
-def render_table_stats_zh(stats: "PooledStats | None") -> list[str]:
+def render_table_stats_zh(stats: "PooledStats | None",
+                          opponents_in_hand: int | None = None) -> list[str]:
     """桌况事实：`current_table` 是本手在局对手，`population` 是冷启动先验。
 
     替代 `.table_dy` 里「整体偏松」那类形容词。样本太小时不渲染 ——
     十手牌算出来的「本桌 VPIP」比没有更误导。
+
+    `opponents_in_hand` 用主事实块的在局人数，而不是 `stats.total_players`：
+    后者来自聚合时的活动对手列表，偶尔会和状态帧/行动线对不上；两个数字
+    同时出现时模型会不知道该信谁（d3a9 出现过「本手在局 8 人」+「当前牌桌
+    数据（本手在局 3 人）」）。桌况只声明「有画像的对手数」，覆盖率按主事实
+    人数算。
     """
     if stats is None or stats.hands < 20:
         return []
@@ -2998,13 +3078,20 @@ def render_table_stats_zh(stats: "PooledStats | None") -> list[str]:
         return []
     total = 0
     if stats.scope == "current_table":
-        # total_players 现在含 Hero；旧调用只传对手数时 max 兜底，避免又少 1。
-        total = max(int(stats.total_players or 0), stats.players + 1)
+        # 以主事实块的在局人数为准；没有传时退回聚合口径。
+        if opponents_in_hand is not None:
+            total = max(int(opponents_in_hand), 0) + 1
+        else:
+            total = max(int(stats.total_players or 0), stats.players + 1)
         sample = (f"历史画像，单人最多约 {stats.hands} 手"
                   if stats.approx_hands else f"历史画像，单人最多 {stats.hands} 手")
-        lines = [f"## 当前牌桌数据（本手在局 {total} 人（含 Hero），"
-                 f"{stats.players} 名对手有画像；{sample}）"]
-        unknown = max(total - 1 - stats.players, 0)
+        opponents_total = max(total - 1, 0)
+        # 聚合时可能有已弃牌/已离桌的人；不能在「本手 2 人」时写 4 名对手
+        # 有画像。以主事实人数封顶，缺口只算真实在局的人。
+        known = (min(int(stats.players), opponents_total)
+                 if opponents_total else int(stats.players))
+        lines = [f"## 当前牌桌数据（{known} 名在局对手有画像；{sample}）"]
+        unknown = max(opponents_total - known, 0)
         if unknown:
             lines.append(f"另外 {unknown} 名在局对手没有画像，"
                          "按未知对手处理，不伪造个人数据")
@@ -3135,14 +3222,21 @@ def render_explosive_zh(sit: Situation) -> list[str]:
     hr = sit.hand_ranges
     if hr is not None and hr.opponents:
         modeled = len(hr.opponents) + 1
-        fair = 1.0 / modeled
+        # 公平份额按**实际在局人数**算；范围只建模前 N 家。拿建模人数当
+        # 分母会同时出现「公平份额 20%」和「实际 9 人公平份额 11.1%」，
+        # 模型会按更乐观的那个数把中等牌当价值牌。
+        actual = (sit.opponents_in_hand + 1
+                  if sit.opponents_in_hand is not None else modeled)
+        fair = 1.0 / max(actual, 1)
         ratio = hr.equity / fair if fair > 0 else 0.0
         # 只在浅码分支说「按价值牌打」；深码炸弹池一对仍要控池。
         if ratio >= 1.5 and spr <= 3.0:
+            extra = (f"（实际 {actual} 人；范围只建模 {modeled} 人）"
+                     if actual != modeled else "")
             lines.append(
-                f"炸弹池权益：对建模 {modeled} 人的权益 {hr.equity:.0%}，"
-                f"是公平份额 {fair:.0%} 的 {ratio:.1f} 倍 —— 这不是「中等牌」，"
-                "按价值牌下注/跟注，别当控池牌过牌。")
+                f"炸弹池权益：对范围权益 {hr.equity:.0%}，"
+                f"是实际 {actual} 人公平份额 {fair:.1%} 的 {ratio:.1f} 倍{extra}"
+                " —— 这不是「中等牌」，按价值牌下注/跟注，别当控池牌过牌。")
     return lines
 
 
@@ -3378,8 +3472,15 @@ def render_facts_zh(sit: Situation) -> str:
 
     geometry: list[str] = []
     effective = _effective_stack(snap)
+    playable = _playable_depth(snap)
     if effective is not None:
         geometry.append(f"有效筹码：{_fmt_num(effective)}BB")
+        # 多人池里一个短码会把 min 压到很短，但开池/单挑范围该按能跟注的
+        # 最深对手算；两个数都写出来，模型才不会把整桌当短码局。
+        if (playable is not None and effective < playable - 0.5
+                and (sit.opponents_in_hand or 0) >= 2):
+            geometry.append(f"可玩深度：{_fmt_num(playable)}BB"
+                            "（对最深对手；开池/单挑范围按此，短码只压主池）")
     if sit.spr is not None:
         spr_text = "<0.1" if 0 < sit.spr < 0.1 else f"{sit.spr:.1f}"
         geometry.append(f"SPR {spr_text}")
@@ -3389,9 +3490,16 @@ def render_facts_zh(sit: Situation) -> str:
         lines.append("｜".join(geometry))
 
     position: list[str] = []
-    if sit.in_position is not None:
-        position.append("位置：Hero 有位置（翻后最后行动）" if sit.in_position
-                        else "位置：Hero 无位置（翻后先行动）")
+    if snap.street != PREFLOP and (sit.opponents_in_hand or 0) == 0:
+        # 状态帧把对手全标成弃牌时，任何「有位置/先行动」都是假的。
+        position.append("位置：无在局对手（状态帧异常，翻后建议不可信）")
+    elif sit.in_position is not None:
+        if sit.in_position:
+            position.append("位置：Hero 有位置（翻后最后行动）")
+        elif hero_first_to_act(snap):
+            position.append("位置：Hero 无位置（翻后先行动）")
+        else:
+            position.append("位置：Hero 无位置（翻后不是最后行动）")
     if sit.players_left_to_act is not None:
         position.append(_behind_detail_zh(snap)
                         or f"身后待行动：{sit.players_left_to_act} 人")
@@ -3470,7 +3578,8 @@ def render_facts_zh(sit: Situation) -> str:
         if len(eligible) > len(shown_reads):
             lines.append("（只显示最相关 3 家；其余画像略）")
 
-    table_stats = render_table_stats_zh(sit.table_stats)
+    table_stats = render_table_stats_zh(
+        sit.table_stats, opponents_in_hand=sit.opponents_in_hand)
     if table_stats:
         lines.append("")
         lines.extend(table_stats)

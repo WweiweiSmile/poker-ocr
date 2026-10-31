@@ -43,6 +43,9 @@ ICON_CORNER_X = 0.35
 ICON_CORNER_Y = (0.55, 1.05)
 # 白边校验：红色 bbox 外 3px 的一圈里，白色像素占比至少这么多
 ICON_WHITE_RING_MIN = 0.35
+# 深色头像上图标的白边可能和背景融在一起，但图标内部一定有白色 POKER 字。
+# 允许「白边不足但内部白字足够」的候选，避免深色头像整桌漏检。
+ICON_WHITE_TEXT_MIN = 0.08
 # 头像槽统一缩放到这个高度再判断：阈值都是参考分辨率（982x2182）下的像素，
 # 低分辨率流（OBS 只给 540 宽）不先放大就只剩十几个像素，会整桌漏检。
 ICON_CANON_H = 131
@@ -94,7 +97,9 @@ def _has_icon(roi: np.ndarray, slot_w: float, slot_h: float,
         ring[y0:y1, x0:x1] = 255
         ring[y:y + h, x:x + w] = 0
         near = white[ring > 0]
-        if near.size and float(near.mean()) < ICON_WHITE_RING_MIN:
+        ring_ok = bool(near.size and float(near.mean()) >= ICON_WHITE_RING_MIN)
+        inner_white = float(white[y:y + h, x:x + w].mean())
+        if not ring_ok and inner_white < ICON_WHITE_TEXT_MIN:
             continue
         return True
     return False

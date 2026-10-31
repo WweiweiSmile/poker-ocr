@@ -263,17 +263,21 @@ def build_state(frame: RoiFrame, profile: Profile,
         icon = icons.get(sid)
         shown_here = sid in shown
         fold = None
+        fold_from_avatar = False
         # 亮牌时头像被两张明牌顶掉：头像区的 rec（读到的是牌面）和图标都
         # 不可信，不能拿它们判弃牌。
         if sid in avatar_reads and not shown_here:
             fold = is_fold_badge(*avatar_reads[sid])
+            fold_from_avatar = fold is True
         if action == "fold":
             fold = True
+            fold_from_avatar = False
         # 头像底角的手牌图标是最硬的「还在池里」证据：看到就是没弃牌，
         # 即使 rec 把「弃牌」读成了别的字也不能反过来判。（没图标 → 弃牌
         # 要等筹码/在场都定下来再判，见下面 in_hand 之后。）
         if icon is True:
             fold = False
+            fold_from_avatar = False
         if shown_here:
             # 河底亮牌不代表没弃牌：早已弃牌的人也可能 show 牌。亮牌时头像
             # 被牌顶掉、图标也没有，只能沿用**前面动作**得出的弃牌判定
@@ -326,6 +330,18 @@ def build_state(frame: RoiFrame, profile: Profile,
                0.0 if (not bet_raw.strip() or bet_label) else
                (bet_a.value if bet_a.ok else None))
         stack = None if chip_equity is not None else (chip.value if chip.ok else None)
+
+        # 本街已经主动投入 >BB 的玩家不可能已经弃牌：图标消失/头像 OCR 误读
+        # 不能覆盖这个硬事实。0c2e 的 LJ 在 22:07:59 已 3-bet 到 20BB，
+        # 却被图标缺失判成弃牌，直到 5-bet all-in 才恢复。
+        fold_ignored_bet = False
+        if (fold is True and not fold_from_avatar
+                and sid not in left and action != "fold"
+                and (prev_fold or {}).get(sid) is not True
+                and bet is not None
+                and bet > (blinds.bb if blinds else 1.0) + 1e-9):
+            fold = False
+            fold_ignored_bet = True
 
         # 名字粘性只在**这一座还有人的证据**时生效。不能拿「文本非空」当证据：
         # 人走后的空座位，筹码/下注槽也常被 rec 读成 `--`/`·` 之类乱码；
@@ -426,6 +442,9 @@ def build_state(frame: RoiFrame, profile: Profile,
                   "folded" if fold else "playing")
 
         notes: list[str] = []
+        if fold_ignored_bet:
+            notes.append(
+                f"fold: 本街已下注 {bet:g}BB，图标缺失不判弃牌")
         if chip_loose:
             notes.append(f"chip: 宽松解析 {chip_raw!r} → {chip.value}")
         elif chip_raw.strip() and not chip.ok and not all_in:

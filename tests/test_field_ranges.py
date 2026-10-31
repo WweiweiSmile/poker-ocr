@@ -151,8 +151,33 @@ def test_missing_and_contradictory_data_fail_open() -> None:
     unread = resolve(snap(
         hero_pos="BTN", opponents=(opp("x", "BB", bet=8.0),),
         preflop=(act("hero", "BTN", "raise", 6.0, hero=True),)))
-    check(unread.specs[0].mode == "unknown",
-          f"有下注额没动作徽章应 unknown，实际 {unread.specs[0].mode}")
+    # 分不清 bet 还是 call 时退回更宽的 call，**不再置空 prior**：置空会让
+    # 范围退化成随机牌，我方权益被系统性高估（见 fold_equity 设计文档）。
+    check(unread.specs[0].mode == "call",
+          f"有下注额没动作徽章应退回 call，实际 {unread.specs[0].mode}")
+    check(unread.specs[0].prior_id is not None,
+          "没读到徽章也必须保留翻前先验，不能退化成随机牌")
+
+
+def test_unread_badge_keeps_prior_range() -> None:
+    """没读到动作徽章时仍按翻前先验收窄，不能退化成「按牌面筛的随机牌」。
+
+    退化的代价：同一局面范围 147→664 组合、我方权益 5.9%→15.8%
+    （见 docs/条件弃牌率-设计.md）。
+    """
+    from poker_ocr import board_range, ranges
+
+    field = resolve(snap(
+        hero_pos="BTN", opponents=(opp("x", "BB", bet=8.0),),
+        preflop=(act("hero", "BTN", "raise", 6.0, hero=True),)))
+    spec = field.specs[0]
+    prior = ranges.get(spec.prior_id)
+    check(prior is not None, "应能取回翻前先验")
+    kept = board_range.build("Ks7d2c", spec.mode, prior)
+    dropped = board_range.build("Ks7d2c", "unknown", prior)
+    check(len(kept.combo_weights) < len(dropped.combo_weights),
+          f"保留先验的范围应更窄：{len(kept.combo_weights)} vs "
+          f"{len(dropped.combo_weights)}")
 
 
 def test_folded_and_opponent_cap() -> None:
