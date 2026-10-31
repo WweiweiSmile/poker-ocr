@@ -223,6 +223,31 @@ def test_enabled_flag_and_sample_env() -> None:
             os.environ["HAND_VS_RANGES_SAMPLES"] = old_samples
 
 
+def test_random_fill_opponents_are_in_mc() -> None:
+    """未建模对手按随机牌进入 MC，而不是只对建模的 4 家算权益。"""
+    rng = make("TIGHT", keys_combos("AA", "KK"))
+    hero, board = "AhAd", "AsKs9h4d3c"
+    base = hand_vs_ranges.compute(hero, board, [("a", None, rng)],
+                                  samples=3000)
+    fill = hand_vs_ranges.compute(hero, board, [("a", None, rng)],
+                                  samples=3000, random_opponents=2)
+    assert base is not None and fill is not None
+    check(base.random_opponents == 0, "默认不应有随机牌对手")
+    check(fill.random_opponents == 2, "随机牌对手数应写入结果")
+    check(fill.equity <= base.equity + 0.02,
+          f"加入随机牌对手后权益不应更高：{base.equity:.3f} -> {fill.equity:.3f}")
+    check(fill.behind_any >= base.behind_any - 0.02,
+          f"加入随机牌对手后落后比例不应更低：{base.behind_any:.3f} -> {fill.behind_any:.3f}")
+    check("random fill" in fill.render(), f"渲染应标随机牌：\n{fill.render()}")
+
+    only_random = hand_vs_ranges.compute(
+        hero, board, [], samples=2000, random_opponents=2)
+    assert only_random is not None
+    check(only_random.random_opponents == 2, "纯随机牌也应能计算")
+    check(len(only_random.opponents) == 0, "纯随机牌不应伪造逐家范围")
+    check(0.0 <= only_random.equity <= 1.0, "随机牌权益应在 0-1")
+
+
 def main() -> int:
     tests = [
         test_exact_and_mc_against_bruteforce,
@@ -232,6 +257,7 @@ def main() -> int:
         test_deterministic_and_cached,
         test_fail_open_and_render,
         test_enabled_flag_and_sample_env,
+        test_random_fill_opponents_are_in_mc,
     ]
     for t in tests:
         before = len(FAILS)

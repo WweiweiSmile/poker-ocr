@@ -89,6 +89,8 @@ class HandVsRanges:
     equity: float
     equity_ci: float
     samples: int
+    # 未建模对手：按随机牌纳入 MC，但不在 opponents 里展开逐家范围。
+    random_opponents: int = 0
     warnings: tuple[str, ...] = ()
     context: str = ""
     source: str = ""
@@ -106,11 +108,17 @@ class HandVsRanges:
         lines.append("Ranges: " + " | ".join(
             f"{o.label} {o.range_id} {o.width_pct:.1f}% "
             f"({o.combos_after_removal} live combos)" for o in shown)
-            + (f" | +{more} more (in equity)" if more else ""))
+            + (f" | +{more} more (in equity)" if more else "")
+            + (f" | +{self.random_opponents} random fill (unmodeled)"
+               if self.random_opponents else ""))
         lines.append(f"Equity vs field (by river): {self.equity:.0%} "
-                     f"±{max(self.equity_ci * 100, 0.1):.1f}%")
+                     f"±{max(self.equity_ci * 100, 0.1):.1f}%"
+                     + (f" (incl. {self.random_opponents} random fill)"
+                        if self.random_opponents else ""))
         lines.append(f"Made hand now: behind at least one {self.behind_any:.1%} "
-                     f"(tie {self.tie_any:.1%})")
+                     f"(tie {self.tie_any:.1%})"
+                     + (f"; {self.random_opponents} opponent(s) treated as random"
+                        if self.random_opponents else ""))
         for edge in shown:
             group_text = ""
             if edge.beaten_by:
@@ -322,9 +330,9 @@ def _samples_for(n: int) -> int:
 
 
 def _seed(hero: str, board: str, entries, samples: int,
-          seed_key: str | None) -> int:
+          seed_key: str | None, random_opponents: int = 0) -> int:
     text = "|".join([
-        seed_key or "", hero, board, str(samples),
+        seed_key or "", hero, board, str(samples), f"rnd:{random_opponents}",
         *(f"{o.seat_id}:{o.range_id}:{o.width_pct:.2f}" for o in entries),
     ])
     return zlib.crc32(text.encode("utf-8"))
@@ -357,12 +365,26 @@ def _draw(combos: list, cumulative: list, rnd: random.Random):
 
 
 def _monte_carlo(hero_cards, board, ranges_list, samples: int,
-                 seed: int) -> tuple[float, float, float, int, int]:
-    """返回 (behind_any, tie_any, equity, valid_samples, failed_groups)。"""
+                 seed: int, random_opponents: int = 0
+                 ) -> tuple[float, float, float, int, int]:
+    """返回 (behind_any, tie_any, equity, valid_samples, failed_groups)。
+
+    `random_opponents` 是未建模对手数：它们不在 `ranges_list` 里，但按均匀
+    随机牌参与每一轮抽样，避免多人池里只对前 4 家算权益而高估胜率。
+    """
     dead = set(hero_cards) | set(board)
     samplers = [_sampler(rng, dead) for rng in ranges_list]
     if any(s is None for s in samplers):
         return 0.0, 0.0, 0.0, 0, samples
+    if random_opponents > 0:
+        uniform = _sampler(ranges.uniform_range("RANDOM_FILL",
+                                                note="unmodeled opponent: random cards"),
+                           dead)
+        if uniform is None:
+            return 0.0, 0.0, 0.0, 0, samples
+        # 每个未建模对手独立抽两手牌；共享同一份 combo 列表即可，抽样时
+        # 会按 used 去重，所以不会和已建模对手/彼此撞牌。
+        samplers.extend([uniform] * int(random_opponents))
     rnd = random.Random(seed)
     hero_score = evaluate(hero_cards + board)
     deck = [c for c in ranges.DECK if c not in dead]
@@ -421,9 +443,10 @@ _CACHE_LOCK = threading.Lock()
 
 def _cache_key(hero: str, board: str, edges, sampled_ranges, samples: int,
                seed_key: str | None, context: str, source: str,
-               warnings: Iterable[str]) -> tuple:
+               warnings: Iterable[str], random_opponents: int = 0) -> tuple:
     return (
         hero, board, samples, seed_key or "", context, source, tuple(warnings),
+        int(random_opponents),
         tuple(
             (o.seat_id, o.position, o.range_id, o.mode, round(o.width_pct, 3),
              round(o.behind, 6), round(o.tie, 6), round(o.ahead, 6), id(rng))
@@ -434,11 +457,15 @@ def _cache_key(hero: str, board: str, edges, sampled_ranges, samples: int,
 
 def compute(hero, board, opponents: Sequence[Any], *, samples: int | None = None,
             warnings: Iterable[str] = (), context: str = "",
-            source: str = "", seed_key: str | None = None) -> HandVsRanges | None:
+            source: str = "", seed_key: str | None = None,
+            random_opponents: int = 0) -> HandVsRanges | None:
     """计算手牌对多个对手范围的强度。
 
     `opponents` 支持 Range、`(seat, Range)`、`(seat, position, Range)`、
     `(seat, position, Range, mode)`；也兼容带 `.range`/`.seat_id` 的对象。
+
+    `random_opponents`：未建模对手数。它们不展开逐家范围，但按均匀随机牌
+    参与 MC，保证多人池 equity/behind_any 不会只算前 4 家而虚高。
     """
     try:
         hero_cards = _as_cards(hero)
@@ -452,11 +479,12 @@ def compute(hero, board, opponents: Sequence[Any], *, samples: int | None = None
     if set(hero_cards) & set(board_cards):
         return None
 
+    random_opponents = max(0, int(random_opponents))
     normalized = _normalize_opponents(opponents)
-    if not normalized:
+    if not normalized and random_opponents <= 0:
         return None
     if samples is None:
-        samples = _samples_for(len(normalized))
+        samples = _samples_for(len(normalized) + random_opponents)
     else:
         samples = max(1, int(samples))
 
@@ -476,18 +504,20 @@ def compute(hero, board, opponents: Sequence[Any], *, samples: int | None = None
             continue
         edges.append(edge)
         sampled_ranges.append(rng)
-    if not edges:
+    if not edges and random_opponents <= 0:
         return None
 
     key = _cache_key(hero_text, board_text, edges, sampled_ranges, samples,
-                     seed_key, context, source, warnings)
+                     seed_key, context, source, warnings, random_opponents)
     with _CACHE_LOCK:
         if key in _CACHE:
             return _CACHE[key]
 
-    seed = _seed(hero_text, board_text, edges, samples, seed_key)
+    seed = _seed(hero_text, board_text, edges, samples, seed_key,
+                 random_opponents)
     behind_any, tie_any, equity, valid, failed = _monte_carlo(
-        hero_cards, board_cards, sampled_ranges, samples, seed)
+        hero_cards, board_cards, sampled_ranges, samples, seed,
+        random_opponents)
     if valid <= 0:
         return None
 
@@ -510,6 +540,7 @@ def compute(hero, board, opponents: Sequence[Any], *, samples: int | None = None
         equity=equity,
         equity_ci=ci,
         samples=valid,
+        random_opponents=random_opponents,
         warnings=tuple(all_warnings),
         context=context,
         source=source,
@@ -594,16 +625,25 @@ def _lookup(sit: Any) -> HandVsRanges | None:
             continue
         entries.append((spec.seat_id, spec.position, built, spec.mode))
         used_specs.append(spec)
+    active = [o for o in snap.opponents if not o.folded]
+    # 建模上限是 4 家（field_ranges.resolve 的渲染/性能 cap）。其余在局对手
+    # 不展开范围，但必须按随机牌纳入 MC，否则 8 人池的 equity 只对 4 家算，
+    # 会被当成全桌权益使用。
+    random_opponents = max(len(active) - len(entries), 0)
     if not entries:
+        # 一家可确认范围都没有时，不生成范围权益块；保留 gt 的随机牌下界，
+        # 避免把「全随机」冒充成「对手范围」。
         return None
 
     result = compute(
         "".join(snap.hero_cards), board, entries,
         warnings=warnings,
-        context=_context(snap, used_specs, len(field.specs) + 1),
+        context=_context(snap, used_specs, len(active) + 1),
         source="descriptive preflop priors × current-street action filter; "
+               "unmodeled opponents are sampled as random hands; "
                "not a solver and not range-vs-range equity.",
         seed_key=snap.hand_id,
+        random_opponents=random_opponents,
     )
     return result
 
