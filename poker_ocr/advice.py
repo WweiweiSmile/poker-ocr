@@ -63,7 +63,7 @@ HERO_ACTOR = "hero"
 
 # 当前唯一的中文 lean 提示词版本。写入 session_start / advice JSONL，
 # 复盘归因用；改动 system 或事实块时 bump。
-PROMPT_VERSION = "lean-zh-2026-11-01.1"
+PROMPT_VERSION = "lean-zh-2026-11-01.2"
 PROMPT_LANGUAGE = "zh"
 
 # 加注尺度：名字 → 底池倍数。「满池 1.2」是超池，用于需要施压/劝退的场合
@@ -3377,9 +3377,14 @@ def _facing_raise_zh(sit: Situation) -> list[str]:
         and r.gate in ("read", "stable")
     ]
     if aggressive_reads:
-        who = "、".join((r.display_name or r.key) for r in aggressive_reads[:3])
+        names = [r.display_name or r.key for r in aggressive_reads]
+        who = "、".join(names[:3])
+        if len(names) > 3:
+            # 只点 3 个名字会被读成「就这 3 家松凶」，表里其余松凶的座位
+            # 反而被这句话藏掉了。
+            who += f" 等 {len(names)} 家"
         lines.append(
-            f"对手画像：{who} 是松凶（实测，n≥{min(r.n for r in aggressive_reads)}）"
+            f"对手画像：{who}是松凶（实测，n≥{min(r.n for r in aggressive_reads)}）"
             "；范围表是基线，「默认弃牌」不是绝对，按对手实际加注宽度调整。")
     return lines
 
@@ -3912,27 +3917,6 @@ def render_attack_zh(sit: Situation) -> list[str]:
     return lines
 
 
-def _select_reads(sit: Situation, active: dict,
-                  limit: int = 3) -> list[OpponentRead]:
-    """只把最相关的 2–3 家画像交给模型，避免 9 人桌 20+ 行画像。
-
-    优先：当前街最后加注者 > 身后还有行动的人 > stable > 置信度/样本。
-    """
-    reads = [r for r in sit.opponent_reads
-             if r.archetype != "unknown" and r.seat_id in active]
-    if len(reads) <= limit:
-        return reads
-    aggressor = last_aggressor_seat(sit.snap)
-    behind = set(_after_hero(sit.snap))
-
-    def rank(read: OpponentRead) -> tuple:
-        position = active.get(read.seat_id)
-        return (read.seat_id == aggressor, position in behind,
-                read.gate == "stable", read.confidence, read.n)
-
-    return sorted(reads, key=rank, reverse=True)[:limit]
-
-
 def _behind_detail_zh(snap: HandSnapshot,
                       prefix: str = "跟注/过牌后待行动") -> str:
     """「跟注/过牌后待行动」一行：人数 + 位置名 + 谁还没跟到当前注。
@@ -4128,19 +4112,19 @@ def render_facts_zh(sit: Situation) -> str:
         lines.append("")
         lines.extend(strength)
 
+    # 本手还没弃牌的对手全部进提示词：多人池里模型的 sizing/弃牌决策依赖
+    # 「身后还剩谁、谁是什么类型」，截到 3 家会让 9 人桌的其余座位变成盲区。
+    # 渲染顺序由 `render_reads_zh` 按位置排，不按画像在元组里的先后。
     active = {o.seat_id: (o.position or o.seat_id)
               for o in snap.opponents if not o.folded}
-    shown_reads = _select_reads(sit, active, limit=3)
+    in_hand_reads = [r for r in sit.opponent_reads
+                     if r.archetype != "unknown" and r.seat_id in active]
     reads = render_reads_zh(
-        shown_reads, active,
+        in_hand_reads, active,
         header="## 对手画像（逐座位，优先于全场统计/人工观察）")
     if reads:
         lines.append("")
         lines.extend(reads)
-        eligible = [r for r in sit.opponent_reads
-                    if r.archetype != "unknown" and r.seat_id in active]
-        if len(eligible) > len(shown_reads):
-            lines.append("（只显示最相关 3 家；其余画像略）")
 
     # 攻击块会给出本街弃牌率的最终裁决；有攻击块、或某个座位已经有
     # 「别开火」的反向证据时，桌级 c-bet 建议不再单独出现，避免同一份

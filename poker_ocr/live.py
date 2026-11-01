@@ -1718,17 +1718,21 @@ class LiveProcessor:
                  if r.archetype != "unknown"]
         read_tag = ""
         if reads:
+            # 全部在局对手都要露出来：只打前两家时，用户会以为其余座位没被
+            # 识别（画像其实都有，是这行自己截断了），也没法核对模型看到的
+            # 是不是同一批人。顺序沿用 advice.opponent_reads（快照座位序）。
             brief = "，".join(
                 f"{r.display_name or r.key} {r.archetype.upper()} "
-                f"{r.confidence:.2f}" for r in reads[:2])
-            read_tag = f"｜对手 {brief}"
+                f"{r.confidence:.2f}" for r in reads)
+            read_tag = f"对手 {len(reads)} 家：{brief}"
         # 下一街计划：同一手牌下一街会回灌「My previous decision」，
         # 实时日志里也打出来，用户能看出模型打算怎么打这手牌。
         plan = (getattr(advice, "plan", "") or "").strip()
         plan_tag = f"｜计划 {plan}" if plan else ""
         if not _use_ansi():
+            reads_part = f"｜{read_tag}" if read_tag else ""
             self.log(f"  [建议] {advice.street} ⇒ {option.label}{amount}"
-                     f"｜{elapsed}{read_tag}｜{advice.reason}{plan_tag}{tail}")
+                     f"｜{elapsed}{reads_part}｜{advice.reason}{plan_tag}{tail}")
             return
         # 模型结果只出现一次，别被滚动的识别日志淹没：
         # 留白 → 高亮横幅（街 + 动作 + 金额 + 耗时）→ 粗体理由 → 留白。
@@ -1741,8 +1745,7 @@ class LiveProcessor:
         self.log(f"{style}{headline}{_ANSI_RESET}")
         self.log(f"{style}{bar}{_ANSI_RESET}")
         if read_tag:
-            self.log(f"{_ANSI_ADVICE_TEXT} 对手：{read_tag.lstrip('｜')}"
-                     f"{_ANSI_RESET}")
+            self.log(f"{_ANSI_ADVICE_TEXT} {read_tag}{_ANSI_RESET}")
         self.log(f"{_ANSI_ADVICE_TEXT} 理由：{advice.reason}{tail}{_ANSI_RESET}")
         if plan:
             self.log(f"{_ANSI_ADVICE_TEXT} 计划：{plan}{_ANSI_RESET}")

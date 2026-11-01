@@ -4288,6 +4288,41 @@ def test_gap_summary_pins_zero_opponent_warning() -> None:
     check(len(summary) <= 4, f"数据质量最多 4 条：{summary}")
 
 
+def test_all_in_hand_opponents_get_reads() -> None:
+    """本手没弃牌的对手全部进提示词；已弃牌的不进，也不再写「只显示 3 家」。"""
+    from poker_ocr.hand_track import OpponentSnapshot, StreetRecord
+    from poker_ocr.opponent_profile import OpponentRead
+
+    def read(seat: str, name: str, archetype: str) -> OpponentRead:
+        return OpponentRead(seat, name, name, archetype, 0.7, 30,
+                            40.0, 12.0, 1.5, "auto", "", "read")
+
+    seats = (("s1", "甲一", "lag", "UTG"),
+             ("s2", "乙二", "station", "UTG+1"),
+             ("s3", "丙三", "maniac", "LJ"),
+             ("s4", "丁四", "nit", "HJ"),
+             ("s5", "戊五", "tag", "CO"),
+             ("s6", "己六", "station", "BB"))
+    opponents = tuple(
+        OpponentSnapshot(seat, name, position, 100.0, 0.0, False)
+        for seat, name, _, position in seats)
+    # 已弃牌的人也有画像：不该出现在「对手画像」块里
+    opponents += (OpponentSnapshot("s7", "庚七", "SB", 100.0, 0.0, True),)
+    point = make_point(
+        table_size=9, opponents=opponents,
+        streets=(StreetRecord("preflop", 0.0, ()),
+                 StreetRecord("flop", 6.0, ())))
+    sit = build_situation(point, opponent_reads=tuple(
+        read(seat, name, archetype) for seat, name, archetype, _ in seats
+    ) + (read("s7", "庚七", "lag"),))
+    text = render_facts_zh(sit)
+    for _, name, _, _ in seats:
+        check(name in text, f"在局对手 {name} 的画像应进提示词：\n{text}")
+    check("庚七" not in text, f"已弃牌的人不该有画像行：\n{text}")
+    check("只显示最相关" not in text,
+          f"不该再有「只显示最相关 N 家」截断提示：\n{text}")
+
+
 def main() -> int:
     # 自动收集本模块的 test_*，避免删掉旧用例后手工清单漂移。
     tests = [value for name, value in sorted(globals().items())

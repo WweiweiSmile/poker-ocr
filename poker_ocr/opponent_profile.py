@@ -2376,6 +2376,21 @@ def load_profile_store(path: str | Path | None = None,
     return store
 
 
+_ACTION_ORDER_9MAX = _position_rank(9)
+
+
+def _reads_sort_key(position: str) -> tuple[int, str]:
+    """画像块的排序键：按翻前行动顺序（SB 先、BTN 后），未知位置排最后。
+
+    9 人桌的位置表是各人数位置表的超集，且相对顺序一致（6 人桌的
+    SB→BB→UTG→HJ→CO→BTN 在同一张表里仍然递增），所以固定用 9 人桌的
+    顺序给任意人数排序都不会串。之前按字符串排会得到 BB/BTN/CO/HJ…
+    这种和行动线对不上的顺序，多人桌一次列 8 家时特别难读。
+    """
+    rank = _ACTION_ORDER_9MAX.get(position.upper())
+    return (rank if rank is not None else len(_ACTION_ORDER_9MAX), position)
+
+
 def render_reads(reads: Iterable[OpponentRead],
                  positions: Mapping[str, str],
                  *,
@@ -2397,7 +2412,7 @@ def render_reads(reads: Iterable[OpponentRead],
         rows.append((positions[seat], read))
     if not rows:
         return []
-    rows.sort(key=lambda item: item[0])
+    rows.sort(key=lambda item: _reads_sort_key(item[0]))
     lines = [header] if header else []
     for position, read in rows:
         name = read.display_name or read.key
@@ -2434,7 +2449,7 @@ def render_reads_zh(reads: Iterable[OpponentRead],
         rows.append((positions[seat], read))
     if not rows:
         return []
-    rows.sort(key=lambda item: item[0])
+    rows.sort(key=lambda item: _reads_sort_key(item[0]))
     lines = [header] if header else []
     for position, read in rows:
         name = read.display_name or read.key
