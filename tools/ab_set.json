@@ -20,7 +20,7 @@
    "to_call": 63.0,
    "threshold": 0.2414,
    "old_equity": 0.6915,
-   "new_equity": 0.0537,
+   "new_equity": 0.0867,
    "old_advice": "call",
    "new_advice": "fold",
    "note": "目标用例：明三条在成花+公对河牌面对前置位 donk-jam 进 2 人；旧 69% → 新 5%。"
@@ -39,7 +39,7 @@
    "to_call": 47.0,
    "threshold": 0.1124,
    "old_equity": 0.5968,
-   "new_equity": 0.01,
+   "new_equity": 0.0112,
    "old_advice": "call",
    "new_advice": "fold",
    "note": "HJ 最后位置面对下注+跟注再加注全下；旧 60% → 新 1%。"
@@ -58,7 +58,7 @@
    "to_call": 21.0,
    "threshold": 0.2485,
    "old_equity": 0.6957,
-   "new_equity": 0.4057,
+   "new_equity": 0.3917,
    "old_advice": "call",
    "new_advice": "call",
    "note": "自己是上一街 aggressor 时下一街先下注是续注，不是 donk；修 prev_aggressor!=seat 后权益 40.6%。"
@@ -117,7 +117,7 @@
    "to_call": 57.5,
    "threshold": 0.1825,
    "old_equity": 0.9105,
-   "new_equity": 0.7087,
+   "new_equity": 0.6707,
    "old_advice": "call",
    "new_advice": "call",
    "note": "葫芦（KKK55）面对 LAG 全下；旧 91% → 新 70.9%，仍然 call，防强价值误弃。"
@@ -193,7 +193,7 @@
    "to_call": 14.0,
    "threshold": 0.2478,
    "old_equity": 0.0,
-   "new_equity": 0.0312,
+   "new_equity": 0.0362,
    "old_advice": "fold",
    "new_advice": "fold",
    "note": "跟注站河牌下注，hero 只有中对；权益 0→3.1%，仍 fold。"
@@ -288,7 +288,7 @@
    "to_call": 17.0,
    "threshold": 0.25,
    "old_equity": 0.0,
-   "new_equity": 0.069,
+   "new_equity": 0.0767,
    "old_advice": "fold",
    "new_advice": "fold",
    "note": "A 高、四花面、跟注站下注 17 into 51（25%）；0→6.9%，仍 fold。"

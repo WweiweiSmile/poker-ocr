@@ -1,6 +1,7 @@
 # A/B 测试：对手范围事件模型手牌集
 
-2026-11-01。清单 [`tools/ab_set.json`](../tools/ab_set.json)；跑批 [`tools/ab_range_set.py`](../tools/ab_range_set.py)。
+2026-11-01。清单 [`tools/ab_set.json`](../tools/ab_set.json)；跑批 [`tools/ab_range_set.py`](../tools/ab_range_set.py)；
+控制台只读页 `http://127.0.0.1:8010/range-ab`。
 
 ## 0. 用途
 
@@ -27,8 +28,12 @@
 .venv/bin/python tools/ab_range_set.py --model --priority P0
 
 # 落盘
-.venv/bin/python tools/ab_range_set.py --json /tmp/ab_set.json
+.venv/bin/python tools/ab_range_set.py --json tools/ab_results.json
 ```
+
+控制台只读页（复跑控制台）：`http://127.0.0.1:8010/range-ab`。
+它读 `tools/ab_set.json` + `tools/ab_results.json`，不跑模型、不碰 DB；
+没有结果文件时只显示清单里记录的旧/新权益。
 
 `expect` 的含义：`cross_down`（旧过门槛、新不过）、`cross_up`（旧不过、新过）、
 `stay_above` / `stay_below`（两侧同侧）、`n/a`（无门槛，如自己下注）。

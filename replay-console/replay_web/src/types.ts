@@ -607,3 +607,63 @@ export interface ExperimentResults {
   versions: Record<string, ExperimentVersionResult>
   review: Record<string, number>
 }
+
+export interface RangeABResult {
+  result: string
+  old: number | null
+  new: number | null
+  threshold: number | null
+  problems: string[]
+  adviceDiff: string | null
+  model: Record<string, unknown> | null
+}
+
+export interface RangeABCase {
+  id: string
+  priority: string
+  hand: string
+  street: string
+  action_index: number | null
+  category: string
+  source: string
+  status: string
+  expect: string
+  pot?: number | null
+  to_call?: number | null
+  threshold?: number | null
+  old_equity?: number | null
+  new_equity?: number | null
+  old_advice?: string
+  new_advice?: string
+  note?: string
+  result?: RangeABResult
+}
+
+export interface RangeABSummary {
+  total: number
+  ready: number
+  blocked: number
+  pass: number
+  fail: number
+  skip: number
+  missing: number
+  byStatus: Record<string, number>
+  byPriority: Record<string, { total: number; pass: number; fail: number; skip: number }>
+}
+
+export interface RangeABResponse {
+  available: boolean
+  error?: string
+  hint?: string
+  generatedAt?: string
+  setPath?: string
+  resultsPath?: string
+  resultsAvailable?: boolean
+  resultsUpdatedAt?: string | null
+  summary?: RangeABSummary
+  cases?: RangeABCase[]
+  skipped?: { hand: string; reason: string }[]
+  run?: string
+  baseline?: string
+  candidate?: string
+}

@@ -5,6 +5,7 @@ import {
   DeploymentUnitOutlined,
   ExperimentOutlined,
   SettingOutlined,
+  SwapOutlined,
   ThunderboltOutlined,
 } from '@ant-design/icons'
 import { QueryClient, QueryClientProvider, useQuery } from '@tanstack/react-query'
@@ -24,6 +25,7 @@ import VersionsPage from './pages/VersionsPage'
 import SettingsPage from './pages/SettingsPage'
 import ExperimentsPage from './pages/ExperimentsPage'
 import ExperimentDetailPage from './pages/ExperimentDetailPage'
+import RangeABPage from './pages/RangeABPage'
 
 dayjs.locale('zh-cn')
 
@@ -40,6 +42,7 @@ const queryClient = new QueryClient({
 const NAV = [
   { to: '/hands', label: '手牌库', icon: <DatabaseOutlined />, hint: '筛选、收藏、逐街对比' },
   { to: '/experiments', label: 'A/B 实验', icon: <ExperimentOutlined />, hint: '离线冻结数据集、dev/holdout' },
+  { to: '/range-ab', label: '范围 A/B', icon: <SwapOutlined />, hint: '旧路径 vs 事件模型' },
   { to: '/jobs', label: '复跑任务', icon: <ThunderboltOutlined />, hint: '进度、取消、重试' },
   { to: '/versions', label: '版本管理', icon: <DeploymentUnitOutlined />, hint: '不可变 AI 配置快照' },
   { to: '/settings', label: '设置与健康', icon: <SettingOutlined />, hint: '连接、队列、上限' },
@@ -189,6 +192,7 @@ export default function App() {
                 <Route path="/hands/:handId" element={<HandDetailPage />} />
                 <Route path="/experiments" element={<ExperimentsPage />} />
                 <Route path="/experiments/:experimentId" element={<ExperimentDetailPage />} />
+                <Route path="/range-ab" element={<RangeABPage />} />
                 <Route path="/jobs" element={<JobsPage />} />
                 <Route path="/jobs/:jobId" element={<JobDetailPage />} />
                 <Route path="/jobs/:jobId/compare" element={<JobComparisonPage />} />

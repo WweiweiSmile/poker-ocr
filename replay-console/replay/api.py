@@ -14,6 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
+from . import range_ab
 from .config import Settings
 from .db import Database
 from .errors import ApiError
@@ -182,6 +183,12 @@ def create_app(settings: Settings | None = None,
     @app.get("/api/health")
     def get_health(request: Request):
         return service(request).health()
+
+    # ─────────────── 范围模型 A/B（只读，不碰 DB）───────────────
+
+    @app.get("/api/range-ab")
+    def get_range_ab():
+        return range_ab.load()
 
     # ─────────────── hands ───────────────
 
