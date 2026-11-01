@@ -93,6 +93,12 @@ class Features:
     backdoor_straight: bool
     overcards: bool
     plays_board: bool
+    # 已成同花时，这张同花是不是坚果同花（手里有该花色最大的一张）。
+    # 事件模型的 nut 档要用；默认 False，不影响旧的连接度打分。
+    nut_flush: bool = False
+    # evaluate 的踢脚部分（牌型相同才比）。事件模型用它算「这手牌在这张
+    # 牌面上的百分位」：同样是两对，顶两对和公牌两对的档位不该一样。
+    tiebreak: tuple[int, ...] = ()
 
 
 def _as_cards(value) -> list[tuple[int, str]]:
@@ -107,6 +113,11 @@ def _as_cards(value) -> list[tuple[int, str]]:
             rank, suit = item
             out.append((int(rank), str(suit).lower()))
     return out
+
+
+def as_cards(value) -> list[tuple[int, str]]:
+    """公开的牌面解析入口（事件模型按当时的牌面字符串分类要用）。"""
+    return _as_cards(value)
 
 
 def _pair_kind(combo: tuple[tuple[int, str], ...],
@@ -171,6 +182,14 @@ def _classify(combo: tuple[tuple[int, str], ...],
         board_len == 3 and cat < FLUSH
         and any(n == 3 and s in hole_suits for s, n in suit_counts.items())
     )
+    # 坚果同花：已成同花，且手里拿着该花色最大的一张。公共牌自己成花时
+    # （play the board）手里不可能有更大的牌，nut_flush 必须是 False。
+    nut_flush = False
+    if cat == FLUSH:
+        made_suit = next((s for s, n in suit_counts.items() if n >= 5), None)
+        if made_suit is not None:
+            top_rank = max(r for r, s in all_cards if s == made_suit)
+            nut_flush = any(r == top_rank and s == made_suit for r, s in combo)
 
     straight_outs = 0
     backdoor_straight = False
@@ -199,6 +218,8 @@ def _classify(combo: tuple[tuple[int, str], ...],
         backdoor_straight=backdoor_straight,
         overcards=overcards,
         plays_board=plays_board,
+        nut_flush=nut_flush,
+        tiebreak=tuple(_tb),
     )
 
 
@@ -207,6 +228,19 @@ def classify(combo, board) -> Features:
     cards = tuple(ranges.canon_combo(*combo))
     board_cards = tuple(_as_cards(board))
     return _classify(cards, board_cards)
+
+
+def features_for_board(board) -> tuple[tuple[ranges.Combo, Features, float], ...]:
+    """一个牌面上所有不和公共牌撞牌的 combo 的 (combo, Features, score)。
+
+    事件模型（`range_flow`）每个动作都要按当时的牌面分类，必须和旧的
+    `board_range.build` 共用同一份缓存与同一套分类，不能写第二套分类器。
+    返回顺序是 `ALL_COMBOS` 顺序，确定性对采样种子很重要。
+    """
+    cards = tuple(_as_cards(board))
+    if not (3 <= len(cards) <= 5) or len(set(cards)) != len(cards):
+        return ()
+    return _features_for_board(_board_key(cards))
 
 
 # 连接度分数（设计文档 §6.3）。分数是「关系强度」，不是概率。
@@ -418,6 +452,6 @@ def reset_cache() -> None:
 
 
 __all__ = [
-    "Features", "MODE_MIN_WEIGHT", "STRAIGHT_HIGH", "build", "classify",
-    "reset_cache", "score", "straight_high",
+    "Features", "MODE_MIN_WEIGHT", "STRAIGHT_HIGH", "as_cards", "build",
+    "classify", "features_for_board", "reset_cache", "score", "straight_high",
 ]

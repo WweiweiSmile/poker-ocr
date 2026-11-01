@@ -11,6 +11,7 @@
     test_board_range 实时牌面范围：combo 分类/动作 mode/连接度（纯逻辑）
     test_field_ranges 快照 → 每对手范围 ID + mode（纯逻辑）
     test_hand_vs_ranges 手牌 vs 范围：精确 behind + MC 权益（纯逻辑）
+    test_range_flow  事件模型：动作序列/桶/似然/范围收窄（纯逻辑）
     test_hand_strength 实时牌力解析：behind/equity 合成一行结论（纯逻辑）
     test_advice     实时 AI 建议：行动线/中文事实/选项/模型协议（纯逻辑）
     test_gto_lookup GTO 近似表查询：同构映射/节点/插值/保守 None（纯逻辑）
@@ -47,7 +48,8 @@ HERE = Path(__file__).resolve().parent
 
 SUITES = ["test_positions.py", "test_env.py", "test_coach.py",
           "test_ranges.py", "test_board_range.py", "test_field_ranges.py",
-          "test_hand_vs_ranges.py", "test_hand_strength.py", "test_advice.py",
+          "test_hand_vs_ranges.py", "test_range_flow.py", "test_hand_strength.py",
+          "test_advice.py",
           "test_gto_lookup.py",
           "test_hand_id.py", "test_hand_outbox.py",
           "test_opponent_profile.py", "test_clicker.py",

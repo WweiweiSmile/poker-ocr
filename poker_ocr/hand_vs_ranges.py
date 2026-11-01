@@ -1,7 +1,9 @@
 """手牌 vs 范围：现在领先谁、打到河牌有多少权益。
 
 和 `coach.beat_rate` 的区别：那个把对手当成「随机两手牌」，是下界；
-这里用每个对手的翻前先验 × 当前街动作条件范围，回答：
+这里用每个对手的**翻前先验 × 他的每一个翻后动作**（`range_flow` 事件模型，
+按时间顺序连乘；`RANGE_EVENT_MODEL=0` 回退旧口径「先验 × 当前街动作」），
+回答：
 
   · `behind_i` / `behind_any`：**当前成手牌**严格大于我的范围比例；
   · `tie_i` / `tie_any`：平局比例；
@@ -29,7 +31,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Sequence
 
-from . import board_range, field_ranges, ranges
+from . import board_range, field_ranges, range_flow, ranges
 from .coach import (
     CATEGORY_NAMES_EN, FLUSH, FULL_HOUSE, ONE_PAIR, QUADS, STRAIGHT,
     STRAIGHT_FLUSH, TRIPS, TWO_PAIR, evaluate, parse_cards,
@@ -65,6 +67,18 @@ class OpponentEdge:
     position: str | None = None
     mode: str = "call"
     combos_after_removal: int = 0
+    # 事件模型的附带事实：当前动作落在哪个桶、最后一条动作是不是全下、
+    # 以及范围在当前牌面上的成牌/听牌/空气分区。旧路径下都是空/None。
+    bucket: str = ""
+    # 有效宽度：按权重从高到低累加到 90% 质量所需的 combo 占比。事件模型
+    # 的连乘会把长尾压到极低但不清零，直接报支撑集宽度（width_pct）会永远
+    # 接近 100%，"范围 6%" 这个最有用的数字就没了。
+    eff_width_pct: float = 0.0
+    jam: bool = False
+    composition: "range_flow.Composition | None" = field(
+        default=None, compare=False, repr=False)
+    # 这手牌走到现在的动作链（时间顺序）。渲染线路用，不参与相等比较。
+    events: tuple = field(default=(), compare=False, repr=False)
     # 本手收窄后的范围（翻前先验 × 当前街动作过滤）。fold_equity 要用它按
     # 权重算条件弃牌率；compare=False 是为了不改变 dataclass 的相等语义
     # （Range 里带 dict，参与比较会又慢又容易误判）。
@@ -76,6 +90,11 @@ class OpponentEdge:
         if self.mode:
             parts.append(f"[{self.mode}]")
         return " ".join(parts)
+
+    @property
+    def line(self) -> str:
+        """这条动作链的英文摘要（内部/日志用）。"""
+        return range_flow.line_note(self.events)
 
 
 @dataclass(frozen=True)
@@ -106,7 +125,7 @@ class HandVsRanges:
             shown = tuple(sorted(shown, key=lambda e: -e.behind)[:3])
             more = len(self.opponents) - 3
         lines.append("Ranges: " + " | ".join(
-            f"{o.label} {o.range_id} {o.width_pct:.1f}% "
+            f"{o.label} {o.range_id} {o.eff_width_pct or o.width_pct:.1f}% "
             f"({o.combos_after_removal} live combos)" for o in shown)
             + (f" | +{more} more (in equity)" if more else "")
             + (f" | +{self.random_opponents} random fill (unmodeled)"
@@ -123,8 +142,15 @@ class HandVsRanges:
             group_text = ""
             if edge.beaten_by:
                 group_text = " — " + ", ".join(g.render() for g in edge.beaten_by[:2])
-            lines.append(f"- {edge.label} {edge.width_pct:.1f}%: behind "
-                         f"{edge.behind:.1%} (tie {edge.tie:.1%}){group_text}")
+            lines.append(f"- {edge.label} {edge.eff_width_pct or edge.width_pct:.1f}%:"
+                         f" behind {edge.behind:.1%} (tie {edge.tie:.1%}){group_text}")
+            comp = edge.composition
+            if comp is not None:
+                types = ", ".join(f"{name} {share:.0%}"
+                                  for name, share in comp.types[:3])
+                lines.append(f"  line={edge.line or 'n/a'} bucket={edge.bucket or 'n/a'}"
+                             f" | made {comp.made_hand:.0%} draw {comp.draw:.0%} "
+                             f"air {comp.air:.0%}" + (f" ({types})" if types else ""))
         behind_by_type: dict[str, RangeGroup] = {}
         for edge in self.opponents:
             for group in edge.beaten_by:
@@ -181,32 +207,40 @@ def _as_cards(value) -> list[tuple[int, str]]:
     return out
 
 
-def _normalize_opponents(opponents: Sequence[Any]
-                         ) -> list[tuple[str, str | None, ranges.Range, str]]:
-    out: list[tuple[str, str | None, ranges.Range, str]] = []
+_Entry = tuple[str, "str | None", ranges.Range, str, str, tuple]
+
+
+def _normalize_opponents(opponents: Sequence[Any]) -> list[_Entry]:
+    """接受 Range、`(seat, Range)`、`(seat, pos, Range)`、`(seat, pos, Range, mode)`、
+    `(seat, pos, Range, mode, bucket, events)`，以及带同名属性的对象。"""
+    out: list[_Entry] = []
     for i, item in enumerate(opponents):
         if isinstance(item, ranges.Range):
-            out.append((f"r{i}", None, item, "call"))
+            out.append((f"r{i}", None, item, "call", "", ()))
             continue
         if isinstance(item, (tuple, list)):
             if len(item) == 2:
                 seat, rng = item
-                out.append((str(seat), None, rng, "call"))
+                out.append((str(seat), None, rng, "call", "", ()))
                 continue
             if len(item) == 3:
                 seat, pos, rng = item
-                out.append((str(seat), pos, rng, "call"))
+                out.append((str(seat), pos, rng, "call", "", ()))
                 continue
-            if len(item) == 4:
-                seat, pos, rng, mode = item
-                out.append((str(seat), pos, rng, str(mode)))
-                continue
+            seat, pos, rng = str(item[0]), item[1], item[2]
+            mode = str(item[3]) if len(item) > 3 else "call"
+            bucket = str(item[4]) if len(item) > 4 else ""
+            events = tuple(item[5]) if len(item) > 5 else ()
+            out.append((seat, pos, rng, mode, bucket, events))
+            continue
         # 兼容 duck typing：对象带 .range / .range_obj
         rng = getattr(item, "range", None) or getattr(item, "range_obj", None)
         if isinstance(rng, ranges.Range):
             out.append((str(getattr(item, "seat_id", f"r{i}")),
                         getattr(item, "position", None), rng,
-                        str(getattr(item, "mode", "call"))))
+                        str(getattr(item, "mode", "call")),
+                        str(getattr(item, "bucket", "") or ""),
+                        tuple(getattr(item, "events", ()) or ())))
     return out
 
 
@@ -251,7 +285,8 @@ def _examples(weights: dict, to_text) -> tuple[str, ...]:
 
 
 def _exact_edge(seat_id: str, position: str | None, rng: ranges.Range,
-                mode: str, hero_cards, board, hero_score) -> OpponentEdge | None:
+                mode: str, hero_cards, board, hero_score,
+                bucket: str = "", events: tuple = ()) -> OpponentEdge | None:
     dead = set(hero_cards) | set(board)
     weights: dict[tuple, float] = {}
     for combo, w in rng.combo_weights.items():
@@ -302,6 +337,7 @@ def _exact_edge(seat_id: str, position: str | None, rng: ranges.Range,
         seat_id=seat_id,
         range_id=rng.id,
         width_pct=rng.width_pct,
+        eff_width_pct=rng.effective_width_pct() or rng.width_pct,
         behind=behind / total,
         tie=tie / total,
         ahead=ahead / total,
@@ -310,6 +346,10 @@ def _exact_edge(seat_id: str, position: str | None, rng: ranges.Range,
         position=position,
         mode=mode,
         combos_after_removal=len(weights),
+        bucket=bucket,
+        jam=bool(events and events[-1].all_in),
+        composition=range_flow.composition(rng, board) if events else None,
+        events=events,
         rng=rng,
     )
 
@@ -448,8 +488,9 @@ def _cache_key(hero: str, board: str, edges, sampled_ranges, samples: int,
         hero, board, samples, seed_key or "", context, source, tuple(warnings),
         int(random_opponents),
         tuple(
-            (o.seat_id, o.position, o.range_id, o.mode, round(o.width_pct, 3),
-             round(o.behind, 6), round(o.tie, 6), round(o.ahead, 6), id(rng))
+            (o.seat_id, o.position, o.range_id, o.mode, o.bucket,
+             round(o.width_pct, 3), round(o.behind, 6), round(o.tie, 6),
+             round(o.ahead, 6), id(rng))
             for o, rng in zip(edges, sampled_ranges)
         ),
     )
@@ -494,11 +535,11 @@ def compute(hero, board, opponents: Sequence[Any], *, samples: int | None = None
     edges: list[OpponentEdge] = []
     sampled_ranges: list[ranges.Range] = []
     skipped: list[str] = []
-    for seat, pos, rng, mode in normalized:
+    for seat, pos, rng, mode, bucket, events in normalized:
         if not isinstance(rng, ranges.Range):
             continue
         edge = _exact_edge(seat, pos, rng, mode, hero_cards, board_cards,
-                           evaluate(hero_cards + board_cards))
+                           evaluate(hero_cards + board_cards), bucket, events)
         if edge is None:
             skipped.append(f"{seat}: range empty after removing dead cards")
             continue
@@ -595,6 +636,17 @@ def lookup(sit: Any) -> HandVsRanges | None:
         return None
 
 
+def _archetypes(sit: Any) -> dict[str, str]:
+    """本手逐座位画像 → {seat_id: archetype}。没有画像的座位不猜。"""
+    out: dict[str, str] = {}
+    for read in getattr(sit, "opponent_reads", ()) or ():
+        seat = getattr(read, "seat_id", None)
+        archetype = getattr(read, "archetype", None)
+        if seat and archetype and archetype != "unknown":
+            out[str(seat)] = str(archetype)
+    return out
+
+
 def _lookup(sit: Any) -> HandVsRanges | None:
     if not enabled():
         return None
@@ -608,6 +660,13 @@ def _lookup(sit: Any) -> HandVsRanges | None:
         return None
 
     board = "".join(snap.board[:5])
+    try:
+        dead = set(_as_cards(snap.hero_cards)) | set(_as_cards(board))
+    except (ValueError, TypeError):
+        dead = set()
+    archetypes = _archetypes(sit)
+    use_events = range_flow.enabled()
+
     entries = []
     warnings = list(field.warnings)
     used_specs = []
@@ -618,12 +677,24 @@ def _lookup(sit: Any) -> HandVsRanges | None:
         if prior is None:
             warnings.append(f"seat {spec.seat_id}: range {spec.prior_id} not found")
             continue
-        built = board_range.build(board, spec.mode, prior)
+        built = None
+        bucket = ""
+        if use_events and spec.events:
+            built = range_flow.build_range(
+                prior, spec.events,
+                archetype=archetypes.get(spec.seat_id, "unknown"),
+                dead=dead)
+            bucket = range_flow.bucket_of(spec.events[-1])
+        if built is None:
+            # 事件链不可用（没有翻后动作 / 牌面缺张）时退回旧口径：先验 ×
+            # 当前街动作。宁可窄一点，也不要拿翻前先验冒充收窄后的范围。
+            built = board_range.build(board, spec.mode, prior)
         if built is None:
             warnings.append(f"seat {spec.seat_id}: board range empty "
                             f"({spec.mode}, {spec.prior_id})")
             continue
-        entries.append((spec.seat_id, spec.position, built, spec.mode))
+        entries.append((spec.seat_id, spec.position, built, spec.mode,
+                        bucket, spec.events))
         used_specs.append(spec)
     active = [o for o in snap.opponents if not o.folded]
     # 建模上限是 4 家（field_ranges.resolve 的渲染/性能 cap）。其余在局对手
@@ -639,9 +710,13 @@ def _lookup(sit: Any) -> HandVsRanges | None:
         "".join(snap.hero_cards), board, entries,
         warnings=warnings,
         context=_context(snap, used_specs, len(active) + 1),
-        source="descriptive preflop priors × current-street action filter; "
-               "unmodeled opponents are sampled as random hands; "
-               "not a solver and not range-vs-range equity.",
+        source=("event model: preflop prior × every postflop action in order "
+                "(street kept in sync); unmodeled opponents are sampled as "
+                "random hands; not a solver and not range-vs-range equity."
+                if use_events else
+                "descriptive preflop priors × current-street action filter; "
+                "unmodeled opponents are sampled as random hands; "
+                "not a solver and not range-vs-range equity."),
         seed_key=snap.hand_id,
         random_opponents=random_opponents,
     )

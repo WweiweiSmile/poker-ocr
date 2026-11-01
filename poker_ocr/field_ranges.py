@@ -1,4 +1,4 @@
-"""从实时快照解析每个在局对手的「翻前先验 + 当前街动作模式」。
+"""从实时快照解析每个在局对手的「翻前先验 + 动作事件序列」。
 
 这是范围与快照之间的接线层：`hand_vs_ranges` 只负责算，不负责猜角色。
 职责分开的好处是——角色解析错了，事实块会明确写 `range unknown`，而不是
@@ -12,18 +12,23 @@
   · 炸弹池 → `BOMB`（任意两张，标注 board-only）。
 与 `preflop_shapes` 矛盾时不猜：该座位 `prior_id=None`，写一条 warning。
 
-当前街动作决定牌面范围的 mode：
-  · bet/raise/allin → 同名 mode；
-  · call / check → call / check；
-  · 还没动作 → check（没有新信息）；
-  · 有下注额但没有动作记录 → unknown + warning。
+事件序列（`docs/对手范围-事件模型-设计.md`）：
+  · 翻前不做事件，由 `prior_id` 覆盖；
+  · 翻后每个动作一条 `ActionEvent`，上下文取**行动前**状态：身后还有几人、
+    面对什么下注、本街这个下注之后已有几次跟注、SPR；
+  · 动作顺序以 `snap.streets` 的记录为准；对账补出来的 `inferred` 动作照用，
+    但整条链上只要有一条是补的，就在数据质量里标注。
+
+当前街动作仍保留 `mode`（兼容旧的 `board_range.build` 路径）：bet/raise/allin
+→ 同名 mode；call / check → call / check；还没动作 → unacted。
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
-from .hand_track import PREFLOP, ActionRecord, HandSnapshot
+from . import range_flow
+from .hand_track import FLOP, PREFLOP, RIVER, TURN, ActionRecord, HandSnapshot
 from .positions import BB, POSITIONS_BY_TABLE_SIZE, SB
 
 
@@ -37,6 +42,8 @@ class OpponentRangeSpec:
     mode: str
     role: str = ""
     note: str = ""
+    # 翻后动作序列（时间顺序）。空 = 这手还没有可用的翻后动作，退回旧口径。
+    events: tuple[range_flow.ActionEvent, ...] = field(default=())
 
 
 @dataclass(frozen=True)
@@ -211,6 +218,247 @@ def _role_prior(snap: HandSnapshot, opp, raises: list[ActionRecord],
     return None, "unknown", "no preflop action"
 
 
+# ─────────────────────────── 事件序列 ───────────────────────────
+
+_BOARD_LEN = {FLOP: 3, TURN: 4, RIVER: 5}
+# hero 在快照里没有 seat_id（`opponents` 不含 hero）。动作记录里通常能拿到，
+# 拿不到时用这个占位符参与座位环，只影响「身后还有几人」的计数。
+_HERO_KEY = "__hero__"
+
+
+def _action_seat(action: ActionRecord, hero: str) -> str:
+    return hero if action.is_hero else action.seat_id
+
+
+def _seats(snap: HandSnapshot) -> tuple[dict[str, str | None], str]:
+    """seat_id → 位置（含 hero 的占位/真实 seat_id）。"""
+    seats: dict[str, str | None] = {o.seat_id: o.position for o in snap.opponents}
+    hero = _HERO_KEY
+    for rec in snap.streets:
+        found = next((a.seat_id for a in rec.actions if a.is_hero), None)
+        if found:
+            hero = found if found not in seats else _HERO_KEY
+            break
+    seats.setdefault(hero, snap.hero_position)
+    return seats, hero
+
+
+def _seat_ring(snap: HandSnapshot, seats: dict[str, str | None],
+               hero: str) -> list[str]:
+    """翻后行动顺序的座位环。位置齐全时按位置表，否则用动作记录兜底。
+
+    位置表（`POSITIONS_BY_TABLE_SIZE`）本身就是翻前行动顺序，翻后从 SB 起
+    沿同一方向走，所以位置齐全时它就是正确的行动环。OCR 漏位置/位置重复
+    时才退回「动作出现的顺序」——那只保证大致方向，不保证环是对的。
+    """
+    order = POSITIONS_BY_TABLE_SIZE.get(snap.table_size or 0)
+    positions = [p for p in seats.values() if p]
+    if (order and len(positions) == len(seats)
+            and len(set(positions)) == len(seats)
+            and all(p in order for p in positions)):
+        return sorted(seats, key=lambda sid: order.index(seats[sid] or ""))
+    seen: list[str] = []
+    for rec in snap.streets:
+        for a in rec.actions:
+            seat = _action_seat(a, hero)
+            if seat not in seen:
+                seen.append(seat)
+    for sid in seats:
+        if sid not in seen:
+            seen.append(sid)
+    return seen
+
+
+def _invested_totals(snap: HandSnapshot, hero: str) -> dict[str, float]:
+    """每个座位这手一共投进底池多少（用「本街加到总额」逐街累加）。
+
+    快照只给**当前**后手，事件发生在过去。后手 = 当前后手 + 总投入 − 行动前
+    已投入，用它才能算行动时的 SPR。前注/盲注不在动作记录里，会整体少算
+    几 BB；SPR 只做方向性修正，这点误差可以接受。
+    """
+    totals: dict[str, float] = {}
+    for rec in snap.streets:
+        per_street: dict[str, float] = {}
+        for a in rec.actions:
+            if a.action == "fold" or a.amount is None:
+                continue
+            seat = _action_seat(a, hero)
+            per_street[seat] = max(per_street.get(seat, 0.0), float(a.amount))
+        for seat, amount in per_street.items():
+            totals[seat] = totals.get(seat, 0.0) + amount
+    return totals
+
+
+def _players_behind(ring: list[str], seat: str, folded: set[str],
+                    all_in: set[str], acted: set[str]) -> int:
+    """身后还能行动、且本街还没行动过的对手数（设计 §1 的补充约定）。"""
+    try:
+        index = ring.index(seat)
+    except ValueError:
+        return 0
+    behind = 0
+    for step in range(1, len(ring)):
+        other = ring[(index + step) % len(ring)]
+        if other == seat:
+            continue
+        if other in folded or other in all_in or other in acted:
+            continue
+        behind += 1
+    return behind
+
+
+def build_events(snap: HandSnapshot) -> tuple[dict[str, tuple], tuple[str, ...]]:
+    """按时间顺序给每个座位生成翻后动作事件。
+
+    返回 `{seat_id: (ActionEvent, ...)}` 与 warnings。翻前不产生事件：
+    先验已经覆盖了「他翻前用哪些牌进池」，重复计入等于算两次。
+    """
+    seats, hero = _seats(snap)
+    ring = _seat_ring(snap, seats, hero)
+    warnings: list[str] = []
+
+    current_stack: dict[str, float | None] = {
+        o.seat_id: o.stack for o in snap.opponents}
+    current_stack[hero] = snap.hero_stack
+    invested_total = _invested_totals(snap, hero)
+    invested_before_street: dict[str, float] = {}
+    events: dict[str, list[range_flow.ActionEvent]] = {sid: [] for sid in ring}
+    # 弃牌状态以动作记录为准（它带时间顺序）。但「这手根本没参与」的座位
+    # （空座、带入中、翻前就弃且没抓到动作）在记录里一条动作都没有，只能
+    # 用快照的 folded 兜底；否则他会一直算进「身后还有几人」。
+    recorded = {_action_seat(a, hero)
+                for rec in snap.streets for a in rec.actions}
+    folded: set[str] = {o.seat_id for o in snap.opponents
+                        if o.folded and o.seat_id not in recorded}
+    all_in: set[str] = set()
+    prev_aggressor: str | None = None
+    running_pot = 0.0
+    inferred_used = 0
+
+    for rec in snap.streets:
+        street = rec.street
+        emit = street in _BOARD_LEN
+        board_len = _BOARD_LEN.get(street, 0)
+        board_cards = snap.board[:board_len]
+        if emit and len(board_cards) < board_len:
+            warnings.append(f"{street}: board incomplete "
+                            f"({len(board_cards)}/{board_len} cards); "
+                            "action events skipped for this street")
+            emit = False
+        board_text = "".join(board_cards)
+
+        committed: dict[str, float] = {}
+        acted: set[str] = set()
+        level = 0.0
+        raises = 0
+        callers = 0
+        street_aggressor: str | None = None
+        if rec.pot_start is not None:
+            pot = float(rec.pot_start)
+        else:
+            pot = running_pot
+            if emit:
+                warnings.append(f"{street}: pot at street start unread; "
+                                "SPR is approximate")
+
+        for action in rec.actions:
+            seat = _action_seat(action, hero)
+            if action.action == "fold":
+                folded.add(seat)
+                acted.add(seat)
+                continue
+            if seat not in events:              # 不在座位环上（离桌/漏座位）
+                events.setdefault(seat, [])
+
+            amount = float(action.amount) if action.amount is not None else None
+            before = committed.get(seat, 0.0)
+            facing = level > 0 and before < level - 1e-9
+            behind = _players_behind(ring, seat, folded, all_in, acted)
+            first = not acted
+            pot_before = pot
+            if emit:
+                stack_actor = _stack_at_event(current_stack, invested_total,
+                                              invested_before_street, seat,
+                                              before)
+                stack_hero = _stack_at_event(current_stack, invested_total,
+                                             invested_before_street, hero,
+                                             committed.get(hero, 0.0))
+                effective = min((s for s in (stack_actor, stack_hero)
+                                 if s is not None), default=None)
+                spr = (effective / pot_before
+                       if effective is not None and pot_before > 1e-9 else 99.0)
+                events[seat].append(range_flow.ActionEvent(
+                    street=street,
+                    board=board_text,
+                    seat_id=seat,
+                    action=action.action,
+                    all_in=bool(action.all_in),
+                    amount=amount,
+                    facing_bet=facing,
+                    raises_before=raises,
+                    n_callers=callers,
+                    players_behind=behind,
+                    is_first_to_act=first,
+                    is_last_to_act=behind <= 0,
+                    closes_action=(action.action == "call" and behind <= 0),
+                    prev_street_aggressor=prev_aggressor,
+                    is_donk=(not facing and first
+                             and action.action in ("bet", "raise")
+                             and prev_aggressor is not None
+                             # 自己是上一街 aggressor 时是续注（lead），
+                             # 不是 donk——donk 是「下注进别人的 aggressor」。
+                             and prev_aggressor != seat
+                             and prev_aggressor not in folded
+                             and prev_aggressor not in acted),
+                    spr=spr,
+                    pot=pot_before,
+                ))
+                if action.inferred:
+                    inferred_used += 1
+
+            # ── 状态推进（用行动**前**的 before/level 算，再更新） ──
+            delta = max((amount if amount is not None else level) - before, 0.0)
+            pot = pot_before + delta
+            if amount is not None:
+                committed[seat] = max(before, amount)
+            if action.action in ("bet", "raise") or (
+                    action.action == "call" and action.all_in):
+                level = max(level, committed.get(seat, level))
+                raises += 1
+                callers = 0
+                street_aggressor = seat
+            elif action.action == "call":
+                callers += 1
+            acted.add(seat)
+            if action.all_in:
+                all_in.add(seat)
+
+        # 下一街的 donk 只能对着**本街真下过注**的人；本街全过牌就没有。
+        prev_aggressor = street_aggressor
+        for seat, amount in committed.items():
+            invested_before_street[seat] = (
+                invested_before_street.get(seat, 0.0) + amount)
+        running_pot = pot
+
+    if inferred_used:
+        warnings.append(f"range events include {inferred_used} inferred "
+                        "action(s) from pot reconciliation; order/context "
+                        "are approximate")
+    return ({sid: tuple(items) for sid, items in events.items()},
+            tuple(dict.fromkeys(warnings)))
+
+
+def _stack_at_event(current_stack: dict[str, float | None],
+                    invested_total: dict[str, float],
+                    invested_before_street: dict[str, float],
+                    seat: str, street_committed: float) -> float | None:
+    now = current_stack.get(seat)
+    if now is None:
+        return None
+    invested_before = (invested_before_street.get(seat, 0.0) + street_committed)
+    return now + invested_total.get(seat, 0.0) - invested_before
+
+
 def _mode(snap: HandSnapshot, opp, warnings: list[str]) -> str:
     """当前街动作 → 牌面范围 mode。"""
     if snap.street == PREFLOP:
@@ -241,7 +489,7 @@ def _mode(snap: HandSnapshot, opp, warnings: list[str]) -> str:
 
 
 def resolve(snap: HandSnapshot) -> Field:
-    """把快照解析成每个在局对手的 (先验, mode)。失败也返回 Field + warnings。"""
+    """把快照解析成每个在局对手的 (先验, mode, 事件序列)。失败也返回 warnings。"""
     warnings: list[str] = []
     active = [o for o in snap.opponents if not o.folded]
     if not active:
@@ -284,6 +532,12 @@ def resolve(snap: HandSnapshot) -> Field:
         unreliable_raise = True
 
     specs: list[OpponentRangeSpec] = []
+    # 事件序列是「这手牌怎么走到现在的」唯一完整记录，按座位生成一次。
+    # 关闭事件模型时不必算，省掉一层遍历。
+    event_map: dict[str, tuple] = {}
+    if range_flow.enabled():
+        event_map, event_warnings = build_events(snap)
+        warnings.extend(event_warnings)
     for opp in active:
         if unreliable_raise:
             # 形状与动作线矛盾时不猜角色：宁可 range unknown，也不拿 BB 范围
@@ -297,7 +551,8 @@ def resolve(snap: HandSnapshot) -> Field:
         mode = _mode(snap, opp, warnings)
         if mode == "fold":
             continue
-        if mode == "unacted" and snap.street != PREFLOP:
+        seat_events = event_map.get(opp.seat_id, ())
+        if mode == "unacted" and snap.street != PREFLOP and not seat_events:
             warnings.append(
                 f"seat {opp.seat_id}: no action this street; "
                 "range kept at preflop prior")
@@ -310,6 +565,7 @@ def resolve(snap: HandSnapshot) -> Field:
             mode=mode,
             role=role,
             note=note,
+            events=seat_events,
         ))
 
     # 短码的有效筹码会把范围整体拉宽/拉窄；表仍可用，但要标注近似。
@@ -321,4 +577,4 @@ def resolve(snap: HandSnapshot) -> Field:
     return Field(tuple(specs), tuple(dict.fromkeys(warnings)), None)
 
 
-__all__ = ["Field", "OpponentRangeSpec", "bucket", "resolve"]
+__all__ = ["Field", "OpponentRangeSpec", "bucket", "build_events", "resolve"]

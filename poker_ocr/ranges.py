@@ -138,6 +138,28 @@ class Range:
         return MappingProxyType({c: w / total for c, w in self.combo_weights.items()
                                  if w > 0})
 
+    def effective_width_pct(self, mass: float = 0.90) -> float:
+        """按权重从高到低累加到 `mass` 质量所需的 combo 占比。
+
+        事件模型连乘后每个 combo 都非零，支撑集宽度（`width_pct`）会接近
+        100%；「他的范围实际集中在多少组合上」要按质量算，否则提示词里
+        永远写「范围 75%」，看不出收窄。
+        """
+        values = sorted((w for w in self.combo_weights.values() if w > 0),
+                        reverse=True)
+        total = sum(values)
+        if total <= 0:
+            return 0.0
+        target = total * mass
+        acc = 0.0
+        count = 0
+        for w in values:
+            acc += w
+            count += 1
+            if acc >= target:
+                break
+        return count / TOTAL_COMBOS * 100
+
     def render_label(self) -> str:
         return f"{self.id} {self.width_pct:.1f}%"
 
