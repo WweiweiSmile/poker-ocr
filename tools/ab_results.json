@@ -11,6 +11,20 @@
   "old": 0.6915,
   "new": 0.08675,
   "threshold": 0.2414,
+  "model": {
+   "old": "call",
+   "old_label": "跟注 63BB",
+   "old_kind": "call",
+   "old_amount": 63.0,
+   "old_reason": "明三条在炸弹池对范围权益69%远超24%门槛，成花面但价格合适，跟注控池",
+   "old_ms": 1231,
+   "new": "fold",
+   "new_label": "弃牌",
+   "new_kind": "fold",
+   "new_amount": null,
+   "new_reason": "河牌成花成对，UTG+1全下范围89%压过我，权益仅9%远低于24%门槛",
+   "new_ms": 982
+  },
   "result": "PASS"
  },
  {
@@ -25,6 +39,20 @@
   "old": 0.59675,
   "new": 0.01125,
   "threshold": 0.1124,
+  "model": {
+   "old": "call",
+   "old_label": "跟注 47BB",
+   "old_kind": "call",
+   "old_amount": 47.0,
+   "old_reason": "明三条对两家全下范围权益60%远超11.2%门槛，成花面但价格极佳，",
+   "old_ms": 1090,
+   "new": "fold",
+   "new_label": "弃牌",
+   "new_kind": "fold",
+   "new_amount": null,
+   "new_reason": "河牌面对全下加注，对手范围89%压过我，明三条非坚果且赔率仅11.2%，弃牌",
+   "new_ms": 716
+  },
   "result": "PASS"
  },
  {
@@ -39,6 +67,20 @@
   "old": 0.69575,
   "new": 0.39175,
   "threshold": 0.2485,
+  "model": {
+   "old": "call",
+   "old_label": "跟注 21BB",
+   "old_kind": "call",
+   "old_amount": 21.0,
+   "old_reason": "两对但公对面有葫芦风险，权益70%远超24.9%门槛，跟注控池",
+   "old_ms": 1298,
+   "new": "call",
+   "new_label": "跟注 21BB",
+   "new_kind": "call",
+   "new_amount": 21.0,
+   "new_reason": "两对但公对面成葫芦风险高，对手河牌下注范围强，权益39%仅够跟注门槛，跟注控池",
+   "new_ms": 941
+  },
   "result": "PASS"
  },
  {
@@ -53,6 +95,21 @@
   "old": 0.2231111111111111,
   "new": 0.28188888888888886,
   "threshold": 0.2264,
+  "model": {
+   "old": "fold",
+   "old_label": "弃牌",
+   "old_kind": "fold",
+   "old_amount": null,
+   "old_reason": "4人池中对9在K高花听面，权益22%低于22.6%门槛，",
+   "old_ms": 1075,
+   "new": "fold",
+   "new_label": "弃牌",
+   "new_kind": "fold",
+   "new_amount": null,
+   "new_reason": "4人池中对仅28%权益，低于22.6%门槛且身后SB/UTG未行动，无听牌，",
+   "new_ms": 972
+  },
+  "advice_diff": "新模型建议 fold，记录 call",
   "result": "PASS"
  },
  {
@@ -67,6 +124,20 @@
   "old": 0.29425,
   "new": 0.3095,
   "threshold": 0.3333,
+  "model": {
+   "old": "fold",
+   "old_label": "弃牌",
+   "old_kind": "fold",
+   "old_amount": null,
+   "old_reason": "3人池两头顺听牌权益29%低于33%门槛，CO加注示强且无位置，弃牌最稳",
+   "old_ms": 865,
+   "new": "fold",
+   "new_label": "弃牌",
+   "new_kind": "fold",
+   "new_amount": null,
+   "new_reason": "3人池两头顺听牌权益31%低于33%门槛，CO加注范围强且无位置，弃牌最稳",
+   "new_ms": 861
+  },
   "result": "PASS"
  },
  {
@@ -81,6 +152,20 @@
   "old": 0.9105,
   "new": 0.67075,
   "threshold": 0.1825,
+  "model": {
+   "old": "call",
+   "old_label": "跟注 57.5BB",
+   "old_kind": "call",
+   "old_amount": 57.5,
+   "old_reason": "河牌葫芦对全下，权益91%远超18.3%门槛，跟注即可",
+   "old_ms": 788,
+   "new": "call",
+   "new_label": "跟注 57.5BB",
+   "new_kind": "call",
+   "new_amount": 57.5,
+   "new_reason": "河牌葫芦，赔率门槛18.3%，对范围权益67%，",
+   "new_ms": 1033
+  },
   "result": "PASS"
  },
  {
@@ -95,6 +180,20 @@
   "old": 0.414,
   "new": 0.5465,
   "threshold": 0.1447,
+  "model": {
+   "old": "call",
+   "old_label": "跟注 11BB",
+   "old_kind": "call",
+   "old_amount": 11.0,
+   "old_reason": "超对SPR0.4，需跟11BB赔率14.5%，对范围权益41%远超门槛，跟注即可",
+   "old_ms": 874,
+   "new": "call",
+   "new_label": "跟注 11BB",
+   "new_kind": "call",
+   "new_amount": 11.0,
+   "new_reason": "超对SPR0.4，对范围权益55%远超14.5%门槛，HJ全下封口只能跟",
+   "new_ms": 913
+  },
   "result": "PASS"
  },
  {
@@ -109,6 +208,20 @@
   "old": 0.1785,
   "new": 0.325,
   "threshold": 0.2804,
+  "model": {
+   "old": "fold",
+   "old_label": "弃牌",
+   "old_kind": "fold",
+   "old_amount": null,
+   "old_reason": "卡顺仅4 outs、权益18%低于28%门槛，对手范围2.2%极强，弃牌",
+   "old_ms": 778,
+   "new": "fold",
+   "new_label": "弃牌",
+   "new_kind": "fold",
+   "new_amount": null,
+   "new_reason": "卡顺仅4 outs、赔率门槛28%远高于8%成牌率，SPR1.8且对手范围强，",
+   "new_ms": 726
+  },
   "result": "PASS"
  },
  {
@@ -123,6 +236,20 @@
   "old": 0.013444444444444443,
   "new": 0.016444444444444446,
   "threshold": 0.38,
+  "model": {
+   "old": "fold",
+   "old_label": "弃牌",
+   "old_kind": "fold",
+   "old_amount": null,
+   "old_reason": "J5无成牌无听牌，对范围权益仅1%，面对全下38%门槛远不够，弃牌",
+   "old_ms": 823,
+   "new": "fold",
+   "new_label": "弃牌",
+   "new_kind": "fold",
+   "new_amount": null,
+   "new_reason": "J5无成牌无听牌，对范围权益仅2%，面对全下跟注门槛38%远不够",
+   "new_ms": 794
+  },
   "result": "PASS"
  },
  {
@@ -137,6 +264,20 @@
   "old": 0.0,
   "new": 0.03625,
   "threshold": 0.2478,
+  "model": {
+   "old": "fold",
+   "old_label": "弃牌",
+   "old_kind": "fold",
+   "old_amount": null,
+   "old_reason": "河牌成花成顺面，底对权益0%，跟注需24.8%赔率不足，弃牌",
+   "old_ms": 727,
+   "new": "fold",
+   "new_label": "弃牌",
+   "new_kind": "fold",
+   "new_amount": null,
+   "new_reason": "河牌成花成顺面，底对仅4%权益，跟注门槛24.8%远不够",
+   "new_ms": 889
+  },
   "result": "PASS"
  },
  {
@@ -151,6 +292,20 @@
   "old": 0.527,
   "new": 0.62275,
   "threshold": 0.2273,
+  "model": {
+   "old": "call",
+   "old_label": "跟注 20BB",
+   "old_kind": "call",
+   "old_amount": 20.0,
+   "old_reason": "顶对A踢，SPR0.5已套池，对范围权益53%高于22.7%门槛，跟注即可",
+   "old_ms": 755,
+   "new": "call",
+   "new_label": "跟注 20BB",
+   "new_kind": "call",
+   "new_amount": 20.0,
+   "new_reason": "顶对A踢，SPR0.5已套池，对范围权益62%远超22.7%门槛，跟注即可",
+   "new_ms": 748
+  },
   "result": "PASS"
  },
  {
@@ -176,6 +331,20 @@
   "old": 0.03283333333333334,
   "new": 0.024888888888888884,
   "threshold": 0.2549,
+  "model": {
+   "old": "fold",
+   "old_label": "弃牌",
+   "old_kind": "fold",
+   "old_amount": null,
+   "old_reason": "空气无听牌，9人池权益仅3%，面对65BB加注跟注门槛25.5%远不够，弃牌",
+   "old_ms": 702,
+   "new": "fold",
+   "new_label": "弃牌",
+   "new_kind": "fold",
+   "new_amount": null,
+   "new_reason": "空气无听牌，对范围权益仅2%，面对加注跟注池需25.5%门槛，远不够",
+   "new_ms": 1015
+  },
   "result": "PASS"
  },
  {
@@ -190,6 +359,21 @@
   "old": 0.3703888888888888,
   "new": 0.3703888888888888,
   "threshold": 0.0,
+  "model": {
+   "old": "call",
+   "old_label": "过牌",
+   "old_kind": "check",
+   "old_amount": null,
+   "old_reason": "7人炸弹池无位置，A高坚果花听牌权益37%仅略高于公平份额，身后4人未行动，",
+   "old_ms": 1099,
+   "new": "call",
+   "new_label": "过牌",
+   "new_kind": "check",
+   "new_amount": null,
+   "new_reason": "7人炸弹池无位置，A高坚果花听牌权益37%但身后4人未行动，过牌控池等转牌",
+   "new_ms": 695
+  },
+  "advice_diff": "新模型建议 call，记录 raise-1/3",
   "result": "PASS"
  },
  {
@@ -204,6 +388,20 @@
   "old": 0.0,
   "new": 0.07675,
   "threshold": 0.25,
+  "model": {
+   "old": "fold",
+   "old_label": "弃牌",
+   "old_kind": "fold",
+   "old_amount": null,
+   "old_reason": "A高空气无听牌，成花面河牌面对下注，权益0%远低于25%门槛，弃牌",
+   "old_ms": 829,
+   "new": "fold",
+   "new_label": "弃牌",
+   "new_kind": "fold",
+   "new_amount": null,
+   "new_reason": "A高空气，成花面河牌面对下注，权益仅8%低于25%门槛，弃牌",
+   "new_ms": 671
+  },
   "result": "PASS"
  },
  {

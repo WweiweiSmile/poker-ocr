@@ -5,8 +5,10 @@ import {
 import type { ColumnsType } from 'antd/es/table'
 import { useQuery } from '@tanstack/react-query'
 import { api, errorMessage } from '../api'
-import type { RangeABCase, RangeABResponse } from '../types'
-import { formatDate } from '../lib/format'
+import type {
+  RangeABAction, RangeABAdvice, RangeABCase, RangeABResponse,
+} from '../types'
+import { formatAmount, formatDate } from '../lib/format'
 
 const STATUS_COLORS: Record<string, string> = {
   ready: 'blue',
@@ -53,6 +55,143 @@ function EquityPair({ row }: { row: RangeABCase }) {
     <span className="mono" style={{ color }}>
       {pct(old)} → {pct(next)}
     </span>
+  )
+}
+
+const ACTION_LABELS: Record<string, string> = {
+  fold: '弃牌', check: '过牌', call: '跟注', bet: '下注', raise: '加注', allin: '全下',
+}
+const STREET_LABELS: Record<string, string> = {
+  preflop: '翻前', flop: '翻牌', turn: '转牌', river: '河牌',
+}
+
+function actionText(action: RangeABAction): string {
+  const label = ACTION_LABELS[action.action] || action.action
+  return action.amount === null || action.amount === undefined
+    ? label : `${label} ${formatAmount(action.amount)}`
+}
+
+function AdviceCard({ title, option, amount, reason, meta, highlight }: {
+  title: string
+  option?: string | null
+  amount?: number | null
+  reason?: string | null
+  meta?: string | null
+  highlight?: boolean
+}) {
+  return (
+    <Card
+      size="small"
+      style={highlight
+        ? { borderColor: '#0f766e', background: '#f5faf8' }
+        : undefined}
+    >
+      <div className="card-title" style={{ marginBottom: 8 }}>{title}</div>
+      <Space wrap style={{ marginBottom: 6 }}>
+        <span className="option-pill">{option || '—'}</span>
+        {amount !== null && amount !== undefined
+          ? <span className="mono">{formatAmount(amount)} BB</span> : null}
+        {meta ? <span className="muted">{meta}</span> : null}
+      </Space>
+      <div className="advice-reason">{reason || '—'}</div>
+    </Card>
+  )
+}
+
+function historicalAdvice(row: RangeABCase): RangeABAdvice | undefined {
+  const advices = row.handDetail?.advices || []
+  return advices.find((advice) => (
+    advice.street === row.street
+    && (row.action_index === null || row.action_index === undefined
+      || advice.actionIndex === row.action_index)
+  )) || advices.find((advice) => advice.street === row.street)
+}
+
+function CaseDetail({ row }: { row: RangeABCase }) {
+  const hand = row.handDetail
+  const model = row.result?.model
+  const hist = historicalAdvice(row)
+  const old = row.result?.old ?? row.old_equity
+  const next = row.result?.new ?? row.new_equity
+  return (
+    <div style={{ padding: '2px 8px 10px' }}>
+      <div className="muted" style={{ marginBottom: 10 }}>
+        {hand
+          ? `${hand.heroCards} · ${hand.board || '—'} · ${hand.heroPosition || '—'} · 底池 ${hand.pot !== null && hand.pot !== undefined ? formatAmount(hand.pot) : '—'}BB${hand.bombPot ? ' · 炸弹池' : ''}`
+          : '没有手牌行动线'}
+        {' · '}
+        决策点：{STREET_LABELS[row.street] || row.street}
+        {row.to_call ? ` · 需跟 ${formatAmount(row.to_call)}BB` : ''}
+        {row.pot ? ` · 底池 ${formatAmount(row.pot)}BB` : ''}
+        {' · '}旧 {pct(old)} → 新 {pct(next)}（门槛 {pct(row.threshold)}）
+        <span style={{ marginLeft: 8 }}>
+          模型建议为单次采样，可能波动；「线上原建议」来自当时落库的 advice。
+        </span>
+      </div>
+      {hand ? (
+        <div className="street-list" style={{ marginBottom: 12 }}>
+          {hand.streets.map((street) => (
+            <div className="street-row" key={street.street}>
+              <div className="street-side" style={{ minWidth: 92 }}>
+                <div className="street-name">
+                  {STREET_LABELS[street.street] || street.street}
+                </div>
+                <div className="street-pot">
+                  {street.potStart !== null && street.potStart !== undefined
+                    ? `起始 ${formatAmount(street.potStart)} BB` : '—'}
+                </div>
+              </div>
+              <div className="street-actions">
+                {street.actions.length ? street.actions.map((action, index) => (
+                  <span
+                    className={`action-chip${action.isHero ? ' hero' : ''}`}
+                    key={`${street.street}-${index}`}
+                  >
+                    {action.position || '?'} {actionText(action)}
+                    {action.allIn
+                      ? <Tag color="red" className="mini-tag">ALLIN</Tag> : null}
+                    {action.inferred
+                      ? <span className="muted">（推断）</span> : null}
+                  </span>
+                )) : <span className="muted">没有记录</span>}
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : null}
+      <Row gutter={[12, 12]}>
+        <Col span={8}>
+          <AdviceCard
+            title="线上原建议"
+            option={hist?.optionLabel}
+            amount={hist?.amount}
+            reason={hist?.reason}
+            meta={hist
+              ? [hist.model, hist.promptVersion].filter(Boolean).join(' · ')
+              : null}
+          />
+        </Col>
+        <Col span={8}>
+          <AdviceCard
+            title="旧引擎重跑"
+            option={model?.old_label || model?.old}
+            amount={model?.old_amount}
+            reason={model?.old_reason || (model ? '' : '未跑模型（--model）')}
+            meta={model?.old_ms ? `${model.old_ms}ms` : null}
+          />
+        </Col>
+        <Col span={8}>
+          <AdviceCard
+            title="新引擎重跑"
+            option={model?.new_label || model?.new}
+            amount={model?.new_amount}
+            reason={model?.new_reason || (model ? '' : '未跑模型（--model）')}
+            meta={model?.new_ms ? `${model.new_ms}ms` : null}
+            highlight
+          />
+        </Col>
+      </Row>
+    </div>
   )
 }
 
@@ -265,6 +404,10 @@ export default function RangeABPage() {
           columns={columns}
           pagination={false}
           scroll={{ x: 1300 }}
+          expandable={{
+            expandedRowRender: (row) => <CaseDetail row={row} />,
+            rowExpandable: (row) => Boolean(row.handDetail || row.result?.model),
+          }}
         />
       </Card>
 

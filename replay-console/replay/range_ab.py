@@ -20,6 +20,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 SET_PATH = ROOT / "tools" / "ab_set.json"
 RESULT_PATH = ROOT / "tools" / "ab_results.json"
+OUTBOX = ROOT / "data" / "hand_outbox" / "pending"
 
 _STATUS_ORDER = ("ready", "blocked_cap", "blocked_data", "data_broken",
                  "manual", "needs_reconstruction")
@@ -47,6 +48,57 @@ def _rows(raw) -> list[dict]:
         rows = raw.get("rows") or raw.get("cases") or []
         return [r for r in rows if isinstance(r, dict)]
     return []
+
+
+def _hand_detail(hand_id: str) -> dict | None:
+    """手牌的行动线 + 线上原建议；只读 outbox，缺失时返回 None。"""
+    raw = _read_json(OUTBOX / f"{hand_id}.json")
+    if not isinstance(raw, dict):
+        return None
+    streets = []
+    for rec in raw.get("streets") or []:
+        actions = []
+        for action in rec.get("actions") or []:
+            actions.append({
+                "position": action.get("position"),
+                "action": action.get("action"),
+                "amount": action.get("amount"),
+                "allIn": bool(action.get("all_in")),
+                "inferred": bool(action.get("inferred")),
+                "isHero": bool(action.get("is_hero")),
+            })
+        streets.append({
+            "street": rec.get("street"),
+            "potStart": rec.get("pot_start"),
+            "actions": actions,
+        })
+    advices = []
+    for advice in raw.get("advices") or []:
+        option = advice.get("option") or {}
+        amount = option.get("amount_bb")
+        if amount is None:
+            amount = option.get("amount")
+        advices.append({
+            "street": advice.get("street"),
+            "actionIndex": advice.get("action_index"),
+            "optionId": option.get("id"),
+            "optionLabel": option.get("label") or option.get("id"),
+            "amount": amount,
+            "reason": advice.get("reason") or "",
+            "pot": advice.get("pot"),
+            "toCall": advice.get("to_call"),
+            "model": advice.get("model"),
+            "promptVersion": advice.get("prompt_version"),
+        })
+    return {
+        "heroCards": " ".join(raw.get("hero_cards") or []),
+        "board": " ".join(raw.get("board") or []),
+        "heroPosition": raw.get("hero_position"),
+        "pot": raw.get("pot"),
+        "bombPot": bool(raw.get("bomb_pot")),
+        "streets": streets,
+        "advices": advices,
+    }
 
 
 def _summary(cases: list[dict]) -> dict:
@@ -110,6 +162,7 @@ def load() -> dict:
             continue
         merged = dict(case)
         result = by_id.get(str(case.get("id")))
+        merged["handDetail"] = _hand_detail(str(case.get("hand")))
         if result:
             merged["result"] = {
                 "result": result.get("result"),

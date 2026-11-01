@@ -35,6 +35,10 @@
 它读 `tools/ab_set.json` + `tools/ab_results.json`，不跑模型、不碰 DB；
 没有结果文件时只显示清单里记录的旧/新权益。
 
+页面上每条用例可展开：**行动线**（每条街、每个人的动作，含推断/全下标）+ 三张
+建议卡（线上原建议 / 旧引擎重跑 / 新引擎重跑，含理由）。模型建议来自
+`ab_range_set.py --model --json tools/ab_results.json`，是单次采样，可能波动。
+
 `expect` 的含义：`cross_down`（旧过门槛、新不过）、`cross_up`（旧不过、新过）、
 `stay_above` / `stay_below`（两侧同侧）、`n/a`（无门槛，如自己下注）。
 模型建议有随机性，`--model` 默认只记录与 `new_advice` 的差异，不判 FAIL；

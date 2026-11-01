@@ -608,6 +608,59 @@ export interface ExperimentResults {
   review: Record<string, number>
 }
 
+export interface RangeABModelRun {
+  old?: string
+  new?: string
+  old_label?: string
+  new_label?: string
+  old_kind?: string
+  new_kind?: string
+  old_amount?: number | null
+  new_amount?: number | null
+  old_reason?: string
+  new_reason?: string
+  old_ms?: number
+  new_ms?: number
+}
+
+export interface RangeABAction {
+  position: string | null
+  action: string
+  amount: number | null
+  allIn: boolean
+  inferred: boolean
+  isHero: boolean
+}
+
+export interface RangeABStreet {
+  street: string
+  potStart: number | null
+  actions: RangeABAction[]
+}
+
+export interface RangeABAdvice {
+  street: string
+  actionIndex: number | null
+  optionId: string
+  optionLabel: string
+  amount: number | null
+  reason: string
+  pot: number | null
+  toCall: number | null
+  model: string | null
+  promptVersion: string | null
+}
+
+export interface RangeABHandDetail {
+  heroCards: string
+  board: string
+  heroPosition: string | null
+  pot: number | null
+  bombPot: boolean
+  streets: RangeABStreet[]
+  advices: RangeABAdvice[]
+}
+
 export interface RangeABResult {
   result: string
   old: number | null
@@ -615,7 +668,7 @@ export interface RangeABResult {
   threshold: number | null
   problems: string[]
   adviceDiff: string | null
-  model: Record<string, unknown> | null
+  model: RangeABModelRun | null
 }
 
 export interface RangeABCase {
@@ -636,6 +689,7 @@ export interface RangeABCase {
   old_advice?: string
   new_advice?: string
   note?: string
+  handDetail?: RangeABHandDetail | null
   result?: RangeABResult
 }
 

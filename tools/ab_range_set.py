@@ -183,6 +183,9 @@ def run_case(case: dict, settings: AISettings | None,
             try:
                 got = advise(sit, settings, timeout=timeout)
                 row["model"][label] = got.option.id
+                row["model"][label + "_label"] = got.option.label
+                row["model"][label + "_kind"] = got.option.kind
+                row["model"][label + "_amount"] = got.option.amount
                 row["model"][label + "_reason"] = got.reason
             except Exception as exc:  # noqa: BLE001
                 row["model"][label] = f"ERROR:{type(exc).__name__}"
