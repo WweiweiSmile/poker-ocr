@@ -58,7 +58,13 @@ from poker_ocr.table_dynamics import (  # noqa: E402
 #               先结论后依据并与桌级剥削统一；座位画像可剥削合并；炸弹池/
 #               combo draw/听牌价格口径；单挑标签、JSON 契约、raise id、
 #               A 高面条件化。
-CURRENT_ADVICE_VERSION = "advice-2026-10-31.4"
+# 2026-11-01.1：0 对手异常帧硬闸（不渲染筹码几何/牌力、只给过牌/弃牌、
+#               不调模型）；攻击块只在记录到全部 check 时才宣称「全部过牌」；
+#               `.table_dy` 的 A 高面观察按街/牌面过滤，依据与结论对齐；
+#               否定词按分句匹配；3 人池标签；溜入只数 Hero 前/加注前；
+#               桌级 c-bet 与座位反向证据去重；默认弃牌只由实测松凶软化；
+#               定义强/中/空气牌力；行动线提前。
+CURRENT_ADVICE_VERSION = "advice-2026-11-01.1"
 # 改动 decisions.py 的重建语义时 bump。
 # recon-3：翻前底池补上盲注（实时 pbs 只记前注，h39 4.5 → 6.0）。
 CURRENT_RECONSTRUCT_VERSION = "recon-3"
