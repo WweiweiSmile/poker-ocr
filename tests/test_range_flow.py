@@ -497,6 +497,31 @@ def test_comb_indexing_via_events_keeps_draws() -> None:
           "花听 QhTh 必须保留在范围里，不能被强度门槛砍掉")
 
 
+def test_draw_weight_follows_rule_of_4_2() -> None:
+    """听牌权重按街缩放：转牌是翻牌的一半（2 张发牌 vs 4 张），河牌为 0。"""
+    def event(board: str, street: str) -> range_flow.ActionEvent:
+        return range_flow.ActionEvent(
+            street=street, board=board, seat_id="x", action="call",
+            facing_bet=True, players_behind=2, spr=3.0)
+
+    flop = event("Ks9h2h", "flop")
+    turn = event("Ks9h2h4c", "turn")
+    draw = range_flow.HandClass("air", "flush", "semi_bluff")
+    made = range_flow.HandClass("strong", "none", "value")
+
+    flop_draw = range_flow.event_factor(flop, draw)
+    turn_draw = range_flow.event_factor(turn, draw)
+    check(flop_draw > 0 and abs(turn_draw / flop_draw - 0.5) < 1e-9,
+          f"转牌听牌权重应是翻牌的一半：{turn_draw:.4f} vs {flop_draw:.4f}")
+    check(range_flow.event_factor(turn, made)
+          == range_flow.event_factor(flop, made),
+          "成牌权重不该被街因子缩放")
+    check(range_flow.draw_street_factor(3) == 1.0
+          and range_flow.draw_street_factor(4) == 0.5
+          and range_flow.draw_street_factor(5) == 0.0,
+          "街因子应是翻牌 1.0 / 转牌 0.5 / 河牌 0")
+
+
 def test_event_range_narrows_over_streets() -> None:
     """同一批事件下，范围随动作顺序单调收窄（不是每街重算）。"""
     prior = ranges.uniform_range("UNIFORM")
@@ -560,6 +585,7 @@ def main() -> int:
         test_trigger_hand_river_folds,
         test_prompt_renders_line_partition_and_warning,
         test_comb_indexing_via_events_keeps_draws,
+        test_draw_weight_follows_rule_of_4_2,
         test_event_range_narrows_over_streets,
         test_spec_carries_events,
         test_off_switch_falls_back_to_old_path,

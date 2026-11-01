@@ -27,7 +27,8 @@
 两条不变量：
 
   · 听牌不会被成牌强度门槛砍掉（旧路径 `MODE_MIN_WEIGHT` 的问题），只被
-    听牌类动作倾向加权；
+    听牌类动作倾向加权；权重再乘四二法则的街因子（翻牌 1.0 / 转牌 0.5 /
+    河牌 0），转牌听牌不会按翻牌的权重留在范围里；
   · 范围在整手牌里是**持续更新的状态**，不是每街从翻前先验重算。
 
 本模块只改「对手范围怎么来」，不改 `hand_vs_ranges` 的权益算法。
@@ -163,6 +164,22 @@ _DRAW_PROBS: dict[str, tuple[float, float, float, float, float]] = {
     "backdoor": (0.94, 1.15,  1.15, 1.02, 0.95),
     "none":     (1.00, 1.00,  1.00, 1.00, 1.00),
 }
+
+# 听牌权重的街因子：听牌的价值随「还能发几张牌」线性缩水，就是四二法则——
+# 翻牌 4 张（outs×4）、转牌 2 张（outs×2）、河牌 0 张。绝对倍数 4/2 会在
+# 每个动作的合法动作集归一化里约掉（call/raise/fold 同乘一个数，比例不变），
+# 所以这里存相对翻牌的比值：4/4、2/4、0/4。它作用在**类别权重**上，不作用
+# 在权益上；权益仍由 `hand_vs_ranges` 按剩余牌 runout 精确算。
+_DRAW_STREET_FACTOR: dict[int, float] = {3: 1.0, 4: 0.5, 5: 0.0}
+
+
+def draw_street_factor(board_len: int) -> float:
+    """听牌权重按剩余发牌张数缩放：翻牌 1.0、转牌 0.5、河牌 0。"""
+    try:
+        return _DRAW_STREET_FACTOR.get(int(board_len), 1.0)
+    except (TypeError, ValueError):
+        return 1.0
+
 
 # 桶 × 成牌档（设计 §4.2 的细化）：设计稿给的是 3 组乘数，但「价值组」
 # 内部还要**向坚果集中**——多人池的 donk-jam 里，坚果该升、两对/顶对该降，
@@ -500,8 +517,13 @@ def likelihood(action: str, cls: HandClass, *, facing: bool, bucket: str,
 
 def event_factor(event: ActionEvent, cls: HandClass, *,
                  archetype: str = "unknown") -> float:
-    """一个事件对一类手牌的乘数（未取 α 次幂）。"""
-    return likelihood(
+    """一个事件对一类手牌的乘数（未取 α 次幂）。
+
+    听牌再乘一个街因子（四二法则）：翻牌 ×1.0（还剩 4 张发牌）、转牌 ×0.5
+    （2 张）、河牌 ×0（没有下一张）。不这么做的话，同一手花听在转牌仍按
+    翻牌的权重留在范围里，转牌听牌占比会虚高。后门听只在翻牌成立，不缩放。
+    """
+    factor = likelihood(
         event.action, cls,
         facing=event.facing_bet,
         bucket=bucket_of(event),
@@ -509,6 +531,10 @@ def event_factor(event: ActionEvent, cls: HandClass, *,
         archetype=archetype,
         all_in=event.all_in,
     )
+    if cls.draw in ("combo", "flush", "oesd", "gutshot"):
+        # event.board 是拼起来的字符串（每张牌两个字符），换成张数再查表。
+        factor *= draw_street_factor(len(event.board) // 2)
+    return factor
 
 
 # ─────────────────────────── 构建范围 ───────────────────────────
@@ -710,7 +736,7 @@ def reset_cache() -> None:
 __all__ = [
     "ActionEvent", "BUCKETS", "Composition", "DRAW_KINDS", "GROUPS",
     "HandClass", "MADE_KINDS", "bucket_of", "build_range", "composition",
-    "effective_alpha", "enabled", "event_factor", "group_multiplier",
-    "hand_class", "likelihood",
+    "draw_street_factor", "effective_alpha", "enabled", "event_factor",
+    "group_multiplier", "hand_class", "likelihood",
     "line_note", "reset_cache", "spr_bucket",
 ]
