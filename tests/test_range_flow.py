@@ -497,6 +497,28 @@ def test_comb_indexing_via_events_keeps_draws() -> None:
           "花听 QhTh 必须保留在范围里，不能被强度门槛砍掉")
 
 
+def test_composition_separates_top_pair_and_two_pair_plus() -> None:
+    """封顶事实要能拆出「两对+」和「顶对」：它们都在「一对/成牌」里，
+    不拆出来就看不出连续过牌后强牌还剩多少。"""
+    board = "3dAc2cKh9s"
+    prior = ranges.uniform_range("UNIFORM")
+    event = range_flow.ActionEvent(
+        street="turn", board="3dAc2cKh", seat_id="x", action="check",
+        players_behind=2, is_first_to_act=False, spr=2.0)
+    built = range_flow.build_range(prior, (event,),
+                                   dead=set(parse_cards(board)))
+    assert built is not None
+    comp = range_flow.composition(built, board)
+    check(comp.two_pair_plus > 0.03,
+          f"河牌面应有两对+ 占比，实际 {comp.two_pair_plus:.3f}")
+    check(comp.top_pair > 0.02,
+          f"河牌面应有顶对占比，实际 {comp.top_pair:.3f}")
+    check(comp.top_pair + comp.two_pair_plus <= comp.made_hand + 1e-9,
+          f"顶对+两对+ 不能超过成牌占比："
+          f"{comp.top_pair:.3f}+{comp.two_pair_plus:.3f} vs "
+          f"{comp.made_hand:.3f}")
+
+
 def test_draw_weight_follows_rule_of_4_2() -> None:
     """听牌权重按街缩放：转牌是翻牌的一半（2 张发牌 vs 4 张），河牌为 0。"""
     def event(board: str, street: str) -> range_flow.ActionEvent:

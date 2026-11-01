@@ -1161,11 +1161,12 @@ class LiveHandTracker:
                          items: list[tuple[PlayerState, str, float]]) -> None:
         """把补出来的动作按发生顺序追加到这一街，并标 inferred。"""
         for p, action, amount in items:
+            name, position = self._seat_info(hand, p.seat_id, state)
             hand.actions.append(ActionRecord(
-                street=street, seat_id=p.seat_id, name=p.name,
-                position=p.position, action=action, amount=amount,
-                all_in=p.all_in, is_hero=p.seat_id == state.hero_seat_id,
-                inferred=True))
+                street=street, seat_id=p.seat_id, name=name or p.name,
+                position=position or p.position, action=action,
+                amount=amount, all_in=p.all_in,
+                is_hero=p.seat_id == state.hero_seat_id, inferred=True))
             hand.last_index[(street, p.seat_id)] = len(hand.actions) - 1
             hand.baseline[(street, p.seat_id)] = amount
 
@@ -1186,18 +1187,29 @@ class LiveHandTracker:
     def _seat_info(self, hand: _LiveHand, seat_id: str,
                    state: FrameState | None = None) -> tuple[str | None,
                                                               str | None]:
-        """补记录时给座位找名字/位置：当前帧 > 座位缓存 > 起始筹码 > 行动线。"""
+        """补记录时给座位找名字/位置：**开手位置优先**，名字用当前帧。
+
+        位置不能用当前帧：玩家离桌/换位后，整桌的 position 会重排，动作
+        记录就会和 seat_meta 对不上（实测 13.7%）。名字可以继续用当前帧
+        （OCR 会逐步纠正），位置一旦开手就钉死。
+        """
+        entry = hand.start_stacks.get(seat_id) or {}
+        name = None
+        current_position = None
         if state is not None:
             for p in state.players:
                 if p.seat_id == seat_id:
-                    if p.name or p.position:
-                        return p.name, p.position
-        name, position = self._seat_meta.get(seat_id, (None, None))
+                    name, current_position = p.name, p.position
+                    break
+        position = entry.get("position") or current_position
+        if name is None:
+            name = entry.get("name")
+        if position is None:
+            position = self._seat_meta.get(seat_id, (None, None))[1]
+        if name is None:
+            name = self._seat_meta.get(seat_id, (None, None))[0]
         if name or position:
             return name, position
-        entry = hand.start_stacks.get(seat_id)
-        if entry:
-            return entry.get("name"), entry.get("position")
         for a in reversed(hand.actions):
             if a.seat_id == seat_id and (a.name or a.position):
                 return a.name, a.position
@@ -1367,9 +1379,12 @@ class LiveHandTracker:
         to_call = max(max_bet - hero_bet, 0.0)
 
         opponents = tuple(
-            OpponentSnapshot(seat_id=p.seat_id, name=p.name, position=p.position,
-                             stack=p.stack, bet=p.bet,
-                             folded=(p.fold is True or p.status == "folded"))
+            OpponentSnapshot(
+                seat_id=p.seat_id, name=p.name,
+                position=(hand.start_stacks.get(p.seat_id) or {}).get(
+                    "position") or p.position,
+                stack=p.stack, bet=p.bet,
+                folded=(p.fold is True or p.status == "folded"))
             for p in state.players
             if p.seat_id != hero_seat and (p.in_hand or p.status == "folded")
         )

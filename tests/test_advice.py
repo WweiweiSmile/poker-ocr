@@ -2089,6 +2089,53 @@ def test_hand_vs_ranges_facts_block() -> None:
     check("## Hand vs ranges" in legacy, "离线事实块应保留 Hand vs ranges")
 
 
+def test_check_through_caps_range_facts() -> None:
+    """连续过牌要写成「范围封顶」事实：完整线路 + 两对+/顶对残量 +
+    单家领先 vs N 家至少一家领先，不能只剩最后一条「转牌过牌」。"""
+    from poker_ocr.hand_track import (ActionRecord, OpponentSnapshot,
+                                      StreetRecord)
+
+    def chk(street: str) -> ActionRecord:
+        return ActionRecord(street, "a", "老王", "BB", "check", None)
+
+    opponents = (OpponentSnapshot("a", "老王", "BB", 90.0, 0.0, False),)
+    sit = build_situation(make_point(
+        street="river", board=("3d", "Ac", "2c", "Kh", "9s"),
+        hero_cards=("Ks", "Td"), hero_position="LJ",
+        opponents=opponents, pot=45.0, pot_before_street=45.0,
+        hero_stack=182.0, to_call=0.0,
+        streets=(StreetRecord("preflop", 0.0, ()),
+                 StreetRecord("flop", 45.0, (chk("flop"),)),
+                 StreetRecord("turn", 45.0, (chk("turn"),)),
+                 StreetRecord("river", 45.0, ())),
+        preflop_shapes=("limped",), hero_is_pfr=False))
+    text = render_facts_zh(sit)
+    check("翻牌过牌→转牌过牌" in text,
+          f"范围第一行要写出连续两次过牌：\n{text}")
+    check("连续过牌封顶" in text,
+          f"连续过牌应给封顶事实：\n{text}")
+    check("两对+" in text and "顶对" in text,
+          f"封顶事实要拆出两对+/顶对：\n{text}")
+    check("你领先" in text,
+          f"要明说单家范围你领先多少：\n{text}")
+
+    # 单次过牌写「收窄」，不冒充「连续封顶」。
+    one = build_situation(make_point(
+        street="turn", board=("3d", "Ac", "2c", "Kh"),
+        hero_cards=("Ks", "Td"), hero_position="LJ",
+        opponents=opponents, pot=45.0, pot_before_street=45.0,
+        hero_stack=182.0, to_call=0.0,
+        streets=(StreetRecord("preflop", 0.0, ()),
+                 StreetRecord("flop", 45.0, (chk("flop"),)),
+                 StreetRecord("turn", 45.0, ())),
+        preflop_shapes=("limped",), hero_is_pfr=False))
+    one_text = render_facts_zh(one)
+    check("过牌后范围收窄" in one_text,
+          f"单次过牌应写收窄：\n{one_text}")
+    check("连续过牌封顶" not in one_text,
+          f"单次过牌不能写连续封顶：\n{one_text}")
+
+
 def test_combo_draw_facts_show_combo_and_fair_share_ratio() -> None:
     """对子+强听要标「有牌又有听」并给权益/公平份额倍数；
     纯听牌不能带这个标签，避免把纯听当价值牌。"""
@@ -2975,8 +3022,8 @@ def test_explosive_pot_facts_follow_spr() -> None:
           f"浅码不能自动把顶对当价值牌：\n{text}")
     check("套池价值牌" not in text and "默认跟注打光" not in text,
           f"浅码不能默认打光：\n{text}")
-    check("超强范围" in text and "顶对/超对默认降级" in text,
-          f"遇到抵抗只用超强范围：\n{text}")
+    check("只投一条街的钱" in text and "之后过牌/弃牌" in text,
+          f"炸弹池顶对及以上只打一条街：\n{text}")
 
     deep = build_situation(make_point(pot=15.0, pot_before_street=15.0,
                                       to_call=0.0, table_size=3))
@@ -2985,7 +3032,7 @@ def test_explosive_pot_facts_follow_spr() -> None:
     text = render_facts_zh(deep)
     check("套池价值牌" not in text and "默认跟注打光" not in text,
           f"深码炸弹池不该给套池结论：\n{text}")
-    check("一对不做大底池" in text and "超强范围" in text,
+    check("一对不做大底池" in text and "只投一条街的钱" in text,
           f"深码炸弹池要给正常深码打法：\n{text}")
 
 
@@ -3194,6 +3241,35 @@ def test_table_stats_label_marks_current_table_scope() -> None:
         table_stats=prior))
     check("全场先验" in prior_user and "非本桌" in prior_user,
           f"冷启动先验要标明不是本桌：\n{prior_user}")
+
+
+def test_table_stab_read_is_actionable() -> None:
+    """桌况 stab 要翻成动作提示：高 stab = 过牌不是免费看牌。"""
+    from poker_ocr.advice import _table_stab_read_zh
+    from poker_ocr.opponent_profile import PooledStats
+
+    high = PooledStats(hands=294, players=4, scope="current_table",
+                       stab=43.0, opportunities={"stab": 161.5})
+    text = _table_stab_read_zh(high)
+    check("爱开火" in text and "过牌不是免费看牌" in text,
+          f"高 stab 要说明过牌不是免费看牌：\n{text}")
+    check("加注范围仍偏强" in text,
+          f"高 stab 不能推成加注也宽：\n{text}")
+
+    mid = PooledStats(hands=294, players=4, scope="current_table",
+                      stab=33.0, opportunities={"stab": 100.0})
+    check("会开火" in _table_stab_read_zh(mid),
+          f"30–40% 应给「会开火」：\n{_table_stab_read_zh(mid)}")
+
+    low = PooledStats(hands=294, players=4, scope="current_table",
+                      stab=10.0, opportunities={"stab": 100.0})
+    check("很少开火" in _table_stab_read_zh(low),
+          f"低 stab 才说免费看下一张：\n{_table_stab_read_zh(low)}")
+
+    thin = PooledStats(hands=294, players=4, scope="current_table",
+                       stab=43.0, opportunities={"stab": 5.0})
+    check(_table_stab_read_zh(thin) == "",
+          "机会太少不该给桌况读法")
 
 
 def test_table_stats_counts_hero_and_flags_small_samples() -> None:
@@ -3534,7 +3610,8 @@ def test_preflop_facing_raise_facts_cover_dominated_calls() -> None:
     ak_text = render_facts_zh(ak)
     check("面对 3-bet 的继续范围" in ak_text,
           f"AKo 要给 3-bet 继续范围：\n{ak_text}")
-    check("可以跟注或 4-bet" in ak_text, f"AKo 是价值牌：\n{ak_text}")
+    check("可以跟注，不 4-bet" in ak_text,
+          f"AK 面对 3-bet 只跟不 4-bet：\n{ak_text}")
     check("位置：Hero 无位置" in ak_text,
           f"UTG 被 LJ 3-bet 必须写无位置：\n{ak_text}")
     check("有位置" not in ak_text.split("## 翻前信息")[0],
@@ -3611,8 +3688,8 @@ def test_bomb_pot_shallow_spr_plays_normal_not_auto_stackoff() -> None:
           f"不能再把顶对自动说成套池价值牌：\n{text}")
     check("默认跟注打光" not in text,
           f"不能默认跟注打光：\n{text}")
-    check("超强范围" in text and "顶对/超对默认降级" in text,
-          f"遇到抵抗应只用超强范围：\n{text}")
+    check("只投一条街的钱" in text and "低于顶对" in text,
+          f"炸弹池顶对及以上只打一条街：\n{text}")
 
 
 

@@ -63,7 +63,7 @@ HERO_ACTOR = "hero"
 
 # 当前唯一的中文 lean 提示词版本。写入 session_start / advice JSONL，
 # 复盘归因用；改动 system 或事实块时 bump。
-PROMPT_VERSION = "lean-zh-2026-11-01.2"
+PROMPT_VERSION = "lean-zh-2026-11-01.4"
 PROMPT_LANGUAGE = "zh"
 
 # 加注尺度：名字 → 底池倍数。「满池 1.2」是超池，用于需要施压/劝退的场合
@@ -2298,24 +2298,23 @@ SYSTEM_CORE_ZH = """你是一名德州扑克现金局实时教练。Hero 只有�
 1. 硬事实：牌/公共牌/底池/需跟/在局人数/后手/位置/行动线/有效筹码/底池类型。
 2. 程序计算：SPR、赔率门槛、牌型/坚果/听牌、范围权益、当前落后比例、听牌价格。
 3. 逐座位对手画像；4. 当前牌桌统计/全场先验/人工观察；5. 通用经验。
-冲突时高级覆盖低级；规则提示不能覆盖硬事实。
-程序裁决（攻击/炸弹/听牌价格）优先于画像/桌况/人工观察，但不能压硬事实；人工观察/经验是启发式。
+冲突时高级覆盖低级、规则提示不能压硬事实；程序裁决（攻击/炸弹/听牌价格）优先于画像/桌况，人工观察是启发式。
 
 ## 决策顺序
-- 翻前：看位置、前面行动（未开池/溜入/单加注/3-bet）、有效筹码和范围；不要因为“便宜”用垃圾牌入池。
+- 翻前：看位置、前面行动（未开池/溜入/单加注/3-bet）、有效筹码和范围；不要因为“便宜”用垃圾牌入池。4-bet 只用 KK/AA，AK 只跟。
 - 翻后：先问哪些更差的牌会跟、哪些更好的牌会加，再比权益与赔率门槛，决定价值/诈唬/过牌/弃牌。
 - 听牌：按 outs、价格、弃牌率、公对面/成花风险判断；不要因为“当前未成牌不是坚果”就否决半诈唬。
 - 多人池（含 Hero）：4 人以上顶对/超对降级，3 人池 SPR<3 可套池。无弃牌率别用听牌硬下注。
 - 牌力：强牌=两对+/超对/顶对（踢脚 T+）；中等=顶对弱踢/中对/底对；空气=无成牌无听牌；4+ 人顶对按中等牌。
 - 位置=翻后座位顺序：身后还有在局对手=无位置，没有=有位置；翻前行动顺序另看「翻前行动」，BB 可能还没说话。
 - 下注/加注会重新打开行动：已过牌/跟注/下注的对手仍可再行动；「有位置」不等于「没人能加注」。
-- 河牌：纯听牌等同空气，已成对的牌仍有摊牌价值；跟注看赔率/线路，价值下注看更差的牌会不会跟。
+- 河牌：纯听牌等同空气，已成对的牌仍有摊牌价值；跟注看赔率/线路，价值下注看更差的牌会不会跟。非坚果不打三条街，被加注默认弃。
 - 尺度只能从「可选动作」里选，金额由程序算好；深码不要用 all-in 代替正常尺度，后手 ≤20BB 的翻前推/弃区全下是标准动作。
-- 炸弹池：按正常翻后规则打，底池大不等于必须打光；遇加注/过牌-加注/多街连开或对手过度激进时，只用超强范围（两对、三条、顺子、同花、葫芦/四条，或坚果听牌且有合适价格）继续，顶对/超对降级。
+- 炸弹池（强制前注、低 SPR）：顶对及以上总共只投一条街的钱（下注/跟注），之后过牌/弃牌、被下注即弃；低于顶对默认过牌/弃牌、不主动下注，只有「有位置+画像可读(疯子/高弃牌率)+赔率≥3:1」才跟一注。
 
 ## 指标口径
-- 补牌成牌率（四二法则）= 听牌到河牌成牌的概率，不是胜率；翻牌是两街，不能直接和单街门槛比，只有全下/后面不再下注时才可直接比。
-- 对范围权益 = 对建模范围（未建模对手按随机牌计入）的河牌胜率；同样假设后面不再下注，只有全下/后面不再下注时才可直接比即时门槛，否则按后续下注折价。
+- 补牌成牌率（四二法则）= 听牌到河牌成牌概率，不是胜率；翻牌两街，只有全下/后面不再下注才能直接比单街门槛。
+- 对范围权益 = 对建模范围（未建模对手按随机牌计入）的河牌胜率，假设后面不再下注；非全下时按后续下注折价再比门槛。
 - 当前成牌落后 = 按当前五张至少一家领先，不是输牌概率/权益。
 - 跟注看权益与门槛；下注看更差的牌会不会跟；不要用“当前落后”单独否决听牌，对成牌它也不是输牌概率。
 
@@ -2828,14 +2827,58 @@ def _composition_zh(edge) -> str:
 
 
 def _range_short(edge) -> str:
-    """最新一条动作的短标签：`河牌donk全下进2人`。
+    """最近两条动作的短标签：`翻牌过牌→转牌过牌`。
 
     第一行汇总用；逐家明细只写位置，避免同一个长标签在一屏里出现两遍。
+    只写最后一条会把「连续过牌」压成「转牌过牌」——模型看不出这是第二次
+    过牌，也就不会把顶对/两对+ 从范围里拿走。
     """
     events = tuple(getattr(edge, "events", ()) or ())
     if events:
-        return _range_line_zh(events[-1:])
+        return _range_line_zh(events[-2:])
     return _RANGE_MODE_ZH.get(edge.mode or "", edge.mode or "")
+
+
+def _trailing_checks(edge) -> int:
+    """整条翻后线路都是过牌时，返回过牌次数；有任何下注/加注/跟注返回 0。
+
+    只认「纯过牌」线路：过牌后再跟注/加注的范围已经由那个动作重新收窄，
+    不能再用「连续过牌封顶」解释。
+    """
+    events = tuple(getattr(edge, "events", ()) or ())
+    if not events:
+        return 0
+    if any(getattr(event, "action", "") != "check" for event in events):
+        return 0
+    return len(events)
+
+
+def _range_cap_zh(edge, actual_opponents: int, behind_any: float,
+                  equity: float) -> str:
+    """对手连续过牌后的「范围封顶」事实：强牌剩多少、单家/全场各是多少。
+
+    这一段直接回答用户 2026-11-01 的漏：只看「权益 21%/32%」会把连续
+    过牌的中等成牌看扁。把「两对+ / 顶对」的残量、「单家你领先多少」和
+    「N 家至少一家领先你」并排写出来，模型才不会把单家领先当成全场领先。
+    """
+    checks = _trailing_checks(edge)
+    comp = getattr(edge, "composition", None)
+    if checks <= 0 or comp is None:
+        return ""
+    lead = max(0.0, 1.0 - edge.behind - edge.tie)
+    label = "连续过牌封顶" if checks >= 2 else "过牌后范围收窄"
+    text = (f"- {label}：两对+ {comp.two_pair_plus:.0%}、"
+            f"顶对 {comp.top_pair:.0%}；")
+    if actual_opponents <= 1:
+        text += f"你领先 {lead:.0%}"
+    else:
+        text += (f"单家范围你领先 {lead:.0%}，但 {actual_opponents} 家"
+                 f"至少一家领先你 {behind_any:.0%}")
+    if actual_opponents > 0 and equity > 0:
+        fair = 1.0 / (actual_opponents + 1)
+        text += (f"；权益 {equity:.0%} 是公平份额 {fair:.1%} 的 "
+                 f"{equity / fair:.1f} 倍")
+    return text
 
 
 def _range_label(edge) -> str:
@@ -2887,8 +2930,19 @@ def render_ranges_zh(sit: Situation) -> list[str]:
         composition = _composition_zh(edge)
         detail = composition + "；" if composition else ""
         position = edge.position or edge.seat_id
+        lead = max(0.0, 1.0 - edge.behind - edge.tie)
         lines.append(f"- {position}：{detail}当前成牌领先我 "
-                     f"{edge.behind:.1%}（平局 {edge.tie:.1%}）")
+                     f"{edge.behind:.1%}（平局 {edge.tie:.1%}；"
+                     f"你领先 {lead:.1%}）")
+
+    # 连续过牌是**强范围退场**的证据：把「两对+/顶对还剩多少」写成一行，
+    # 并同时给出「单家领先」和「N 家至少一家领先」，避免模型把单家领先
+    # 当成全场领先。只取一个代表（各座位同一线路时数值相同）。
+    capped = [e for e in shown if _trailing_checks(e) > 0
+              and getattr(e, "composition", None) is not None]
+    if capped:
+        rep = max(capped, key=_trailing_checks)
+        lines.append(_range_cap_zh(rep, actual, hr.behind_any, hr.equity))
 
     # 按牌型列「你赢的 / 赢你的」，只在事件模型给出分区时才写：旧路径的
     # ahead_groups 只有类别名，混进去会让模型把「类别」当成「范围比例」。
@@ -3353,8 +3407,14 @@ def _facing_raise_zh(sit: Situation) -> list[str]:
         lines.append(f"对加注的牌力：{key} 在 {label}{width_text}内{shape}"
                      f" → 可以跟注（多人池按边缘牌处理，别把顶对当坚果）")
     elif n_raises >= 2:
-        lines.append(f"对加注的牌力：{key} 在 {label}{width_text}内"
-                     " → 价值牌，可以跟注或 4-bet")
+        # 2026-11-01：面对 3-bet 的 4-bet 只用 KK/AA；AK/QQ 只跟不加。
+        # 之前这里对范围内所有牌都写「可以跟注或 4-bet」，AK 打光就是这条线。
+        if key in ("AA", "KK"):
+            lines.append(f"对加注的牌力：{key} 在 {label}{width_text}内"
+                         " → 价值牌，可以 4-bet 或跟注")
+        else:
+            lines.append(f"对加注的牌力：{key} 在 {label}{width_text}内"
+                         " → 可以跟注，不 4-bet（4-bet 只用 KK/AA）")
     elif key in range_mod.expand_tokens(("QQ+", "AKs", "AKo")):
         lines.append(f"对加注的牌力：{key} 在 {label}{width_text}内"
                      " → 可以 3-bet 或跟注")
@@ -3441,6 +3501,34 @@ def _table_stat_zh(label: str, value: float,
     return text
 
 
+def _table_stab_read_zh(stats: "PooledStats") -> str:
+    """桌况的 stab 读法：把「前面没人下注时下注 X%」翻成可执行动作。
+
+    用户 2026-11-01 口径：只给提示，不做硬闸。高 stab 的核心含义是
+    「你过牌不是免费看牌」——强牌可过牌诱导，中等牌别主动下注把空气
+    打走；但 stab 只描述「下注」，不描述「加注」，加注范围仍按价值密集
+    处理。低 stab 才是「过牌基本能免费看下一张」。
+    """
+    stab = stats.stab
+    opps = (stats.opportunities or {}).get("stab", 0.0)
+    if stab is None or opps < _TABLE_SMALL_OPPS:
+        return ""
+    if stab >= 40:
+        return (f"桌况读法：前面没人下注时这桌爱开火（{stab:.0f}%）。"
+                "你过牌不是免费看牌——强牌可以过牌诱导 check-raise，"
+                "中等牌别主动下注把他们的空气打走；但他们加注范围仍偏强，"
+                "别用中对跟加注。")
+    if stab >= 30:
+        return (f"桌况读法：前面没人下注时这桌会开火（{stab:.0f}%）。"
+                "过牌别当免费看牌；强牌可过牌诱导，中等牌下注前先想清楚"
+                "被加注怎么办。")
+    if stab <= 15:
+        return (f"桌况读法：前面没人下注时这桌很少开火（{stab:.0f}%）。"
+                "你过牌大概率能免费看下一张；没摊牌价值时可以在下一街"
+                "主动偷池。")
+    return ""
+
+
 def render_table_stats_zh(stats: "PooledStats | None",
                           opponents_in_hand: int | None = None,
                           street: str | None = None,
@@ -3471,7 +3559,7 @@ def render_table_stats_zh(stats: "PooledStats | None",
             ("3-bet", stats.threebet, "threebet"),
             ("溜入", stats.limp, "limp"),
             ("对 c-bet 弃", stats.fold_to_cbet, "fcbet"),
-            ("别人过牌后下注", stats.stab, "stab"),
+            ("前面没人下注时下注", stats.stab, "stab"),
         )
         if value is not None
     ]
@@ -3513,6 +3601,9 @@ def render_table_stats_zh(stats: "PooledStats | None",
     ]
     if street_stats:
         lines.append("面对下注弃：" + "｜".join(street_stats))
+    stab_read = _table_stab_read_zh(stats)
+    if stab_read:
+        lines.append(stab_read)
     tags: list[str] = []
     if stats.loose is True:
         tags.append("松")
@@ -3545,9 +3636,10 @@ def render_table_stats_zh(stats: "PooledStats | None",
 def render_explosive_zh(sit: Situation) -> list[str]:
     """炸弹池的结构与打法事实。
 
-    用户 2026-10-31 口径：炸弹池按正常翻后规则打，不因为「是炸弹池」就
-    把顶对自动升级成套池价值牌；遇到加注/过牌-加注/多街连开或对手明显
-    过度激进时，只用超强范围继续。这里只给结构和这条边界，不给固定尺度。
+    用户 2026-11-01 口径（全量 497 手复盘后修订）：炸弹池顶对及以上**只打一条街**
+    ——下注一街后过牌收手，被加注/过牌-加注即弃；低于顶对默认过牌/弃牌、不主动
+    下注，只有「有位置 + 画像可读 + 赔率≥3:1」才跟一注。依据：41 手炸弹池里唯一
+    的大坑是明三条打满三条街（-140.5），一条街内结束的几手都只 -23。
     """
     if sit.street == PREFLOP:
         return ["炸弹池翻前：每人强制投入 5BB 前注后直接发翻牌，翻前没有可做的决策；"
@@ -3574,9 +3666,27 @@ def render_explosive_zh(sit: Situation) -> list[str]:
             "无加注、干燥面、价格合适时可以继续，但不主动造大底池；"
             "顶对弱踢/中对/底对/弱听牌不要为了套池主动造大底池。")
     lines.append(
-        "遇到加注/过牌-加注/多街连开，或对手明显过度激进时，只用超强范围继续："
-        "两对、三条、顺子、同花、葫芦/四条，或坚果听牌且有合适价格；"
-        "顶对/超对默认降级，不要用「炸弹池」当打光理由。")
+        "炸弹池打法：顶对及以上总共只投一条街的钱（下注/跟注），之后过牌/弃牌、"
+        "被下注即弃；低于顶对默认过牌/弃牌、不主动下注，只有「有位置 + 画像可读"
+        "（疯子/高弃牌率）+ 赔率≥3:1」才跟一注；不要用「炸弹池」当打光理由。")
+
+    # 已经投过一条街的，直接把「本街不再投钱」写成事实：模型对
+    # 「只打一条街」会理解成「我还能打这一条街」，K3s 河牌就是这么跟出去的。
+    prior = []
+    for name, zh in (("flop", "翻牌"), ("turn", "转牌")):
+        if name == sit.street:
+            break
+        for act in sit.snap.actions_of(name) or []:
+            if (getattr(act, "is_hero", False) or act.seat_id == "hero") \
+                    and act.action in ("bet", "raise", "call") \
+                    and (act.amount or 0) > 0:
+                prior.append(zh)
+                break
+    if prior:
+        lines.append(
+            f"炸弹池节奏（硬规则）：你已在{'、'.join(prior)}投过这一条街，"
+            "本街及后续只能过牌/弃牌，**不能跟注、不能加注**；"
+            "对手能跟到下注的正是比你大的牌，「赔率合适」不构成跟注理由。")
 
     hr = sit.hand_ranges
     if hr is not None:
@@ -3952,6 +4062,22 @@ def _behind_detail_zh(snap: HandSnapshot,
     return text
 
 
+def _table_stab_hint_short(stats: "PooledStats | None") -> str:
+    """当前局面里的一行 stab 提示：放在行动线之前，别让模型只看到权益。
+
+    和桌况块的完整读法不重复细节：这里只说「这桌爱开火，过牌不是免费
+    看牌；强牌诱导、中等牌控池」，让模型在决策前就看到这条桌风。
+    """
+    if stats is None:
+        return ""
+    stab = getattr(stats, "stab", None)
+    opps = (getattr(stats, "opportunities", {}) or {}).get("stab", 0.0)
+    if stab is None or opps < _TABLE_SMALL_OPPS or stab < 40:
+        return ""
+    return (f"桌况提示：这桌前面没人下注时爱开火（{stab:.0f}%）；"
+            "你过牌不是免费看牌，强牌可过牌诱导，中等牌过牌控池。")
+
+
 def render_facts_zh(sit: Situation) -> str:
     """中文 lean 的 user 事实块（§4.1）。所有金额/概率来自程序计算。"""
     snap = sit.snap
@@ -4171,6 +4297,11 @@ def render_facts_zh(sit: Situation) -> str:
         lines.append("无")
 
     lines.append("")
+    stab_hint = _table_stab_hint_short(sit.table_stats)
+    if stab_hint:
+        lines.append("## 决策提示")
+        lines.append(stab_hint)
+        lines.append("")
     lines.extend(render_options_zh(sit))
     return "\n".join(lines)
 

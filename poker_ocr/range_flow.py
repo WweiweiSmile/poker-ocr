@@ -122,6 +122,11 @@ class Composition:
     air: float = 0.0
     # 成牌类型的加权占比，例如 (("同花", 0.45), ("葫芦", 0.18))。
     types: tuple[tuple[str, float], ...] = ()
+    # 「封顶」用的两个细项：两对+（含三条/顺子/同花/葫芦/四条）和顶对。
+    # 它们都在 made_hand 里，单独拆出来是因为「对手连续过牌后还剩多少强牌」
+    # 不能从「一对 48%」里看出来——顶对和中对/底对对这个决策是两回事。
+    two_pair_plus: float = 0.0
+    top_pair: float = 0.0
 
     def __bool__(self) -> bool:
         return self.made_hand + self.draw + self.air > 0
@@ -378,7 +383,7 @@ def _board_key(board) -> tuple[tuple[int, str], ...]:
     return tuple(sorted(cards))
 
 
-def _class_map(board) -> dict[ranges.Combo, tuple[HandClass, str, int]]:
+def _class_map(board) -> dict[ranges.Combo, tuple[HandClass, str, int, str]]:
     key = _board_key(board)
     cached = _CLASS_CACHE.get(key)
     if cached is not None:
@@ -389,7 +394,7 @@ def _class_map(board) -> dict[ranges.Combo, tuple[HandClass, str, int]]:
     scores = sorted((feat.category, feat.tiebreak) for _c, feat, _s in entries)
     total = len(scores) or 1
     better_cache: dict[tuple, float] = {}
-    table: dict[ranges.Combo, tuple[HandClass, str, int]] = {}
+    table: dict[ranges.Combo, tuple[HandClass, str, int, str]] = {}
     for combo, feat, _score in entries:
         score = (feat.category, feat.tiebreak)
         better = better_cache.get(score)
@@ -397,7 +402,8 @@ def _class_map(board) -> dict[ranges.Combo, tuple[HandClass, str, int]]:
             above = total - bisect.bisect_right(scores, score)
             better = above / total
             better_cache[score] = better
-        table[combo] = (_class_of(feat, better), _made_label(feat), feat.category)
+        table[combo] = (_class_of(feat, better), _made_label(feat),
+                        feat.category, feat.pair_kind)
     if len(_CLASS_CACHE) >= _CLASS_CACHE_MAX:
         _CLASS_CACHE.clear()
     _CLASS_CACHE[key] = table
@@ -683,12 +689,13 @@ def composition(rng: ranges.Range | None, board) -> Composition:
     total = 0.0
     value = semi = bluff = 0.0
     made_hand = draw_share = air = 0.0
+    two_pair_plus = top_pair = 0.0
     types: dict[str, float] = {}
     for combo, weight in rng.combo_weights.items():
         entry = table.get(combo)
         if entry is None or weight <= 0:
             continue
-        cls, label, category = entry
+        cls, label, category, pair_kind = entry
         total += weight
         if cls.group == "value":
             value += weight
@@ -700,6 +707,10 @@ def composition(rng: ranges.Range | None, board) -> Composition:
         # 也可能落在 weak 档（档位是相对的），但它不是成牌。
         if category >= ONE_PAIR:
             made_hand += weight
+            if category >= TWO_PAIR:
+                two_pair_plus += weight
+            elif pair_kind == "top":
+                top_pair += weight
         elif cls.draw in ("combo", "flush", "oesd", "gutshot"):
             draw_share += weight
         else:
@@ -712,7 +723,8 @@ def composition(rng: ranges.Range | None, board) -> Composition:
     return Composition(
         value=value / total, semi=semi / total, bluff=bluff / total,
         made_hand=made_hand / total, draw=draw_share / total, air=air / total,
-        types=shown,
+        types=shown, two_pair_plus=two_pair_plus / total,
+        top_pair=top_pair / total,
     )
 
 

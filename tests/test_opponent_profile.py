@@ -914,18 +914,18 @@ def test_tendency_render_and_exploit_hints() -> None:
         cbet_pct=45.0, barrel_pct=40.0, stab_pct=12.0, check_raise_pct=5.0)
     text = render_tendencies_zh(passive)
     check("开池 EP 12% / LP 45%" in text, f"位置开池应渲染：{text}")
-    check("别人过牌后他下注 12%" in text, f"stab 应渲染：{text}")
+    check("前面没人下注时他下注 12%" in text, f"stab 应渲染：{text}")
     hints = exploit_hint_zh(passive)
     check("偷池" in hints, f"低 stab 应给偷池建议：{hints}")
     check("挤压" in hints, f"宽开池 + 低 3-bet 应给挤压建议：{hints}")
 
-    # 中间值：不给任何建议（两边都不站）
+    # 中间值：不给任何建议（stab 的中间带是 25–30；30 以上算会开火）
     neutral = OpponentRead(
         seat_id="b", key="k2", display_name="某甲", archetype="tag",
         confidence=0.8, n=40, vpip=24.0, pfr=20.0, af=1.6,
         source="auto", note="", gate="stable",
         open_lp_pct=30.0, open_ep_pct=18.0, threebet_pct=9.0,
-        cbet_pct=60.0, barrel_pct=55.0, stab_pct=45.0, check_raise_pct=8.0)
+        cbet_pct=60.0, barrel_pct=55.0, stab_pct=27.0, check_raise_pct=8.0)
     check(exploit_hint_zh(neutral) == "", "中间值不该给剥削建议")
 
     # 样本不足：指标为 None 时不渲染、不建议
@@ -966,6 +966,73 @@ def test_street_actions_are_reordered_chronologically() -> None:
            for x in _ordered_street_actions(check_raise, rank)]
     check(got == [("a", "check"), ("b", "bet"), ("a", "raise")],
           f"check-raise 顺序错：{got}")
+
+    # 动作里的 position 是当前帧读的，玩家离桌后会错位；开手位置优先。
+    shifted = [
+        {"seat_id": "a", "position": "BTN", "action": "check"},
+        {"seat_id": "b", "position": "SB", "action": "bet"},
+    ]
+    got = [x["seat_id"] for x in _ordered_street_actions(
+        shifted, rank, {"a": "SB", "b": "BB"})]
+    check(got == ["a", "b"],
+          f"应按开手位置 SB→BB 排，不是当前帧的 BTN→SB：{got}")
+
+
+def test_stab_counts_bet_after_fold() -> None:
+    """宽口径 stab：前面没人下注（哪怕只是弃牌）时下注也算。
+
+    严格口径要求「前面有人过牌」，会把「SB 弃牌、BB 下注」这种 probe
+    漏掉；而这正是这桌 0–2% 与现场 20–40% 差距的主要来源。
+    """
+    hand = make_hand(
+        uid="s01-stab", board=("Ad", "7s", "2c"),
+        seats=[
+            {"seat_id": "hero", "name": "我", "position": "BTN", "stack": 100.0},
+            {"seat_id": "a", "name": "A", "position": "SB", "stack": 100.0},
+            {"seat_id": "b", "name": "B", "position": "BB", "stack": 100.0},
+        ],
+        preflop=[act("a", "call", 1.0, name="A", position="SB"),
+                 act("b", "check", None, name="B", position="BB"),
+                 act("hero", "check", None, is_hero=True)],
+        flop=[act("a", "fold", None, name="A", position="SB"),
+              act("b", "bet", 5.0, name="B", position="BB"),
+              act("hero", "call", 5.0, is_hero=True)],
+        street_active={"preflop": ["hero", "a", "b"],
+                       "flop": ["hero", "b"]})
+    got = next(o for o in observations_from_hand(hand)
+               if o.opponent_key == "B")
+    check(got.stab_opp and got.stab,
+          f"前面只有弃牌、BB 下注也应算 stab：{got}")
+
+
+def test_partial_hand_is_not_profiled() -> None:
+    """没有翻前动作、又不是炸弹池的残手/中途接管不进画像统计。"""
+    phantom = make_hand(
+        uid="s01-phantom", board=("Kh", "4c", "Ah"),
+        preflop=None,
+        flop=[act("a", "check", None, name="A", position="BTN")])
+    check(observations_from_hand(phantom) == [],
+          "无翻前动作的残手不应产生画像观察")
+
+    # 炸弹池本来就没有翻前动作，不能被误杀。
+    bomb = make_hand(
+        uid="s01-bomb", board=("Kh", "4c", "Ah"), bomb_pot=True,
+        preflop=None,
+        flop=[act("a", "check", None, name="A", position="BTN")])
+    check(bool(observations_from_hand(bomb)),
+          "炸弹池没有翻前动作也应进画像统计")
+
+
+def test_inferred_ratio_is_rendered() -> None:
+    """推断比例高的画像要在事实行里标出来，别把推断值当逐帧实测。"""
+    from poker_ocr.opponent_profile import render_reads_zh
+
+    read = OpponentRead(
+        seat_id="a", key="k", display_name="芒果与西米", archetype="lag",
+        confidence=0.8, n=40, vpip=44.0, pfr=9.0, af=1.9,
+        source="auto", note="", gate="stable", inferred_ratio=0.62)
+    text = "\n".join(render_reads_zh((read,), {"a": "HJ"}))
+    check("推断 62%" in text, f"高推断比例应标出来：\n{text}")
 
 
 def test_limp_and_cbet_defence_observations() -> None:

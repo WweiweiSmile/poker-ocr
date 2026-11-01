@@ -477,7 +477,9 @@ def _position_rank(table_size: int | None) -> dict[str, int]:
 
 
 def _ordered_street_actions(actions: list[dict],
-                            rank: Mapping[str, int]) -> list[dict]:
+                            rank: Mapping[str, int],
+                            positions: Mapping[str, str] | None = None
+                            ) -> list[dict]:
     """把一条街的行动按**真实下注顺序**重排。
 
     推断出来的 check/fold 是街末统一追加的，追加顺序不是行动顺序（实测
@@ -487,12 +489,18 @@ def _ordered_street_actions(actions: list[dict],
     还原办法：按「每个座在这条街的第几次行动」分轮，轮内按位置序排。
     check-raise 也能覆盖：A 的 check 在轮 1、B 的 bet 在轮 1、A 的 raise
     在轮 2 —— 排序后 B 的 bet 会正确落在 A 的 raise 之前。
+
+    `positions` 是开手时的座位位置（seat_id → position）。动作记录里的
+    `position` 是**当前帧**读到的，玩家离桌/换位后会整体错位（实测 13.7%
+    的动作和 seat_meta 对不上），所以排序优先用开手位置；没有时才回退。
     """
+    seat_pos = positions or {}
     seen: dict[str, int] = {}
     keyed = []
     for index, action in enumerate(actions):
         seat = str(action.get("seat_id") or "")
-        position = str(action.get("position") or "")
+        position = str(seat_pos.get(seat)
+                       or action.get("position") or "")
         round_index = seen.get(seat, 0)
         seen[seat] = round_index + 1
         keyed.append(((round_index, rank.get(position, len(rank)), index),
@@ -665,10 +673,29 @@ def observations_from_hand(hand: Mapping, *,
     # 推断出来的 check/fold 是街末追加的，顺序不是行动顺序；线路统计必须用
     # 还原过顺序的版本（见 _ordered_street_actions 的说明）。
     rank = _position_rank(hand.get("table_size"))
+    # 动作记录里的 position 是当前帧读到的，玩家离桌/换位后会错位；开手
+    # 时的 seat_meta 才是这一手的真实座位。排序统一用它，缺了才回退。
+    seat_positions = {
+        str(seat_id): str(info.get("position") or "")
+        for seat_id, info in meta.items()
+        if info.get("position")
+    }
     ordered = {street: _ordered_street_actions(actions.get(street) or [], rank)
                for street in _STREET_ORDER}
+    # stab 单独用开手位置重排：动作记录里的 position 是当前帧读的，玩家
+    # 离桌/换位后会错位（实测 13.7%），而 stab 恰好依赖「谁在我前面」。
+    # 其它统计暂时沿用原顺序，避免把真实的 bet→call 顺序也按位置打乱。
+    ordered_stab = {street: _ordered_street_actions(
+        actions.get(street) or [], rank, seat_positions)
+        for street in _STREET_ORDER}
     preflop_actions = actions.get(_PREFLOP) or []
     bomb_pot, passive_entry = _bomb_pot_entry(hand, preflop_actions)
+    # 画像统计只收有翻前信息的手牌：没有翻前动作又不是炸弹池的是中途接管/
+    # 换手残影（例如 20261101-695bb6e571 的 7 条假过牌）。这类手没有可靠的
+    # 翻前机会，会把 VPIP/PFR/stab 的分母冲淡。`partial` 但翻前完整的截断手
+    # 仍然保留 —— 它们只是不补推弃牌，不是残影。
+    if not bomb_pot and not preflop_actions:
+        return []
     board = [str(c) for c in (hand.get("board") or [])]
     session = str(hand.get("session") if hand.get("session") is not None else "")
     uid = hand_uid(hand)
@@ -926,23 +953,28 @@ def observations_from_hand(hand: Mapping, *,
                 dcb_opp = True
                 dcb = mine_turn.get("action") in ("bet", "raise")
 
-        # ── 被过牌后下注 / 过牌-加注：按街扫描自己的第一次动作 ──
+        # ── 无人下注时下注（stab/probe）/ 过牌-加注：按街扫描自己的第一次动作 ──
+        #
+        # 口径（2026-11-01）：不再要求「前面有人过牌」，只要「前面没人下注」
+        # 就算机会。原因：check 是街末推断补的，顺序/有无都不可靠；而底池
+        # delta 能确认「有没有人下注」。严格口径（必须有人过牌）会把
+        # 「前面都弃牌、他下注」的牌漏掉，实测这桌被压到 0–2%；宽口径是
+        # 20–40%，和现场观察一致。也不再只算第一条街：check 过的下一街
+        # 再下注同样算命中。
         stab_opp = stab = False
         check_raise_opp = check_raise = False
         for street in _POSTFLOP:
-            seq = ordered.get(street) or []
+            seq = ordered_stab.get(street) or []
             mine = next((i for i, a in enumerate(seq)
                          if str(a.get("seat_id")) == seat_id), None)
             if mine is None:
                 continue
             before = seq[:mine]
             action = seq[mine].get("action")
-            if (not stab_opp
-                    and not any(a.get("action") in ("bet", "raise")
-                                for a in before)
-                    and any(a.get("action") == "check" for a in before)):
+            if not any(a.get("action") in ("bet", "raise") for a in before):
                 stab_opp = True
-                stab = action in ("bet", "raise")
+                if action in ("bet", "raise"):
+                    stab = True
             if not check_raise_opp and action == "check":
                 after = seq[mine + 1:]
                 if any(a.get("action") in ("bet", "raise") for a in after):
@@ -1482,6 +1514,9 @@ class OpponentRead:
     fold_to_bet_river_pct: float | None = None
     # 哪些指标是被人群先验收缩过的（不是实测值）。渲染时加 ≈。
     prior_dominated: tuple[str, ...] = ()
+    # 这手/这名对手的动作里有多少是推断补出来的（0–1）。高推断比例意味着
+    # 统计只能作参考；渲染时标出来，避免把推断值当成逐帧实测。
+    inferred_ratio: float = 0.0
 
     @property
     def aggressive(self) -> bool:
@@ -1820,6 +1855,7 @@ def classify(stats: OpponentStats,
         af=round(af, 2) if af is not None else 0.0,
         **fields,
         prior_dominated=prior_dominated,
+        inferred_ratio=round(stats.inferred_ratio, 3),
         source="auto",
         note=", ".join(note_parts),
         gate=gate,
@@ -2461,10 +2497,12 @@ def render_reads_zh(reads: Iterable[OpponentRead],
             source = "，.table_dy 先验"
         af = f"，AF {read.af:g}" if read.af else ""
         cn = ARCHETYPE_NAMES.get(read.archetype, read.archetype)
+        inferred = (f"，推断 {read.inferred_ratio:.0%}"
+                    if read.inferred_ratio >= 0.3 else "")
         lines.append(
             f"- {position} {name}：{read.archetype.upper()}（{cn}）"
             f"（n={read.n}，VPIP {read.vpip:g}%，PFR {read.pfr:g}%{af}，"
-            f"置信 {read.confidence:.2f}{source}）{gate}")
+            f"置信 {read.confidence:.2f}{source}{inferred}）{gate}")
         range_note = ARCHETYPE_RANGE_NOTES.get(read.archetype)
         if range_note:
             # 「松弱 = 加注范围宽」是模型最常读反的一条；把类型语义和
@@ -2506,7 +2544,7 @@ def render_tendencies_zh(read: OpponentRead) -> str:
         parts.append(_mark(read, ("barrel",), f"转牌续打 {read.barrel_pct:.0f}%"))
     if read.stab_pct is not None:
         parts.append(_mark(read, ("stab",),
-                           f"别人过牌后他下注 {read.stab_pct:.0f}%"))
+                           f"前面没人下注时他下注 {read.stab_pct:.0f}%"))
     if read.check_raise_pct is not None:
         parts.append(_mark(read, ("check_raise",),
                            f"过牌-加注 {read.check_raise_pct:.0f}%"))
@@ -2641,12 +2679,17 @@ def exploit_hint_zh(read: OpponentRead, *, limit: int = 2) -> str:
     if _confident(read, "stab") and read.stab_pct is not None:
         if read.stab_pct <= 25:
             candidates.append((31, "other",
-                               "别人过牌后他很少下注 —— 过牌给他基本能免费"
-                               "看下一张；他过牌后你可以在下一街主动偷池"))
-        elif read.stab_pct >= 60:
+                               "前面没人下注时他很少下注 —— 你过牌给他，"
+                               "他多半也过牌；他过牌后你可以在下一街主动偷池"))
+        elif read.stab_pct >= 50:
             candidates.append((31, "other",
-                               "别人过牌后他爱下注 —— 你过牌给他要准备 "
+                               "前面没人下注时他爱下注 —— 你过牌给他要准备 "
                                "check-raise，别用中等牌白跟"))
+        elif read.stab_pct >= 30:
+            candidates.append((31, "other",
+                               "前面没人下注时他会开火 —— 你过牌不是免费"
+                               "看牌；强牌可过牌诱导，中等牌别主动下注"
+                               "把空气打走"))
 
     if (_confident(read, "limp") and read.limp_pct is not None
             and read.limp_pct >= 25):
