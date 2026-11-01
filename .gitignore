@@ -42,3 +42,6 @@ data/hand_outbox/
 gto/runner/target/
 gto/data/
 gto/jobs/
+
+# codegraph 索引缓存（本地工具产物，11MB 级，不入库）
+.codegraph/
