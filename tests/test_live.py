@@ -1269,10 +1269,26 @@ def test_hand_memory_flushes_on_switch_frame() -> None:
 
 
 def test_hand_gap_without_hero_is_skipped_by_default() -> None:
-    """换手空档里读到的第一组牌直接挂到空档手上，不再另开一手。"""
+    """换手空档不再单独开一手；整手读不到 hero 手牌时才按开关跳过/保留。
+
+    换手帧只收手，新手等真正属于它的信号（这里用庄位轮转）才开，所以
+    「收牌空档」本身不会再产出记录；只有整手牌都没读到 hero 手牌（旁观/
+    看对手）时，才由 `record_without_hero` 决定写不写。
+    """
+
     class GapStream(StubStateStream):
+        """庄位按帧脚本轮转，其余字段固定。"""
+
+        def __init__(self, dealers: list[str]) -> None:
+            super().__init__()
+            self.dealers = dealers
+            self.i = 0
+
         def ingest(self, img, frame_id: str, t: float, *,
                    extra_signature: tuple | None = None) -> FrameOutcome:
+            self.calls.append((frame_id, t))
+            dealer = self.dealers[min(self.i, len(self.dealers) - 1)]
+            self.i += 1
             st = FrameState(
                 frame_id=frame_id, table_seats=2, players_in_hand=2,
                 players=[
@@ -1281,56 +1297,66 @@ def test_hand_gap_without_hero_is_skipped_by_default() -> None:
                     PlayerState("a", name="A", position="BB", stack=99.0,
                                 bet=1.0, in_hand=True),
                 ],
-                blinds=live.parse_blinds("1/2"), dealer="a",
+                blinds=live.parse_blinds("1/2"), dealer=dealer,
                 hero_seat_id="hero", hero_turn=False, pot=1.5,
                 pot_before_street=0.0)
             return FrameOutcome("no_change", st, [], None, 0, 0)
 
-    # 一手真牌 → 收牌空档 → 下一手真牌 → 再收牌空档
-    script = [
-        SimpleNamespace(hero_codes=["Ah", "Kd"], board_codes=[], warnings=[]),
-        SimpleNamespace(hero_codes=["Ah", "Kd"],
-                        board_codes=["Ks", "7d", "2c"], warnings=[]),
-        None, None,
-        SimpleNamespace(hero_codes=["7c", "7s"], board_codes=[], warnings=[]),
-        SimpleNamespace(hero_codes=["7c", "7s"],
-                        board_codes=["2h", "9d", "4c"], warnings=[]),
-        None, None,
-    ]
-
-    def run(record_without_hero: bool):
-        frames = iter(script)
+    def run(record_without_hero: bool, *, hero_cards_at_end: bool):
+        # 第 1 手正常；第 3–4 帧公共牌读空 → 收手；第 5 帧庄位轮到 b → 开
+        # 新手，但整手读不到 hero 手牌
+        cards = [
+            SimpleNamespace(hero_codes=["Ah", "Kd"], board_codes=[], warnings=[]),
+            SimpleNamespace(hero_codes=["Ah", "Kd"],
+                            board_codes=["Ks", "7d", "2c"], warnings=[]),
+            None, None,
+            (SimpleNamespace(hero_codes=["7c", "7s"], board_codes=[],
+                             warnings=[])
+             if hero_cards_at_end else None),
+            None,
+        ]
+        frames = iter(cards)
         writer = StubWriter()
         tracker = LiveHandTracker(confirm_frames=1)
+        stream = GapStream(["a", "a", "a", "a", "b", "b"])
         with patch.object(live, "recognize_cards",
                           lambda img, profile: next(frames)):
-            proc = LiveProcessor(GapStream(), writer, quiet=True,
+            proc = LiveProcessor(stream, writer, quiet=True,
                                  profile=SimpleNamespace(),
                                  hand_tracker=tracker,
                                  record_without_hero=record_without_hero,
                                  log=lambda *_: None)
-            for seq in range(1, len(script) + 1):
+            for seq in range(1, len(cards) + 1):
                 proc.handle(packet(seq))
             proc.drain_advice(final=True)
         return proc, [r for r in writer.rows if r["type"] == "hand"]
 
-    proc, hands = run(False)
+    # 默认：第二手没有 hero 手牌 → 不写；空档本身也不该多出记录
+    proc, hands = run(False, hero_cards_at_end=False)
     ids = [h["hand_id"] for h in hands]
-    check(len(ids) == 2 and all(HAND_ID_RE.match(hid) for hid in ids),
-          f"默认只应记真正有手牌的两手，且 ID 是名单摘要，实际 {ids}")
-    check(len(set(ids)) == 2, f"两手 ID 应不同：{ids}")
-    check(all(h.get("hero_cards") for h in hands),
-          f"落库的手牌都应带 hero 手牌：{hands}")
+    check(len(ids) == 1 and HAND_ID_RE.match(ids[0]),
+          f"默认只应记真正有手牌的那一手，实际 {ids}")
     check(proc.hands_skipped_no_hero == 1,
-          f"只有退出时还没发牌的空档该跳过，实际 {proc.hands_skipped_no_hero}")
+          f"整手没有 hero 手牌应跳过，实际 {proc.hands_skipped_no_hero}")
 
-    proc2, hands2 = run(True)
+    # 观察对手模式：同样的空手牌也要记下来
+    proc2, hands2 = run(True, hero_cards_at_end=False)
     ids2 = [h["hand_id"] for h in hands2]
-    check(len(ids2) == 3 and all(HAND_ID_RE.match(hid) for hid in ids2),
-          f"观察对手模式应把退出时的空档也记下来，且 ID 合法：{ids2}")
-    check(len(set(ids2)) == 3, f"三手 ID 应不同：{ids2}")
+    check(len(ids2) == 2 and all(HAND_ID_RE.match(hid) for hid in ids2),
+          f"观察对手模式应把空手牌也记下来，且 ID 合法：{ids2}")
+    check(len(set(ids2)) == 2, f"两手 ID 应不同：{ids2}")
     check(proc2.hands_skipped_no_hero == 0,
           f"观察对手模式不应再跳过，实际 {proc2.hands_skipped_no_hero}")
+
+    # 空档期读到的第一组牌直接挂到这一手上，不再另开一手
+    proc3, hands3 = run(False, hero_cards_at_end=True)
+    ids3 = [h["hand_id"] for h in hands3]
+    check(len(ids3) == 2 and len(set(ids3)) == 2,
+          f"空档读到牌应就地补进新手，不该多开：{ids3}")
+    check(all(h.get("hero_cards") for h in hands3),
+          f"落库的手牌都应带 hero 手牌：{hands3}")
+    check(proc3.hands_skipped_no_hero == 0,
+          f"补到手牌的空档不该再算跳过，实际 {proc3.hands_skipped_no_hero}")
 
 
 # ─────────────────────────── 自动点击 ───────────────────────────
@@ -2050,6 +2076,23 @@ def test_start_stack_read_after_street_change_includes_preflop() -> None:
           f"{tr.hand.start_stack}")
 
 
+class _Clock:
+    """可手动拨动的 injectable 时钟：换手窗口按真实时间判断，测试要可控。"""
+
+    def __init__(self) -> None:
+        from datetime import datetime, timedelta, timezone
+        self.now = datetime(2026, 11, 1, 14, 15, 0,
+                            tzinfo=timezone(timedelta(hours=8)))
+        self._timedelta = timedelta
+
+    def __call__(self):
+        return self.now
+
+    def tick(self, seconds: float):
+        self.now += self._timedelta(seconds=seconds)
+        return self.now
+
+
 def _boundary_state(*, pot=1.5, pbs=0.0, dealer="a", in_hand=3) -> FrameState:
     """1/2 三人桌：hero BTN、a CO、b BB。"""
     return FrameState(
@@ -2090,12 +2133,18 @@ def test_hero_card_flicker_is_correction_not_new_hand() -> None:
           f"翻前加注后换牌也应纠正，实际 {tr2.hand.hand_id}")
     check(tr2.hand.hero_cards == ("Ah", "Qd"), "翻前纠正也要写回")
 
-    # 翻前底池还在盲注水位 = 真换手
-    tr3 = LiveHandTracker(confirm_frames=1)
+    # 翻前底池还在盲注水位：窗口过后换牌才是真换手；换手帧只收手，下一帧才开
+    clock = _Clock()
+    tr3 = LiveHandTracker(confirm_frames=1, now=clock)
     tr3.observe(_boundary_state(), ["Ah", "Kd"], [])
     second = tr3.hand.hand_id
+    clock.tick(3.0)
     tr3.observe(_boundary_state(), ["7c", "7s"], [])
-    check(tr3.hand.hand_id != second,
+    check(tr3.hand is None and tr3.last_finished is not None
+          and tr3.last_finished.hand_id == second,
+          "底池归到盲注水位时换牌应先收手")
+    tr3.observe(_boundary_state(), ["7c", "7s"], [])
+    check(tr3.hand is not None and tr3.hand.hand_id != second,
           "底池归到盲注水位时换牌应开新手")
 
 

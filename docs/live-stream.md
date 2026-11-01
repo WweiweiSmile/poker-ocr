@@ -840,11 +840,16 @@ cd ~/codes/poker-ocr
 完整手牌落库时终端会打一条**亮黄底**提示：`完整手牌 6，id h6 日志已经生成`
 （`partial` 不打）；AI 决策有问题时凭这行按 `hand_id` 回 JSONL 定位。
 
-**没有 hero 手牌的记录默认不写**：上一手收牌后、下一手发牌前，追踪器会开一手
-`hero_cards=[]`、没有行动线的「空档手牌」；写下来会让每手牌都多一条重复的
-空记录。默认跳过（`session_end.summary.hands_skipped_no_hero` 计数）；
-旁观/观察对手时用 `--record-without-hero`（或 `.env` 里
-`RECORD_WITHOUT_HERO=1`）保留这些记录。
+**换手那一帧只收手**：收牌瞬间的公共牌/手牌/位置往往还是上一手的（牌面要等
+收牌动画结束才清空），追踪器先把上一手落库，等下一帧出现真正属于新手的信号
+（牌面清空 / 庄位轮转 / 新牌）再开新手；新手开局头几秒的换牌读数只当 OCR 纠正。
+否则会拿旧牌面开出 `start_street=turn` 的「新手」，下一帧牌面清空又立刻收掉，
+同一手写两条记录（2026-11-01 实盘 `20261101-354c2ad3c9` / `20261101-695bb6e571`）。
+
+**没有 hero 手牌的记录默认不写**：新手若整手都没读到自己手牌（旁观/看对手），
+写下来就是一条没有 hero 手牌的空记录。默认跳过
+（`session_end.summary.hands_skipped_no_hero` 计数）；旁观/观察对手时用
+`--record-without-hero`（或 `.env` 里 `RECORD_WITHOUT_HERO=1`）保留这些记录。
 
 ```json
 {"type":"hand","ts":"...","schema":"hand.v2",

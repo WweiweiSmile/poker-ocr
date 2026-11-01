@@ -27,8 +27,15 @@
     更新，只有底池还在盲注/前注水位时才当新手；人数骤变也只在翻前 + 初始底池
     时才认，避免资料弹窗把一手牌劈成两半。1/2 张牌是发牌动画，5→4 更像读错
     一张，都不算换手。
-  · **换手空档就是新手**：空档手（还没有 hero 手牌）读到第一组牌时直接补上，
-    不另开一手；空档期间读到的起始筹码也能继续用。
+  · **换手那一帧只收手，不当成新手开局**：收牌时公共牌/手牌/位置往往还是上一手
+    的（牌面要等收牌动画结束才清空）。这里先落上一手，等下一帧出现真正属于新手
+    的信号（牌面清空 / 庄位轮转 / 新牌）再开；否则会把上一手的牌面写进新手
+    （`start_street=turn`），下一帧牌面清空又把同一手劈成两条记录（2026-11-01
+    实盘 `20261101-354c2ad3c9` / `20261101-695bb6e571`）。
+  · **新手开局头几秒换牌只算 OCR 纠正**：换手帧常先读到旧的 hero 手牌、下一帧
+    才是真新牌。这手还没有任何动作时，换牌不能判成「又换了一手」。
+  · **空档期读到的第一组牌就是这一手的**：新手开头几帧可能还没有 hero 手牌，
+    读到第一组牌时直接补上，不另开一手；空档期间读到的起始筹码也能继续用。
   · **轮到我用「连续帧确认 + 决策点指纹」去重**，不用单帧上升沿。真机上预设按钮
     会在一次回合内消失又出现（见 frame_state 的注释），上升沿会重复触发；
     而多人池里 hero 过牌后对手下注、又轮回 hero 时，按钮可能全程都在、
@@ -73,9 +80,14 @@ IN_HAND_JUMP = 2
 # All-in；单帧就记会把「只秀一张 K」的玩家写成全下。
 ALL_IN_CONFIRM_FRAMES = 2
 
-# `finish_current()` 之后等新手信号的上限帧数。超过就强制开新手：
+# `finish_current()` / 换手之后等新手信号的上限帧数。超过就强制开新手：
 # 牌背/弹窗可能让 hero 手牌和庄位连续读不到，不能无限等下去。
 AWAIT_NEW_HAND_MAX_FRAMES = 20
+
+# 新手开局的头几秒：这一手还没任何动作时，hero 手牌从旧读数变成真读数
+# 只能是 OCR 纠正。真人一手牌不可能几秒内打完，这个窗口内换牌不能当成
+# 「又换了一手」——否则同一手会被劈成两条记录。
+PREFLOP_CARD_CORRECTION_SECONDS = 2.0
 
 # 写进 hand 记录时只保留这些关键词命中的牌面异常；动画期间的
 # 「新读数待确认」是正常过程，写进手牌记忆只会变成噪声。
@@ -330,6 +342,9 @@ class LiveHandTracker:
         # 等待期间保留一份结束手牌的副本：`take_finished()` 会把 last_finished
         # 清空，不能再用它判断「下一帧是不是同一手」。
         self._await_hand: _LiveHand | None = None
+        # 本手开始时间。新手开局头几秒里的换牌只当 OCR 纠正，见
+        # PREFLOP_CARD_CORRECTION_SECONDS。
+        self._hand_started_at: datetime | None = None
         # seat_id → 连续读到 all_in 的帧数。够 ALL_IN_CONFIRM_FRAMES 才写记录。
         self._all_in_streak: dict[str, int] = {}
 
@@ -365,8 +380,11 @@ class LiveHandTracker:
 
         if self._await_new_hand:
             self._await_frames += 1
-            if (not self._looks_like_new_hand(state, cards, board_len)
-                    and self._await_frames < AWAIT_NEW_HAND_MAX_FRAMES):
+            # 牌面还停在上一手时，超时也不强制开新手：摊牌画面能停十几秒，
+            # 这时候开出来的「新手」只会是上一手的残影。等牌面清掉再开。
+            if (not self._looks_like_new_hand(state, cards, board, board_len)
+                    and (self._await_frames < AWAIT_NEW_HAND_MAX_FRAMES
+                         or self._shows_finished_board(board, board_len))):
                 return None
             self._await_new_hand = False
             self._await_hand = None
@@ -379,6 +397,18 @@ class LiveHandTracker:
                 self._finalize_street(self.hand, self.hand.street, None,
                                       at_hand_end=True)
                 self.last_finished = copy.deepcopy(self.hand)
+                # **这一帧只收手，不当成新手开局**：换手帧还挂着上一手的公共牌
+                # （牌面比底池晚清）、手牌往往也还是旧读数。直接开新手会把
+                # 上一手的牌面写成新手的开局街（start_street=turn），下一帧
+                # 牌面清空又把同一手劈成两条记录。等下一帧出现真正属于新手的
+                # 信号（牌面清空 / 庄位轮转 / 新牌）再开。
+                self._await_hand = self.last_finished
+                self.hand = None
+                self._await_new_hand = True
+                self._await_frames = 0
+                self._drop_frames = 0
+                self._all_in_streak.clear()
+                return None
             self._start_hand(state, cards, board_len, board)
 
         hand = self.hand
@@ -550,9 +580,10 @@ class LiveHandTracker:
         属于刚结束的上一手。
         """
         target = self.hand
+        prev = self.last_finished or self._await_hand
         if (target is None or (not target.hero_cards and not target.board)) \
-                and self.last_finished is not None:
-            target = self.last_finished
+                and prev is not None:
+            target = prev
         return target
 
     def finish_current(self) -> None:
@@ -568,11 +599,13 @@ class LiveHandTracker:
         self.hand = None
         self._await_new_hand = True
         self._await_frames = 0
+        self._drop_frames = 0
         self._all_in_streak.clear()
 
     def _looks_like_new_hand(self, state: FrameState,
-                             cards: tuple[str, ...], board_len: int) -> bool:
-        """`finish_current()` 之后判断当前帧是否真的是下一手。
+                             cards: tuple[str, ...], board: tuple[str, ...],
+                             board_len: int) -> bool:
+        """`finish_current()` / 换手之后判断当前帧是否真的是下一手。
 
         不直接用 `_is_new_hand()`：那个函数在 `self.hand is None` 时会立刻
         返回 True，会把摊牌后的同一帧当成新手牌开头。
@@ -580,6 +613,10 @@ class LiveHandTracker:
         hand = self._await_hand or self.last_finished
         if hand is None:
             return True
+        # 收牌动画没结束：牌面还是刚结束那一手的，这一帧仍然属于上一手。
+        # 拿它当新手开局会把旧牌面写成新手的第一条街。
+        if self._shows_finished_board(board, board_len):
+            return False
         if hand.dealer and state.dealer and hand.dealer != state.dealer:
             return True
         if (len(cards) == 2 and len(hand.hero_cards) == 2
@@ -604,6 +641,7 @@ class LiveHandTracker:
         self._await_new_hand = False
         self._await_frames = 0
         self._await_hand = None
+        self._hand_started_at = None
         self._all_in_streak.clear()
 
     # ─────────────────────────── 换手 ───────────────────────────
@@ -654,6 +692,10 @@ class LiveHandTracker:
                 return False
             # 翻前：只有底池还停在盲注/前注水位（没人入池）才像新手开局；
             # 已经有人加注后再换牌，按 OCR 纠正处理。
+            # 新手开局头几秒更要当纠正：换手帧常先读到上一手的旧牌，下一帧
+            # 才是真新牌，按换手处理会把同一手劈成两条记录。
+            if self._in_deal_settle(hand):
+                return False
             return self._pot_is_initial(state, hand)
         # 在局人数一次变化 ≥2：旧口径直接判换手，资料弹窗让两个人短暂
         # in_hand=false 就会把一手牌劈成两半。现在只在「翻前 + 底池还是盲注
@@ -664,6 +706,27 @@ class LiveHandTracker:
                 and self._pot_is_initial(state, hand)):
             return True
         return False
+
+    def _shows_finished_board(self, board: tuple[str, ...],
+                              board_len: int) -> bool:
+        """这一帧的公共牌是不是还停在刚结束那一手上（收牌动画没结束）。"""
+        hand = self._await_hand or self.last_finished
+        return bool(hand is not None and hand.board and board_len >= 3
+                    and board == tuple(hand.board))
+
+    def _in_deal_settle(self, hand: _LiveHand) -> bool:
+        """这一手是不是还在「刚发牌、读数没稳定」的头几秒。
+
+        换手那一帧常先读到上一手的 hero 手牌，下一帧才是真新牌。这期间
+        还没有任何行动，换牌只能是 OCR 纠正；真人一手牌不可能在窗口内打完，
+        所以不会吞掉真正的换手。
+        """
+        if hand.actions:
+            return False                 # 已经有人行动 = 这手牌确实打起来了
+        if self._hand_started_at is None:
+            return False
+        return ((self._now() - self._hand_started_at).total_seconds()
+                < PREFLOP_CARD_CORRECTION_SECONDS)
 
     @staticmethod
     def _pot_is_initial(state: FrameState, hand: _LiveHand) -> bool:
@@ -708,14 +771,16 @@ class LiveHandTracker:
         street = street_of_board(board_len) or PREFLOP
         hero = self._hero(state)
         roster_rows = self._roster_for_id(state)
+        started_at = self._now()
         identity = build_hand_identity(
             roster_rows,
-            started_at=self._now(),
+            started_at=started_at,
             table_size=state.table_seats,
             dealer=state.dealer,
             taken=self._used_hand_ids,
         )
         self._used_hand_ids.add(identity.hand_id)
+        self._hand_started_at = started_at
         hand = _LiveHand(
             hand_id=identity.hand_id,
             hand_index=self.hand_seq,

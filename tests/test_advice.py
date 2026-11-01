@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import sys
 import tempfile
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -373,12 +374,18 @@ def test_tracker_new_hand_on_dealer_change() -> None:
                    player("a", position="SB"), player("b", position="BB"),
                    dealer="a"), ["Ah", "Qd"], [])
     first = tr.hand.hand_id
-    feed(tr, state(player("hero", position="CO"),
-                   player("a", position="BB"), player("b", position="BTN"),
-                   dealer="b"), ["7c", "7s"], [])
-    check(tr.hand.hand_id != first, "庄位变了应开新手牌")
+    switched = state(player("hero", position="CO"),
+                     player("a", position="BB"), player("b", position="BTN"),
+                     dealer="b")
+    # 换手的那一帧只收手：这一帧的名字/位置/牌面还可能属于上一手，
+    # 不能拿它当新手的开局
+    feed(tr, switched, ["7c", "7s"], [])
+    check(tr.hand is None, "换手帧不该立刻开新手")
     check(tr.last_finished is not None and tr.last_finished.hand_id == first,
           "上一手应被保留下来供落库")
+    # 下一帧才是真正的新手开局
+    feed(tr, switched, ["7c", "7s"], [])
+    check(tr.hand is not None and tr.hand.hand_id != first, "庄位变了应开新手牌")
 
 
 def test_tracker_board_drop_needs_two_frames() -> None:
@@ -391,7 +398,11 @@ def test_tracker_board_drop_needs_two_frames() -> None:
     feed(tr, state(*players, dealer="a"), ["Ah", "Kd"], [])
     check(tr.hand.hand_id == first, "单帧读空不该换手")
     feed(tr, state(*players, dealer="a"), ["Ah", "Kd"], [])
-    check(tr.hand.hand_id != first, "连续两帧读空应换手")
+    check(tr.hand is None and tr.last_finished is not None
+          and tr.last_finished.hand_id == first,
+          "连续两帧读空应收掉上一手")
+    feed(tr, state(*players, dealer="a"), ["Ah", "Kd"], [])
+    check(tr.hand is not None and tr.hand.hand_id != first, "下一帧应开新手牌")
 
 
 def test_tracker_ignores_turn_card_flicker() -> None:
@@ -410,6 +421,169 @@ def test_tracker_ignores_turn_card_flicker() -> None:
     feed(tr, state(*players, dealer="a"), ["Ah", "Kd"],
          ["Ks", "7d", "2c", "Qh", "9s"])
     check(tr.hand.hand_id == first, "河牌仍应属于同一手")
+
+
+class _Clock:
+    """可手动拨动的 injectable 时钟：换手窗口用真实时间判断，测试要可控。"""
+
+    def __init__(self) -> None:
+        self.now = datetime(2026, 11, 1, 14, 15, 0,
+                            tzinfo=timezone(timedelta(hours=8)))
+
+    def __call__(self) -> datetime:
+        return self.now
+
+    def tick(self, seconds: float) -> datetime:
+        self.now += timedelta(seconds=seconds)
+        return self.now
+
+
+def _seven_handed(dealer: str, **positions: str):
+    """7 人在座的固定牌桌；位置随庄位轮转时只传要改的那几个。"""
+    seats = {
+        "hero": ("svsvbmbm", positions.get("hero", "HJ")),
+        "lowL": ("爽歪的麻雀", positions.get("lowL", "CO")),
+        "midL": ("书麻头了", positions.get("midL", "BTN")),
+        "upL": ("ssS771", positions.get("upL", "SB")),
+        "topR": ("盘盘AAAA", positions.get("topR", "BB")),
+        "midR": ("偷鸡就得欧", positions.get("midR", "UTG")),
+        "lowR": ("俊伯老公", positions.get("lowR", "LJ")),
+    }
+    return tuple(player(seat, name=name, position=pos)
+                 for seat, (name, pos) in seats.items())
+
+
+def test_tracker_transition_frame_is_not_a_new_hand() -> None:
+    """换手帧还挂着上一手的牌面：只收手，不能拿它开新手。
+
+    实盘 2026-11-01 14:15:40：上一手已经打到转牌（牌面 Kh4cAhQh、底池 40），
+    收牌那一帧底池先归位（5.0），但公共牌还没清、hero 手牌也还是旧读数；
+    下一帧牌面清空、真手牌 6c8d 才出现。旧实现把这一帧当成新手开局
+    （start_street=turn + 上一手的牌面），0.3s 后牌面清空又立刻收掉，
+    同一手写了两条记录（20261101-354c2ad3c9 / 20261101-695bb6e571）。
+    """
+    clock = _Clock()
+    tr = LiveHandTracker(confirm_frames=1, now=clock)
+    players = _seven_handed("midL")
+    feed(tr, state(*players, pot=40.0, pbs=24.0, dealer="midL", in_hand=7),
+         ["8s", "Jd"], ["Kh", "4c", "Ah", "Qh"])
+    first = tr.hand.hand_id
+    check(tr.hand.street == "turn", "上一手应记录到转牌")
+
+    # 收牌帧：底池归位 + hero 换回旧读数，公共牌还是上一手的 4 张
+    clock.tick(0.2)
+    feed(tr, state(*players, pot=5.0, pbs=3.5, dealer="midL", in_hand=7),
+         ["3s", "Jd"], ["Kh", "4c", "Ah", "Qh"])
+    check(tr.hand is None, "换手帧只收手，不该开新手")
+    finished = tr.take_finished()
+    check(finished is not None and finished["hand_id"] == first,
+          f"上一手应完整落库：{finished and finished.get('hand_id')}")
+    check(finished["board"] == ["Kh", "4c", "Ah", "Qh"]
+          and finished["pot"] == 40.0,
+          f"上一手的牌面/底池不能被收牌帧覆盖："
+          f"{finished['board']} / {finished['pot']}")
+
+    # 下一帧：公共牌清空、庄位轮到 upL、真手牌 6c8d
+    clock.tick(0.3)
+    dealt = _seven_handed("upL", hero="HJ", lowL="HJ", lowR="UTG+1",
+                          midR="UTG", midL="CO", upL="BTN", topR="BB")
+    feed(tr, state(*dealt, pot=5.0, pbs=3.5, dealer="upL", in_hand=8),
+         ["6c", "8d"], [])
+    check(tr.hand is not None and tr.hand.hand_id != first,
+          "牌面清空后应开新手")
+    check(tr.hand.street == "preflop" and tr.hand.board == (),
+          f"新手必须从翻前开始，不能继承上一手牌面："
+          f"{tr.hand.street} / {tr.hand.board}")
+    check(tr.hand.hero_cards == ("6c", "8d"),
+          f"新手应记真手牌：{tr.hand.hero_cards}")
+    check(tr.take_finished() is None,
+          "同一手不该再收出第二条记录")
+
+    # 后续帧（哪怕 hero 手牌又被读错一次）也不能再劈一手
+    second = tr.hand.hand_id
+    clock.tick(0.4)
+    feed(tr, state(*dealt, pot=5.0, pbs=3.5, dealer="upL", in_hand=8),
+         ["6s", "8d"], [])
+    check(tr.hand is not None and tr.hand.hand_id == second,
+          "新手开局的换牌读数只当 OCR 纠正")
+    check(tr.hand.hero_cards == ("6s", "8d"), "应就地更新成纠正后的手牌")
+
+
+def test_tracker_waits_until_old_board_clears() -> None:
+    """换手帧后牌面还没清：庄位已经轮转也不能拿旧牌面开新手。"""
+    clock = _Clock()
+    tr = LiveHandTracker(confirm_frames=1, now=clock)
+    players = _seven_handed("midL")
+    feed(tr, state(*players, pot=40.0, pbs=24.0, dealer="midL", in_hand=7),
+         ["8s", "Jd"], ["Kh", "4c", "Ah", "Qh"])
+    first = tr.hand.hand_id
+    clock.tick(0.2)
+    feed(tr, state(*players, pot=5.0, pbs=3.5, dealer="midL", in_hand=7),
+         ["3s", "Jd"], ["Kh", "4c", "Ah", "Qh"])
+
+    # 庄位已经轮到 upL、真手牌也读到了，但公共牌还是上一手的：继续等
+    clock.tick(0.3)
+    next_players = _seven_handed("upL", hero="HJ", lowL="HJ", lowR="UTG+1",
+                                 midR="UTG", midL="CO", upL="BTN", topR="BB")
+    feed(tr, state(*next_players, pot=5.0, pbs=3.5, dealer="upL", in_hand=8),
+         ["6c", "8d"], ["Kh", "4c", "Ah", "Qh"])
+    check(tr.hand is None, "旧牌面还没清时不该开新手")
+
+    clock.tick(0.3)
+    feed(tr, state(*next_players, pot=5.0, pbs=3.5, dealer="upL", in_hand=8),
+         ["6c", "8d"], [])
+    check(tr.hand is not None and tr.hand.hand_id != first,
+          "牌面清空后才能开新手")
+    check(tr.hand.board == () and tr.hand.street == "preflop",
+          f"新手开局不该带任何旧牌面：{tr.hand.board}")
+
+
+def test_tracker_young_hand_card_change_is_ocr_fix() -> None:
+    """刚开的一手还没有任何动作：换牌是 OCR 纠正，不是又换了一手。"""
+    clock = _Clock()
+    tr = LiveHandTracker(confirm_frames=1, now=clock)
+    players = (player("hero", position="BTN"), player("a", position="BB"))
+    feed(tr, state(*players, pot=1.5, pbs=0.0), ["3s", "Jd"], [])
+    first = tr.hand.hand_id
+
+    clock.tick(0.4)
+    feed(tr, state(*players, pot=1.5, pbs=0.0), ["8s", "Jd"], [])
+    check(tr.hand is not None and tr.hand.hand_id == first,
+          "刚开手就换牌不该劈成两手")
+    check(tr.hand.hero_cards == ("8s", "Jd"), "换牌应按 OCR 纠正原地更新")
+
+    # 窗口过了以后，同样的「翻前 + 初始底池 + 换牌」才是真的换手
+    clock.tick(5.0)
+    feed(tr, state(*players, pot=1.5, pbs=0.0), ["6c", "8d"], [])
+    check(tr.hand is None and tr.last_finished is not None
+          and tr.last_finished.hand_id == first,
+          "窗口外的换牌应正常收手")
+
+
+def test_tracker_does_not_force_new_hand_while_showdown_board_stays() -> None:
+    """摊牌画面能停十几秒：等新手的超时也不能拿上一手的牌面开新手。"""
+    from poker_ocr.hand_track import AWAIT_NEW_HAND_MAX_FRAMES
+
+    clock = _Clock()
+    tr = LiveHandTracker(confirm_frames=1, now=clock)
+    players = (player("hero", position="BTN"), player("a", position="BB"))
+    st = state(*players, pot=120.0, pbs=40.0, dealer="a")
+    board = ["Ks", "7d", "2c", "Qh", "9s"]
+    feed(tr, st, ["Ah", "Kd"], board)
+    first = tr.hand.hand_id
+    tr.finish_current()                 # All-in 徽章消失 = 手牌结束
+    tr.take_finished()
+
+    for _ in range(AWAIT_NEW_HAND_MAX_FRAMES + 5):
+        clock.tick(1.0)
+        feed(tr, st, ["Ah", "Kd"], board)
+        check(tr.hand is None, "摊牌画面还在时不该开新手")
+
+    clock.tick(1.0)
+    feed(tr, st, ["2c", "3d"], [])
+    check(tr.hand is not None and tr.hand.hand_id != first,
+          "牌面清掉（下一手发牌）后才该开新手")
+    check(tr.hand.board == (), f"新手不该带摊牌的旧牌面：{tr.hand.board}")
 
 
 def test_tracker_decision_point_confirmed_and_deduped() -> None:
@@ -514,17 +688,19 @@ def test_hand_record_includes_shown_cards() -> None:
                                 "position": "BB", "cards": ["Ac", "Qh"]}],
           f"hand 记录应带上亮牌：{rec.get('shows')}")
 
-    # 换手（庄位变化）后，上一手的亮牌还停留在屏幕上：不能写进新手牌
+    # 换手（庄位变化）：换手帧只收手，下一帧才开新手
     st2 = state(player("hero", position="BTN"),
                 player("a", name="老王", position="BB"),
                 pot=3.0, pbs=3.0, dealer="a")
     feed(tr, st2, ["2c", "3d"], [])
-    tr.record_shows({"a": ["Ac", "Qh"]})
-    check("shows" not in tr._hand_dict(tr.hand),
-          "跨手停留的亮牌不应写进新手牌")
     finished = tr.take_finished()
     check(finished is not None and finished.get("shows"),
           f"上一手仍应保留亮牌：{finished}")
+    feed(tr, st2, ["2c", "3d"], [])
+    check(tr.hand is not None, "下一帧应开新手牌")
+    tr.record_shows({"a": ["Ac", "Qh"]})
+    check("shows" not in tr._hand_dict(tr.hand),
+          "跨手停留的亮牌不应写进新手牌")
 
 
 def test_hand_record_includes_one_card_show() -> None:
@@ -2729,11 +2905,14 @@ def test_tracker_latches_bomb_pot_across_frames() -> None:
     hand = tr._hand_dict(tr.hand)
     check(hand.get("bomb_pot") is True, f"落库应写 bomb_pot：{hand}")
 
-    # 换手后清空（庄位轮换）
-    feed(tr, state(player("hero", position="CO"),
-                   player("a", position="BTN", name="老王"),
-                   dealer="b"), ["7c", "7s"], [])
-    check(not tr.hand.bomb_pot, "换手后不该继承上一手的爆炸标记")
+    # 换手后清空（庄位轮换）：换手帧只收手，下一帧才开新手
+    next_hand = state(player("hero", position="CO"),
+                      player("a", position="BTN", name="老王"),
+                      dealer="b")
+    feed(tr, next_hand, ["7c", "7s"], [])
+    feed(tr, next_hand, ["7c", "7s"], [])
+    check(tr.hand is not None and not tr.hand.bomb_pot,
+          "换手后不该继承上一手的爆炸标记")
 
 
 def test_explosive_pot_prompt_and_directive() -> None:
