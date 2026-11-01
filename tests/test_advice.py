@@ -3036,6 +3036,47 @@ def test_explosive_pot_facts_follow_spr() -> None:
           f"深码炸弹池要给正常深码打法：\n{text}")
 
 
+def test_explosive_pot_one_street_is_enforced_on_river() -> None:
+    """炸弹池已经投过一条街：事实块要直说「本街不能跟注」。
+
+    K3s（11-01 14:56）：转牌下注 30，河牌面对 63 又跟、再加注又跟 47。
+    只写「顶对及以上只打一条街」时，模型会理解成「我还没下注，这条街可以打」，
+    所以要在已经投过钱时把结论写成硬事实。
+    """
+    from poker_ocr.hand_track import ActionRecord, StreetRecord
+
+    turn = StreetRecord("turn", 45.0, (
+        ActionRecord("turn", "hero", None, "LJ", "bet", 30.0, False, True),
+        ActionRecord("turn", "hj", None, "HJ", "call", 30.0, False, False),
+    ))
+    sit = build_situation(make_point(
+        street="river", board=("6h", "Kd", "9d", "4h", "Kh"),
+        hero_cards=("Ks", "3c"), hero_position="LJ", hero_stack=180.5,
+        pot=198.0, pot_before_street=135.0, to_call=63.0,
+        streets=(StreetRecord("preflop", 45.0, ()),
+                 StreetRecord("flop", 45.0, ()),
+                 turn,
+                 StreetRecord("river", 135.0, ())),
+        bomb_pot=True, table_size=9))
+    check(sit.explosive_pot, "fixture 应是炸弹池")
+    text = render_facts_zh(sit)
+    check("炸弹池节奏" in text, f"要写出一条街的节奏：\n{text}")
+    check("转牌" in text, f"要说明是哪条街投过钱：\n{text}")
+    check("不能跟注" in text, f"要直接写不能跟注：\n{text}")
+
+    # 还没投过钱的街不能出现这条硬规则（否则会把正常下注也吓住）
+    fresh = build_situation(make_point(
+        street="turn", board=("6h", "Kd", "9d", "4h"),
+        hero_cards=("Ks", "3c"), hero_position="LJ",
+        pot=45.0, pot_before_street=45.0, to_call=0.0,
+        streets=(StreetRecord("preflop", 45.0, ()),
+                 StreetRecord("flop", 45.0, ()),
+                 StreetRecord("turn", 45.0, ())),
+        bomb_pot=True, table_size=9))
+    text = render_facts_zh(fresh)
+    check("炸弹池节奏" not in text, f"没投过钱不该给这条硬规则：\n{text}")
+
+
 def test_effective_stack_not_hero_stack_drives_depth() -> None:
     """Hero 300BB 对 100BB 对手：有效筹码是 100BB，按浅码炸弹池处理。
 
