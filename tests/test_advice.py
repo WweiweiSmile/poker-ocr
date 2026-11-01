@@ -1233,10 +1233,11 @@ def test_open_size_scales_with_pot() -> None:
     check(abs(ante_pot["open-3.5"] - 3.5 * scale6) < 0.01
           and abs(ante_pot["open-4"] - 4.0 * scale6) < 0.01,
           f"底池 6BB 时后位应开到 {3.5 * scale6:.2f}/{4.0 * scale6:.2f}：{ante_pot}")
-    check(ante_pot["open-4"] >= 9.0,
-          f"底池 6BB 时后位大档应不少于 9BB：{ante_pot}")
+    # 底池 4 倍 → 开方缩放 2 倍：后位基础 3.5/4.0 → 7/8BB（0.6 时是 8.1/9.2）
+    check(abs(ante_pot["open-4"] - 8.0) < 0.01,
+          f"底池 6BB 时后位大档应开到 8BB：{ante_pot}")
 
-    # 底池翻 4 倍 → 尺度乘 4**指数（0.6 时约 2.3 倍），不是乘 4
+    # 底池翻 4 倍 → 尺度乘 4**指数（0.5 时正好 2 倍），不是乘 4
     bigger = opens(24.0, 0.5)
     expect = 4.0 * (24.0 / 1.5) ** OPEN_POT_EXPONENT
     check(abs(bigger["open-4"] - expect) < 0.01,
