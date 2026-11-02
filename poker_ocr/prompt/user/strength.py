@@ -39,12 +39,11 @@ def render_hand_strength_zh(sit: Situation) -> list[str]:
         # 0 对手时 gt/落后比例是按假想对手算的；整块不渲染，交给数据质量段。
         return []
     lines = ["## 实时牌力"]
+    gt = sit.ground_truth
     tier = sit.hand_tier
     is_draw = tier in (STRONG_DRAW, WEAK_DRAW)
-    # 「有牌又有听」：对子类成牌 + ≥8 outs 的强听。它不是纯听牌，
-    # 多人池里不能按「没有弃牌率就过牌」处理。
-    combo_draw = (not is_draw and sit.outs is not None and sit.outs >= 8
-                  and tier in (OVERPAIR, TPTK, TP_WEAK, MID_BOTTOM))
+    # 仅真实听花/听顺属于「成牌+听牌」分类；两高张等其他 outs 不算 combo。
+    combo_draw = sit.hand_class == "combo"
 
     if is_draw:
         kind = "强听牌" if tier == STRONG_DRAW else "弱听牌"
@@ -71,9 +70,11 @@ def render_hand_strength_zh(sit: Situation) -> list[str]:
     elif sit.hand_label:
         # 只给牌型标签；「大 / 中 / 小」是 hand_strength 的第 4 套口径，
         # 已经由 hand_tier / ground_truth / hand_ranges 的数字覆盖，不再重复。
-        lines.append(f"牌力：{sit.hand_label}")
+        label = sit.hand_label
+        if sit.hand_class == "combo" and gt is not None:
+            label = f"成牌+听花/听顺（{label}；{_draws_zh(gt)}）"
+        lines.append(f"牌力：{label}")
 
-    gt = sit.ground_truth
     if gt is not None:
         made = gt.made.name_cn
         if gt.made.category == HIGH_CARD:
@@ -113,18 +114,11 @@ def render_hand_strength_zh(sit: Situation) -> list[str]:
                 lines.append("能打败你的牌型（理论上）："
                              + "、".join(stronger))
         lines.append(f"听牌：{_draws_zh(gt)}")
+        if sit.hand_class == "combo":
+            lines.append("牌况分类：成牌+听花/听顺；该分类不代表听牌强度或下注许可")
         if gt.draws.overcard_outs:
             kind = ("两高张" if gt.draws.overcard_outs >= 6 else "单高张")
             lines.append(f"反超 outs：{kind} {gt.draws.overcard_outs} 张")
-        if combo_draw:
-            combo_tail = ("只有范围权益高于公平份额时，才提高下注频率"
-                          if sit.hand_ranges is not None
-                          else "没有范围权益时不要假设自己领先")
-            lines.append(
-                "（程序建议）有牌又有听：成牌 + 强听（combo draw，不是纯听牌）；"
-                "可作为保护/半诈唬下注，不是默认；多人池或无位置默认过牌，"
-                "没有弃牌率也别硬开。"
-                + combo_tail)
         if gt.draws.total_outs:
             # 纯两高张不是「补牌成牌」，是反超当前顶对的权益；分开写，
             # 免得模型把 24% 当成「已经能跟任何下注」的胜率。
@@ -214,9 +208,11 @@ def render_hand_strength_zh(sit: Situation) -> list[str]:
                      "仅全下/无后续下注时可直接比门槛）："
                      f"{sit.equity_pct:.0f}%")
 
-    # 听牌的即时价格：SPR ≤ 2 时跟注/全下基本就是最后一手，四二法则可以
-    # 直接和门槛比。模型看到「32% vs 33.3%」比看到两个孤立的数字更不容易
-    # 把「筹码不多，推了」当成理由（a334 的全下就是这么来的）。
+    # 听牌的即时价格：只在 SPR ≤ 2（跟注/全下基本就是最后一手）时给。
+    # 关键约束：只有「跟注即全下/后面不再下注」才把四二法则印出来直接比；
+    # 未全下时**不印二个数**——事实块里两个相邻的百分比（门槛 33% / 四二
+    # 法则 32%）会被模型直接拿来比较，A/B P0-05 就是这么写出「赔率33%接近
+    # 32%成牌率」的。门槛仍然给，判断方式交给牌型段（范围权益+隐含赔率）。
     if is_draw and snap.to_call and snap.to_call > 0 and (sit.spr or 99) <= 2.0:
         owed = call_amount(snap)
         winnable = winnable_pot(snap)
@@ -232,15 +228,15 @@ def render_hand_strength_zh(sit: Situation) -> list[str]:
             no_more_betting = not any(_can_act(o) for o in snap.opponents)
             direct = call_is_all_in or no_more_betting
             base = (f"听牌价格：跟注 {_fmt_num(owed)}BB / 可争夺底池 "
-                    f"{_fmt_num(winnable)}BB = {bep:.0f}% 门槛；"
-                    f"四二法则 {eq:.0f}%")
+                    f"{_fmt_num(winnable)}BB = {bep:.0f}% 门槛")
             if direct:
                 verdict = "够" if eq >= bep else "直接赔率不够"
-                lines.append(base + f" → {verdict}（跟注即全下/后面不再下注）")
+                lines.append(f"{base}；四二法则 {eq:.0f}% → {verdict}"
+                             "（跟注即全下/后面不再下注）")
             else:
                 lines.append(
-                    base + "；参考值，不可直接与单街门槛比较"
-                    "（未全下，后面还可能下注）")
+                    f"{base}；未全下/后面还会下注：四二法则不参与门槛比较，"
+                    "按「范围权益 + 隐含赔率 + 对手线路」判断")
 
     if gt is not None:
         lines.append(f"牌面结构：{_board_structure_zh(gt)}")

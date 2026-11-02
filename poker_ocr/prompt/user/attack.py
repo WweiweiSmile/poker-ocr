@@ -250,8 +250,8 @@ def render_attack_zh(sit: Situation) -> list[str]:
                 f"{scope_label}对 c-bet 只弃 {stats.fold_to_cbet:.0f}%"
                 f"（{_fmt_num(cbet_opps)} 次机会）—— 诈唬没有弃牌率。")
         lines.append(
-            "结论：跟着过牌，看免费牌；只有强牌可以下注拿价值；"
-            "强听/空气在多人池默认过牌，别硬开。")
+            "结论：跟着过牌，看免费牌；只有强牌（两对+/超对/顶对强踢）"
+            "可以下注拿价值；强听没有弃牌率、按默认过牌，空气过牌。")
         if (any(str(card)[:1].upper() == "A" for card in snap.board)
                 and _notes_ace_weakness(sit.table_dynamics)):
             lines.append("A 高面也一样：对手 xc/xr 高时，怕 A 不等于会弃牌。")
@@ -266,22 +266,25 @@ def render_attack_zh(sit: Situation) -> list[str]:
             "没有对手过牌-加注数据，不能把这里当无风险开火点。")
 
     if fold_verdict == "support" and xr_known and not wet:
-        conclusion = "可高频小注攻击（1/3–1/2 池），别只拿成牌下注"
+        conclusion = ("可高频小注攻击（1/3–1/2 池）：强牌拿价值，"
+                      "强听可按牌型段下注诈唬")
     elif fold_verdict == "support" and xr_known:
         conclusion = ("可小注，但牌面有花/顺可能，降低频率；"
-                      "别只拿成牌下注")
+                      "强牌拿价值，强听可按牌型段下注诈唬")
     elif fold_verdict == "support":
         conclusion = ("可小注，但不默认高频（没有 xr 数据）；"
-                      "只用强牌，强听/空气优先过牌")
+                      "强牌下注拿价值，强听可按牌型段小注诈唬，空气过牌")
     elif fold_verdict == "weak":
-        conclusion = "不开火：只用强牌下注，强听/空气过牌"
+        conclusion = ("不开火：强牌（两对+/超对/顶对强踢）下注拿价值，"
+                      "强听/空气按默认过牌")
     elif fold_verdict == "small":
-        conclusion = "仅强牌下注（弃牌率样本不足，强听/空气过牌）"
+        conclusion = ("仅强牌下注（弃牌率样本不足）；"
+                      "强听没有弃牌率支撑，按默认过牌")
     elif fold_verdict == "neutral":
-        conclusion = ("仅强牌下注（弃牌率一般，不能单独作为开火理由；"
-                      "强听/空气过牌）")
+        conclusion = ("仅强牌下注（弃牌率一般，不能单独作为开火理由）；"
+                      "强听/空气过牌")
     else:
-        conclusion = "仅强牌下注（没有该街弃牌率，强听/空气过牌）"
+        conclusion = "仅强牌下注（没有该街弃牌率）；强听/空气过牌"
     lines.append("结论：" + conclusion)
     lines.append("依据：")
     lines.extend(_attack_evidence(sit, stats, street, scope_label,

@@ -44,6 +44,10 @@
 模型建议有随机性，`--model` 默认只记录与 `new_advice` 的差异，不判 FAIL；
 要硬判加 `--strict-advice`。
 
+结果行带 `prompt_version`，每个路径再带 `*_source`（model / fallback）与
+`*_finish_reason`。跨提示词版本比结果时先看这三个字段：提示词换了、这次跑成
+fallback、或输出被 `MAX_TOKENS` 截断，看起来都可能像「建议变了」。
+
 ## 2. 用例表
 
 | id | 手牌 | 决策点 | 类别 | 旧 → 新权益 | 门槛 | 预期 | 状态 |

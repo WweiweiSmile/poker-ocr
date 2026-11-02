@@ -1,0 +1,837 @@
+{
+  "title": "poker-ocr 提示词体系",
+  "role": "lean-zh-2026-11-03.3",
+  "detail": {
+    "when": "每次 Hero 决策点",
+    "lead": "live 实时建议只有一套中文 lean 提示词：system 给规则，user 给事实；模型只从程序算好的选项里选一个。",
+    "bullets": [
+      "版本：PROMPT_VERSION = lean-zh-2026-11-03.2；ADVICE_VERSION = advice-2026-11-03.2",
+      "事实全部由 situation.py / options.py / pot_math.py 算好，提示词层只渲染",
+      "输出固定为 option + reason，option 必须来自「可选动作」",
+      "prompt 原文随 Advice 落 JSONL，复跑控制台可回放"
+    ],
+    "note": "依据 docs/提示词模块拆分-2026-11-03.md 与 poker_ocr/prompt/ 源码整理。"
+  },
+  "children": [
+    {
+      "title": "① 调用链",
+      "role": "谁拼提示词、谁调模型",
+      "side": "right",
+      "color": "#4c6ef5",
+      "detail": {
+        "lead": "一次建议的装配顺序：先把局面算成 Situation，再算选项，最后渲染 system + user 并调用模型。",
+        "bullets": [
+          "HandSnapshot + 画像 / 桌况 / 观察 → Situation",
+          "Situation → system（规则）+ user（事实）",
+          "build_messages(sit) → (system, user)",
+          "POST /chat/completions → JSON → Advice"
+        ],
+        "note": "advice.py 只保留模型调用；事实、选项、提示词文本各自独立。"
+      },
+      "children": [
+        {
+          "title": "advice.py",
+          "role": "只负责模型调用与结果",
+          "detail": {
+            "path": "poker_ocr/advice.py",
+            "when": "每次建议",
+            "lead": "模型调用层：拼 prompt、调 /chat/completions、校验 option id、截断 reason、失败兜底，并把 prompt 原文写进 Advice 供复盘。",
+            "bullets": [
+              "AISettings：凭据 / 采样参数 / 超时（OpenAI 兼容）",
+              "complete_json：非流式、连接复用、错误归一化",
+              "advise()：解析 option、reason ≤60 字、fallback_option",
+              "Advice / AdviceRunner：结果结构与后台线程"
+            ],
+            "note": "不再计算事实或选项；旧入口仍从这里 re-export。"
+          }
+        },
+        {
+          "title": "situation.py",
+          "role": "事实唯一源 build_situation",
+          "detail": {
+            "path": "poker_ocr/situation.py",
+            "when": "每次建议前",
+            "lead": "一次决策的结构化事实模型：把 HandSnapshot、对手画像、桌况、人工观察整理成 Situation；提示词层只负责渲染。",
+            "bullets": [
+              "计算顺序：牌面 ground truth → 对手范围 → 牌力解析 → 条件弃牌率",
+              "缺数据 fail open，绝不阻塞主链路",
+              "字段覆盖几何 / 牌力 / 范围 / 画像 / 桌况 / GTO / board equity"
+            ],
+            "note": "与 advice.py 同属 2026-11-03 第二次拆分。"
+          }
+        },
+        {
+          "title": "options.py",
+          "role": "选项空间：id / 标签 / 金额",
+          "detail": {
+            "path": "poker_ocr/options.py",
+            "when": "每次建议前",
+            "lead": "选项空间：把当前局面能做的动作算成固定 id + 中文标签 + 实际金额；模型只选，不算尺度。",
+            "bullets": [
+              "翻后：1/3、1/2、2/3、1、1.2 倍池 + all-in",
+              "翻前：开池按位置 / 前注 / 溜入者；面对加注 3× / 4×",
+              "all-in 只在几何合理时挂入；封顶档位去重",
+              "preset_targets() 给自动点击器"
+            ],
+            "note": "「## 可选动作」由 prompt/user/options.py 渲染。"
+          }
+        },
+        {
+          "title": "pot_math.py",
+          "role": "几何 / 赔率 / 位置纯计算",
+          "detail": {
+            "path": "poker_ocr/pot_math.py",
+            "when": "事实计算时",
+            "lead": "牌桌几何 / 赔率 / 位置的纯计算，不渲染任何文字。",
+            "bullets": [
+              "有效筹码 / 可玩深度 / SPR / 底池类型",
+              "需跟 / 可争夺底池 / 对手超额全下",
+              "行动顺序 / 身后人数 / 谁还没跟到最高注"
+            ],
+            "note": "提示词里的数都从这里来，保证同一手牌只有一套口径。"
+          }
+        },
+        {
+          "title": "事实来源",
+          "role": "ground_truth / 范围 / 画像",
+          "detail": {
+            "when": "事实计算时",
+            "lead": "事实块里的每个数都由程序算好；模型不自己推，避免同一手牌出现两套口径。",
+            "bullets": [
+              "ground_truth.py：最好五张 / 坚果校验 / outs",
+              "hand_vs_ranges.py：对范围权益 / 成牌·听牌·空气分区",
+              "opponent_profile.py：逐座位画像 / 桌况统计",
+              "preflop_ranges.py：开池范围结论 / 面对加注继续范围",
+              "gto_lookup.py / board_range.py：可选覆盖，查不到就不写"
+            ],
+            "note": "这些模块不在 prompt/ 包内，但决定事实块的内容。"
+          }
+        },
+        {
+          "title": "输出 JSON",
+          "role": "option + reason(+confidence)",
+          "detail": {
+            "when": "模型返回后",
+            "lead": "模型只回一个 option id + 一句 reason（≤60 字），需要时带 confidence；id 必须严格来自「可选动作」。",
+            "bullets": [
+              "解析失败 / id 非法 / 超时 → fallback_option()",
+              "reason 超长截断，原文保留在 reason_full",
+              "prompt_system / prompt_user / raw_response 一起落 JSONL"
+            ],
+            "note": "复跑控制台用这些字段还原「模型当时看到了什么」。"
+          }
+        }
+      ]
+    },
+    {
+      "title": "② system/",
+      "role": "规则：契约 / 优先级 / 决策 / 场景",
+      "side": "right",
+      "color": "#7c5cfc",
+      "detail": {
+        "when": "每次建议",
+        "lead": "system 是模型的行为规则：6 个恒定段 + 前注局 + 当前局面成立的场景段；只讲「拿到这些事实后怎么权衡」。",
+        "bullets": [
+          "恒定段只放任何牌桌都成立的口径",
+          "场景段只在该局面成立时追加，避免条件规则被读成普适规则",
+          "一段文字只服务一个决策问题",
+          "改文本必须 bump PROMPT_VERSION"
+        ],
+        "note": "顺序固定：角色 → 契约 → 优先级 → 决策 → 指标 → 筹码 → 场景。"
+      },
+      "children": [
+        {
+          "title": "__init__.py",
+          "role": "恒定段 + 条件段拼装",
+          "detail": {
+            "path": "poker_ocr/prompt/system/__init__.py",
+            "when": "每次建议",
+            "lead": "system 的组装入口：按固定顺序拼 6 个恒定段，再按局面追加前注局与场景段。",
+            "bullets": [
+              "SYSTEM_SECTIONS 就是提示词骨架，测试可逐段断言",
+              "ANTE_SECTION 只在 blinds.ante 有值时出现",
+              "scenario_sections(sit) 按注册顺序返回成立的场景",
+              "段间统一用空行连接，各段自己 rstrip"
+            ],
+            "note": "新增场景规则放 scenario.py，不要塞进恒定段。"
+          }
+        },
+        {
+          "title": "恒定段（7）",
+          "role": "任何牌桌都成立的口径",
+          "detail": {
+            "when": "恒定",
+            "lead": "与局面无关的 6 段，顺序固定；只放任何牌桌都成立的口径。",
+            "bullets": [
+              "角色 → 输出契约 → 事实优先级 → 决策顺序 → 指标口径 → 筹码深度",
+              "想加局面规则：放 scenario.py，不要往这里塞"
+            ],
+            "note": "SYSTEM_SECTIONS 就是这个元组，测试可逐段断言。"
+          },
+          "children": [
+            {
+              "title": "intro",
+              "role": "角色与节奏",
+              "detail": {
+                "path": "poker_ocr/prompt/system/intro.py",
+                "when": "恒定，第 1 段",
+                "lead": "角色与节奏：告诉模型它是现金局实时教练，Hero 只有几秒钟，必须从「可选动作」里选一个能直接执行的动作。",
+                "bullets": [
+                  "只定角色，不写任何牌局规则",
+                  "「几秒钟」是节奏约束：不要输出长篇分析"
+                ],
+                "note": "整段只有一句话。"
+              }
+            },
+            {
+              "title": "output",
+              "role": "输出契约：id + reason",
+              "detail": {
+                "path": "poker_ocr/prompt/system/output.py",
+                "when": "恒定，第 2 段",
+                "lead": "输出契约：只输出一个 JSON（option + reason），并规定按街的 id 映射、reason 的引用要求、硬缺口时的保守线。",
+                "bullets": [
+                  "call 的多义：翻前补盲 / 过牌 / 跟注，翻后过牌 / 跟注",
+                  "raise-* 在翻后是下注 / 加注，标签按实际级别写 3-bet / 4-bet",
+                  "禁止自造 check / bet-*；option 必须来自「可选动作」",
+                  "reason 必须引用已提供的事实，且不得与事实矛盾",
+                  "只有「硬缺口」才走保守线；「程序建议」不是事实"
+                ],
+                "note": "契约冲突会直接表现为模型选错 id 或编造金额。"
+              }
+            },
+            {
+              "title": "priority",
+              "role": "五级事实优先级",
+              "detail": {
+                "path": "poker_ocr/prompt/system/priority.py",
+                "when": "恒定，第 3 段",
+                "lead": "五级事实优先级：硬事实 > 确定性计算 > 现场观察 > 模型估计 > 通用经验；同层内更具体者优先。",
+                "bullets": [
+                  "硬事实：牌 / 公共牌 / 底池 / 需跟 / 在局人数 / 后手",
+                  "确定性计算：SPR / 赔率门槛 / 牌型 / 坚果 / outs",
+                  "现场观察只覆盖它明确描述的范围，不得压 1/2",
+                  "模型估计（范围权益 / 画像 / 桌况）不能当已发生事实",
+                  "文字建议块不能压 1–4 层事实"
+                ],
+                "note": "这一段是后面所有「冲突时听谁」的仲裁依据。"
+              }
+            },
+            {
+              "title": "arbitration",
+              "role": "规则仲裁：契约 > 场景段 > 恒定段",
+              "detail": {
+                "path": "poker_ocr/prompt/system/arbitration.py"
+              }
+            },
+            {
+              "title": "decision",
+              "role": "决策顺序：翻前 → 翻后 → 牌力",
+              "detail": {
+                "path": "poker_ocr/prompt/system/decision.py",
+                "when": "恒定，第 4 段",
+                "lead": "决策顺序：翻前 → 翻后 → 听牌 → 人数 → 牌力 → 位置 → 河牌 → 尺度 → 沉没成本。",
+                "bullets": [
+                  "翻后下注前问：更差的牌会不会跟？更好的牌会不会弃？",
+                  "听牌按 outs / 价格 / 弃牌率；无弃牌率时纯听牌不主动下注",
+                  "4 人以上顶对 / 超对降级；3 人池 SPR<3 可套池",
+                  "位置 = 翻后座位顺序；下注 / 加注会重新打开行动",
+                  "尺度只能从「可选动作」里选；已投入是沉没成本"
+                ],
+                "note": "规则写成条件句，避免「永远 / 绝不」与场景段打架。"
+              }
+            },
+            {
+              "title": "metrics",
+              "role": "四二法则 / 范围权益 / 落后",
+              "detail": {
+                "path": "poker_ocr/prompt/system/metrics.py",
+                "when": "恒定，第 5 段",
+                "lead": "指标口径：四二法则是成牌率不是胜率；对当前范围权益未计后续下注；当前落后不是输牌概率。",
+                "bullets": [
+                  "只在全下 / 套池时直接比门槛",
+                  "否则用赔率 + 隐含赔率 + 对手线路",
+                  "不要用「当前落后」单独否决听牌"
+                ],
+                "note": "这一段专门防止模型把三个数当成同一个「胜率」。"
+              }
+            },
+            {
+              "title": "stack",
+              "role": "后手 / 有效 / 可玩 / SPR",
+              "detail": {
+                "path": "poker_ocr/prompt/system/stack.py",
+                "when": "恒定，第 6 段",
+                "lead": "筹码深度：后手、本手总筹码、有效筹码、可玩深度、SPR 分档。",
+                "bullets": [
+                  "有效筹码 = min(我, 对手) 的本手总筹码；翻后套池 / SPR 用它",
+                  "可玩深度 = min(我的后手, 最深对手的后手)；翻前开池 / 单挑范围用它",
+                  "SPR>6 一对默认控池；SPR<3 单挑 / 3 人池顶对可套池",
+                  "本手总筹码 21–40BB 正常加注；≤20BB 按短码段"
+                ],
+                "note": "「后手」和「本手总筹码」分写，是 11-03.2 的修订点。"
+              }
+            }
+          ]
+        },
+        {
+          "title": "条件场景段",
+          "role": "按局面追加，条件句优先",
+          "detail": {
+            "when": "按局面逐段判断",
+            "lead": "只在对应局面成立时追加，避免把条件规则读成普适规则。",
+            "bullets": [
+              "前注局（ante.py）需要盲注数据，单独一段",
+              "短码 / 3 人池 / 多人池 / 单挑 / 听牌 / 河牌都在 scenario.py",
+              "每段写「如果…则…」，并明确让事实优先"
+            ],
+            "note": "新增场景：加一个 xxx_section(sit) 并注册到 SCENARIO_SECTIONS。"
+          },
+          "children": [
+            {
+              "title": "ante",
+              "role": "前注局：死钱与尺度",
+              "detail": {
+                "path": "poker_ocr/prompt/system/ante.py",
+                "when": "blinds.ante 有值",
+                "lead": "前注局场景段：前注是死钱，底池更大、入池赔率更好；放宽主要在后位 / BB，前位仍按位置范围。",
+                "bullets": [
+                  "开池尺度按底池放大，选项金额已算好",
+                  "有前注 ≠ 低 SPR：算出来 SPR<3 才是低 SPR",
+                  "深码前注局仍按深码打"
+                ],
+                "note": "前注局单独成段，因为它需要盲注数据，放在 system/ante.py。"
+              }
+            },
+            {
+              "title": "scenario",
+              "role": "短码 / 多人池 / 单挑 / 听牌 / 河牌",
+              "detail": {
+                "path": "poker_ocr/prompt/system/scenario.py",
+                "when": "按局面逐段判断",
+                "lead": "条件场景段：短码、3 人池 / 多人池、单挑、听牌、河牌；每段只在该局面成立时追加，写「如果…则…」。",
+                "bullets": [
+                  "短码：本手总筹码 ≤20BB → 翻前推 / 弃，翻后按 SPR",
+                  "3 人池 / 多人池：在局对手 ≥2；4 人以上标多人池，顶对 / 超对降级",
+                  "单挑：在局对手 =1，范围最宽、位置价值最大",
+                  "听牌：强听 / 弱听，或成牌 + ≥8 outs；成牌率 ≠ 胜率",
+                  "河牌：street=river；纯听牌等同空气，已成对有摊牌价值"
+                ],
+                "note": "一段一场景：人数段不写河牌，河牌段不写听牌价格；场景段不覆盖事实优先级。"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "title": "④ shared/",
+      "role": "数字格式与中文词表",
+      "side": "right",
+      "color": "#d98a1a",
+      "detail": {
+        "when": "所有段",
+        "lead": "各段共用的小工具：BB 数字格式与中文词表；只放两种以上段落都会用到的东西。",
+        "bullets": [
+          "避免同一段里 3.0BB / 3BB 混用",
+          "避免同一种牌在「牌力」和「范围」两段叫不同名字"
+        ],
+        "note": "某一段专用的标签留在该段模块里，避免 shared 变成第二个大杂烩。"
+      },
+      "children": [
+        {
+          "title": "format.py",
+          "role": "BB 数字唯一口径",
+          "detail": {
+            "path": "poker_ocr/prompt/shared/format.py",
+            "when": "所有段",
+            "lead": "BB 数字格式唯一口径：整数不带小数点，其余最多两位；None 写「未知」。",
+            "bullets": [
+              "_fmt_num() 是全包唯一的数字格式化入口",
+              "避免 3.0BB / 3BB、24.20% / 24.2% 混用"
+            ],
+            "note": "改格式会同时影响 system 与 user。"
+          }
+        },
+        {
+          "title": "labels.py",
+          "role": "街 / 底池 / 牌型词表",
+          "detail": {
+            "path": "poker_ocr/prompt/shared/labels.py",
+            "when": "所有段",
+            "lead": "中文词表：街名、底池类型、翻前形态、花色 / 点数、牌型、牌面质地。",
+            "bullets": [
+              "街：翻前 / 翻牌 / 转牌 / 河牌",
+              "底池：3-bet+ 池 / 单加注池 / 溜入池 / 无人入池 / 炸弹池",
+              "牌型：高牌 / 一对 / 两对 / 三条 / 顺子 / 同花 / 葫芦 / 四条 / 同花顺",
+              "各段只引用、不各写一份"
+            ],
+            "note": "旧英文事实块的 texture_en 也在这里。"
+          }
+        }
+      ]
+    },
+    {
+      "title": "⑥ 版本与回归",
+      "role": "版本 / golden hash / 复跑",
+      "side": "right",
+      "color": "#d9527a",
+      "detail": {
+        "when": "每次改提示词",
+        "lead": "提示词是「模型看到的语义版本」：改文本必须 bump 版本并更新 golden hash，复盘 / A-B 才能对齐。",
+        "bullets": [
+          "版本写进 session_start / advice JSONL",
+          "复跑控制台拒绝跨版本混跑",
+          "只挪代码不改文本不需要 bump（hash 不变）"
+        ],
+        "note": "PROMPT_VERSION 是语义版本，不是代码位置版本。"
+      },
+      "children": [
+        {
+          "title": "version.py",
+          "role": "PROMPT_VERSION 单一版本源",
+          "detail": {
+            "path": "poker_ocr/prompt/version.py",
+            "when": "每次建议",
+            "lead": "提示词语义版本：PROMPT_VERSION = lean-zh-2026-11-03.2，PROMPT_LANGUAGE = zh。",
+            "bullets": [
+              "改 system、事实块或模块顺序时必须 bump",
+              "版本写进 session_start / advice JSONL",
+              "复盘归因与 A/B 用它对齐「模型当时看到了什么」"
+            ],
+            "note": "11-03.2 修订：场景叠加仲裁、后手 / 本手总筹码拆分、行动线「未记录」、4-bet 形态、硬 / 软缺口分栏、程序建议标记、reason 60。"
+          }
+        },
+        {
+          "title": "versioning.py",
+          "role": "CURRENT_ADVICE_VERSION 由 PROMPT_VERSION 派生",
+          "detail": {
+            "path": "replay-console/replay/versioning.py",
+            "when": "复跑时",
+            "lead": "CURRENT_ADVICE_VERSION = advice-2026-11-03.2；复跑控制台用它拒绝跨版本混跑。",
+            "bullets": [
+              "与 PROMPT_VERSION 同步 bump",
+              "记录里 advice_version 不匹配时提示克隆成新版本再跑"
+            ],
+            "note": "版本是复跑结果可比性的前提。"
+          }
+        },
+        {
+          "title": "test_prompt_golden.py",
+          "role": "prompt hash 锁定",
+          "detail": {
+            "path": "replay-console/tests/test_prompt_golden.py",
+            "when": "CI / 回归",
+            "lead": "golden test：固定 system+user 的 SHA-256；文本漂移但没 bump 版本时失败。",
+            "bullets": [
+              "同时断言 CURRENT_ADVICE_VERSION == EXPECTED_ADVICE_VERSION",
+              "改提示词后同步 EXPECTED_PROMPT_HASH",
+              "防止「语义已经漂移但版本没动」"
+            ],
+            "note": "只挪代码不改文本时 hash 不变，不需要 bump。"
+          }
+        },
+        {
+          "title": "版本流程",
+          "role": "改文本 → bump → 更新 hash",
+          "detail": {
+            "when": "每次改提示词文本",
+            "lead": "改提示词文本的标准流程。",
+            "bullets": [
+              "1. bump prompt/version.py 的 PROMPT_VERSION",
+              "2. bump replay/versioning.py 的 CURRENT_ADVICE_VERSION",
+              "3. 更新 test_prompt_golden.py 的 EXPECTED_ADVICE_VERSION 与 EXPECTED_PROMPT_HASH",
+              "4. 同步 README 与 docs/提示词模块拆分 的版本号",
+              "验证：pytest tests/test_advice.py；pytest replay-console/tests；tests/run_all.py"
+            ],
+            "note": "只挪代码、不改文本：不 bump（golden hash 不变）。"
+          }
+        }
+      ]
+    },
+    {
+      "title": "③ user/",
+      "role": "事实块：硬事实 → 读牌 → 选项",
+      "side": "left",
+      "color": "#0e9f8a",
+      "detail": {
+        "when": "每次建议",
+        "lead": "user 是模型看到的事实块：先硬事实，再行动线与牌力，然后画像 / 桌况 / 现场观察，最后数据质量与可选动作。",
+        "bullets": [
+          "每个数都由程序算好，模型只做选择",
+          "空列表 = 该段不出现；空行由 user/__init__.py 统一插",
+          "行动线提前：模型判断范围最需要「谁做了什么」",
+          "事实块顺序就是模型读到的顺序"
+        ],
+        "note": "user 不写规则；规则在 system。"
+      },
+      "children": [
+        {
+          "title": "__init__.py",
+          "role": "只排顺序与空行",
+          "detail": {
+            "path": "poker_ocr/prompt/user/__init__.py",
+            "when": "每次建议",
+            "lead": "user 事实块的组装入口：只负责顺序与空行，不写事实本身。",
+            "bullets": [
+              "当前局面 → 行动线 → 翻前 / 牌力 → 画像 / 桌况 → 观察 → 攻击 → 数据质量 → 可选动作",
+              "空列表表示该段不出现",
+              "攻击块在场时抑制逐座位 / 桌级的 c-bet 建议，避免三个「能不能开火」的来源"
+            ],
+            "note": "新增事实段：在 user/ 新建模块，再在 render_facts_zh() 里按顺序 append。"
+          }
+        },
+        {
+          "title": "当前局面（硬事实）",
+          "role": "桌况 / 几何 / 位置 / 价格",
+          "detail": {
+            "when": "恒定，第一段",
+            "lead": "模型第一眼看到的硬事实，全部来自当前帧；后面的行动线、牌力、范围都以它为准。",
+            "bullets": [
+              "桌况 / 盲注 / 在局人数 / Hero / 街道 / 底池 / 需跟",
+              "几何：有效筹码 / 可玩深度 / SPR / 底池类型",
+              "位置 / 价格 / 短码 / 爆炸底池"
+            ],
+            "note": "这一组里的数与 OCR 冲突时，以当前帧字段为准。"
+          },
+          "children": [
+            {
+              "title": "situation",
+              "role": "桌况 / 在局 / Hero / 街道",
+              "detail": {
+                "path": "poker_ocr/prompt/user/situation.py",
+                "when": "恒定，第一段",
+                "lead": "「## 当前局面」标题块：桌况 / 盲注 / 在局人数 / Hero / 街道 / 底池 / 需跟。",
+                "bullets": [
+                  "全部来自当前帧，是模型第一眼看到的事实",
+                  "Hero 行同时给后手与本手总筹码",
+                  "需跟额由 call_amount() 算，不由模型推"
+                ],
+                "note": "行动线、牌力、范围都在这之后。"
+              }
+            },
+            {
+              "title": "geometry",
+              "role": "有效筹码 / SPR / 底池类型",
+              "detail": {
+                "path": "poker_ocr/prompt/user/geometry.py",
+                "when": "恒定（0 对手异常时只写未知）",
+                "lead": "几何事实：有效筹码 / 可玩深度 / SPR / 底池类型 / 短码 / 本手已投入。",
+                "bullets": [
+                  "有效筹码与可玩深度分写，避免多人池把整桌当短码局",
+                  "SPR 决定顶对能不能打光；有效筹码决定对手能不能把我打光",
+                  "本手已投入只作事实，不当跟注理由"
+                ],
+                "note": "0 对手异常帧：只写「未知」，不渲染假的位置 / SPR。"
+              }
+            },
+            {
+              "title": "position",
+              "role": "翻后位置 / 身后待行动",
+              "detail": {
+                "path": "poker_ocr/prompt/user/position.py",
+                "when": "恒定",
+                "lead": "位置事实：翻后座位顺序 + 身后还有谁没跟到最高注；翻前标成「翻后位置」。",
+                "bullets": [
+                  "身后人数只数「还没跟到最高注」的人",
+                  "下注 / 加注会重新打开行动：已过牌 / 跟注的对手仍可再行动",
+                  "对手已全下时明说「无人能再加注」"
+                ],
+                "note": "翻前另有行动顺序，BB 可能还没说话，所以不能只写「位置」。"
+              }
+            },
+            {
+              "title": "price",
+              "role": "赔率门槛 / 可争夺底池",
+              "detail": {
+                "path": "poker_ocr/prompt/user/price.py",
+                "when": "有底池时",
+                "lead": "价格事实：赔率门槛与可争夺底池；分母用含我跟注的可争夺底池。",
+                "bullets": [
+                  "对手超额全下会被退回，牌桌 pot 里那部分不算",
+                  "门槛与权益必须同口径，模型才比得对",
+                  "没有需跟额时只写可争夺底池"
+                ],
+                "note": "赔率门槛是「跟注需要多少胜率」，不是「我有多少胜率」。"
+              }
+            },
+            {
+              "title": "explosive",
+              "role": "炸弹池结构与权益",
+              "detail": {
+                "path": "poker_ocr/prompt/user/explosive.py",
+                "when": "炸弹池",
+                "lead": "爆炸底池：只给结构与权益事实（5BB/人、SPR、人数、权益 / 公平份额），不写特殊打法规则。",
+                "bullets": [
+                  "炸弹池翻前没有决策，直接发翻牌",
+                  "翻后按正常翻后规则打：牌力 / 赔率 / 位置 / 对手线路",
+                  "权益只是当前权益，不自动等于价值下注"
+                ],
+                "note": "旧版的「一条街 / 被下注即弃 / 顶对打光」已删除。"
+              }
+            }
+          ]
+        },
+        {
+          "title": "action_line",
+          "role": "逐街动作顺序 + 推断标记",
+          "detail": {
+            "path": "poker_ocr/prompt/user/action_line.py",
+            "when": "恒定（无记录时写「未记录到行动」）",
+            "lead": "逐街行动顺序（谁做了什么），是模型判断范围的主输入；推断动作会标「推断」。",
+            "bullets": [
+              "标题下先声明：OCR / 视频解码可能有归因或顺序误差",
+              "「未记录到行动」只表示没抓到，不等于没人行动",
+              "与「当前局面」硬事实冲突时，以硬事实为准"
+            ],
+            "note": "行动线提前到牌力之前，是 lean 版的结构性调整。"
+          }
+        },
+        {
+          "title": "翻前与牌力",
+          "role": "翻前看形态，翻后看牌力",
+          "detail": {
+            "when": "翻前 / 翻后二选一",
+            "lead": "翻前看形态与范围结论；翻后看牌力与对手范围；两者只出现一个。",
+            "bullets": [
+              "preflop 只在翻前出现",
+              "strength 只在翻后出现，内部调用 ranges / board",
+              "范围是「翻前先验 × 翻后逐动作」的事件模型"
+            ],
+            "note": "翻前不渲染牌力，翻后不渲染翻前信息。"
+          },
+          "children": [
+            {
+              "title": "preflop",
+              "role": "形态 / PFR / 范围结论",
+              "detail": {
+                "path": "poker_ocr/prompt/user/preflop.py",
+                "when": "仅翻前",
+                "lead": "翻前信息：形态（未开池 / 溜入 / 单加注 / 3-bet）、最后加注者、PFR、范围结论、面对加注的继续范围。",
+                "bullets": [
+                  "开池范围结论由 preflop_ranges.range_verdict 算好",
+                  "面对加注给继续范围与被支配结论",
+                  "形态未知 / 动作线缺失时按未开池处理"
+                ],
+                "note": "翻后不再渲染这一段。"
+              }
+            },
+            {
+              "title": "strength",
+              "role": "牌型 / 坚果 / 听牌 / 权益",
+              "detail": {
+                "path": "poker_ocr/prompt/user/strength.py",
+                "when": "仅翻后",
+                "lead": "实时牌力：牌型 / 最好五张 / 坚果 / 听牌 outs / 补牌成牌率 / 对范围权益 / 当前落后 / 牌面。",
+                "bullets": [
+                  "坚果注明「指当前成牌」，避免模型读成「对手没有更大牌」",
+                  "四二法则是成牌率，不是胜率",
+                  "对当前范围权益注明「未计后续下注」",
+                  "多人池给实际 / 建模人数与公平份额"
+                ],
+                "note": "牌面结构 / 转河变化 / 警告来自 board.py。"
+              }
+            },
+            {
+              "title": "ranges",
+              "role": "线路 / 宽度 / 分区 / 谁赢我",
+              "detail": {
+                "path": "poker_ocr/prompt/user/ranges.py",
+                "when": "翻后且有可确认范围",
+                "lead": "对手范围：线路 + 有效宽度 + 成牌 / 听牌 / 空气分区 + 谁赢我 + 封顶。",
+                "bullets": [
+                  "翻前先验 × 翻后逐动作按时间顺序更新（事件模型）",
+                  "本街没动作时沿用上一街收窄后的范围，不丢回 100%",
+                  "连续过牌封顶：单家领先 ≠ 全场领先",
+                  "不暴露内部 range id / combo 数"
+                ],
+                "note": "河牌面对全下且范围几乎只剩成牌时，给「你基本只赢诈唬」警告。"
+              }
+            },
+            {
+              "title": "board",
+              "role": "牌面结构 / 转河变化",
+              "detail": {
+                "path": "poker_ocr/prompt/user/board.py",
+                "when": "被 strength 调用，不单独成段",
+                "lead": "牌面结构：彩虹 / 花面 / 顺面 / 公对面、转河变化、听牌与牌面警告。",
+                "bullets": [
+                  "牌面质地决定 c-bet / 半诈唬的可行性",
+                  "转河变化描述牌面怎么变，不重复牌力",
+                  "警告只描述风险，不直接给动作"
+                ],
+                "note": "它是 strength 的素材模块，不进入 user/__init__.py 的组装表。"
+              }
+            }
+          ]
+        },
+        {
+          "title": "读人与现场",
+          "role": "画像 / 桌况 / 观察 / 攻击",
+          "detail": {
+            "when": "有对应数据时",
+            "lead": "统计算不出来的东西：逐座位画像、桌况统计、人工观察、攻击裁决。",
+            "bullets": [
+              "画像优先于全场统计",
+              "桌况统计样本 <20 次机会时明说",
+              "攻击块只给一个结论，避免多个「能不能开火」的来源"
+            ],
+            "note": "文字建议块不是事实，不能压 1–4 层事实。"
+          },
+          "children": [
+            {
+              "title": "profiles",
+              "role": "逐座位类型 / 范围宽度",
+              "detail": {
+                "path": "poker_ocr/prompt/user/profiles.py",
+                "when": "有可信画像时",
+                "lead": "逐座位对手画像：在局每个座位是什么类型、范围多宽、加注宽度；优先于全场统计。",
+                "bullets": [
+                  "全部在局对手都进提示词，不截到 3 家",
+                  "没有可信画像时整段不出现",
+                  "攻击块在场时只留描述性数据，不重复动作建议"
+                ],
+                "note": "画像冲突时以画像为准，桌况统计退后。"
+              }
+            },
+            {
+              "title": "table_stats",
+              "role": "本桌 VPIP / PFR / 弃牌率",
+              "detail": {
+                "path": "poker_ocr/prompt/user/table_stats.py",
+                "when": "样本足够时",
+                "lead": "桌况统计：本桌 VPIP / PFR / 3-bet / 弃牌率 + 可执行读法（stab / 剥削口径）。",
+                "bullets": [
+                  "current_table 是本手在局对手实测，population 是冷启动先验",
+                  "机会数 <20 时明说「仅 N 次机会」",
+                  "样本太小不渲染：十手牌的 VPIP 比没有更误导"
+                ],
+                "note": "只给提示，不做硬闸；加注范围仍按价值密集处理。"
+              }
+            },
+            {
+              "title": "notes",
+              "role": ".table_dy 人工观察过滤",
+              "detail": {
+                "path": "poker_ocr/prompt/user/notes.py",
+                "when": "有 .table_dy 时",
+                "lead": "人工现场观察：统计算不出来的东西；按街 / 牌面过滤 A 高面观察，把「见 A 抵抗下降」翻成条件事实。",
+                "bullets": [
+                  "翻前、非 A 牌面不注入 A 高面观察",
+                  "只覆盖它明确描述的范围",
+                  "与画像冲突时按画像；不得压硬事实"
+                ],
+                "note": ".table_dy 是自由文本，程序只做最影响决策的两条处理。"
+              }
+            },
+            {
+              "title": "attack",
+              "role": "攻击 / 剥削的单一裁决",
+              "detail": {
+                "path": "poker_ocr/prompt/user/attack.py",
+                "when": "溜入池 + 本街全过牌 + Hero 收尾",
+                "lead": "攻击 / 剥削的单一裁决：只给一个结论（不开火 / 仅强牌下注 / 可小注 / 可高频小注）。",
+                "bullets": [
+                  "弃牌率 <35% 不给「高频」；≥50% 且有低 xr 实测才给",
+                  "对手 xc / xr 高时不给开火：小注诈唬没有弃牌率",
+                  "只有行动线真的记录了全部 check 才写「本街全部过牌到 Hero」"
+                ],
+                "note": "依据里的弃牌率、xr、牌面、A 高面只描述单项，不另下结论。"
+              }
+            }
+          ]
+        },
+        {
+          "title": "quality",
+          "role": "硬缺口（选项降级）vs 范围缺口",
+          "detail": {
+            "path": "poker_ocr/prompt/user/quality.py",
+            "when": "恒定（有缺口时才有内容）",
+            "lead": "数据质量：把技术告警翻成 1–4 条中文，区分硬缺口（改变可用动作）与范围 / 画像缺口（只降低可信度）。",
+            "bullets": [
+              "硬缺口：底牌 / 公共牌 / 底池 / 需跟 / 后手 / 在局人数",
+              "逐座位 range unknown 合并成一句，英文技术告警不逐行塞",
+              "硬缺口优先，不能被 cap 挤掉"
+            ],
+            "note": "system 的保守线只对硬缺口生效，这段就是它的输入。"
+          }
+        },
+        {
+          "title": "options",
+          "role": "可选动作 id / 标签 / 金额",
+          "detail": {
+            "path": "poker_ocr/prompt/user/options.py",
+            "when": "恒定，最后一段",
+            "lead": "可选动作：程序算好的 id + 中文标签 + 实际金额；封顶成同一金额的档位只显示一个。",
+            "bullets": [
+              "模型只能选这里的 id，不能编造金额",
+              "后手不足时五个档位封顶成同一个数，prompt 只留一个",
+              "sit.options 仍保留全部 id 供点击器 / preset 映射"
+            ],
+            "note": "这一段是输出契约的「事实依据」。"
+          }
+        }
+      ]
+    },
+    {
+      "title": "⑤ offline/",
+      "role": "旧英文提示词与策略层，不进 live",
+      "side": "left",
+      "color": "#7c8594",
+      "detail": {
+        "when": "只服务复盘 / 复跑",
+        "lead": "离线 / 复盘用的旧提示词与规则层，不进入 live 链路；只服务历史记录复跑与复盘归因。",
+        "bullets": [
+          "advice.py 仍 re-export 这些名字，旧调用方不用改 import",
+          "live 只有一套中文 lean 提示词"
+        ],
+        "note": "2026-11-03 拆分时整体移到 offline/，文本未改。"
+      },
+      "children": [
+        {
+          "title": "strategy.py",
+          "role": "Value directive / Math gate",
+          "detail": {
+            "path": "poker_ocr/prompt/offline/strategy.py",
+            "when": "离线审计 / 复跑",
+            "lead": "旧策略层：Value directive / Math gate / 价值取向 / decision_read；只服务离线审计与复跑。",
+            "bullets": [
+              "Value directive：价值下注取向",
+              "Math gate：赔率 / 权益硬闸",
+              "不进入 live prompt；改它不影响实时建议"
+            ],
+            "note": "2026-11-03 拆分时整体移到这里，文本未改。"
+          }
+        },
+        {
+          "title": "hand_facts.py",
+          "role": "旧英文事实块",
+          "detail": {
+            "path": "poker_ocr/prompt/offline/hand_facts.py",
+            "when": "历史复跑 / 对比",
+            "lead": "旧英文事实块 render_hand_facts / render_opponent_reads；只服务历史复跑与新旧对比。",
+            "bullets": [
+              "英文版事实块，与中文 lean 并存",
+              "不进入 live prompt"
+            ],
+            "note": "旧调用方仍可从 advice 导入。"
+          }
+        },
+        {
+          "title": "audit.py",
+          "role": "复盘审计标签",
+          "detail": {
+            "path": "poker_ocr/prompt/offline/audit.py",
+            "when": "复盘归因",
+            "lead": "复盘归因的硬规则审计 audit_advice_tags：从 advice 反推标签，不参与实时决策。",
+            "bullets": [
+              "按硬规则给建议打标签（价值 / 诈唬 / 听牌等）",
+              "只服务复盘与统计"
+            ],
+            "note": "需要时懒计算。"
+          }
+        }
+      ]
+    }
+  ]
+}

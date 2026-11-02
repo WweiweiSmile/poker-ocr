@@ -24,6 +24,10 @@
 
     # 落盘
     .venv/bin/python tools/ab_range_set.py --json /tmp/ab_set.json
+
+`--model` 每行除建议外还记录 `prompt_version`（行级）与每个路径的
+`*_source` / `*_finish_reason`：跨提示词版本对比时才能分清是提示词变了、
+还是这次跑成了 fallback / 输出被截断。
 """
 
 from __future__ import annotations
@@ -42,7 +46,7 @@ if str(ROOT) not in sys.path:
 
 from poker_ocr import board_range, hand_vs_ranges  # noqa: E402
 from poker_ocr.advice import (  # noqa: E402
-    AISettings, advise, build_situation,
+    AISettings, PROMPT_VERSION, advise, build_situation,
 )
 from tools.replay_hand_outbox import (  # noqa: E402
     _table_stats, build_snap, load_hand,
@@ -141,7 +145,7 @@ def run_case(case: dict, settings: AISettings | None,
     row = dict(id=case["id"], priority=case["priority"], hand=case["hand"],
                street=case["street"], idx=case.get("action_index"),
                status=case["status"], expect=case["expect"],
-               note=case.get("note", ""))
+               note=case.get("note", ""), prompt_version=PROMPT_VERSION)
     if case["status"] != "ready":
         row["result"] = "SKIP"
         return row
@@ -187,8 +191,14 @@ def run_case(case: dict, settings: AISettings | None,
                 row["model"][label + "_kind"] = got.option.kind
                 row["model"][label + "_amount"] = got.option.amount
                 row["model"][label + "_reason"] = got.reason
+                # 落盘带上「谁给的/是否降级/是否被截断」，否则跨版本翻旧
+                # 结果时分不清是提示词变了还是这次跑成了 fallback。
+                row["model"][label + "_prompt_version"] = got.prompt_version
+                row["model"][label + "_source"] = got.source
+                row["model"][label + "_finish_reason"] = got.finish_reason
             except Exception as exc:  # noqa: BLE001
                 row["model"][label] = f"ERROR:{type(exc).__name__}"
+                row["model"][label + "_source"] = "exception"
             row["model"][label + "_ms"] = int((time.monotonic() - t0) * 1000)
         expected = case.get("new_advice")
         if expected and row["model"]["new"] != expected:

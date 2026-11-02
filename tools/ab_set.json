@@ -271,8 +271,9 @@
    "old_equity": 0.3704,
    "new_equity": 0.3704,
    "old_advice": "raise-1/3",
-   "new_advice": "raise-1/3",
-   "note": "7 人炸弹池，As6s 坚果花听，主动加注；测多人池范围分区渲染。"
+   "new_advice": "call",
+   "note": "7 人炸弹池，As6s 坚果花听；测多人池范围分区渲染与听牌默认口径。",
+   "new_advice_note": "按 11-03.5 听牌口径：强听要在样本达标的弃牌率下才下注诈唬。本手对 c-bet 弃牌率只有 3.5 次机会（<20），默认过牌；call=过牌，旧记录 raise-1/3 作废。"
   },
   {
    "id": "P2-03",

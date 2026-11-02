@@ -72,6 +72,11 @@ from poker_ocr.table_dynamics import (  # noqa: E402
 #               硬/软缺口分栏、程序建议标记、reason 上限 60。
 # 2026-11-03.3：硬缺口改由 options_mode 派生、新增规则仲裁段、恒定段的
 #               场景规则下沉、顶对强踢 T→J、删恒定「无」行。
+# 2026-11-03.4：仲裁表补「跟注口径」——未全下/未套池不得拿四二法则成牌率
+#               直接对单街门槛，听牌照范围权益+隐含赔率+对手线路判断。
+# 2026-11-03.5：提示词按牌型拆分——听牌/成牌/空气三选一注入（combo 走成牌
+#               +听牌修正）；场景段按牌型只渲染对应口径；未全下时听牌价格行
+#               不再印四二法则数字；攻击块强听+样本达标弃牌率可小注。
 # 版本号由 PROMPT_VERSION 派生：只 bump 提示词包，advice 版本自动跟随。
 CURRENT_ADVICE_VERSION = "advice-" + PROMPT_VERSION.removeprefix("lean-zh-")
 # 改动 decisions.py 的重建语义时 bump。

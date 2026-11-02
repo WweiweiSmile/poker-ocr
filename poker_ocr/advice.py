@@ -682,6 +682,9 @@ def _facts_snapshot(sit: Situation) -> dict:
     snap = sit.snap
     facts = {
         "hand_tier": sit.hand_tier,
+        # 这次注入的是哪套牌型规则（听牌/成牌/空气）；与 prompt_version 一起
+        # 用于复盘归因「建议变了是提示词哪一支换了」。
+        "hand_class": sit.hand_class,
         "hand_label": sit.hand_label,
         "hand_label_en": sit.hand_label_en,
         "equity_pct": (round(sit.equity_pct, 1)

@@ -69,7 +69,8 @@ def test_prompt_and_raw_are_captured():
     assert advice.prompt_sha256 == expected
     assert advice.raw_response and '"option": "call"' in advice.raw_response
     assert advice.reason_full == long_reason
-    assert len(advice.reason) <= 41
+    # 11-03.2 把 reason 上限从 40 提到 60（advice._clip_reason 默认值）。
+    assert len(advice.reason) <= 60
     assert advice.prompt_tokens == 321
     data = advice.to_dict()
     assert data["prompt_sha256"] == expected

@@ -2525,7 +2525,8 @@ def render_reads_zh(reads: Iterable[OpponentRead],
                     positions: Mapping[str, str],
                     *,
                     header: str = "## 对手画像（逐座位；优先于全场统计）",
-                    include_exploit: bool = True) -> list[str]:
+                    include_exploit: bool = True,
+                    preserve_input_order: bool = False) -> list[str]:
     """按座位渲染中文画像行，供中文 lean 事实块使用。
 
     `positions` 只含本手还在局的座位（seat_id → 位置）：不在其中（已弃牌）或
@@ -2541,7 +2542,8 @@ def render_reads_zh(reads: Iterable[OpponentRead],
         rows.append((positions[seat], read))
     if not rows:
         return []
-    rows.sort(key=lambda item: _reads_sort_key(item[0]))
+    if not preserve_input_order:
+        rows.sort(key=lambda item: _reads_sort_key(item[0]))
     lines = [header] if header else []
     for position, read in rows:
         name = read.display_name or read.key

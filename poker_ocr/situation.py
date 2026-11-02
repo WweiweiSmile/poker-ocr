@@ -15,7 +15,8 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Iterable
 
 from .coach import (
-    STRONG_DRAW, WEAK_DRAW, board_texture, opponent_strength, parse_cards,
+    BOARD_PLAY, MID_BOTTOM, OVERPAIR, STRONG_DRAW, STRONG_MADE, TPTK,
+    TP_WEAK, WEAK_DRAW, board_texture, opponent_strength, parse_cards,
     read_hand,
 )
 from .ground_truth import GroundTruth, compute_ground_truth
@@ -49,6 +50,11 @@ _TEXTURE_EN = {
     "干燥": "Dry", "花面": "Flush-y", "顺面": "Straight-y",
     "花顺面": "Flush + straight", "公对面": "Paired",
 }
+
+# 牌型规则集：提示词按 hand_class 四选一注入（听牌 / 成牌+听 / 成牌 / 空气）。
+# combo 按真实补牌听牌归类，不设强度门槛；听牌质量由牌力事实描述。
+_DRAW_TIERS = (STRONG_DRAW, WEAK_DRAW)
+_MADE_TIERS = (STRONG_MADE, OVERPAIR, TPTK, TP_WEAK, MID_BOTTOM, BOARD_PLAY)
 
 
 @dataclass(frozen=True)
@@ -100,8 +106,8 @@ class Situation:
     # LAG，中等成牌就不能默认做薄价值。见 table_dynamics.is_aggressive_table。
     aggressive_table: bool = False
     # 当前改良 outs（coach.Read.outs），含无花顺听时的两高张反超 outs。
-    # 用于区分「成牌+弱听」和「成牌+强听」：4 张卡顺不该豁免「被统治」判定，
-    # 8+ 张 combo draw 才该按半诈唬处理。两高张不是听牌（见 hand_tier）。
+    # 牌况分类用 ground_truth.draws.total_outs；策略评估再用此处 outs/牌力判断质量。
+    # 两高张反超 outs 不是听牌，不能单独把空气归为 draw/combo。
     outs: int | None = None
     # 本手在局对手的画像（按 seat_id 对回具体的人）。空 = 没有画像，
     # 行为退回 `.table_dy` / aggressive_table 的旧口径。
@@ -140,6 +146,30 @@ class Situation:
     @property
     def street(self) -> str:
         return self.snap.street
+
+    @property
+    def hand_class(self) -> str:
+        """牌型规则集：`draw` / `combo` / `made` / `air`，互斥四类。
+
+        · draw = 当前未成牌，但有真实可兑现听牌；
+        · combo = 当前已成牌，且有真实听花或听顺（只认这两类）；
+        · made = 当前已成牌，或只有其他改善/反超 outs；
+        · air = 当前未成牌且没有有效听牌（河牌未成牌听牌也归空气）。
+
+        combo 只由 `ground_truth.draws.flush_draw` 或 `straight_draw` 决定；
+        不因两高张、其他反超 outs 或泛称的「可改善」归入 combo。
+        分类描述牌况，不代表听牌质量或行动许可；低质量/被统治的 outs
+        仍须在事实和决策中折价，不能因归 combo 自动下注。
+        """
+        tier = self.hand_tier
+        if tier in _DRAW_TIERS:
+            return "draw"
+        if tier in _MADE_TIERS:
+            gt = self.ground_truth
+            has_combo_draw = bool(
+                gt is not None and (gt.draws.flush_draw or gt.draws.straight_draw))
+            return "combo" if has_combo_draw else "made"
+        return "air"
 
 
 def _read(snap: HandSnapshot):

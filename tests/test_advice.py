@@ -1707,7 +1707,7 @@ def test_prompt_has_no_rule_layers() -> None:
     # 短码推/弃已下沉到「场景：短码」，只在 ≤20BB 的局面出现。
     short_system, _ = build_messages(build_situation(
         make_point(hero_stack=18.0, pot=6.0, to_call=0.0)))
-    check("翻前优先把 all-in 或弃牌当作默认分支" in short_system,
+    check("优先把 all-in 或弃牌当作默认分支" in short_system,
           "短码段应说明推/弃区全下是标准动作")
 
 
@@ -1722,7 +1722,7 @@ def test_system_scenario_sections_follow_the_spot() -> None:
     def scenes(**kw):
         system, _ = build_messages(build_situation(make_point(**kw)))
         return [line for line in system.splitlines()
-                if line.startswith("## 场景")]
+                if line.startswith(("## 场景", "## 牌型"))]
 
     hu = scenes()
     check("## 场景：单挑" in hu, f"1 名对手应是单挑：{hu}")
@@ -1741,7 +1741,7 @@ def test_system_scenario_sections_follow_the_spot() -> None:
           f"14BB 应有短码段：{short}")
 
     draw = scenes(hero_cards=("Qh", "Jh"), board=("Kh", "7h", "2c"))
-    check("## 场景：听牌" in draw, f"同花听牌应有听牌段：{draw}")
+    check("## 牌型：听牌" in draw, f"同花听牌应有牌型段：{draw}")
 
     river = scenes(street="river",
                    board=("Ks", "7d", "2c", "Th", "4s"))
@@ -2093,8 +2093,14 @@ def test_lean_system_priorities() -> None:
     check("文字建议块" in system, "system 应说明文字建议块不是硬事实")
     check("更差的牌会不会跟" in system,
           "system 的翻后决策顺序应问「更差的牌会不会跟」")
-    check("不要因为“当前未成牌不是坚果”就否决半诈唬" in system,
-          "system 应保护听牌半诈唬")
+    draw_system, _ = build_messages(build_situation(make_point(
+        hero_cards=("Qh", "Jh"), board=("Kh", "7h", "2c"))))
+    check("当前节点弃牌证据足" in draw_system
+          and "强听/好阻断" in draw_system,
+          "system 应要求节点证据后再进行听牌半诈唬")
+    for phrase in ("剥削强度按 L0–L3", "当前行动顺序",
+                   "被加注后的回退", "更差牌会跟"):
+        check(phrase in system, f"system 缺少统一剥削仲裁规则：{phrase}")
     check("不要引用未提供的规则" in system,
           "system 应禁止编造规则/图表")
 
@@ -2227,19 +2233,54 @@ def test_combo_draw_facts_show_combo_and_fair_share_ratio() -> None:
         opponents=opponents, table_size=9, players_dealt=5,
         preflop_shapes=("limped",), hero_is_pfr=False))
     text = render_facts_zh(combo)
-    check("有牌又有听：成牌 + 强听（combo draw，不是纯听牌）" in text,
-          f"combo draw 应有「有牌又有听」：\n{text}")
-    check("可作为保护/半诈唬下注，不是默认" in text,
-          f"combo draw 不能给默认下注：\n{text}")
-    check("多人池或无位置默认过牌" in text,
-          f"combo draw 要提示多人池/无位置先过牌：\n{text}")
+    combo_system, _ = build_messages(combo)
+    check("## 牌型：成牌+有效听牌（有牌又有听）" in combo_system,
+          f"combo draw 应有专属牌型段：\n{combo_system}")
+    check("当前已有摊牌价值且有真实听花或听顺" in combo_system,
+          f"combo draw 不能按纯听牌打：\n{combo_system}")
+    check("诈唬仍需当前节点弃牌证据" in combo_system,
+          f"combo draw 不该套用纯听牌默认过牌：\n{combo_system}")
+    check("只有这两类补牌听牌归 combo" in combo_system,
+          f"combo 仅应包括听花/听顺：{combo_system}")
+    check("不要求 ≥8 outs" in combo_system,
+          f"combo 不应使用 8 outs 分类门槛：{combo_system}")
     check("公平份额 20.0%，权益是它的" in text,
           f"combo draw 应给权益/公平份额倍数：\n{text}")
+
+    # 4 outs 的对子+卡顺仍归 combo：这里用户明确包含听顺，不设置 outs 门槛。
+    straight_combo = build_situation(make_point(
+        street="turn", board=("Jd", "4c", "Qc", "9d"),
+        hero_cards=("8c", "8d"), to_call=0.0))
+    straight_text = render_facts_zh(straight_combo)
+    straight_system, _ = build_messages(straight_combo)
+    check(straight_combo.hand_class == "combo"
+          and straight_combo.ground_truth.draws.straight_draw,
+          f"对子+听顺应归 combo：{straight_combo.hand_class}")
+    check("成牌+有效听牌" in straight_system
+          and "听顺" in straight_text,
+          f"听顺成牌的 prompt 应标明 combo：\n{straight_system}\n{straight_text}")
+
+    # 两高张反超 outs 不属于听花/听顺，未成牌手仍归空气。
+    overcard_air = build_situation(make_point(
+        street="flop", board=("7d", "4c", "2h"),
+        hero_cards=("Jc", "Tc"), to_call=0.0))
+    check(overcard_air.hand_class == "air",
+          f"两高张反超 outs 不可单独成为 combo：{overcard_air.hand_class}")
+
+    # 有真实成牌但没有听花/听顺时，不能进 combo。
+    made_only = build_situation(make_point(
+        street="flop", board=("9d", "7c", "2h"),
+        hero_cards=("9c", "Ad"), to_call=0.0))
+    check(made_only.hand_class == "made"
+          and not made_only.ground_truth.draws.flush_draw
+          and not made_only.ground_truth.draws.straight_draw,
+          f"无听花/听顺的成牌应保持 made：{made_only.hand_class}")
 
     pure = build_situation(make_point(
         hero_cards=("Ah", "Qh"), board=("9h", "6h", "5s"),
         to_call=4.0, pot=10.5, hero_stack=94.0))
     pure_text = render_facts_zh(pure)
+    check(pure.hand_class == "draw", f"纯听牌应分类为 draw：{pure.hand_class}")
     check("有牌又有听" not in pure_text,
           f"纯听牌不该有 combo 标签：\n{pure_text}")
 
@@ -2448,6 +2489,11 @@ def test_facts_include_spot_spr_and_position() -> None:
     check("底池类型：单加注池" in user, f"事实里应有底池类型：\n{user}")
     check("SPR 9" in user, f"事实里应有 SPR：\n{user}")
     check("Hero 有位置" in user, f"事实里应写明位置：\n{user}")
+    system, _ = build_messages(sit)
+    check("不得依据桌型、盲注或行动顺序自行推测具体谁在 Hero 身后" in system,
+          f"系统提示应禁止编造未行动座位：\n{system}")
+    check("没有列出具体座位就只说人数" in system,
+          f"系统提示应约束待行动座位的表述：\n{system}")
     check("赔率门槛" in user, f"事实里应有赔率门槛：\n{user}")
 
     # 有位置 ≠ 当前本轮最后行动：BB 先过牌、CO 下注后，BB 还没跟到 4BB，
@@ -4141,7 +4187,7 @@ def test_draw_price_verdict_only_when_no_more_betting() -> None:
             preflop_shapes=("single-raise",), hero_is_pfr=False)
 
     text = render_facts_zh(build_situation(draw_point(12.0)))
-    check("参考值，不可直接与单街门槛比较" in text,
+    check("四二法则不参与门槛比较" in text,
           f"未全下时不能给「够」：\n{text}")
     check("→ 够" not in text, f"未全下时不能写够：\n{text}")
 
@@ -4496,7 +4542,7 @@ def test_all_in_hand_opponents_get_reads() -> None:
     seats = (("s1", "甲一", "lag", "UTG"),
              ("s2", "乙二", "station", "UTG+1"),
              ("s3", "丙三", "maniac", "LJ"),
-             ("s4", "丁四", "nit", "HJ"),
+             ("s4", "丁四", "nit", "BTN"),
              ("s5", "戊五", "tag", "CO"),
              ("s6", "己六", "station", "BB"))
     opponents = tuple(
@@ -4505,7 +4551,7 @@ def test_all_in_hand_opponents_get_reads() -> None:
     # 已弃牌的人也有画像：不该出现在「对手画像」块里
     opponents += (OpponentSnapshot("s7", "庚七", "SB", 100.0, 0.0, True),)
     point = make_point(
-        table_size=9, opponents=opponents,
+        table_size=9, hero_position="HJ", opponents=opponents,
         streets=(StreetRecord("preflop", 0.0, ()),
                  StreetRecord("flop", 6.0, ())))
     sit = build_situation(point, opponent_reads=tuple(
@@ -4514,6 +4560,12 @@ def test_all_in_hand_opponents_get_reads() -> None:
     text = render_facts_zh(sit)
     for _, name, _, _ in seats:
         check(name in text, f"在局对手 {name} 的画像应进提示词：\n{text}")
+    profile = text.split("## 对手画像", 1)[1].split("\n## ", 1)[0]
+    # 9-max 翻后 HJ 后行动顺序：CO、BTN、BB、UTG、UTG+1、LJ。
+    ordered = [profile.index(name) for name in ("戊五", "丁四", "己六",
+                                                "甲一", "乙二", "丙三")]
+    check(ordered == sorted(ordered),
+          f"画像应按 Hero 后续行动顺序旋转排序：\n{profile}")
     check("庚七" not in text, f"已弃牌的人不该有画像行：\n{text}")
     check("只显示最相关" not in text,
           f"不该再有「只显示最相关 N 家」截断提示：\n{text}")
@@ -4761,13 +4813,13 @@ def test_scenario_sections_stack_without_contradiction() -> None:
         )), StreetRecord("flop", 6.0, ()))))
     system, _ = build_messages(hu)
     for section in ("## 场景：短码（本手总筹码约 18BB）",
-                    "## 场景：单挑", "## 场景：听牌"):
+                    "## 场景：单挑", "## 牌型：听牌"):
         check(section in system, f"18BB 单挑听牌应出现 {section}：\n{system}")
     check("翻后不要套用翻前推/弃" in system,
           f"短码段应把推/弃限定在翻前：\n{system}")
-    check("本段「主动定义底池」只适用于成牌" in system,
+    check("成牌的「主动定义底池」不适用于纯听牌" in system,
           f"单挑段应让位给听牌段：\n{system}")
-    check("隐含赔率按 0 算" in system,
+    check("短码按即时赔率" in system or "隐含赔率按 0 算" in system,
           f"听牌段应服从短码的即时赔率：\n{system}")
     check("后手 ≤20BB" not in system, "短码段不应再用「后手」这个双关词")
     check("SPR ≤3" not in system, "SPR 边界应统一为 <3")
