@@ -64,10 +64,11 @@ from poker_ocr.table_dynamics import (  # noqa: E402
 #               否定词按分句匹配；3 人池标签；溜入只数 Hero 前/加注前；
 #               桌级 c-bet 与座位反向证据去重；默认弃牌只由实测松凶软化；
 #               定义强/中/空气牌力；行动线提前。
-CURRENT_ADVICE_VERSION = "advice-2026-11-01.1"
+CURRENT_ADVICE_VERSION = "advice-2026-11-02.1"
 # 改动 decisions.py 的重建语义时 bump。
 # recon-3：翻前底池补上盲注（实时 pbs 只记前注，h39 4.5 → 6.0）。
-CURRENT_RECONSTRUCT_VERSION = "recon-3"
+# recon-4：决策点 action_index 改成整手牌全局动作数，与 live Advice 对齐。
+CURRENT_RECONSTRUCT_VERSION = "recon-4"
 
 # 新版本只允许 lean；旧版本里的 skills / lean-rules 只读，不再重跑。
 PROMPT_STYLE_VALUES = ("lean",)

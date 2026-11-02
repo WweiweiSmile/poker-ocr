@@ -36,9 +36,12 @@ from .importer import (
 from .repository import (
     HAND_SOURCE_DB, HAND_SOURCE_LABELS, HAND_SOURCE_LIVE, HAND_SOURCE_REVIEW,
     DecisionMarkRepository, DecisionRepository, ExperimentRepository,
-    HandRepository, ImportBatchRepository, JobRepository, MarkRepository,
+    HandRepository, HandSetRepository, ImportBatchRepository, JobRepository,
+    LiveAdviceRepository, MarkRepository, PairReviewRepository,
     ResultRepository, VersionRepository,
 )
+from .timeline import build_timeline
+from .flags import compute_flags, mask_for, parse_flags
 from .util import (
     BOARD_LEN, STREET_LABELS, iso, json_load, median, now_cn, split_board,
 )
@@ -114,6 +117,9 @@ class ReplayService:
         self.job_repo = JobRepository(db, settings.console_user_id)
         self.experiment_repo = ExperimentRepository(db, settings.console_user_id)
         self.result_repo = ResultRepository(db)
+        self.live_advice_repo = LiveAdviceRepository(db)
+        self.hand_set_repo = HandSetRepository(db, settings.console_user_id)
+        self.pair_review_repo = PairReviewRepository(db, settings.console_user_id)
 
     # ─────────────────────────── 基础查询 ───────────────────────────
 
@@ -235,6 +241,9 @@ class ReplayService:
             "fingerprint": analysis.fingerprint,
             "hasRun": last_run is not None,
             "lastRun": last_run,
+            "flagMask": int(row.get("flag_mask") or 0),
+            "flags": json_load(row.get("flags_json"), {}) or {},
+            "reviewScore": int(row.get("review_score") or 0),
             "createdAt": iso(row.get("created_at")),
             "updatedAt": iso(row.get("updated_at")),
             "userId": row.get("user_id"),
@@ -254,6 +263,13 @@ class ReplayService:
         tags = [t.lower() for t in _as_list(filters.get("tag"))]
         qualities = {q.lower() for q in _as_list(filters.get("quality"))}
         has_run = _parse_bool(filters.get("hasRun"))
+        flag_names = parse_flags(filters.get("flags"))
+        flag_mask = mask_for(flag_names)
+        min_score = filters.get("minScore")
+        try:
+            min_score = int(min_score) if min_score not in (None, "") else None
+        except (TypeError, ValueError):
+            min_score = None
         keyword = str(filters.get("keyword") or "").strip().lower()
         date_from = _parse_date(filters.get("dateFrom"))
         date_to = _parse_date(filters.get("dateTo"))
@@ -277,6 +293,10 @@ class ReplayService:
             if qualities and analysis.quality not in qualities:
                 continue
             if has_run is not None and (last_runs.get(hand_id) is not None) != has_run:
+                continue
+            if flag_names and (int(row.get("flag_mask") or 0) & flag_mask) != flag_mask:
+                continue
+            if min_score is not None and int(row.get("review_score") or 0) < min_score:
                 continue
             if not_run_days and last_runs.get(hand_id):
                 at = _parse_date(last_runs[hand_id].get("at"))
@@ -314,6 +334,8 @@ class ReplayService:
             if key == "last_run":
                 at = (last_runs.get(hand_id) or {}).get("at")
                 return _parse_date(at) or dt.datetime.min
+            if key in ("review_score", "reviewscore", "score"):
+                return int(row.get("review_score") or 0)
             if key == "id":
                 return hand_id
             return row.get("created_at") or dt.datetime.min
@@ -623,6 +645,8 @@ class ReplayService:
                     int(hand_id), roster)
                 advices_written += self.import_repo.replace_live_advices(
                     int(hand_id), advices, decision_ids=decision_ids)
+                self._apply_enrichment(int(hand_id), row, analysis,
+                                       decision_ids)
                 if len(samples) < 50:
                     samples.append({
                         "index": index,
@@ -661,6 +685,21 @@ class ReplayService:
             "samples": samples,
             "issues": errors[:50],
         }
+
+    def _apply_enrichment(self, hand_id: int, row: dict, analysis: HandAnalysis,
+                          decision_ids: dict | None = None) -> None:
+        """物化时间线 + 深挖标记；失败不阻塞手牌入库。"""
+        try:
+            advices = self.live_advice_repo.list_for_hand(hand_id)
+            timeline = build_timeline(row, analysis, advices,
+                                      decision_ids=decision_ids or {})
+            flag_mask, flags, score = compute_flags(row, analysis, advices)
+            self.hand_repo.update_enrichment(
+                hand_id, timeline=timeline, flag_mask=flag_mask,
+                flags=flags, review_score=score,
+                record_schema=str(row.get("record_schema") or "hand.v2"))
+        except Exception:  # noqa: BLE001
+            log.exception("手牌 %s 时间线/标记生成失败；手牌已入库", hand_id)
 
     @staticmethod
     def _hero_roster(roster: list[dict], hero_position: str | None) -> list[dict]:
@@ -771,10 +810,28 @@ class ReplayService:
 
     @staticmethod
     def _advice_public(advice: dict) -> dict:
-        """把导入日志里的 advice 记录转成前端 camelCase 形状。"""
+        """把线上建议行 / payload advice 统一成前端 camelCase 形状。"""
         option = advice.get("option") if isinstance(advice.get("option"), dict) else {}
+        if not option:
+            option = {
+                "id": advice.get("option_id"),
+                "label": advice.get("option_label"),
+                "kind": advice.get("option_kind"),
+                "amount": advice.get("option_amount"),
+            }
+        context = advice.get("context")
+        if context is None:
+            context = advice.get("context_json")
+        if isinstance(context, str):
+            context = json_load(context, {}) or {}
+        has_prompt = bool(advice.get("prompt_system")
+                          or advice.get("prompt_user")
+                          or advice.get("prompt_sha256"))
+        prompt_missing = bool(advice.get("prompt_missing")) or (
+            str(advice.get("source") or "") == "model" and not has_prompt)
         return {
-            "ts": advice.get("ts"),
+            "id": advice.get("id") or advice.get("advice_id"),
+            "ts": advice.get("ts") or advice.get("captured_at"),
             "street": advice.get("street"),
             "pot": advice.get("pot"),
             "toCall": advice.get("to_call"),
@@ -787,15 +844,20 @@ class ReplayService:
                            else option.get("amount")),
             },
             "reason": advice.get("reason"),
+            "reasonFull": advice.get("reason_full"),
             "plan": advice.get("plan"),
             "confidence": advice.get("confidence"),
             "source": advice.get("source"),
             "model": advice.get("model"),
             "durationMs": advice.get("duration_ms"),
             "promptVersion": advice.get("prompt_version"),
+            "promptSha256": advice.get("prompt_sha256"),
+            "promptMissing": prompt_missing,
+            "promptMissingReason": advice.get("prompt_missing_reason"),
+            "hasPrompt": has_prompt,
             "actionIndex": advice.get("action_index"),
             "decisionKey": advice.get("decision_key"),
-            "context": advice.get("context"),
+            "context": context or None,
             "actualAction": advice.get("actual_action"),
             "actualAmount": advice.get("actual_amount"),
             "bucket": advice.get("bucket"),
@@ -806,10 +868,18 @@ class ReplayService:
         if row is None:
             raise ApiError("HAND_NOT_FOUND", f"手牌 {hand_id} 不存在或已删除", 404)
         analysis = self.analyze(row)
-        # 导入实时日志时，advice 行会并进手牌的 payload_json；详情页要能
-        # 看到「当时 AI 建议了什么」。大字段只在详情查询时取，不进列表。
-        advices: list[dict] = []
-        if row.get("source") in (HAND_SOURCE_LIVE, HAND_SOURCE_REVIEW):
+        # 线上建议优先读 replay_live_advices（有 prompt/raw 的规范表）；
+        # 旧记录没有拆表时，再回退 payload_json 里的 advices。
+        try:
+            live_rows = self.live_advice_repo.list_for_hand(hand_id)
+        except Exception:  # noqa: BLE001
+            log.exception("读取线上建议失败；回退 payload")
+            live_rows = []
+        advices: list[dict] = [
+            self._advice_public(item) for item in live_rows
+        ]
+        if not advices and row.get("source") in (HAND_SOURCE_LIVE,
+                                                 HAND_SOURCE_REVIEW):
             payload = self.import_repo.get_payload(hand_id)
             value = payload.get("advices") if isinstance(payload, dict) else None
             if isinstance(value, list):
@@ -861,6 +931,117 @@ class ReplayService:
                 "adviceVersion": CURRENT_ADVICE_VERSION,
                 "reconstructVersion": CURRENT_RECONSTRUCT_VERSION,
             },
+        }
+
+    def hand_replay(self, hand_id: int) -> dict:
+        """瀑布流/牌桌共用的帧序列。优先读 ingest 时物化的 timeline。"""
+        row = self.hand_repo.get_row(hand_id)
+        if row is None:
+            raise ApiError("HAND_NOT_FOUND", f"手牌 {hand_id} 不存在或已删除", 404)
+        analysis = self.analyze(row)
+        row = dict(row)
+        if isinstance(row.get("streets"), str):
+            row["streets"] = json_load(row.get("streets"), []) or []
+        if isinstance(row.get("table_roster"), str):
+            row["table_roster"] = json_load(row.get("table_roster"), []) or []
+        if isinstance(row.get("villains"), str):
+            row["villains"] = json_load(row.get("villains"), []) or []
+
+        advices = self.live_advice_repo.list_for_hand(hand_id)
+        if not advices:
+            payload = self.import_repo.get_payload(hand_id)
+            value = payload.get("advices") if isinstance(payload, dict) else None
+            if isinstance(value, list):
+                advices = [a for a in value if isinstance(a, dict)]
+        persisted = self.decision_repo.for_hand(hand_id, analysis.fingerprint)
+        decision_ids: dict[tuple[str, int], int] = {}
+        for (street, _seq), item in persisted.items():
+            if item.get("id") is not None:
+                decision_ids[(street, int(item.get("action_index") or 0))] = int(item["id"])
+        timeline = {}
+        try:
+            timeline = self.hand_repo.get_timeline(hand_id)
+        except Exception:  # noqa: BLE001
+            timeline = {}
+        if not isinstance(timeline, dict) or not timeline.get("frames"):
+            timeline = build_timeline(row, analysis, advices,
+                                      decision_ids=decision_ids)
+        frames = timeline.get("frames") if isinstance(timeline, dict) else []
+        decisions = []
+        advice_by_key = {
+            (str(item.get("street") or ""), int(item.get("action_index") or 0)): item
+            for item in advices
+        }
+        for decision in analysis.decisions:
+            item = self._decision_public(decision, persisted.get(
+                (decision.street, decision.seq)))
+            advice = advice_by_key.get((decision.street,
+                                        int(decision.action_index or 0)))
+            if advice:
+                item["adviceId"] = advice.get("id")
+                item["promptSha256"] = advice.get("prompt_sha256")
+                item["promptMissing"] = bool(advice.get("prompt_missing"))
+                item["advice"] = self._advice_public(advice)
+            decisions.append(item)
+        return {
+            "hand": {
+                "id": int(hand_id),
+                "uid": row.get("external_uid") or row.get("external_id"),
+                "heroCards": cards_of(row.get("hero_cards")),
+                "heroPosition": row.get("hero_position"),
+                "tableSize": int(row.get("table_size") or 0),
+                "board": cards_of(row.get("board")),
+                "result": {
+                    "heroNetBb": row.get("result_amount"),
+                    "outcome": row.get("result") or "unknown",
+                    "source": row.get("result_source") or "unknown",
+                },
+                "quality": analysis.quality,
+                "warnings": list(analysis.warnings),
+                "partial": bool(row.get("partial")),
+                "createdAt": iso(row.get("created_at")),
+            },
+            "timeline": timeline,
+            "frames": frames,
+            "decisions": decisions,
+        }
+
+    def hand_prompt(self, hand_id: int, advice_id: int) -> dict:
+        """按需加载某一决策点的 prompt / raw / facts / context。"""
+        advice = self.live_advice_repo.get(advice_id)
+        if advice is None or int(advice.get("hand_id") or 0) != int(hand_id):
+            raise ApiError("ADVICE_NOT_FOUND",
+                           f"建议 {advice_id} 不属于手牌 {hand_id}", 404)
+        system = advice.get("prompt_system") or ""
+        user = advice.get("prompt_user") or ""
+        missing = bool(advice.get("prompt_missing"))
+        missing_reason = advice.get("prompt_missing_reason")
+        if not missing and not system and not user:
+            # 迁移前的老记录没有 prompt 列；明确标缺失，不要返回空字符串
+            # 让前端误以为「prompt 就是空的」。
+            missing = True
+            missing_reason = missing_reason or "legacy_no_prompt"
+        return {
+            "adviceId": int(advice_id),
+            "handId": int(hand_id),
+            "street": advice.get("street"),
+            "actionIndex": advice.get("action_index"),
+            "promptVersion": advice.get("prompt_version"),
+            "promptSha256": advice.get("prompt_sha256"),
+            "promptMissing": missing,
+            "promptMissingReason": missing_reason,
+            "promptBytes": len((system + user).encode("utf-8")),
+            "system": system,
+            "user": user,
+            "rawResponse": advice.get("raw_response"),
+            "reasonFull": advice.get("reason_full"),
+            "facts": json_load(advice.get("facts_json"), {}) or {},
+            "context": json_load(advice.get("context_json"), {}) or {},
+            "modelParams": json_load(advice.get("model_params_json"), {}) or {},
+            "capturedAt": iso(advice.get("captured_at")),
+            "tokensIn": advice.get("tokens_in"),
+            "tokensOut": advice.get("tokens_out"),
+            "durationMs": advice.get("duration_ms"),
         }
 
     def _streets_public(self, raw_streets: list[dict],
@@ -966,8 +1147,17 @@ class ReplayService:
         if tags is not None:
             tags = [str(t).strip() for t in tags if str(t).strip()][:12]
         note = str(payload.get("note") or "")[:4000]
-        return self.decision_mark_repo.upsert(
+        result = self.decision_mark_repo.upsert(
             decision_id, verdict=verdict, tags=tags, note=note)
+        if verdict == "bad":
+            try:
+                hand_id = decision.get("hand_id")
+                if hand_id:
+                    self.hand_repo.add_flag(
+                        int(hand_id), "REVIEW_BAD", "人工标记为坏决策")
+            except Exception:  # noqa: BLE001
+                log.exception("回写 REVIEW_BAD 失败 decision=%s", decision_id)
+        return result
 
     def patch_mark(self, hand_id: int, payload: dict) -> dict:
         row = self.hand_repo.get_row(hand_id)
@@ -1408,6 +1598,186 @@ class ReplayService:
             "skipped": resolved["skipped"],
         }
 
+    # ─────────────────────────── 手牌集 ───────────────────────────
+
+    def _set_item_public(self, item: dict, row: dict | None,
+                         analysis: HandAnalysis | None) -> dict:
+        flags = json_load(row.get("flags_json"), {}) if row else {}
+        return {
+            "handId": int(item["hand_id"]),
+            "fingerprint": item.get("fingerprint"),
+            "role": item.get("role") or "regression",
+            "priority": int(item.get("priority") or 0),
+            "stratum": item.get("stratum"),
+            "note": item.get("note") or "",
+            "expect": json_load(item.get("expect_json"), {}) or {},
+            "quality": analysis.quality if analysis else "missing",
+            "stale": bool(analysis and analysis.fingerprint != item.get("fingerprint")),
+            "flags": flags,
+            "hand": ({
+                "id": int(row["id"]),
+                "title": row.get("title") or "",
+                "heroCards": row.get("hero_cards") or "",
+                "board": row.get("board") or "",
+                "heroPosition": row.get("hero_position"),
+                "result": row.get("result") or "unknown",
+                "resultAmount": row.get("result_amount"),
+                "reviewScore": int(row.get("review_score") or 0),
+            } if row else None),
+        }
+
+    def get_hand_set(self, set_id: int) -> dict:
+        row = self.hand_set_repo.get(set_id)
+        if row is None:
+            raise ApiError("HAND_SET_NOT_FOUND", f"手牌集 {set_id} 不存在", 404)
+        items = self.hand_set_repo.items(set_id)
+        hand_ids = [int(item["hand_id"]) for item in items]
+        rows = {int(r["id"]): r for r in self.hand_repo.get_by_ids(hand_ids)}
+        analyses = {hid: self.analyze(r) for hid, r in rows.items()}
+        public_items = [
+            self._set_item_public(item, rows.get(int(item["hand_id"])),
+                                  analyses.get(int(item["hand_id"])))
+            for item in items
+        ]
+        return {
+            "id": int(row["id"]),
+            "name": row.get("name"),
+            "description": row.get("description") or "",
+            "purpose": row.get("purpose") or "regression",
+            "revision": int(row.get("revision") or 1),
+            "frozenAt": iso(row.get("frozen_at")),
+            "createdAt": iso(row.get("created_at")),
+            "updatedAt": iso(row.get("updated_at")),
+            "handCount": len(public_items),
+            "items": public_items,
+            "coverage": self._hand_set_coverage(public_items),
+        }
+
+    def _hand_set_coverage(self, items: list[dict]) -> dict:
+        roles = Counter()
+        streets = Counter()
+        positions = Counter()
+        quality = Counter()
+        results = Counter()
+        prompt_total = prompt_ready = 0
+        for item in items:
+            roles[item.get("role") or "regression"] += 1
+            quality[item.get("quality") or "missing"] += 1
+            hand = item.get("hand") or {}
+            positions[hand.get("heroPosition") or "?"] += 1
+            results[hand.get("result") or "unknown"] += 1
+            hand_id = int(item.get("handId") or 0)
+            try:
+                analysis = self.analyze(self.hand_repo.get_row(hand_id) or {})
+            except Exception:  # noqa: BLE001
+                analysis = None
+            decisions = list(getattr(analysis, "decisions", []) or [])
+            prompt_total += len(decisions)
+            if decisions:
+                advices = {
+                    (str(a.get("street") or ""), int(a.get("action_index") or 0)):
+                    a for a in self.live_advice_repo.list_for_hand(hand_id)
+                }
+                for decision in decisions:
+                    advice = advices.get((decision.street,
+                                          int(decision.action_index or 0)))
+                    if advice and (advice.get("prompt_system")
+                                   or advice.get("prompt_user")):
+                        prompt_ready += 1
+            for decision in decisions:
+                streets[decision.street] += 1
+        return {
+            "roles": dict(roles),
+            "streets": dict(streets),
+            "positions": dict(positions),
+            "quality": dict(quality),
+            "results": dict(results),
+            "decisions": prompt_total,
+            "promptReady": prompt_ready,
+            "promptCoverage": (round(prompt_ready / prompt_total, 4)
+                               if prompt_total else 0),
+        }
+
+    def list_hand_sets(self, limit: int = 100) -> dict:
+        rows = self.hand_set_repo.list(limit=limit)
+        items = []
+        for row in rows:
+            item = self.get_hand_set(int(row["id"]))
+            item.pop("items", None)
+            items.append(item)
+        return {"items": items}
+
+    def create_hand_set(self, payload: dict) -> dict:
+        name = str(payload.get("name") or "").strip()
+        if not name:
+            raise ApiError("INVALID_HAND_SET", "手牌集名称不能为空", 422)
+        set_id = self.hand_set_repo.create(
+            name=name,
+            description=(str(payload.get("description") or "").strip() or None),
+            purpose=str(payload.get("purpose") or "regression"))
+        hand_ids = [int(x) for x in (payload.get("handIds") or [])]
+        if hand_ids:
+            self.add_hand_set_items(set_id, {
+                "handIds": hand_ids,
+                "role": payload.get("role") or "regression",
+                "priority": payload.get("priority", 1),
+            })
+        return self.get_hand_set(set_id)
+
+    def patch_hand_set(self, set_id: int, payload: dict) -> dict:
+        row = self.hand_set_repo.update_meta(
+            set_id,
+            name=payload.get("name"),
+            description=payload.get("description"),
+            purpose=payload.get("purpose"),
+            archived=payload.get("archived"),
+        )
+        if row is None:
+            raise ApiError("HAND_SET_NOT_FOUND", f"手牌集 {set_id} 不存在", 404)
+        return self.get_hand_set(set_id)
+
+    def add_hand_set_items(self, set_id: int, payload: dict) -> dict:
+        if self.hand_set_repo.get(set_id) is None:
+            raise ApiError("HAND_SET_NOT_FOUND", f"手牌集 {set_id} 不存在", 404)
+        hand_ids = [int(x) for x in (payload.get("handIds") or [])]
+        if not hand_ids:
+            raise ApiError("INVALID_HAND_SET", "至少选择一手牌", 422)
+        rows = {int(r["id"]): r for r in self.hand_repo.get_by_ids(hand_ids)}
+        items = []
+        for hand_id in hand_ids:
+            row = rows.get(hand_id)
+            if row is None:
+                continue
+            analysis = self.analyze(row)
+            items.append({
+                "handId": hand_id,
+                "fingerprint": analysis.fingerprint,
+                "role": payload.get("role") or "regression",
+                "priority": payload.get("priority", 1),
+                "note": payload.get("note"),
+                "expect": payload.get("expect"),
+            })
+        written = self.hand_set_repo.add_items(set_id, items)
+        result = self.get_hand_set(set_id)
+        result["written"] = written
+        result["missing"] = [hid for hid in hand_ids if hid not in rows]
+        return result
+
+    def remove_hand_set_items(self, set_id: int, payload: dict) -> dict:
+        if self.hand_set_repo.get(set_id) is None:
+            raise ApiError("HAND_SET_NOT_FOUND", f"手牌集 {set_id} 不存在", 404)
+        hand_ids = [int(x) for x in (payload.get("handIds") or [])]
+        removed = self.hand_set_repo.remove_items(set_id, hand_ids)
+        result = self.get_hand_set(set_id)
+        result["removed"] = removed
+        return result
+
+    def freeze_hand_set(self, set_id: int) -> dict:
+        row = self.hand_set_repo.freeze(set_id)
+        if row is None:
+            raise ApiError("HAND_SET_NOT_FOUND", f"手牌集 {set_id} 不存在", 404)
+        return self.get_hand_set(set_id)
+
     # ─────────────────────────── 离线 A/B 实验 ───────────────────────────
 
     def create_experiment(self, payload: dict) -> dict:
@@ -1427,13 +1797,24 @@ class ReplayService:
         dev_ratio = float(payload.get("devRatio", payload.get("dev_ratio", 0.7)))
         dev_ratio = min(0.9, max(0.1, dev_ratio))
         repeat = max(1, min(5, int(payload.get("repeat", 3) or 3)))
-        resolved = self.resolve_scope({
-            "scope": payload.get("scope") or "hands",
-            "handIds": payload.get("handIds") or payload.get("hand_ids") or [],
-            "filter": payload.get("filter") or {},
-            # A/B 默认只用 exact 决策点；approx 的推算值会把差异混进噪声。
-            "includeQuality": payload.get("includeQuality") or ["exact"],
-        })
+        hand_set = None
+        hand_set_id = payload.get("handSetId") or payload.get("hand_set_id")
+        if hand_set_id:
+            hand_set = self.get_hand_set(int(hand_set_id))
+            hand_ids = [int(item["handId"]) for item in hand_set["items"]]
+            resolved = self.resolve_scope({
+                "scope": "hands",
+                "handIds": hand_ids,
+                "includeQuality": payload.get("includeQuality") or ["exact"],
+            })
+        else:
+            resolved = self.resolve_scope({
+                "scope": payload.get("scope") or "hands",
+                "handIds": payload.get("handIds") or payload.get("hand_ids") or [],
+                "filter": payload.get("filter") or {},
+                # A/B 默认只用 exact 决策点；approx 的推算值会把差异混进噪声。
+                "includeQuality": payload.get("includeQuality") or ["exact"],
+            })
         included = resolved.pop("_included", [])
         if not included:
             raise ApiError("NO_HANDS", "这个范围里没有可重跑的手牌/决策点", 422)
@@ -1443,9 +1824,19 @@ class ReplayService:
             baseline_version_id=baseline,
             variant_version_id=variant,
             hypothesis=(payload.get("hypothesis") or "").strip() or None,
-            filter_payload=payload.get("filter") or {},
+            filter_payload={
+                **(payload.get("filter") or {}),
+                **({"handSetId": int(hand_set_id),
+                    "handSetRevision": int(hand_set["revision"])}
+                   if hand_set else {}),
+            },
             dev_ratio=dev_ratio,
             repeat_count=repeat,
+            hand_set_id=int(hand_set_id) if hand_set else None,
+            hand_set_revision=int(hand_set["revision"]) if hand_set else None,
+            kind=str(payload.get("kind") or "ab"),
+            change_scope=payload.get("changeScope"),
+            baseline_prompt_mode=str(payload.get("baselinePromptMode") or "stored"),
         )
         self.experiment_repo.add_hands(experiment_id, split_rows)
         return self.get_experiment(experiment_id)
@@ -1488,6 +1879,16 @@ class ReplayService:
             "repeat": int(row.get("repeat_count") or 3),
             "status": row.get("status") or "draft",
             "jobId": (int(row["job_id"]) if row.get("job_id") else None),
+            "handSetId": (int(row["hand_set_id"])
+                          if row.get("hand_set_id") else None),
+            "handSetRevision": (int(row["hand_set_revision"])
+                                if row.get("hand_set_revision") else None),
+            "kind": row.get("kind") or "ab",
+            "changeScope": row.get("change_scope"),
+            "baselinePromptMode": row.get("baseline_prompt_mode") or "stored",
+            "decision": row.get("decision"),
+            "conclusion": row.get("conclusion") or "",
+            "metrics": json_load(row.get("metrics_json"), {}) or {},
             "hands": {
                 "total": len(hands),
                 "dev": int(split_counts.get("dev", 0)),
@@ -1585,6 +1986,232 @@ class ReplayService:
             "versions": versions,
             "review": dict(review),
         }
+
+    @staticmethod
+    def _pick_result(results: list[dict]) -> dict | None:
+        """按 repeat 的多数派选一条；没有结果返回 None。"""
+        if not results:
+            return None
+        counts = Counter((r.get("option_kind") or "?",
+                          round(float(r.get("option_amount") or 0.0), 2))
+                         for r in results)
+        best_key, _n = counts.most_common(1)[0]
+        chosen = next((r for r in results
+                       if (r.get("option_kind") or "?",
+                           round(float(r.get("option_amount") or 0.0), 2)) == best_key),
+                      results[0])
+        kinds = {r.get("option_kind") for r in results}
+        return {
+            "resultId": chosen.get("id"),
+            "optionId": chosen.get("option_id"),
+            "kind": chosen.get("option_kind"),
+            "amount": chosen.get("option_amount"),
+            "label": chosen.get("option_label"),
+            "reason": chosen.get("reason"),
+            "source": chosen.get("source"),
+            "error": chosen.get("error_msg"),
+            "promptSha256": chosen.get("prompt_sha256"),
+            "promptSystem": chosen.get("prompt_system"),
+            "promptUser": chosen.get("prompt_user"),
+            "rawResponse": chosen.get("raw_response"),
+            "reasonFull": chosen.get("reason_full"),
+            "durationMs": chosen.get("duration_ms"),
+            "distribution": dict(counts),
+            "repeatCount": len(results),
+            "stable": len(kinds) <= 1,
+        }
+
+    @staticmethod
+    def _run_assertions(item: dict | None, chosen: dict | None) -> list[dict]:
+        if not item or not chosen:
+            return []
+        expect = json_load(item.get("expect_json"), {}) or {}
+        assertions = expect.get("assertions") if isinstance(expect, dict) else None
+        if not isinstance(assertions, list):
+            return []
+        out = []
+        kind = chosen.get("kind")
+        amount = chosen.get("amount")
+        reason = str(chosen.get("reason") or "")
+        for assertion in assertions:
+            if not isinstance(assertion, dict):
+                continue
+            atype = str(assertion.get("type") or "")
+            value = assertion.get("value")
+            ok = False
+            if atype == "option_kind":
+                ok = kind == value
+            elif atype == "not_option_kind":
+                ok = kind != value
+            elif atype == "option_id":
+                ok = chosen.get("optionId") == value
+            elif atype == "amount_range":
+                try:
+                    ok = (amount is not None
+                          and float(assertion.get("min", -1e18)) <= float(amount)
+                          <= float(assertion.get("max", 1e18)))
+                except (TypeError, ValueError):
+                    ok = False
+            elif atype == "reason_contains":
+                ok = str(value or "") in reason
+            elif atype == "reason_not_contains":
+                ok = str(value or "") not in reason
+            elif atype == "stable_across_repeats":
+                ok = bool(chosen.get("stable")) is bool(value)
+            else:
+                ok = False
+            out.append({"type": atype, "ok": ok, "value": value})
+        return out
+
+    def experiment_pairs(self, experiment_id: int, query: dict | None = None) -> dict:
+        """成对结果：同一决策点的 A/B 多数派 + 人工偏好 + P0 断言。"""
+        query = query or {}
+        experiment = self.get_experiment(experiment_id)
+        job_id = experiment.get("jobId")
+        if not job_id:
+            raise ApiError("EXPERIMENT_NOT_RUN", "实验还没跑", 409)
+        rows = self.result_repo.for_job(int(job_id))
+        split_map = {int(h["hand_id"]): h.get("split")
+                     for h in self.experiment_repo.hands(experiment_id)}
+        set_items = {}
+        if experiment.get("handSetId"):
+            set_items = {int(item["hand_id"]): item
+                         for item in self.hand_set_repo.items(
+                             int(experiment["handSetId"]))}
+        reviews = self.pair_review_repo.for_experiment(experiment_id)
+        grouped: dict[int, list[dict]] = {}
+        for row in rows:
+            grouped.setdefault(int(row["decision_id"]), []).append(row)
+        baseline_id = int(experiment["baselineVersionId"])
+        variant_id = int(experiment["variantVersionId"])
+        out_rows = []
+        for decision_id, items in grouped.items():
+            a_rows = [r for r in items if int(r["version_id"]) == baseline_id]
+            b_rows = [r for r in items if int(r["version_id"]) == variant_id]
+            if not a_rows and not b_rows:
+                continue
+            a = self._pick_result(a_rows)
+            b = self._pick_result(b_rows)
+            first = (a_rows or b_rows)[0]
+            hand_id = int(first.get("hand_id") or 0)
+            split = split_map.get(hand_id)
+            same_kind = bool(a and b and a.get("kind") == b.get("kind"))
+            same_size = bool(a and b and a.get("amount") == b.get("amount"))
+            item = set_items.get(hand_id)
+            a_assertions = self._run_assertions(item, a)
+            assertions = self._run_assertions(item, b)
+            p0_bad = [x for x in assertions if not x.get("ok")]
+            p0_regression = bool(
+                a_assertions and all(x.get("ok") for x in a_assertions)
+                and any(not x.get("ok") for x in assertions))
+            review = reviews.get(decision_id) or {}
+            out_rows.append({
+                "decisionId": decision_id,
+                "handId": hand_id,
+                "street": first.get("street"),
+                "seq": first.get("seq"),
+                "split": split,
+                "quality": first.get("quality"),
+                "actual": {
+                    "action": first.get("actual_action"),
+                    "amountBb": first.get("actual_amount"),
+                },
+                "A": a,
+                "B": b,
+                "auto": {
+                    "sameKind": same_kind,
+                    "sameSize": same_size,
+                    "changed": not (same_kind and same_size),
+                    "p0": bool(assertions),
+                    "p0Pass": not p0_bad if assertions else None,
+                    "p0Regression": p0_regression,
+                    "assertions": assertions,
+                    "baselineAssertions": a_assertions,
+                },
+                "review": ({
+                    "preferred": review.get("preferred"),
+                    "tags": json_load(review.get("tags"), []) or [],
+                    "note": review.get("note") or "",
+                } if review else None),
+            })
+        only = str(query.get("only") or "").strip().lower()
+        if only == "changed":
+            out_rows = [r for r in out_rows if r["auto"]["changed"]]
+        elif only == "unreviewed":
+            out_rows = [r for r in out_rows if not r["review"]]
+        elif only == "p0":
+            out_rows = [r for r in out_rows if r["auto"]["p0"]]
+        elif only in ("a", "b"):
+            out_rows = [r for r in out_rows
+                        if (r["review"] or {}).get("preferred") == only.upper()]
+        summary = Counter()
+        for row in out_rows:
+            review = row.get("review") or {}
+            preferred = review.get("preferred")
+            if preferred in ("A", "B", "same", "unsure"):
+                summary[preferred] += 1
+            if row["auto"]["changed"]:
+                summary["changed"] += 1
+            if row["auto"].get("p0Regression"):
+                summary["p0Regressions"] += 1
+        return {
+            "experimentId": int(experiment_id),
+            "jobId": int(job_id),
+            "rows": out_rows,
+            "summary": {
+                "n": len(out_rows),
+                "changed": int(summary.get("changed", 0)),
+                "aWins": int(summary.get("A", 0)),
+                "bWins": int(summary.get("B", 0)),
+                "same": int(summary.get("same", 0)),
+                "unsure": int(summary.get("unsure", 0)),
+                "p0Regressions": int(summary.get("p0Regressions", 0)),
+            },
+        }
+
+    def review_pair(self, experiment_id: int, decision_id: int,
+                    payload: dict) -> dict:
+        experiment = self.get_experiment(experiment_id)
+        preferred = str(payload.get("preferred") or "").strip()
+        if preferred not in ("A", "B", "same", "unsure"):
+            raise ApiError("INVALID_PAIR_REVIEW",
+                           "preferred 只能是 A/B/same/unsure", 422)
+        if not self.experiment_repo.contains_decision(experiment_id, decision_id):
+            raise ApiError("DECISION_NOT_IN_EXPERIMENT",
+                           f"决策点 {decision_id} 不在实验 {experiment_id} 里", 404)
+        return self.pair_review_repo.upsert(
+            experiment_id, decision_id,
+            preferred=preferred,
+            tags=payload.get("tags"),
+            note=payload.get("note"),
+        )
+
+    def experiment_outcome(self, experiment_id: int, payload: dict) -> dict:
+        experiment = self.get_experiment(experiment_id)
+        decision = str(payload.get("decision") or "").strip().lower()
+        if decision not in ("adopt", "reject", "iterate", "inconclusive"):
+            raise ApiError("INVALID_EXPERIMENT_DECISION",
+                           "decision 只能是 adopt/reject/iterate/inconclusive", 422)
+        promoted = payload.get("promotedVersionId")
+        if decision == "adopt":
+            promoted = int(promoted or experiment["variantVersionId"])
+            self.db.execute(
+                """UPDATE replay_versions SET channel='archive'
+                    WHERE user_id=%s AND channel='prod' AND id<>%s""",
+                (self.settings.console_user_id, promoted))
+            self.db.execute(
+                """UPDATE replay_versions
+                      SET channel='prod', promoted_at=NOW(3)
+                    WHERE user_id=%s AND id=%s""",
+                (self.settings.console_user_id, promoted))
+        self.experiment_repo.update_outcome(
+            experiment_id,
+            metrics=payload.get("metrics") or {},
+            conclusion=payload.get("conclusion"),
+            decision=decision,
+            promoted_version_id=(int(promoted) if promoted else None),
+        )
+        return self.get_experiment(experiment_id)
 
     def _version_snapshot(self, row: dict) -> dict:
         return {

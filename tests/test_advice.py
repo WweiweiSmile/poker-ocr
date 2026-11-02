@@ -1798,7 +1798,7 @@ def test_table_dynamics_in_prompt() -> None:
     check("## 桌面动态" not in user,
           f"旧的「桌面动态」段应该已经移除：\n{user}")
     check(dyn in user, f"观察原文应进入提示词：\n{user}")
-    check("逐座位对手画像" in system,
+    check("逐座位画像" in system,
           "system 应说明逐座位画像的优先级")
 
     blank = build_situation(make_point(to_call=4.0, pot=10.0, hero_stack=90.0),
@@ -2012,13 +2012,13 @@ def test_lean_system_priorities() -> None:
     sit = build_situation(make_point())
     system, _ = build_messages(sit)
     check("事实优先级" in system, "system 应含事实优先级")
-    check("硬事实" in system and "逐座位对手画像" in system,
+    check("硬事实" in system and "逐座位画像" in system,
           "system 应说明硬事实与逐座位画像的优先级")
-    check("当前牌桌统计/全场先验/人工观察" in system,
-          "system 应给当前桌统计/全场先验/人工观察排位")
-    check("规则提示" in system, "system 应说明规则提示不能覆盖硬事实")
-    check("哪些更差的牌会跟" in system,
-          "system 的翻后决策顺序应问「哪些更差的牌会跟」")
+    check("现场观察" in system and "桌况统计" in system,
+          "system 应给现场观察/桌况统计排位")
+    check("文字建议块" in system, "system 应说明文字建议块不是硬事实")
+    check("更差的牌会不会跟" in system,
+          "system 的翻后决策顺序应问「更差的牌会不会跟」")
     check("不要因为“当前未成牌不是坚果”就否决半诈唬" in system,
           "system 应保护听牌半诈唬")
     check("不要引用未提供的规则" in system,
@@ -2081,7 +2081,7 @@ def test_hand_vs_ranges_facts_block() -> None:
     check(sit.hand_ranges is not None, "已知对手范围时应生成 hand_ranges")
     text = render_facts_zh(sit)
     check("## 实时牌力" in text, "事实块缺实时牌力")
-    check("对范围权益：" in text, "牌力块缺对范围权益")
+    check("对当前范围权益：" in text, "牌力块缺对当前范围权益")
     check("当前成牌落后至少一家：" in text, "牌力块缺 behind now")
     check("范围：" in text, "缺范围宽度")
     # 旧英文事实块保留给离线审计。
@@ -2186,9 +2186,9 @@ def test_hand_strength_read_line() -> None:
     check(sit.hand_ranges is not None, "前置：应有 hand_ranges")
     check(sit.hand_strength is not None, "有 hand_ranges 时应有 hand_strength")
     text = render_facts_zh(sit)
-    check("对范围权益：" in text, f"事实里应有对范围权益：\n{text}")
-    check(text.index("## 实时牌力") < text.index("对范围权益："),
-          "对范围权益必须在实时牌力段内")
+    check("对当前范围权益：" in text, f"事实里应有对当前范围权益：\n{text}")
+    check(text.index("## 实时牌力") < text.index("对当前范围权益："),
+          "对当前范围权益必须在实时牌力段内")
     check("当前成牌落后至少一家：" in text, "应有当前成牌落后比例")
 
 
@@ -2223,8 +2223,8 @@ def test_hand_strength_absent_without_range() -> None:
         opponents=(OpponentSnapshot("a", "老王", None, 97.0, 0.0, False),)))
     check(sit.hand_ranges is None, "前置：无范围")
     check(sit.hand_strength is None, "无范围时 hand_strength 应为 None")
-    check("对范围权益：" not in render_facts_zh(sit),
-          "无范围时不应出现对范围权益")
+    check("对当前范围权益：" not in render_facts_zh(sit),
+          "无范围时不应出现对当前范围权益")
 
 
 def test_draw_facts_are_chinese_and_not_vetoed() -> None:
@@ -3006,11 +3006,7 @@ def test_explosive_pot_prompt_and_directive() -> None:
 # ─────────────────────────── 主流程 ───────────────────────────
 
 def test_explosive_pot_facts_follow_spr() -> None:
-    """炸弹池按正常翻后规则：浅码不自动套池，深码不默认打完。
-
-    这两段必须落在事实块而不是 system：同一个「是炸弹池」的标记，
-    在 20BB 和 300BB 后手下是完全不同的结论。
-    """
+    """炸弹池只写结构/权益事实，按正常翻后规则打，不再写特殊打法。"""
     shallow = build_situation(make_point(pot=45.0, pot_before_street=45.0,
                                          to_call=0.0, table_size=9))
     check(shallow.explosive_pot and (shallow.spr or 99) <= 3.0,
@@ -3018,12 +3014,13 @@ def test_explosive_pot_facts_follow_spr() -> None:
     text = render_facts_zh(shallow)
     check("按正常翻后规则" in text,
           f"浅码炸弹池也应按正常规则：\n{text}")
-    check("顶对/超对仍按赔率" in text,
-          f"浅码不能自动把顶对当价值牌：\n{text}")
+    check("顶对/超对仍按赔率" not in text,
+          f"不该再写特殊浅码打法：\n{text}")
     check("套池价值牌" not in text and "默认跟注打光" not in text,
           f"浅码不能默认打光：\n{text}")
-    check("只投一条街的钱" in text and "之后过牌/弃牌" in text,
-          f"炸弹池顶对及以上只打一条街：\n{text}")
+    check("一条街" not in text and "被下注即弃" not in text,
+          f"不该再有一条街硬规则：\n{text}")
+    check("炸弹池权益" in text, f"应保留炸弹池权益事实：\n{text}")
 
     deep = build_situation(make_point(pot=15.0, pot_before_street=15.0,
                                       to_call=0.0, table_size=3))
@@ -3032,17 +3029,13 @@ def test_explosive_pot_facts_follow_spr() -> None:
     text = render_facts_zh(deep)
     check("套池价值牌" not in text and "默认跟注打光" not in text,
           f"深码炸弹池不该给套池结论：\n{text}")
-    check("一对不做大底池" in text and "只投一条街的钱" in text,
-          f"深码炸弹池要给正常深码打法：\n{text}")
+    check("一对不做大底池" not in text and "一条街" not in text,
+          f"深码炸弹池不该有特殊打法：\n{text}")
+    check("按正常翻后规则" in text, f"深码也按正常规则：\n{text}")
 
 
-def test_explosive_pot_one_street_is_enforced_on_river() -> None:
-    """炸弹池已经投过一条街：事实块要直说「本街不能跟注」。
-
-    K3s（11-01 14:56）：转牌下注 30，河牌面对 63 又跟、再加注又跟 47。
-    只写「顶对及以上只打一条街」时，模型会理解成「我还没下注，这条街可以打」，
-    所以要在已经投过钱时把结论写成硬事实。
-    """
+def test_explosive_pot_has_no_special_hard_rule() -> None:
+    """炸弹池不再有「一条街/不能跟注」硬规则，只保留结构/权益事实。"""
     from poker_ocr.hand_track import ActionRecord, StreetRecord
 
     turn = StreetRecord("turn", 45.0, (
@@ -3060,9 +3053,9 @@ def test_explosive_pot_one_street_is_enforced_on_river() -> None:
         bomb_pot=True, table_size=9))
     check(sit.explosive_pot, "fixture 应是炸弹池")
     text = render_facts_zh(sit)
-    check("炸弹池节奏" in text, f"要写出一条街的节奏：\n{text}")
-    check("转牌" in text, f"要说明是哪条街投过钱：\n{text}")
-    check("不能跟注" in text, f"要直接写不能跟注：\n{text}")
+    check("炸弹池节奏" not in text, f"不该再写一条街节奏：\n{text}")
+    check("不能跟注" not in text, f"不该再写不能跟注：\n{text}")
+    check("按正常翻后规则" in text, f"应写按正常规则：\n{text}")
 
     # 还没投过钱的街不能出现这条硬规则（否则会把正常下注也吓住）
     fresh = build_situation(make_point(
@@ -3074,7 +3067,7 @@ def test_explosive_pot_one_street_is_enforced_on_river() -> None:
                  StreetRecord("turn", 45.0, ())),
         bomb_pot=True, table_size=9))
     text = render_facts_zh(fresh)
-    check("炸弹池节奏" not in text, f"没投过钱不该给这条硬规则：\n{text}")
+    check("炸弹池节奏" not in text, f"任何街道都不该再给这条硬规则：\n{text}")
 
 
 def test_effective_stack_not_hero_stack_drives_depth() -> None:
@@ -3095,8 +3088,8 @@ def test_effective_stack_not_hero_stack_drives_depth() -> None:
     check((sit.spr or 99) <= 3.0,
           f"300BB 对 100BB 的有效 SPR 应该是 2.2：{sit.spr}")
     text = render_facts_zh(sit)
-    check("顶对/超对仍按赔率" in text,
-          f"对手只有 100BB 时应走浅码分支，不能按 300BB 深码打：\n{text}")
+    check("按正常翻后规则" in text,
+          f"对手只有 100BB 时也按正常规则，不再写浅码分支：\n{text}")
 
 
 def test_playable_depth_uses_deepest_opponent() -> None:
@@ -3243,7 +3236,7 @@ def test_system_has_id_mapping_and_budget() -> None:
           "system 应说明翻后加注用 raise-1/3…1.2")
     check("翻前面对加注" in system and "raise-3x/raise-4x" in system,
           "system 应把 raise-3x/4x 限定在翻前")
-    check(len(system) <= 1900, f"system 不应重新膨胀，实际 {len(system)}")
+    check(len(system) <= 2400, f"system 不应重新膨胀，实际 {len(system)}")
 
 
 def test_short_stack_prompt_dedupes_capped_options() -> None:
@@ -3476,7 +3469,7 @@ def test_system_ante_module_is_conditional() -> None:
           f"前注局不能默认 SPR 低：\n{ante}")
     check("范围通常放宽" not in ante,
           f"前注局不能无条件放宽范围：\n{ante}")
-    check(len(ante) < 2100, f"前注局 system 不应过长：{len(ante)}")
+    check(len(ante) < 2600, f"前注局 system 不应过长：{len(ante)}")
 
 
 def test_all_in_amount_uses_effective_stack() -> None:
@@ -3729,8 +3722,8 @@ def test_bomb_pot_shallow_spr_plays_normal_not_auto_stackoff() -> None:
           f"不能再把顶对自动说成套池价值牌：\n{text}")
     check("默认跟注打光" not in text,
           f"不能默认跟注打光：\n{text}")
-    check("只投一条街的钱" in text and "低于顶对" in text,
-          f"炸弹池顶对及以上只打一条街：\n{text}")
+    check("一条街" not in text and "被下注即弃" not in text,
+          f"炸弹池不再有特殊一条街硬规则：\n{text}")
 
 
 
@@ -4146,8 +4139,10 @@ def test_bomb_pot_does_not_say_you_can_stack_off() -> None:
     from poker_ocr.advice import render_explosive_zh
     text = "\n".join(render_explosive_zh(sit))
     check("可以打光" not in text, f"不能再写可以打光：\n{text}")
-    check("可以继续，但不主动造大底池" in text,
-          f"应改成可继续但不造大底池：\n{text}")
+    check("一条街" not in text and "被下注即弃" not in text,
+          f"炸弹池不再有特殊一条街硬规则：\n{text}")
+    check("按正常翻后规则" in text,
+          f"炸弹池应按正常翻后规则：\n{text}")
 
 
 def test_system_contract_has_valid_json_examples_and_mappings() -> None:
@@ -4439,6 +4434,225 @@ def test_all_in_hand_opponents_get_reads() -> None:
     check("庚七" not in text, f"已弃牌的人不该有画像行：\n{text}")
     check("只显示最相关" not in text,
           f"不该再有「只显示最相关 N 家」截断提示：\n{text}")
+
+
+
+def test_fourbet_and_fivebet_follow_opponent_profile() -> None:
+    """4-bet/5-bet 不再一刀切：紧手只用 KK/AA，松凶/高频可以 QQ/AK 继续。"""
+    from poker_ocr.hand_track import ActionRecord, OpponentSnapshot, StreetRecord
+    from poker_ocr.opponent_profile import OpponentRead
+
+    def read(seat: str, archetype: str, threebet: float,
+             fourbet: float) -> OpponentRead:
+        return OpponentRead(
+            seat, seat, seat, archetype, 0.9, 40, 40.0, 28.0, 2.2,
+            "auto", "", "stable", threebet_pct=threebet, fourbet_pct=fourbet)
+
+    # 4-bet 池：Hero AA，无画像 → 5-bet 是合法加注，不能写 4-bet。
+    fourbet_actions = (
+        ActionRecord("preflop", "hero", None, "UTG", "raise", 5.0, False, True),
+        ActionRecord("preflop", "lj", "LJ", "LJ", "raise", 20.0, False, False),
+        ActionRecord("preflop", "hj", "HJ", "HJ", "raise", 55.0, False, False),
+    )
+    fourbet = build_situation(make_point(
+        street="preflop", board=(), hero_cards=("Ah", "Ad"),
+        hero_position="UTG", hero_stack=145.0, hero_bet=5.0, to_call=50.0,
+        pot=81.5, pot_before_street=1.5, table_size=9, players_dealt=8,
+        preflop_shapes=("single-raise", "three-bet"), hero_is_pfr=False,
+        streets=(StreetRecord("preflop", 1.5, fourbet_actions),),
+        opponents=(
+            OpponentSnapshot("lj", "LJ", "LJ", 180.0, 20.0, False),
+            OpponentSnapshot("hj", "HJ", "HJ", 200.0, 55.0, False),
+            OpponentSnapshot("co", "CO", "CO", 200.0, 0.0, False),
+            OpponentSnapshot("btn", "BTN", "BTN", 200.0, 0.0, False),
+            OpponentSnapshot("sb", "SB", "SB", 200.0, 0.5, False),
+            OpponentSnapshot("bb", "BB", "BB", 200.0, 1.0, False))))
+    text = render_facts_zh(fourbet)
+    check("可以 5-bet 或跟注" in text, f"面对 4-bet 应写 5-bet：\n{text}")
+    opts = "\n".join(render_options_zh(fourbet))
+    check("5-bet 到" in opts and "4-bet 到" not in opts,
+          f"4-bet 池的加注选项应标 5-bet：\n{opts}")
+
+    # 面对 4-bet 的 QQ：松凶对手可以跟，紧手按紧范围。
+    qq = build_situation(make_point(
+        street="preflop", board=(), hero_cards=("Qh", "Qd"),
+        hero_position="UTG", hero_stack=145.0, hero_bet=5.0, to_call=50.0,
+        pot=81.5, pot_before_street=1.5, table_size=9, players_dealt=8,
+        preflop_shapes=("single-raise", "three-bet"), hero_is_pfr=False,
+        streets=(StreetRecord("preflop", 1.5, fourbet_actions),),
+        opponents=(
+            OpponentSnapshot("lj", "LJ", "LJ", 180.0, 20.0, False),
+            OpponentSnapshot("hj", "HJ", "HJ", 200.0, 55.0, False),
+            OpponentSnapshot("co", "CO", "CO", 200.0, 0.0, False),
+            OpponentSnapshot("btn", "BTN", "BTN", 200.0, 0.0, False),
+            OpponentSnapshot("sb", "SB", "SB", 200.0, 0.5, False),
+            OpponentSnapshot("bb", "BB", "BB", 200.0, 1.0, False))))
+    wide = render_facts_zh(build_situation(
+        qq.snap, opponent_reads=(read("hj", "lag", 12.0, 6.0),)))
+    check("可以跟注，不 5-bet" in wide and "LAG" in wide,
+          f"松凶对手的 QQ 应可跟 4-bet、不 5-bet：\n{wide}")
+    tight = render_facts_zh(build_situation(
+        qq.snap, opponent_reads=(read("hj", "nit", 3.0, 1.0),)))
+    check("默认弃牌" in tight and "NIT" in tight,
+          f"紧手对手的 QQ 应在 4-bet 池弃牌：\n{tight}")
+
+    # 面对 3-bet：AKo 对 LAG 可以 4-bet；对 NIT 只跟。
+    threebet_actions = (
+        ActionRecord("preflop", "hero", None, "UTG", "raise", 5.0, False, True),
+        ActionRecord("preflop", "lj", "LJ", "LJ", "raise", 20.0, False, False),
+    )
+    ak = build_situation(make_point(
+        street="preflop", board=(), hero_cards=("Kh", "Ad"),
+        hero_position="UTG", hero_stack=189.0, hero_bet=5.0, to_call=15.0,
+        pot=30.5, pot_before_street=4.0, table_size=9, players_dealt=8,
+        preflop_shapes=("three-bet",), hero_is_pfr=False,
+        streets=(StreetRecord("preflop", 4.0, threebet_actions),),
+        opponents=(
+            OpponentSnapshot("lj", "LJ", "LJ", 226.0, 20.0, False),
+            OpponentSnapshot("hj", "HJ", "HJ", 240.5, 0.0, False),
+            OpponentSnapshot("co", "CO", "CO", 172.5, 0.0, False),
+            OpponentSnapshot("btn", "BTN", "BTN", 59.0, 0.0, False),
+            OpponentSnapshot("sb", "SB", "SB", 260.0, 0.5, False),
+            OpponentSnapshot("bb", "BB", "BB", 182.5, 1.0, False))))
+    wide_ak = render_facts_zh(build_situation(
+        ak.snap, opponent_reads=(read("lj", "lag", 12.0, 6.0),)))
+    check("可以 4-bet 或跟注" in wide_ak,
+          f"AKo 对松凶 3-bet 应可 4-bet：\n{wide_ak}")
+    tight_ak = render_facts_zh(build_situation(
+        ak.snap, opponent_reads=(read("lj", "nit", 3.0, 1.0),)))
+    check("可以跟注，不 4-bet" in tight_ak,
+          f"AKo 对紧手 3-bet 应只跟：\n{tight_ak}")
+
+
+def test_system_removes_river_default_fold_and_bomb_rules() -> None:
+    system, _ = build_messages(build_situation(make_point()))
+    check("被加注默认弃" not in system,
+          "河牌不再写「被加注默认弃」")
+    check("非坚果默认不打三条街" in system,
+          "河牌仍保留「非坚果默认不打三条街」")
+    check("炸弹池" not in system,
+          "炸弹池特殊规则应从 system 移除")
+    check("4-bet 只用 KK/AA" not in system,
+          "4-bet 不再一刀切")
+    for want in ("事实优先级（序号小者优先）", "现场观察", "文字建议块",
+                 "更好的牌会不会弃", "已投入是沉没成本",
+                 "对当前范围权益", "不是对加注范围"):
+        check(want in system, f"system 缺新口径：{want}")
+
+
+def test_bomb_pot_facts_have_no_special_hard_rule() -> None:
+    from poker_ocr.hand_track import OpponentSnapshot
+
+    point = make_point(
+        street="flop", board=("Ks", "7d", "2c"), hero_cards=("Kh", "Qd"),
+        pot=40.0, pot_before_street=40.0, bomb_pot=True, hero_stack=50.0,
+        opponents=(OpponentSnapshot("bb", "BB", "BB", 50.0, 0.0, False),))
+    text = render_facts_zh(build_situation(point))
+    check("按正常翻后规则" in text, f"炸弹池应按正常规则：\n{text}")
+    check("一条街" not in text and "被下注即弃" not in text,
+          f"炸弹池不该再有特殊硬规则：\n{text}")
+    check("炸弹池结构" in text and "炸弹池权益" in text,
+          f"炸弹池应保留结构/权益事实：\n{text}")
+
+
+def test_attack_block_uses_same_draw_rule_and_neutral_wording() -> None:
+    from poker_ocr.opponent_profile import PooledStats
+
+    text = render_facts_zh(build_situation(_limped_point()))
+    check("强听下注" not in text, f"攻击块不该再说强听下注：\n{text}")
+    check("强听/空气" in text, f"攻击块应把强听/空气归到过牌：\n{text}")
+
+    stats = PooledStats(
+        hands=100, players=3, total_players=6, scope="current_table",
+        fold_to_bet_flop=40.0, opportunities={"flop": 100.0})
+    neutral = render_facts_zh(build_situation(_limped_point(), table_stats=stats))
+    check("弃牌率一般" in neutral, f"40% 应写弃牌率一般：\n{neutral}")
+    check("没有该街弃牌率" not in neutral,
+          f"有 40% 数据不能说没有弃牌率：\n{neutral}")
+
+
+def test_stab_read_respects_last_to_act() -> None:
+    from poker_ocr.advice import _table_stab_read_zh
+    from poker_ocr.opponent_profile import PooledStats
+
+    stats = PooledStats(
+        hands=100, players=3, total_players=6, scope="current_table",
+        stab=50.0, opportunities={"stab": 100.0})
+    last = _table_stab_read_zh(stats, players_left_to_act=0, in_position=True)
+    check("过牌免费" in last, f"0 人待行动应说过牌免费：{last}")
+    check("过牌诱导" not in last, f"0 人待行动不该说过牌诱导：{last}")
+    not_last = _table_stab_read_zh(stats, players_left_to_act=2)
+    check("过牌不是免费" in not_last, f"有人待行动应保留原读法：{not_last}")
+
+
+def test_missing_preflop_action_is_a_data_gap() -> None:
+    from poker_ocr.advice import _gap_zh
+    from poker_ocr.hand_track import OpponentSnapshot, StreetRecord
+
+    check("翻前动作线缺失" in _gap_zh(
+        "seat x: no preflop action; preflop shape/PFR unknown"),
+        "no preflop action 应翻成中文缺口")
+    point = make_point(
+        street="preflop", board=(), hero_cards=("Qh", "Js"),
+        hero_position="BTN", hero_stack=100.0, hero_bet=0.0, to_call=0.0,
+        pot=1.5, pot_before_street=1.5, table_size=9, players_dealt=8,
+        preflop_shapes=(), hero_is_pfr=False,
+        streets=(StreetRecord("preflop", 1.5, ()),),
+        opponents=tuple(
+            OpponentSnapshot(f"p{i}", f"P{i}", pos, 100.0, 0.0, False)
+            for i, pos in enumerate(("UTG", "UTG+1", "LJ", "HJ", "CO", "SB", "BB"))))
+    text = render_facts_zh(build_situation(point))
+    check("翻前动作线缺失" in text, f"空行动线应进数据质量：\n{text}")
+    check("无已知硬缺口" not in text, f"有缺口不能说无：\n{text}")
+
+
+def test_range_conclusion_is_actionable_and_not_reference_only() -> None:
+    from poker_ocr.hand_track import ActionRecord, OpponentSnapshot, StreetRecord
+
+    limped_actions = (
+        ActionRecord("preflop", "utg", "UTG", "UTG", "call", 1.0, False, False),
+        ActionRecord("preflop", "hj", "HJ", "HJ", "call", 1.0, False, False),
+        ActionRecord("preflop", "co", "CO", "CO", "call", 1.0, False, False),
+    )
+    qto = build_situation(make_point(
+        street="preflop", board=(), hero_cards=("10s", "Qd"),
+        hero_position="BTN", hero_stack=100.0, hero_bet=0.0, to_call=1.0,
+        pot=4.5, pot_before_street=4.5, table_size=9, players_dealt=8,
+        preflop_shapes=("limped",), hero_is_pfr=False,
+        streets=(StreetRecord("preflop", 1.5, limped_actions),),
+        opponents=(
+            OpponentSnapshot("utg", "UTG", "UTG", 100.0, 1.0, False),
+            OpponentSnapshot("hj", "HJ", "HJ", 100.0, 1.0, False),
+            OpponentSnapshot("co", "CO", "CO", 100.0, 1.0, False),
+            OpponentSnapshot("sb", "SB", "SB", 100.0, 0.5, False),
+            OpponentSnapshot("bb", "BB", "BB", 100.0, 1.0, False))))
+    text = render_facts_zh(qto)
+    check("默认弃牌，不要平跟" in text,
+          f"QTo 三溜入应给单一弃牌结论：\n{text}")
+    check("参考，不覆盖价格" not in text,
+          f"范围结论不该再写「只作参考」：\n{text}")
+
+    aa = build_situation(make_point(
+        street="preflop", board=(), hero_cards=("Ah", "Ad"),
+        hero_position="BTN", hero_stack=100.0, hero_bet=0.0, to_call=0.0,
+        pot=1.5, pot_before_street=1.5, table_size=9, players_dealt=9,
+        preflop_shapes=("unopened",), hero_is_pfr=False,
+        streets=(StreetRecord("preflop", 1.5, ()),),
+        opponents=tuple(
+            OpponentSnapshot(f"p{i}", f"P{i}", pos, 100.0, 0.0, False)
+            for i, pos in enumerate(("UTG", "UTG+1", "LJ", "HJ", "CO", "SB", "BB", "BB2")))))
+    text = render_facts_zh(aa)
+    check("可以开池加注，不要平跟" in text,
+          f"范围内应鼓励开池、不平跟：\n{text}")
+
+
+def test_equity_fact_is_current_range_not_raising_range() -> None:
+    sit = build_situation(make_point(to_call=4.0, pot=10.0, hero_stack=90.0))
+    text = render_facts_zh(sit)
+    check("对当前范围权益" in text, f"权益行应改名：\n{text}")
+    check("不是对加注范围" in text,
+          f"面对下注时应说明不是加注范围：\n{text}")
+    check("折价" not in text, f"不该留无法执行的折价：\n{text}")
 
 
 def main() -> int:

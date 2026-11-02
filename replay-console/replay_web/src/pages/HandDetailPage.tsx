@@ -4,8 +4,8 @@ import {
   Skeleton, Space, Spin, Switch, Tag, Tooltip,
 } from 'antd'
 import {
-  ArrowLeftOutlined, DeleteOutlined, ReloadOutlined, StarFilled,
-  StarOutlined, ThunderboltOutlined, WarningOutlined,
+  ArrowLeftOutlined, DeleteOutlined, PlayCircleOutlined, ReloadOutlined,
+  StarFilled, StarOutlined, ThunderboltOutlined, WarningOutlined,
 } from '@ant-design/icons'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate, useParams } from 'react-router-dom'
@@ -482,6 +482,12 @@ export default function HandDetailPage() {
               >
                 {markFavorite ? <StarFilled /> : <StarOutlined />}
               </button>
+              <Button icon={<PlayCircleOutlined />} onClick={() => navigate(`/hands/${id}/replay`)}>
+                瀑布流回放
+              </Button>
+              <Button icon={<PlayCircleOutlined />} onClick={() => navigate(`/hands/${id}/replay?mode=table`)}>
+                牌桌回放
+              </Button>
               <Button type="primary" icon={<ThunderboltOutlined />} disabled={blocked} onClick={() => setRerunOpen(true)}>
                 重跑这手
               </Button>
@@ -616,7 +622,12 @@ export default function HandDetailPage() {
                   {advice.actionIndex !== null && advice.actionIndex !== undefined ? (
                     <Tag className="mini-tag">动作 #{advice.actionIndex}</Tag>
                   ) : null}
+                  {advice.promptMissing ? <Tag color="orange" className="mini-tag">prompt 缺失</Tag> : null}
                   {advice.bucket ? <BucketTag bucket={advice.bucket} /> : null}
+                  <Button size="small" type="link" style={{ padding: 0 }}
+                    onClick={() => navigate(`/hands/${id}/replay`)}>
+                    看回放 / Prompt
+                  </Button>
                 </div>
                 {advice.reason ? <div className="advice-reason">{advice.reason}</div> : null}
                 {advice.plan ? <div className="advice-plan">计划：{advice.plan}</div> : null}

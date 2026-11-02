@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import {
   Alert, App, Button, Card, Form, Input, InputNumber, Modal, Select, Space,
   Table, Tag,
@@ -6,9 +6,9 @@ import {
 import type { ColumnsType } from 'antd/es/table'
 import { PlusOutlined, ThunderboltOutlined } from '@ant-design/icons'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import { api, errorMessage } from '../api'
-import type { Experiment, Version } from '../types'
+import type { Experiment, HandSetList, Version } from '../types'
 import { formatDate } from '../lib/format'
 
 const STATUS_COLORS: Record<string, string> = {
@@ -23,9 +23,15 @@ const STATUS_LABELS: Record<string, string> = {
 export default function ExperimentsPage() {
   const { message } = App.useApp()
   const navigate = useNavigate()
+  const [searchParams] = useSearchParams()
+  const handSetId = Number(searchParams.get('handSetId') || 0) || null
   const queryClient = useQueryClient()
   const [open, setOpen] = useState(false)
   const [form] = Form.useForm()
+
+  useEffect(() => {
+    if (handSetId) setOpen(true)
+  }, [handSetId])
 
   const experiments = useQuery<Experiment[]>({
     queryKey: ['experiments'],
@@ -35,6 +41,11 @@ export default function ExperimentsPage() {
   const versions = useQuery<{ items: Version[] }>({
     queryKey: ['versions', 'all'],
     queryFn: () => api.get('/versions?includeArchived=1'),
+  })
+  const handSets = useQuery<HandSetList>({
+    queryKey: ['hand-sets'],
+    queryFn: () => api.get('/hand-sets'),
+    enabled: open,
   })
   const versionMap = useMemo(() => {
     const map: Record<number, Version> = {}
@@ -152,7 +163,7 @@ export default function ExperimentsPage() {
         <Form
           form={form}
           layout="vertical"
-          initialValues={{ scope: 'filter', source: 'live', devRatio: 0.7, repeat: 3 }}
+          initialValues={{ scope: 'filter', source: 'live', devRatio: 0.7, repeat: 3, handSetId: handSetId || undefined }}
           onFinish={(values) => {
             const source = values.source as string
             create.mutate({
@@ -160,10 +171,13 @@ export default function ExperimentsPage() {
               hypothesis: values.hypothesis || null,
               baselineVersionId: values.baselineVersionId,
               variantVersionId: values.variantVersionId,
-              scope: 'filter',
+              scope: values.handSetId ? 'hands' : 'filter',
+              handSetId: values.handSetId || null,
               filter: source === 'all' ? {} : { source },
               devRatio: values.devRatio,
               repeat: values.repeat,
+              changeScope: values.changeScope || null,
+              baselinePromptMode: 'stored',
             })
           }}
         >
@@ -193,6 +207,16 @@ export default function ExperimentsPage() {
               />
             </Form.Item>
           </Space>
+          <Form.Item name="handSetId" label="手牌集（可选，优先生效）">
+            <Select
+              allowClear
+              placeholder="不选则按下面的来源/筛选"
+              options={(handSets.data?.items || []).map((item) => ({
+                value: item.id,
+                label: `${item.name} · v${item.revision} · ${item.handCount} 手`,
+              }))}
+            />
+          </Form.Item>
           <Space size="large" style={{ display: 'flex' }}>
             <Form.Item name="source" label="手牌来源" style={{ flex: 1 }}>
               <Select options={[
@@ -207,6 +231,16 @@ export default function ExperimentsPage() {
             </Form.Item>
             <Form.Item name="repeat" label="每点重复" style={{ flex: 1 }}>
               <InputNumber min={1} max={5} style={{ width: '100%' }} />
+            </Form.Item>
+            <Form.Item name="changeScope" label="改动类型" style={{ flex: 1 }}>
+              <Select allowClear placeholder="可选" options={[
+                { value: 'prompt', label: 'Prompt' },
+                { value: 'facts', label: '事实层' },
+                { value: 'model', label: '模型' },
+                { value: 'context', label: '上下文' },
+                { value: 'code', label: '代码' },
+                { value: 'mixed', label: '混合（不推荐）' },
+              ]} />
             </Form.Item>
           </Space>
           <Alert

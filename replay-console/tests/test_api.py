@@ -45,6 +45,58 @@ class FakeService:
         self._check()
         return {"handId": hand_id, "decisions": []}
 
+    def hand_replay(self, hand_id):
+        self._check()
+        self.calls.append(("hand_replay", hand_id))
+        return {"hand": {"id": hand_id}, "frames": [], "decisions": []}
+
+    def hand_prompt(self, hand_id, advice_id):
+        self._check()
+        self.calls.append(("hand_prompt", hand_id, advice_id))
+        return {"adviceId": advice_id, "system": "s", "user": "u"}
+
+    def list_hand_sets(self):
+        self._check()
+        return {"items": [{"id": 3, "name": "set"}]}
+
+    def create_hand_set(self, payload):
+        self._check()
+        return {"id": 3, "name": payload.get("name")}
+
+    def get_hand_set(self, set_id):
+        self._check()
+        return {"id": set_id, "name": "set", "items": []}
+
+    def patch_hand_set(self, set_id, payload):
+        self._check()
+        return {"id": set_id, **payload}
+
+    def add_hand_set_items(self, set_id, payload):
+        self._check()
+        return {"id": set_id, "items": payload.get("handIds")}
+
+    def remove_hand_set_items(self, set_id, payload):
+        self._check()
+        return {"id": set_id, "removed": len(payload.get("handIds") or [])}
+
+    def freeze_hand_set(self, set_id):
+        self._check()
+        return {"id": set_id, "frozenAt": "now"}
+
+    def experiment_pairs(self, experiment_id, query):
+        self._check()
+        return {"experimentId": experiment_id, "rows": [],
+                "summary": {"n": 0}}
+
+    def review_pair(self, experiment_id, decision_id, payload):
+        self._check()
+        return {"experimentId": experiment_id, "decisionId": decision_id,
+                "preferred": payload.get("preferred")}
+
+    def experiment_outcome(self, experiment_id, payload):
+        self._check()
+        return {"id": experiment_id, **payload}
+
     def patch_mark(self, hand_id, payload):
         self._check()
         self.calls.append(("patch_mark", hand_id, payload))
@@ -312,3 +364,40 @@ def test_ingest_and_experiment_routes(client):
                               json={"verdict": "bad", "tags": ["尺寸"]})
     assert marked.status_code == 200
     assert ("mark_decision", 3, {"verdict": "bad", "tags": ["尺寸"]}) in fake.calls
+
+
+def test_replay_and_prompt_routes(client):
+    test_client, fake = client
+    replay = test_client.get("/api/hands/1/replay")
+    assert replay.status_code == 200
+    assert replay.json()["hand"]["id"] == 1
+    prompt = test_client.get("/api/hands/1/advices/9/prompt")
+    assert prompt.status_code == 200
+    assert prompt.json()["adviceId"] == 9
+    assert ("hand_replay", 1) in fake.calls
+
+
+def test_hand_set_routes(client):
+    test_client, fake = client
+    created = test_client.post("/api/hand-sets", json={"name": "set"})
+    assert created.status_code == 200
+    added = test_client.post("/api/hand-sets/3/items",
+                             json={"handIds": [1, 2]})
+    assert added.status_code == 200
+    assert added.json()["items"] == [1, 2]
+    removed = test_client.request("DELETE", "/api/hand-sets/3/items",
+                                  json={"handIds": [1]})
+    assert removed.status_code == 200
+    assert removed.json()["removed"] == 1
+
+
+def test_pair_review_routes(client):
+    test_client, fake = client
+    reviewed = test_client.post("/api/experiments/7/pairs/11/review",
+                                json={"preferred": "B"})
+    assert reviewed.status_code == 200
+    assert reviewed.json()["preferred"] == "B"
+    outcome = test_client.post("/api/experiments/7/outcome",
+                               json={"decision": "adopt"})
+    assert outcome.status_code == 200
+    assert outcome.json()["decision"] == "adopt"

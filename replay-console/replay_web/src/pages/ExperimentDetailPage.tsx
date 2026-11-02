@@ -5,7 +5,7 @@ import {
 } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
 import {
-  ArrowLeftOutlined, PlayCircleOutlined, ReloadOutlined,
+  ArrowLeftOutlined, BranchesOutlined, PlayCircleOutlined, ReloadOutlined,
 } from '@ant-design/icons'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate, useParams } from 'react-router-dom'
@@ -171,6 +171,10 @@ export default function ExperimentDetailPage() {
             {exp.jobId ? (
               <Button onClick={() => navigate(`/jobs/${exp.jobId}`)}>任务 #{exp.jobId}</Button>
             ) : null}
+            <Button icon={<BranchesOutlined />} disabled={!exp.jobId}
+              onClick={() => navigate(`/experiments/${exp.id}/pairs`)}>
+              成对复盘
+            </Button>
             <Button type="primary" icon={<PlayCircleOutlined />}
               disabled={!canRun} loading={run.isPending} onClick={() => run.mutate()}>
               {exp.jobId ? '重跑实验' : '运行实验'}

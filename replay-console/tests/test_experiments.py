@@ -133,3 +133,82 @@ def test_experiment_results_aggregate_bucket_and_review():
     assert variant["n"] == 1
     assert variant["agreement"] == 1.0
     assert out["review"] == {"good": 1, "bad": 1}
+
+
+class FakeResultRepo:
+    def __init__(self, rows):
+        self.rows = rows
+
+    def for_job(self, job_id, hand_id=None, version_ids=None):
+        return [r for r in self.rows if (hand_id is None or r["hand_id"] == hand_id)]
+
+
+class FakeSetRepo:
+    def items(self, set_id):
+        return [{"hand_id": 1, "expect_json": '{"assertions":[{"type":"option_kind","value":"call"}]}'}]
+
+
+class FakePairRepo:
+    def __init__(self):
+        self.reviews = {}
+
+    def for_experiment(self, experiment_id):
+        return self.reviews
+
+    def upsert(self, experiment_id, decision_id, *, preferred, tags=None, note=None):
+        self.reviews[decision_id] = {"preferred": preferred, "tags": "[]",
+                                     "note": note or ""}
+        return self.reviews[decision_id]
+
+
+def test_pick_result_takes_majority_and_reports_stability():
+    service = make_service(experiment_row(), [])
+    chosen = service._pick_result([
+        {"option_kind": "call", "option_amount": 4, "reason": "a"},
+        {"option_kind": "call", "option_amount": 4, "reason": "b"},
+        {"option_kind": "fold", "option_amount": None, "reason": "c"},
+    ])
+    assert chosen["kind"] == "call"
+    assert chosen["stable"] is False
+    assert chosen["repeatCount"] == 3
+
+
+def test_assertions_and_pairs_summary():
+    service = make_service(
+        experiment_row(hand_set_id=3, changed_scope=None),
+        [{"hand_id": 1, "split": "dev"}],
+        results=[
+            {"decision_id": 11, "version_id": 10, "hand_id": 1,
+             "street": "turn", "seq": 1, "quality": "exact",
+             "actual_action": "call", "actual_amount": 8.0,
+             "option_kind": "call", "option_amount": 8.0,
+             "reason": "ok", "source": "model", "id": 1},
+            {"decision_id": 11, "version_id": 11, "hand_id": 1,
+             "street": "turn", "seq": 1, "quality": "exact",
+             "actual_action": "call", "actual_amount": 8.0,
+             "option_kind": "fold", "option_amount": None,
+             "reason": "no", "source": "model", "id": 2},
+        ],
+    )
+    # make_service 的 FakeExperimentRepo 不提供 result_repo，直接替换为可控数据。
+    service.result_repo = FakeResultRepo([
+        {"decision_id": 11, "version_id": 10, "hand_id": 1,
+         "street": "turn", "seq": 1, "quality": "exact",
+         "actual_action": "call", "actual_amount": 8.0,
+         "option_kind": "call", "option_amount": 8.0,
+         "reason": "ok", "source": "model", "id": 1},
+        {"decision_id": 11, "version_id": 11, "hand_id": 1,
+         "street": "turn", "seq": 1, "quality": "exact",
+         "actual_action": "call", "actual_amount": 8.0,
+         "option_kind": "fold", "option_amount": None,
+         "reason": "no", "source": "model", "id": 2},
+    ])
+    service.hand_set_repo = FakeSetRepo()
+    service.pair_review_repo = FakePairRepo()
+    out = service.experiment_pairs(1)
+    assert out["summary"]["n"] == 1
+    assert out["summary"]["changed"] == 1
+    assert out["summary"]["p0Regressions"] == 1
+    assert out["rows"][0]["A"]["kind"] == "call"
+    assert out["rows"][0]["B"]["kind"] == "fold"
+    assert out["rows"][0]["auto"]["p0Pass"] is False

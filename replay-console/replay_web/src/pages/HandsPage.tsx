@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import {
-  App, Button, Card, DatePicker, Divider, Dropdown, Empty, Input, Segmented,
+  App, Button, Card, DatePicker, Divider, Dropdown, Empty, Input, Modal, Segmented,
   Select, Space, Table, Tag, Tooltip,
 } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
@@ -13,7 +13,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import dayjs from 'dayjs'
 import { api, errorMessage, toQuery } from '../api'
-import type { HandDeleteResult, HandsPage, HandSummary, Meta } from '../types'
+import type { HandDeleteResult, HandsPage, HandSet, HandSetList, HandSummary, Meta } from '../types'
 import {
   BoardCards, HandCards, QualityBadge,
 } from '../components/CardChips'
@@ -54,6 +54,8 @@ export default function HandsPage() {
   const [selected, setSelected] = useState<React.Key[]>([])
   const [modal, setModal] = useState<null | 'hands' | 'favorites' | 'filter'>(null)
   const [importOpen, setImportOpen] = useState(false)
+  const [setOpen, setSetOpen] = useState(false)
+  const [targetSetId, setTargetSetId] = useState<number | null>(null)
   const [keywordDraft, setKeywordDraft] = useState(searchParams.get('keyword') || '')
 
   const queryString = searchParams.toString()
@@ -67,6 +69,22 @@ export default function HandsPage() {
     queryFn: () => api.get(`/hands${toQuery({ ...query, page, pageSize })}`),
   })
   const meta = useQuery<Meta>({ queryKey: ['meta'], queryFn: () => api.get('/meta') })
+  const handSets = useQuery<HandSetList>({
+    queryKey: ['hand-sets'],
+    queryFn: () => api.get('/hand-sets'),
+    enabled: setOpen,
+  })
+  const addToSet = useMutation({
+    mutationFn: ({ setId, handIds }: { setId: number; handIds: number[] }) =>
+      api.post<HandSet>(`/hand-sets/${setId}/items`, { handIds }),
+    onSuccess: () => {
+      message.success('已加入手牌集')
+      setSetOpen(false)
+      setTargetSetId(null)
+      queryClient.invalidateQueries({ queryKey: ['hand-sets'] })
+    },
+    onError: (error) => message.error(errorMessage(error)),
+  })
   const tagOptions = hands.data?.tagOptions || meta.data?.tags || []
   const sourceOptions = meta.data?.handSources?.length
     ? meta.data.handSources.map((item) => ({
@@ -196,6 +214,7 @@ export default function HandsPage() {
       resultAmount: 'result_amount',
       decisionCount: 'decision_count',
       lastRun: 'last_run',
+      reviewScore: 'review_score',
       createdAt: 'created_at',
       updatedAt: 'updated_at',
     }
@@ -310,6 +329,28 @@ export default function HandsPage() {
       ),
     },
     {
+      title: '深挖',
+      dataIndex: 'reviewScore',
+      key: 'reviewScore',
+      width: 100,
+      sorter: true,
+      render: (_: unknown, hand) => {
+        const flags = Object.keys(hand.flags || {})
+        return (
+          <div className="review-score-cell">
+            <span className={`review-score${(hand.reviewScore || 0) >= 50 ? ' hot' : ''}`}>
+              {hand.reviewScore || 0}
+            </span>
+            {flags.length ? (
+              <Tooltip title={flags.map((key) => `${key}: ${hand.flags?.[key]?.reason || ''}`).join('；')}>
+                <span className="muted mono">{flags.length} 标记</span>
+              </Tooltip>
+            ) : <span className="muted">—</span>}
+          </div>
+        )
+      },
+    },
+    {
       title: '最近重跑',
       dataIndex: 'lastRun',
       width: 130,
@@ -341,6 +382,16 @@ export default function HandsPage() {
             详情
           </Button>
           <Button
+            type="link"
+            size="small"
+            onClick={(event) => {
+              event.stopPropagation()
+              navigate(`/hands/${hand.id}/replay`)
+            }}
+          >
+            回放
+          </Button>
+          <Button
             danger
             type="link"
             size="small"
@@ -358,9 +409,18 @@ export default function HandsPage() {
 
   const selectedIds = selected.map(Number)
   const activeFilterCount = ['favorite', 'source', 'position', 'result', 'tag', 'hasRun', 'quality', 'keyword',
-    'dateFrom', 'dateTo'].filter((key) => searchParams.get(key)).length
+    'dateFrom', 'dateTo', 'flags', 'minScore'].filter((key) => searchParams.get(key)).length
   const favoriteCount = meta.data?.favoriteCount ?? 0
   const maxCalls = meta.data?.limits.maxCallsPerJob || 2000
+
+  const quickView = (next: Record<string, string>) => {
+    const params = new URLSearchParams()
+    for (const [key, value] of Object.entries(next)) {
+      if (value) params.set(key, value)
+    }
+    params.set('pageSize', searchParams.get('pageSize') || '50')
+    setSearchParams(params, { replace: true })
+  }
 
   return (
     <div className="hands-page">
@@ -369,12 +429,14 @@ export default function HandsPage() {
           <div className="eyebrow">HAND LIBRARY</div>
           <h1>手牌库</h1>
           <p className="page-sub">
-            从 call-back 的 <span className="mono">review_hands</span> 只读加载，
-            或导入复盘 JSON / 实时日志手牌 ·
-            收藏典型手牌，逐街对比多版本 AI 建议。
+            实时手牌自动入库（也兼容 <span className="mono">review_hands</span> 只读加载）·
+            「值得看」按 AI 分歧/兜底/数据异常/大底池排序 · 点「回放」看瀑布流/牌桌与当时的 Prompt。
           </p>
         </div>
         <Space size={8} wrap>
+          <Button onClick={() => quickView({ minScore: '50' })}>值得看</Button>
+          <Button onClick={() => quickView({ flags: 'AB_FLIP' })}>A/B 翻转</Button>
+          <Button onClick={() => quickView({ flags: 'AI_FALLBACK' })}>兜底建议</Button>
           <Button icon={<UploadOutlined />} onClick={() => setImportOpen(true)}>
             导入手牌
           </Button>
@@ -513,6 +575,34 @@ export default function HandsPage() {
           </div>
 
           <div className="filter-field">
+            <label>深挖标记</label>
+            <Select
+              mode="multiple"
+              allowClear
+              placeholder="全部标记"
+              value={(searchParams.get('flags') || '').split(',').filter(Boolean)}
+              onChange={(value) => setFilter('flags', value)}
+              options={[
+                ['AI_DIFF', 'AI 与实际行动分歧'], ['AI_FALLBACK', '兜底建议'],
+                ['DATA_WARN', '数据异常'], ['BIG_POT', '大底池'],
+                ['RIVER_BIG', '河牌大注'], ['AB_FLIP', 'A/B 翻转'],
+                ['PROMPT_MISSING', 'Prompt 缺失'], ['PARTIAL', '未完成'],
+              ].map(([value, label]) => ({ value, label }))}
+            />
+          </div>
+
+          <div className="filter-field">
+            <label>最低深挖分</label>
+            <Select
+              allowClear
+              placeholder="不限"
+              value={searchParams.get('minScore') || undefined}
+              onChange={(value) => setFilter('minScore', value)}
+              options={[30, 50, 70, 90].map((value) => ({ value: String(value), label: `${value}+` }))}
+            />
+          </div>
+
+          <div className="filter-field">
             <label>关键词</label>
             <Input.Search
               placeholder="手牌 / 公共牌 / 标题"
@@ -612,6 +702,15 @@ export default function HandsPage() {
             <Button size="small" onClick={() => setSelected([])}>取消选择</Button>
             <Button
               size="small"
+              onClick={() => {
+                setTargetSetId(handSets.data?.items?.[0]?.id ?? null)
+                setSetOpen(true)
+              }}
+            >
+              加入手牌集
+            </Button>
+            <Button
+              size="small"
               danger
               icon={<DeleteOutlined />}
               onClick={() => confirmDelete(selectedIds, `删除选中的 ${selectedIds.length} 手`)}
@@ -647,6 +746,38 @@ export default function HandsPage() {
           queryClient.invalidateQueries({ queryKey: ['health'] })
         }}
       />
+
+      <Modal
+        open={setOpen}
+        title={`把 ${selectedIds.length} 手加入手牌集`}
+        okText="加入"
+        cancelText="取消"
+        confirmLoading={addToSet.isPending}
+        onCancel={() => setSetOpen(false)}
+        onOk={() => {
+          if (!targetSetId) {
+            message.warning('先在「手牌集」页新建一个集合')
+            return
+          }
+          addToSet.mutate({ setId: targetSetId, handIds: selectedIds })
+        }}
+      >
+        <Select
+          style={{ width: '100%' }}
+          placeholder="选择手牌集"
+          value={targetSetId ?? undefined}
+          onChange={setTargetSetId}
+          options={(handSets.data?.items || []).map((item) => ({
+            value: item.id,
+            label: `${item.name} · v${item.revision} · ${item.handCount} 手`,
+          }))}
+        />
+        {!handSets.data?.items?.length ? (
+          <p className="muted" style={{ marginTop: 8 }}>
+            还没有手牌集。<Button type="link" style={{ padding: 0 }} onClick={() => navigate('/sets')}>去新建</Button>
+          </p>
+        ) : null}
+      </Modal>
     </div>
   )
 }

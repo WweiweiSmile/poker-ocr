@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -166,6 +167,7 @@ def execute_unit(
     retries: int,
     limiter: RateLimiter,
     store_prompts: bool = True,
+    prompt_override: tuple[str, str] | None = None,
 ) -> UnitOutcome:
     """跑一个 unit：build_situation → 带重试的模型调用 → 落库 payload。
 
@@ -193,6 +195,11 @@ def execute_unit(
     facts = decision_facts(sit)
     facts["contextMode"] = context_mode
     facts["tableStatsMode"] = stats_mode
+    facts["promptSource"] = "stored" if prompt_override else "rerender"
+    if prompt_override:
+        facts["baselinePromptSha"] = hashlib.sha256(
+            (prompt_override[0] + "\n---\n" + prompt_override[1]).encode()
+        ).hexdigest()
     actual_tags = sorted(audit(sit, decision.actual, decision.actual_amount))
     facts["actualViolationTags"] = actual_tags
 
@@ -222,7 +229,8 @@ def execute_unit(
     started = time.monotonic()
     try:
         advice: Advice = advise(sit, settings, timeout=timeout,
-                                complete=complete)
+                                complete=complete,
+                                prompt_override=prompt_override)
         elapsed = int((time.monotonic() - started) * 1000)
         source = advice.source
         option = advice.option
@@ -241,6 +249,7 @@ def execute_unit(
             "option_amount": option.amount,
             "option_label": option.label,
             "reason": advice.reason,
+            "reason_full": advice.reason_full,
             "source": source,
             "model": advice.model or version.get("model"),
             "prompt_version": PROMPT_VERSION,
@@ -252,6 +261,7 @@ def execute_unit(
             "facts_json": json.dumps(facts, ensure_ascii=False, default=str),
             "prompt_system": captured["system"] if store_prompts else None,
             "prompt_user": captured["user"] if store_prompts else None,
+            "prompt_sha256": advice.prompt_sha256 if store_prompts else None,
             "raw_response": captured["raw"] if store_prompts else None,
             "error_msg": advice.error if source != "model" else None,
             "actual_tags": actual_tags,

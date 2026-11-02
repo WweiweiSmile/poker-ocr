@@ -52,6 +52,9 @@ export interface HandSummary {
   fingerprint: string
   hasRun: boolean
   lastRun: LastRun | null
+  flagMask?: number
+  flags?: Record<string, { reason?: string }>
+  reviewScore?: number
   createdAt: string | null
   updatedAt: string | null
   userId: number
@@ -111,6 +114,7 @@ export interface StreetBlock {
 }
 
 export interface HandAdvice {
+  id?: number | null
   ts?: string | null
   street?: string | null
   pot?: number | null
@@ -122,12 +126,17 @@ export interface HandAdvice {
     amount?: number | null
   }
   reason?: string | null
+  reasonFull?: string | null
   plan?: string | null
   confidence?: number | null
   source?: string | null
   model?: string | null
   durationMs?: number | null
   promptVersion?: string | null
+  promptSha256?: string | null
+  promptMissing?: boolean
+  promptMissingReason?: string | null
+  hasPrompt?: boolean
   actionIndex?: number | null
   decisionKey?: unknown
   actualAction?: string | null
@@ -581,6 +590,14 @@ export interface Experiment {
   status: string
   jobId: number | null
   hands: { total: number; dev: number; holdout: number }
+  handSetId?: number | null
+  handSetRevision?: number | null
+  kind?: string
+  changeScope?: string | null
+  baselinePromptMode?: string
+  decision?: string | null
+  conclusion?: string
+  metrics?: Record<string, unknown>
   createdAt: string | null
   startedAt: string | null
   finishedAt: string | null
@@ -720,4 +737,244 @@ export interface RangeABResponse {
   run?: string
   baseline?: string
   candidate?: string
+}
+
+// ── 手牌回放 / 手牌集 / 成对 A/B ─────────────────────────────────────
+
+export interface ReplayActor {
+  seatId?: string | null
+  name?: string | null
+  position?: string | null
+}
+
+export interface ReplayAdvice {
+  adviceId?: number | null
+  optionId?: string | null
+  kind?: string | null
+  amount?: number | null
+  label?: string | null
+  reason?: string | null
+  reasonFull?: string | null
+  source?: string | null
+  model?: string | null
+  promptSha256?: string | null
+  promptMissing?: boolean
+  durationMs?: number | null
+  confidence?: number | null
+}
+
+export interface ReplayFrame {
+  seq: number
+  type: 'hand_start' | 'street_start' | 'action' | 'decision' | 'hand_end' | string
+  ts?: string | null
+  street?: string
+  label?: string
+  actor?: ReplayActor
+  action?: string
+  amount?: number | null
+  amountMode?: string
+  potAfter?: number | null
+  potStart?: number | null
+  betsAfter?: Record<string, number>
+  stacksAfter?: Record<string, number>
+  board?: string[]
+  decisionId?: number | null
+  decisionKey?: unknown
+  snapshot?: Record<string, unknown>
+  actual?: { action?: string | null; amountBb?: number | null }
+  advice?: ReplayAdvice | null
+  promptSha256?: string | null
+  promptMissing?: boolean
+  allIn?: boolean
+  inferred?: boolean
+  derived?: boolean
+  warnings?: string[]
+  quality?: string
+  result?: {
+    heroNetBb?: number | null
+    outcome?: string | null
+    source?: string | null
+  }
+  hero?: {
+    seatId?: string
+    cards?: string[]
+    position?: string | null
+    stack?: number | null
+  }
+  roster?: {
+    seatId?: string | null
+    name?: string | null
+    position?: string | null
+    stack?: number | null
+    status?: string | null
+    inHand?: boolean
+  }[]
+  table?: {
+    size?: number
+    blinds?: { sb?: number | null; bb?: number | null; ante?: number | null }
+    bombPot?: boolean
+  }
+}
+
+export interface ReplayDecision {
+  id: number | null
+  street: string
+  seq: number
+  actionIndex: number
+  pot: number
+  toCall: number
+  heroStack: number | null
+  actual: ActualAction
+  adviceId?: number | null
+  promptSha256?: string | null
+  promptMissing?: boolean
+  advice?: ReplayAdvice | null
+}
+
+export interface HandReplay {
+  hand: {
+    id: number
+    uid: string | null
+    heroCards: string[]
+    heroPosition: string | null
+    tableSize: number
+    board: string[]
+    result: { heroNetBb: number | null; outcome: string; source: string }
+    quality: Quality
+    warnings: string[]
+    partial: boolean
+    createdAt: string | null
+  }
+  timeline: { version?: string; frames?: ReplayFrame[] }
+  frames: ReplayFrame[]
+  decisions: ReplayDecision[]
+}
+
+export interface PromptDetail {
+  adviceId: number
+  handId: number
+  street: string
+  actionIndex: number
+  promptVersion: string | null
+  promptSha256: string | null
+  promptMissing: boolean
+  promptMissingReason: string | null
+  promptBytes: number
+  system: string
+  user: string
+  rawResponse: string | null
+  reasonFull: string | null
+  facts: Record<string, unknown>
+  context: Record<string, unknown>
+  modelParams: Record<string, unknown>
+  capturedAt: string | null
+  tokensIn: number | null
+  tokensOut: number | null
+  durationMs: number | null
+}
+
+export interface HandSetItem {
+  handId: number
+  fingerprint: string
+  role: string
+  priority: number
+  stratum: string | null
+  note: string
+  expect: Record<string, unknown>
+  quality: Quality | 'missing'
+  stale: boolean
+  flags: Record<string, unknown>
+  hand: {
+    id: number
+    title: string
+    heroCards: string
+    board: string
+    heroPosition: string | null
+    result: string
+    resultAmount: number | null
+    reviewScore: number
+  } | null
+}
+
+export interface HandSetCoverage {
+  roles: Record<string, number>
+  streets: Record<string, number>
+  positions: Record<string, number>
+  quality: Record<string, number>
+  results: Record<string, number>
+  decisions: number
+  promptReady: number
+  promptCoverage: number
+}
+
+export interface HandSet {
+  id: number
+  name: string
+  description: string
+  purpose: string
+  revision: number
+  frozenAt: string | null
+  createdAt: string | null
+  updatedAt: string | null
+  handCount: number
+  items: HandSetItem[]
+  coverage: HandSetCoverage
+}
+
+export interface HandSetList {
+  items: HandSet[]
+}
+
+export interface PairSide {
+  optionId: string | null
+  kind: string | null
+  amount: number | null
+  reason: string | null
+  source: string | null
+  promptSha256: string | null
+  promptSystem?: string | null
+  promptUser?: string | null
+  rawResponse?: string | null
+  reasonFull?: string | null
+  stable: boolean
+  repeatCount: number
+  distribution: Record<string, number>
+}
+
+export interface PairRow {
+  decisionId: number
+  handId: number
+  street: string
+  seq: number
+  split: string | null
+  quality: string | null
+  actual: { action: string | null; amountBb: number | null }
+  A: PairSide | null
+  B: PairSide | null
+  auto: {
+    sameKind: boolean
+    sameSize: boolean
+    changed: boolean
+    p0: boolean
+    p0Pass: boolean | null
+    p0Regression?: boolean
+    assertions: { type: string; ok: boolean; value?: unknown }[]
+    baselineAssertions?: { type: string; ok: boolean; value?: unknown }[]
+  }
+  review: { preferred: string; tags: string[]; note: string } | null
+}
+
+export interface ExperimentPairs {
+  experimentId: number
+  jobId: number
+  rows: PairRow[]
+  summary: {
+    n: number
+    changed: number
+    aWins: number
+    bWins: number
+    same: number
+    unsure: number
+    p0Regressions: number
+  }
 }

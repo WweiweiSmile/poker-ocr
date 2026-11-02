@@ -56,7 +56,8 @@ class Runner:
         self.decision_repo = DecisionRepository(db)
         self.live_advice_repo = LiveAdviceRepository(db)
         self.result_repo = ResultRepository(db)
-        self.hand_repo = HandRepository(db, settings.hand_user_id)
+        self.hand_repo = HandRepository(db, settings.hand_user_id,
+                                         settings.console_user_id)
         self.experiment_repo = ExperimentRepository(
             db, settings.console_user_id)
         self.limiter = RateLimiter(settings.rate_limit_per_second)
@@ -165,6 +166,17 @@ class Runner:
 
         config_snapshot = json_load(job.get("config_snapshot"), {}) or {}
         include_quality = set(config_snapshot.get("includeQuality") or [EXACT, APPROX])
+        # A/B 实验：baseline 可用线上 prompt 原文（stored），variant 重渲染。
+        experiment = None
+        if job.get("experiment_id"):
+            try:
+                experiment = self.experiment_repo.get(int(job["experiment_id"]))
+            except Exception:  # noqa: BLE001
+                experiment = None
+        baseline_version_id = (int(experiment["baseline_version_id"])
+                               if experiment else None)
+        baseline_prompt_mode = (experiment.get("baseline_prompt_mode") or "stored"
+                                if experiment else "stored")
         job_hands = self.jobs_repo.hand_progress(job_id)
         pending: list[tuple[DecisionPoint, dict, int, int]] = []
         hand_totals: dict[int, int] = {}
@@ -192,10 +204,15 @@ class Runner:
             # 线上建议上下文（table_stats/opponent_reads）按决策点挂到快照上；
             # 版本 context_mode=snapshot 时 engine 会用它，保证线上/重跑同上下文。
             contexts = self.live_advice_repo.context_for_hand(hand_id)
+            stored_prompts = self.live_advice_repo.baseline_prompts_for_hand(hand_id)
             for db_row in decision_rows:
                 decision = _decision_from_row(db_row)
-                decision.context = contexts.get(
-                    (decision.street, decision.action_index), {})
+                key = (decision.street, decision.action_index)
+                decision.context = contexts.get(key, {})
+                prompt = stored_prompts.get(key)
+                if prompt:
+                    decision.baseline_prompt = (prompt["system"], prompt["user"])
+                    decision.baseline_prompt_sha = prompt.get("sha")
                 for version in selected:
                     for repeat_index in range(repeat):
                         pending.append((decision, version, repeat_index,
@@ -239,6 +256,12 @@ class Runner:
                     version_id=int(version["id"]), repeat_index=repeat_index,
                     payload=payload)
                 return "error"
+            override = None
+            if (baseline_prompt_mode == "stored"
+                    and baseline_version_id is not None
+                    and int(version["id"]) == baseline_version_id
+                    and decision.baseline_prompt is not None):
+                override = decision.baseline_prompt
             try:
                 outcome = execute_unit(
                     decision=decision, version=version,
@@ -247,6 +270,7 @@ class Runner:
                     retries=self.settings.transient_retries,
                     limiter=self.limiter,
                     store_prompts=self.settings.store_prompts,
+                    prompt_override=override,
                 )
             except Exception as exc:  # noqa: BLE001
                 log.exception("unit 失败 hand=%s version=%s", decision.hand_id,
@@ -333,8 +357,37 @@ class Runner:
             self.experiment_repo.set_status(
                 int(experiment_id), "done" if status in ("succeeded", "partial")
                 else "failed")
+            if status in ("succeeded", "partial"):
+                self._write_ab_flags(int(experiment_id), int(job["id"]))
         except Exception:  # noqa: BLE001
             log.exception("更新实验状态失败 experiment=%s", experiment_id)
+
+    def _write_ab_flags(self, experiment_id: int, job_id: int) -> None:
+        """把最近一次实验里 A/B 动作/金额不同的手牌标 AB_FLIP。"""
+        experiment = self.experiment_repo.get(experiment_id)
+        if not experiment:
+            return
+        baseline = int(experiment["baseline_version_id"])
+        variant = int(experiment["variant_version_id"])
+        by_decision: dict[int, dict[int, list[dict]]] = {}
+        for row in self.result_repo.for_job(job_id):
+            by_decision.setdefault(int(row["decision_id"]), {}).setdefault(
+                int(row["version_id"]), []).append(row)
+        changed_hands: set[int] = set()
+        for rows in by_decision.values():
+            a = rows.get(baseline) or []
+            b = rows.get(variant) or []
+            if not a or not b:
+                continue
+            a_keys = {(r.get("option_kind"), round(float(r.get("option_amount") or 0), 2))
+                      for r in a}
+            b_keys = {(r.get("option_kind"), round(float(r.get("option_amount") or 0), 2))
+                      for r in b}
+            if a_keys != b_keys:
+                changed_hands.add(int(a[0]["hand_id"]))
+        for hand_id in changed_hands:
+            self.hand_repo.add_flag(
+                hand_id, "AB_FLIP", "最近一次实验 A/B 动作/金额不同")
 
     def _refresh_hand_statuses(self, job_id: int) -> None:
         """以 results 为准刷新逐手状态（断点恢复后也正确）。"""

@@ -57,9 +57,49 @@ class ExperimentCreate(APIModel):
     variantVersionId: int
     scope: Literal["hands", "filter"] = "hands"
     handIds: list[int] | None = None
+    handSetId: int | None = None
     filter: dict[str, Any] = Field(default_factory=dict)
     devRatio: float = Field(0.7, ge=0.1, le=0.9)
     repeat: int = Field(3, ge=1, le=5)
+    kind: Literal["ab", "regression", "smoke"] = "ab"
+    changeScope: Literal["prompt", "facts", "model", "context", "code", "mixed"] | None = None
+    baselinePromptMode: Literal["stored", "rerender", "external"] = "stored"
+
+
+class HandSetCreate(APIModel):
+    name: str = Field(min_length=1, max_length=100)
+    description: str | None = None
+    purpose: Literal["regression", "exploration", "golden", "coverage"] = "regression"
+    handIds: list[int] | None = None
+    role: Literal["golden", "regression", "exploration", "negative"] = "regression"
+    priority: int = Field(1, ge=0, le=9)
+
+
+class HandSetPatch(APIModel):
+    name: str | None = None
+    description: str | None = None
+    purpose: Literal["regression", "exploration", "golden", "coverage"] | None = None
+    archived: bool | None = None
+
+
+class HandSetItems(APIModel):
+    handIds: list[int] = Field(min_length=1, max_length=500)
+    role: Literal["golden", "regression", "exploration", "negative"] = "regression"
+    priority: int = Field(1, ge=0, le=9)
+    note: str | None = None
+    expect: dict[str, Any] | None = None
+
+
+class PairReviewPatch(APIModel):
+    preferred: Literal["A", "B", "same", "unsure"]
+    tags: list[str] | None = None
+    note: str | None = None
+
+
+class ExperimentOutcome(APIModel):
+    decision: Literal["adopt", "reject", "iterate", "inconclusive"]
+    conclusion: str | None = None
+    promotedVersionId: int | None = None
 
 
 class ExperimentRun(APIModel):

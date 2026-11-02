@@ -20,9 +20,10 @@ from .db import Database
 from .errors import ApiError
 from .runner import Runner
 from .schemas import (
-    DecisionMark, ExperimentCreate, ExperimentRun, HandDelete, ImportHands,
-    IngestHands, MarkPatch, RunCreate, RunPreview, VersionClone,
-    VersionCreate, VersionMetaPatch,
+    DecisionMark, ExperimentCreate, ExperimentOutcome, ExperimentRun,
+    HandDelete, HandSetCreate, HandSetItems, HandSetPatch, ImportHands,
+    IngestHands, MarkPatch, PairReviewPatch, RunCreate, RunPreview,
+    VersionClone, VersionCreate, VersionMetaPatch,
 )
 from .service import ReplayService
 
@@ -243,6 +244,63 @@ def create_app(settings: Settings | None = None,
     @app.get("/api/hands/{hand_id}")
     def get_hand(hand_id: int, request: Request):
         return service(request).get_hand(hand_id)
+
+    @app.get("/api/hands/{hand_id}/replay")
+    def get_hand_replay(hand_id: int, request: Request):
+        return service(request).hand_replay(hand_id)
+
+    @app.get("/api/hands/{hand_id}/advices/{advice_id}/prompt")
+    def get_hand_prompt(hand_id: int, advice_id: int, request: Request):
+        return service(request).hand_prompt(hand_id, advice_id)
+
+    @app.get("/api/hand-sets")
+    def list_hand_sets(request: Request):
+        return service(request).list_hand_sets()
+
+    @app.post("/api/hand-sets")
+    def create_hand_set(body: HandSetCreate, request: Request):
+        return service(request).create_hand_set(
+            body.model_dump(exclude_unset=True))
+
+    @app.get("/api/hand-sets/{set_id}")
+    def get_hand_set(set_id: int, request: Request):
+        return service(request).get_hand_set(set_id)
+
+    @app.patch("/api/hand-sets/{set_id}")
+    def patch_hand_set(set_id: int, body: HandSetPatch, request: Request):
+        return service(request).patch_hand_set(
+            set_id, body.model_dump(exclude_unset=True))
+
+    @app.post("/api/hand-sets/{set_id}/items")
+    def add_hand_set_items(set_id: int, body: HandSetItems, request: Request):
+        return service(request).add_hand_set_items(
+            set_id, body.model_dump(exclude_unset=True))
+
+    @app.delete("/api/hand-sets/{set_id}/items")
+    def remove_hand_set_items(set_id: int, body: HandDelete, request: Request):
+        return service(request).remove_hand_set_items(
+            set_id, body.model_dump(exclude_unset=True))
+
+    @app.post("/api/hand-sets/{set_id}/freeze")
+    def freeze_hand_set(set_id: int, request: Request):
+        return service(request).freeze_hand_set(set_id)
+
+    @app.get("/api/experiments/{experiment_id}/pairs")
+    def experiment_pairs(experiment_id: int, request: Request):
+        return service(request).experiment_pairs(
+            experiment_id, dict(request.query_params))
+
+    @app.post("/api/experiments/{experiment_id}/pairs/{decision_id}/review")
+    def review_pair(experiment_id: int, decision_id: int,
+                    body: PairReviewPatch, request: Request):
+        return service(request).review_pair(
+            experiment_id, decision_id, body.model_dump(exclude_unset=True))
+
+    @app.post("/api/experiments/{experiment_id}/outcome")
+    def experiment_outcome(experiment_id: int, body: ExperimentOutcome,
+                           request: Request):
+        return service(request).experiment_outcome(
+            experiment_id, body.model_dump(exclude_unset=True))
 
     @app.delete("/api/hands/{hand_id}")
     def delete_hand(hand_id: int, request: Request):

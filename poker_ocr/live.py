@@ -70,6 +70,7 @@ from .frame_state import action_signature
 from .full_table import (DealerTracker, FullOutcome, FullStateRecorder,
                          FullTableConfig, load_full_config, observe_full)
 from .hand_outbox import HandOutbox
+from .hand_ingest import HandIngestWorker, IngestConfig
 from .hand_track import LiveHandTracker
 from .ocr import OcrEngine
 from .parse import parse_blinds
@@ -982,6 +983,7 @@ class LiveProcessor:
                  table_dynamics_text: str = "",
                  profile_store: ProfileStore | None = None,
                  hand_outbox: HandOutbox | None = None,
+                 hand_ingest_worker=None,
                  incident_dir: Path | None = None,
                  incident_frames: int = 10,
                  incident_max: int = DEFAULT_INCIDENT_MAX,
@@ -1044,6 +1046,7 @@ class LiveProcessor:
         self.table_dynamics_loader = table_dynamics_loader
         # 启动时已加载的文本：第一手不必再打一遍「已加载」；之后文件变化才提示。
         self._table_dynamics_text = table_dynamics_text
+        self.hand_ingest_worker = hand_ingest_worker
         self._table_dynamics_error: str | None = None
         # 对手画像仓库：None = 关闭（--no-opponent-profile 或无 AI 建议）。
         self.profile_store = profile_store
@@ -1689,6 +1692,21 @@ class LiveProcessor:
         if partial:
             record["partial"] = True
         record.update(hand)
+        # 数据质量是落库契约的一部分：复盘时先看这手能不能信，再看建议。
+        inferred = sum(
+            1 for street in record.get("streets") or []
+            for action in street.get("actions") or []
+            if action.get("inferred"))
+        warnings = list(record.get("cards_warnings") or [])
+        status = ("partial" if partial else
+                  "approx" if record.get("cards_unreliable") else "exact")
+        record.setdefault("data_quality", {
+            "status": status,
+            "warnings": warnings,
+            "inferred_actions": inferred,
+            "missing_fields": [],
+            "cards_unreliable": bool(record.get("cards_unreliable")),
+        })
         # 新记录带 schema/uid，手牌库可以直接按 uid 幂等入库；旧消费者
         # 会忽略多出来的键。
         record.setdefault("schema", "hand.v2")
@@ -1700,6 +1718,8 @@ class LiveProcessor:
         if not partial and self.hand_outbox is not None:
             try:
                 self.hand_outbox.enqueue(record)
+                if self.hand_ingest_worker is not None:
+                    self.hand_ingest_worker.kick()
             except OSError as exc:
                 # 队列写失败不能拖垮牌局：JSONL 已经落盘，之后可以用
                 # tools/sync_hand_outbox.py 从日志回填。
@@ -2286,7 +2306,23 @@ def main(argv: list[str] | None = None) -> int:
     clicker = None
     profile_store = None
     hand_outbox = None
+    ingest_worker = None
     table_dynamics_text = ""
+    # outbox 与 AI 建议解耦：即使这局没开 AI，手牌记录也应该能进手牌库。
+    # 没有 hand_tracker 时不会产生手牌，这里建 outbox 只影响配置/日志。
+    if not args.no_hand_outbox:
+        hand_outbox = HandOutbox(args.hand_outbox)
+        ingest_config = IngestConfig.from_env()
+        if ingest_config.mode != "off":
+            ingest_worker = HandIngestWorker(hand_outbox, ingest_config,
+                                             log=_log)
+            ingest_worker.start()
+            _log(f"[手牌] outbox {hand_outbox.root}")
+            _log(f"[手牌] 自动入库 {ingest_config.url}"
+                 f"（{ingest_config.mode}，每 {ingest_config.interval:g}s，"
+                 f"批量 {ingest_config.batch}）")
+        else:
+            _log(f"[手牌] outbox {hand_outbox.root}（自动入库已关闭）")
     if args.ai_advice:
         if not env_load.found:
             _log("[建议] 没找到 .env（找过 "
@@ -2315,9 +2351,6 @@ def main(argv: list[str] | None = None) -> int:
                 "blue_button（用 hero 头像槽判蓝色下注按钮），或补上 hero_turn_probe")
         advice_runner = AdviceRunner(settings, timeout=args.ai_timeout, log=_log)
         hand_tracker = LiveHandTracker(confirm_frames=args.ai_confirm)
-        if not args.no_hand_outbox:
-            hand_outbox = HandOutbox(args.hand_outbox)
-            _log(f"[手牌] outbox {hand_outbox.root}（已结束手牌异步同步到手牌库）")
         _log("[手牌] 没读到自己手牌时："
              + ("也记录（观察对手）" if args.record_without_hero
                 else "默认跳过换手空档（--record-without-hero 可开启）"))
@@ -2453,6 +2486,8 @@ def main(argv: list[str] | None = None) -> int:
            if profile_store is not None else {"opponent_profile": False}),
         **({"hand_outbox": str(hand_outbox.root)}
            if hand_outbox is not None else {}),
+        **({"hand_ingest": ingest_worker.health()}
+           if ingest_worker is not None else {}),
         "hand_schema": "hand.v2",
         "table_view_mode": "current_hand",
     })
@@ -2477,6 +2512,7 @@ def main(argv: list[str] | None = None) -> int:
         table_dynamics_text=table_dynamics_text,
         profile_store=profile_store,
         hand_outbox=hand_outbox,
+        hand_ingest_worker=ingest_worker,
         incident_dir=(None if args.no_incident else args.incident_dir),
         incident_frames=args.incident_frames,
         incident_max=args.incident_max,
@@ -2647,6 +2683,8 @@ def main(argv: list[str] | None = None) -> int:
         if advice_runner is not None:
             advice_runner.close()
             processor.drain_advice(final=True)
+        if ingest_worker is not None:
+            ingest_worker.stop()
 
         elapsed = time.monotonic() - started_mono
         summary = {

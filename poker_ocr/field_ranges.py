@@ -215,6 +215,10 @@ def _role_prior(snap: HandSnapshot, opp, raises: list[ActionRecord],
         warnings.append("preflop shape says a raise but no raise was recorded "
                         f"(seat {seat}: range unknown)")
         return None, "unknown", "raise unread"
+    if not shapes:
+        warnings.append(f"seat {seat}: no preflop action; "
+                        "preflop shape/PFR unknown")
+        return None, "unknown", "no preflop action"
     return None, "unknown", "no preflop action"
 
 

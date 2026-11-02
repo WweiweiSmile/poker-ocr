@@ -59,6 +59,10 @@ class DecisionPoint:
     # runner 从 replay_live_advices 按 (street, action_index) 挂上来；
     # 旧手牌没有快照时为空，重跑退回 none 模式。
     context: dict = field(default_factory=dict)
+    # A/B baseline 的 stored prompt（system,user）；None = 没有线上快照。
+    # variant 仍用当前代码重渲染；只有 baseline 版本会用这个 override。
+    baseline_prompt: tuple[str, str] | None = None
+    baseline_prompt_sha: str | None = None
 
     @property
     def identity(self) -> tuple[str, str, int]:
@@ -409,6 +413,10 @@ def build_decisions(h: dict) -> tuple[list[DecisionPoint], bool, list[str], int]
                              if hero_start is not None else None)
                 to_call = round(max(level - float(commit.get("hero", 0.0) or 0.0), 0.0), 2)
                 board = cards_of(h.get("board"))[:BOARD_LEN[street]]
+                # 与 live 的 Advice.action_index 对齐：它是「决策点之前整手牌
+                # 的动作总数」，不是本街第几个动作。旧实现用本街 enumerate，
+                # 导致多街手牌的线上建议和 replay 决策点对不上。
+                global_action_index = len(seen_actions) + len(cur)
                 snap = HandSnapshot(
                     hand_id=str(h.get("id")), hand_index=0, street=street,
                     board=board, hero_cards=hero_cards,
@@ -423,7 +431,7 @@ def build_decisions(h: dict) -> tuple[list[DecisionPoint], bool, list[str], int]
                     opponents=tuple(opps), streets=streets,
                     preflop_shapes=shapes, hero_is_pfr=hero_pfr,
                     cbet_spot=False,
-                    decision_key=(str(h.get("id")), street, idx,
+                    decision_key=(str(h.get("id")), street, global_action_index,
                                   round(pot, 2), to_call),
                     players_dealt=players, bomb_pot=bomb,
                 )
@@ -436,7 +444,7 @@ def build_decisions(h: dict) -> tuple[list[DecisionPoint], bool, list[str], int]
                     snap = dataclasses.replace(snap, warnings=tuple(decision_warnings))
                 decisions.append(DecisionPoint(
                     hand_id=str(h.get("id")), street=street, seq=idx,
-                    action_index=action_index, snap=snap,
+                    action_index=global_action_index, snap=snap,
                     actual=act,
                     actual_amount=(float(amt) if amt is not None
                                    else (to_call if act == "call" else None)),

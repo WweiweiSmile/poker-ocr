@@ -56,7 +56,7 @@
 | M2 版本管理 / 单手重跑 / 决策卡对比 | ✅ | `/versions`、版本导入/克隆/归档、重跑弹窗、逐街对比 |
 | M3 批量任务 / 进度 / 取消 / 重试 / 预估 | ✅ | `/jobs`、任务详情、worker、`POST /api/runs` |
 | M4 对比筛选 / 导出 / 质量徽标 / 恢复 | ✅ | 对比视图、CSV/Markdown、保留策略、重启恢复 |
-| M5 live log / 线上建议基线 / 多用户 | 🟡 部分 | 已支持导入 live log / `hands.json` 作为第二手牌源；线上建议基线、多用户鉴权未做 |
+| M5 live log / 线上建议基线 / 多用户 | 🟡 部分 | 已支持 live 自动 outbox 入库、线上建议 prompt 快照、stored prompt baseline、手牌集/成对复盘；多用户鉴权未做 |
 
 ---
 
@@ -272,6 +272,17 @@ live 默认把**已结束**手牌写进 `data/hand_outbox/pending/`（一手一�
 旧服务端 404 时自动回退到 `/api/hands/import`。成功才移到 `sent/`；失败留在
 `pending/` 并记次数，达到 `--max-failures` 后进 `failed/`，可 `--retry-failed`。
 
+live 现在默认内嵌 `HandIngestWorker`（`HAND_INGEST_MODE=auto`），手牌结束后
+自动 POST，不需要手动跑上面的工具；手牌库离线时留在 pending，恢复/下次启动
+自动补。可用 `HAND_INGEST_URL` / `HAND_INGEST_TOKEN` / `HAND_INGEST_INTERVAL`
+调整。**改了 Python 代码后要重启 live 和 replay-console**，旧进程不会加载新
+路由/新字段。
+
+`replay_live_advices` 新增了 `prompt_system`、`prompt_user`、`prompt_sha256`、
+`raw_response`、`reason_full`、`facts_json`、`model_params_json` 等列：
+手牌详情底部可跳到回放页，在决策点打开 **Prompt Inspector** 看原文；
+A/B 的 baseline 也可以用这份线上 prompt 做 `stored` 重放。
+
 结构化 ingest 会额外写三张表：
 
 | 表 | 内容 |
@@ -281,6 +292,10 @@ live 默认把**已结束**手牌写进 `data/hand_outbox/pending/`（一手一�
 | `replay_decision_marks` | 逐决策点 `good/bad/unsure` + 标签 + 备注（复盘用） |
 
 幂等键是 `(user_id, source, external_uid)`；补了 advice/context 不会重复入库。
+手牌列表新增「深挖」列（`review_score` + 标记），可按 `flags` / `minScore` 筛选；
+左侧 **手牌集** 可把选中的手牌冻结成回归集，实验详情 → **成对复盘** 逐决策点
+看 A/B 理由并记 A/B/same/unsure。
+
 版本新增 `contextMode` / `tableStatsMode`（`none/snapshot/recompute`）：
 `snapshot` 时重跑会注入 **线上那一刻** 的 `opponent_reads` / `table_stats`，
 A/B 才是同一上下文；`none` 保持旧行为，可做「有画像 vs 无画像」的对照。

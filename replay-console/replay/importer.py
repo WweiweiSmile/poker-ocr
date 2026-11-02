@@ -381,6 +381,15 @@ def normalize_live_hand(rec: dict, *, session: int = 0,
         "external_id": external_id,
         "external_uid": external_id[:128],
         "schema_version": schema_version,
+        "record_schema": _text(rec.get("schema")) or "hand.v2",
+        "partial": bool(rec.get("partial")),
+        "data_quality": rec.get("data_quality")
+        if isinstance(rec.get("data_quality"), dict) else None,
+        "shows": rec.get("shows") if isinstance(rec.get("shows"), list) else [],
+        "start_stacks": rec.get("start_stacks")
+        if isinstance(rec.get("start_stacks"), list) else [],
+        "seat_meta": rec.get("seat_meta")
+        if isinstance(rec.get("seat_meta"), list) else [],
         "result_source": result_source[:16],
         "table_roster": table_roster,
         "title": _text(rec.get("title")) or _default_title(hero_position, hero_cards),
@@ -472,6 +481,7 @@ def _live_table_roster(rec: dict) -> list[dict]:
                 "hole_cards": _cards_text(item.get("hole_cards"))[:4] or None,
             })
         if out:
+            _fill_roster_stacks(out, rec)
             return out
     for item in _as_list(rec.get("seat_meta")):
         if not isinstance(item, dict):
@@ -489,6 +499,43 @@ def _live_table_roster(rec: dict) -> list[dict]:
             "hole_cards": None,
         })
     return out
+
+
+def _fill_roster_stacks(roster: list[dict], rec: dict) -> None:
+    """把 start_stacks / seat_meta 的起始筹码补进 roster。
+
+    live 的 table_roster 往往只有名字/位置，start_stacks 才有每座筹码；
+    牌桌回放需要它来推算 stacksAfter。缺失就保持 None，不猜。
+    """
+    by_key: dict[str, float] = {}
+    for item in _as_list(rec.get("start_stacks")):
+        if not isinstance(item, dict):
+            continue
+        stack = safe_float(item.get("stack"))
+        if stack is None:
+            continue
+        for key in (item.get("seat_id"), item.get("position")):
+            key = _text(key)
+            if key:
+                by_key[key] = stack
+    for item in _as_list(rec.get("seat_meta")):
+        if not isinstance(item, dict):
+            continue
+        stack = safe_float(item.get("stack"))
+        if stack is None:
+            continue
+        for key in (item.get("seat_id"), item.get("position")):
+            key = _text(key)
+            if key:
+                by_key.setdefault(key, stack)
+    for entry in roster:
+        if entry.get("stack") is not None:
+            continue
+        for key in (entry.get("seat_id"), entry.get("position")):
+            key = _text(key)
+            if key and key in by_key:
+                entry["stack"] = by_key[key]
+                break
 
 
 def _live_villains(rec: dict) -> list[dict]:

@@ -33,6 +33,20 @@ def is_imported_hand_id(hand_id: int) -> bool:
     return int(hand_id) >= IMPORTED_HAND_ID_BASE
 
 
+def _mysql_datetime(value: Any) -> dt.datetime | None:
+    """把 ISO 字符串转成 MySQL DATETIME；无时区/坏值都安全返回 None。"""
+    if value is None or value == "":
+        return None
+    if isinstance(value, dt.datetime):
+        return value.replace(tzinfo=None)
+    text = str(value).strip()
+    try:
+        parsed = dt.datetime.fromisoformat(text.replace("Z", "+00:00"))
+        return parsed.replace(tzinfo=None)
+    except ValueError:
+        return None
+
+
 class HandRepository:
     def __init__(self, db: Database, user_id: int = 0,
                  console_user_id: int = 0):
@@ -104,6 +118,57 @@ class HandRepository:
             row["external_id"] = None
             row["batch_id"] = None
         return row
+
+    def get_timeline(self, hand_id: int) -> dict:
+        row = self.db.one(
+            "SELECT timeline_json, timeline_version FROM replay_imported_hands "
+            "WHERE id=%s AND user_id=%s AND deleted_at IS NULL",
+            (int(hand_id), self.console_user_id))
+        if not row:
+            return {}
+        value = json_load(row.get("timeline_json"), {})
+        return value if isinstance(value, dict) else {}
+
+    def update_enrichment(self, hand_id: int, *, timeline: dict | None = None,
+                          flag_mask: int = 0, flags: dict | None = None,
+                          review_score: int = 0,
+                          record_schema: str = "hand.v2") -> None:
+        self.db.execute(
+            """UPDATE replay_imported_hands
+                  SET timeline_json=%s, timeline_version=%s,
+                      flag_mask=%s, flags_json=%s, review_score=%s,
+                      record_schema=%s, updated_at=%s
+                WHERE id=%s AND user_id=%s""",
+            (json_dumps(timeline or {}),
+             (timeline or {}).get("version"),
+             int(flag_mask), json_dumps(flags or {}), int(review_score),
+             (record_schema or "hand.v2")[:16], now_cn(),
+             int(hand_id), self.console_user_id))
+
+    def add_flag(self, hand_id: int, name: str, reason: str) -> bool:
+        """给导入的手牌加一个深挖位（用于实验完成后的 AB_FLIP 回写）。"""
+        from .flags import FLAG_BITS
+        bit = FLAG_BITS.get(name)
+        if not bit:
+            return False
+        row = self.db.one(
+            "SELECT flag_mask, flags_json, review_score FROM replay_imported_hands "
+            "WHERE id=%s AND user_id=%s AND deleted_at IS NULL",
+            (int(hand_id), self.console_user_id))
+        if not row:
+            return False
+        mask = int(row.get("flag_mask") or 0)
+        flags = json_load(row.get("flags_json"), {}) or {}
+        flags[name] = {"reason": reason}
+        score = min(100, int(row.get("review_score") or 0) + 25)
+        self.db.execute(
+            """UPDATE replay_imported_hands
+                  SET flag_mask=%s, flags_json=%s, review_score=%s,
+                      updated_at=%s
+                WHERE id=%s AND user_id=%s""",
+            (mask | bit, json_dumps(flags), score, now_cn(),
+             int(hand_id), self.console_user_id))
+        return True
 
     def get_by_ids(self, hand_ids: Iterable[int]) -> list[dict]:
         ids = [int(x) for x in hand_ids]
@@ -197,6 +262,7 @@ class ImportedHandRepository:
         h.bomb_pot_bb, h.villain_count, h.villains, h.streets, h.result,
         h.result_amount, h.pot_type, h.hero_tags, h.source_created_at,
         h.external_uid, h.schema_version, h.result_source, h.table_roster,
+        h.record_schema, h.flag_mask, h.flags_json, h.review_score,
         h.created_at, h.updated_at
     """
 
@@ -448,11 +514,14 @@ class ImportedHandRepository:
                 """INSERT INTO replay_live_advices
                      (hand_id, decision_id, street, action_index, decision_key,
                       option_id, option_kind, option_amount, option_label,
-                      reason, source, model, prompt_version, context_json,
-                      duration_ms, tokens_in, tokens_out,
+                      reason, reason_full, source, model, prompt_version,
+                      prompt_system, prompt_user, prompt_sha256, raw_response,
+                      response_sha256, facts_json, model_params_json,
+                      prompt_missing, prompt_missing_reason, captured_at,
+                      attempt, context_json, duration_ms, tokens_in, tokens_out,
                       actual_action, actual_amount, bucket)
-                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
-                           %s,%s,%s)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
+                           %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                    ON DUPLICATE KEY UPDATE
                      decision_id=VALUES(decision_id),
                      decision_key=VALUES(decision_key),
@@ -461,9 +530,21 @@ class ImportedHandRepository:
                      option_amount=VALUES(option_amount),
                      option_label=VALUES(option_label),
                      reason=VALUES(reason),
+                     reason_full=VALUES(reason_full),
                      source=VALUES(source),
                      model=VALUES(model),
                      prompt_version=VALUES(prompt_version),
+                     prompt_system=VALUES(prompt_system),
+                     prompt_user=VALUES(prompt_user),
+                     prompt_sha256=VALUES(prompt_sha256),
+                     raw_response=VALUES(raw_response),
+                     response_sha256=VALUES(response_sha256),
+                     facts_json=VALUES(facts_json),
+                     model_params_json=VALUES(model_params_json),
+                     prompt_missing=VALUES(prompt_missing),
+                     prompt_missing_reason=VALUES(prompt_missing_reason),
+                     captured_at=VALUES(captured_at),
+                     attempt=VALUES(attempt),
                      context_json=VALUES(context_json),
                      duration_ms=VALUES(duration_ms),
                      tokens_in=VALUES(tokens_in),
@@ -478,9 +559,21 @@ class ImportedHandRepository:
                  option.get("amount_bb", option.get("amount")),
                  (str(option.get("label") or "")[:64] or None),
                  advice.get("reason"),
+                 advice.get("reason_full"),
                  (str(advice.get("source") or "model")[:16]),
                  (str(advice.get("model") or "")[:100] or None),
                  (str(advice.get("prompt_version") or "")[:32] or None),
+                 advice.get("prompt_system"),
+                 advice.get("prompt_user"),
+                 (str(advice.get("prompt_sha256") or "")[:64] or None),
+                 advice.get("raw_response"),
+                 (str(advice.get("response_sha256") or "")[:64] or None),
+                 json_dumps(advice.get("facts") or {}),
+                 json_dumps(advice.get("model_params") or {}),
+                 1 if advice.get("prompt_missing") else 0,
+                 (str(advice.get("prompt_missing_reason") or "")[:64] or None),
+                 _mysql_datetime(advice.get("captured_at")),
+                 int(advice.get("attempt") or 1),
                  json_dumps(advice.get("context") or {}),
                  advice.get("duration_ms"),
                  advice.get("prompt_tokens"),
@@ -820,6 +913,36 @@ class LiveAdviceRepository:
     def __init__(self, db: Database):
         self.db = db
 
+    def list_for_hand(self, hand_id: int) -> list[dict]:
+        rows = self.db.query(
+            """SELECT * FROM replay_live_advices
+                WHERE hand_id=%s ORDER BY street, action_index, id""",
+            (int(hand_id),))
+        return rows
+
+    def get(self, advice_id: int) -> dict | None:
+        return self.db.one(
+            "SELECT * FROM replay_live_advices WHERE id=%s", (int(advice_id),))
+
+    def baseline_prompts_for_hand(self, hand_id: int) -> dict[tuple[str, int], dict]:
+        """(street, action_index) → 线上 prompt 原文，用于 stored baseline。"""
+        rows = self.db.query(
+            """SELECT street, action_index, prompt_system, prompt_user,
+                      prompt_sha256
+                 FROM replay_live_advices
+                WHERE hand_id=%s AND prompt_system IS NOT NULL
+                  AND prompt_user IS NOT NULL""",
+            (int(hand_id),))
+        out: dict[tuple[str, int], dict] = {}
+        for row in rows:
+            out[(str(row.get("street") or ""),
+                 int(row.get("action_index") or 0))] = {
+                "system": row.get("prompt_system"),
+                "user": row.get("prompt_user"),
+                "sha": row.get("prompt_sha256"),
+            }
+        return out
+
     def context_for_hand(self, hand_id: int) -> dict[tuple[str, int], dict]:
         """(street, action_index) → context_json。没有线上快照的手牌返回空。"""
         rows = self.db.query(
@@ -845,17 +968,26 @@ class ExperimentRepository:
     def create(self, *, name: str, baseline_version_id: int,
                variant_version_id: int, hypothesis: str | None,
                filter_payload: dict | None, dev_ratio: float,
-               repeat_count: int, split_strategy: str = "hand_hash") -> int:
+               repeat_count: int, split_strategy: str = "hand_hash",
+               hand_set_id: int | None = None,
+               hand_set_revision: int | None = None,
+               kind: str = "ab", change_scope: str | None = None,
+               baseline_prompt_mode: str = "stored") -> int:
         return int(self.db.execute(
             """INSERT INTO replay_experiments
                  (user_id, name, hypothesis, baseline_version_id,
                   variant_version_id, filter_json, split_strategy,
-                  dev_ratio, repeat_count, status)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,'draft')""",
+                  dev_ratio, repeat_count, status, hand_set_id,
+                  hand_set_revision, kind, change_scope,
+                  baseline_prompt_mode)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,'draft',%s,%s,%s,%s,%s)""",
             (self.user_id, name[:100], hypothesis,
              int(baseline_version_id), int(variant_version_id),
              json_dumps(filter_payload or {}), split_strategy,
-             float(dev_ratio), int(repeat_count))))
+             float(dev_ratio), int(repeat_count),
+             hand_set_id, hand_set_revision, (kind or "ab")[:16],
+             (change_scope or "")[:32] or None,
+             (baseline_prompt_mode or "stored")[:24])))
 
     def get(self, experiment_id: int) -> dict | None:
         row = self.db.one(
@@ -917,6 +1049,17 @@ class ExperimentRepository:
             "UPDATE replay_jobs SET experiment_id=%s WHERE id=%s",
             (int(experiment_id), int(job_id)))
 
+    def contains_decision(self, experiment_id: int, decision_id: int) -> bool:
+        row = self.db.one(
+            """SELECT 1 AS ok
+                 FROM replay_experiment_hands e
+                 JOIN replay_decisions d
+                   ON d.hand_id=e.hand_id
+                  AND d.hand_fingerprint=e.fingerprint
+                WHERE e.experiment_id=%s AND d.id=%s LIMIT 1""",
+            (int(experiment_id), int(decision_id)))
+        return row is not None
+
     def set_status(self, experiment_id: int, status: str) -> None:
         finished = now_cn() if status in ("done", "failed", "archived") else None
         self.db.execute(
@@ -924,6 +1067,19 @@ class ExperimentRepository:
                   SET status=%s, finished_at=COALESCE(%s, finished_at)
                 WHERE id=%s AND user_id=%s""",
             (status[:16], finished, int(experiment_id), self.user_id))
+
+    def update_outcome(self, experiment_id: int, *, metrics: dict | None = None,
+                       conclusion: str | None = None,
+                       decision: str | None = None,
+                       promoted_version_id: int | None = None) -> None:
+        self.db.execute(
+            """UPDATE replay_experiments
+                  SET metrics_json=%s, conclusion=%s, decision=%s,
+                      promoted_version_id=%s
+                WHERE id=%s AND user_id=%s""",
+            (json_dumps(metrics or {}), conclusion,
+             (decision or "")[:16] or None, promoted_version_id,
+             int(experiment_id), self.user_id))
 
     def result_rows(self, experiment_id: int, job_id: int,
                     split: str | None = None) -> list[dict]:
@@ -957,6 +1113,164 @@ class ExperimentRepository:
             sql += " AND e.split=%s"
             params.append(split)
         return self.db.query(sql, tuple(params))
+
+
+class HandSetRepository:
+    """手牌集：人工挑选 + 冻结 revision。"""
+
+    def __init__(self, db: Database, user_id: int = 0):
+        self.db = db
+        self.user_id = user_id
+
+    def create(self, *, name: str, description: str | None = None,
+               purpose: str = "regression") -> int:
+        try:
+            return int(self.db.execute(
+                """INSERT INTO replay_hand_sets
+                     (user_id, name, description, purpose)
+                   VALUES (%s,%s,%s,%s)""",
+                (self.user_id, name[:100], description,
+                 (purpose or "regression")[:32])))
+        except IntegrityError as exc:
+            raise ApiError("HAND_SET_NAME_EXISTS",
+                           f"手牌集 {name} 已存在", 409) from exc
+
+    def get(self, set_id: int) -> dict | None:
+        return self.db.one(
+            "SELECT * FROM replay_hand_sets WHERE id=%s AND user_id=%s",
+            (int(set_id), self.user_id))
+
+    def list(self, limit: int = 100) -> list[dict]:
+        rows = self.db.query(
+            """SELECT s.*,
+                      (SELECT COUNT(*) FROM replay_hand_set_items i
+                        WHERE i.set_id=s.id) AS hand_count
+                 FROM replay_hand_sets s
+                WHERE s.user_id=%s AND s.archived=0
+                ORDER BY s.updated_at DESC, s.id DESC LIMIT %s""",
+            (self.user_id, int(limit)))
+        return rows
+
+    def items(self, set_id: int) -> list[dict]:
+        return self.db.query(
+            """SELECT * FROM replay_hand_set_items
+                WHERE set_id=%s ORDER BY priority ASC, added_at ASC""",
+            (int(set_id),))
+
+    def update_meta(self, set_id: int, *, name: str | None = None,
+                    description: str | None = None,
+                    purpose: str | None = None,
+                    archived: bool | None = None) -> dict | None:
+        sets: list[str] = []
+        params: list[Any] = []
+        if name is not None:
+            sets.append("name=%s")
+            params.append(name[:100])
+        if description is not None:
+            sets.append("description=%s")
+            params.append(description)
+        if purpose is not None:
+            sets.append("purpose=%s")
+            params.append(purpose[:32])
+        if archived is not None:
+            sets.append("archived=%s")
+            params.append(1 if archived else 0)
+        if sets:
+            params += [int(set_id), self.user_id]
+            self.db.execute(
+                f"UPDATE replay_hand_sets SET {', '.join(sets)} "
+                "WHERE id=%s AND user_id=%s", tuple(params))
+        return self.get(set_id)
+
+    def add_items(self, set_id: int, items: list[dict]) -> int:
+        written = 0
+        for item in items:
+            hand_id = item.get("handId") or item.get("hand_id")
+            fingerprint = item.get("fingerprint") or ""
+            if not hand_id or not fingerprint:
+                continue
+            self.db.execute(
+                """INSERT INTO replay_hand_set_items
+                     (set_id, hand_id, fingerprint, role, priority,
+                      stratum, expect_json, note)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+                   ON DUPLICATE KEY UPDATE
+                     fingerprint=VALUES(fingerprint), role=VALUES(role),
+                     priority=VALUES(priority), stratum=VALUES(stratum),
+                     expect_json=VALUES(expect_json), note=VALUES(note)""",
+                (int(set_id), int(hand_id), str(fingerprint)[:64],
+                 (str(item.get("role") or "regression"))[:16],
+                 int(item.get("priority") or 1),
+                 (str(item.get("stratum") or "")[:64] or None),
+                 json_dumps(item.get("expect") or {}),
+                 (str(item.get("note") or "")[:255] or None)))
+            written += 1
+        if written:
+            self.db.execute(
+                """UPDATE replay_hand_sets
+                      SET revision=revision+1, frozen_at=NULL
+                    WHERE id=%s AND user_id=%s""",
+                (int(set_id), self.user_id))
+        return written
+
+    def remove_items(self, set_id: int, hand_ids: list[int]) -> int:
+        ids = [int(x) for x in hand_ids if int(x)]
+        if not ids:
+            return 0
+        placeholders = ",".join(["%s"] * len(ids))
+        removed = self.db.execute(
+            f"""DELETE FROM replay_hand_set_items
+                 WHERE set_id=%s AND hand_id IN ({placeholders})""",
+            (int(set_id), *ids))
+        if removed:
+            self.db.execute(
+                """UPDATE replay_hand_sets
+                      SET revision=revision+1, frozen_at=NULL
+                    WHERE id=%s AND user_id=%s""",
+                (int(set_id), self.user_id))
+        return removed
+
+    def freeze(self, set_id: int) -> dict | None:
+        self.db.execute(
+            """UPDATE replay_hand_sets SET frozen_at=%s
+                WHERE id=%s AND user_id=%s""",
+            (now_cn(), int(set_id), self.user_id))
+        return self.get(set_id)
+
+
+class PairReviewRepository:
+    """成对人工偏好：A/B/same/unsure。"""
+
+    def __init__(self, db: Database, user_id: int = 0):
+        self.db = db
+        self.user_id = user_id
+
+    def upsert(self, experiment_id: int, decision_id: int, *,
+               preferred: str, tags: list[str] | None = None,
+               note: str | None = None) -> dict:
+        self.db.execute(
+            """INSERT INTO replay_pair_reviews
+                 (user_id, experiment_id, decision_id, preferred, tags, note)
+               VALUES (%s,%s,%s,%s,%s,%s)
+               ON DUPLICATE KEY UPDATE
+                 preferred=VALUES(preferred), tags=VALUES(tags),
+                 note=VALUES(note)""",
+            (self.user_id, int(experiment_id), int(decision_id),
+             preferred[:8], json_dumps(tags or []), (note or "")[:4000] or None))
+        return self.get(experiment_id, decision_id) or {}
+
+    def get(self, experiment_id: int, decision_id: int) -> dict | None:
+        return self.db.one(
+            """SELECT * FROM replay_pair_reviews
+                WHERE user_id=%s AND experiment_id=%s AND decision_id=%s""",
+            (self.user_id, int(experiment_id), int(decision_id)))
+
+    def for_experiment(self, experiment_id: int) -> dict[int, dict]:
+        rows = self.db.query(
+            """SELECT * FROM replay_pair_reviews
+                WHERE user_id=%s AND experiment_id=%s""",
+            (self.user_id, int(experiment_id)))
+        return {int(row["decision_id"]): row for row in rows}
 
 
 class JobRepository:
@@ -1186,8 +1500,8 @@ class ResultRepository:
                 option_kind, option_amount, option_label, reason, source, model,
                 duration_ms, tokens_in, tokens_out, bucket, violation_tags,
                 facts_json, prompt_system, prompt_user, raw_response, error_msg,
-                prompt_version)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                prompt_version, prompt_sha256, reason_full)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
             (
                 job_id, decision_id, version_id, repeat_index,
                 payload.get("option_id"), payload.get("option_kind"),
@@ -1199,6 +1513,7 @@ class ResultRepository:
                 payload.get("facts_json"), payload.get("prompt_system"),
                 payload.get("prompt_user"), payload.get("raw_response"),
                 payload.get("error_msg"), payload.get("prompt_version"),
+                payload.get("prompt_sha256"), payload.get("reason_full"),
             ))
         return bool(result)
 

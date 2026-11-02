@@ -826,7 +826,7 @@ def test_prompt_renders_opponent_reads() -> None:
         _read("x", "路人", "unknown", confidence=0.0, n=0,
               source="unknown", gate="unknown")))
     facts = render_facts_zh(sit)
-    check("## 对手画像（逐座位，优先于全场统计/人工观察）" in facts,
+    check("## 对手画像（逐座位；优先于全场统计）" in facts,
           f"事实块应含对手画像：\n{facts}")
     check("BTN 芒果与西米：MANIAC" in facts,
           f"画像应带位置和类型：\n{facts}")
