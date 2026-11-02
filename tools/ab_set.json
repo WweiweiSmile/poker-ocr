@@ -72,16 +72,16 @@
    "category": "middle_pair_multiway",
    "source": "marginal",
    "status": "ready",
-   "expect": "cross_up",
+   "expect": "stay_below",
    "pot": 20.5,
    "to_call": 6.0,
    "threshold": 0.2264,
-   "old_equity": 0.2231,
-   "new_equity": 0.2819,
+   "old_equity": 0.1319,
+   "new_equity": 0.1756,
    "old_advice": "fold",
-   "new_advice": "call",
-   "note": "4 人池中对面对小注；跟注者范围 16.6%→24.7%，权益 22.3%→28.2% 跨过 22.6% 门槛。需要人工判断是否过度跟注。",
-   "new_advice_note": "边界手：模型建议在 call/fold 间不稳定，A/B 用多次采样，不把单次建议当硬断言。"
+   "new_advice": "fold",
+   "note": "2026-11-02 数据修正：大盲翻前是过牌（1BB 已投、无人加注）不是弃牌，hero 的翻牌弃牌补记；BB 进范围后两路权益都低于 22.6% 门槛（13.2% / 17.6%），模型两路都 fold。原 cross_up 是 BB 被误判弃牌造成的假象。",
+   "new_advice_note": "数据修正后不再是 call/fold 边界手：两路权益均低于门槛，作为「假弃牌导致过度跟注」的回归守卫。"
   },
   {
    "id": "P0-05",

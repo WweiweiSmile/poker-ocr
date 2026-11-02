@@ -55,7 +55,7 @@ fallback、或输出被 `MAX_TOKENS` 截断，看起来都可能像「建议变�
 | P0-01 | `20261101-d32f55ecc1` | river idx=16 | value_vs_multiway_donk_jam | 69.2% → 5.4% | 24.1% | cross_down | ready |
 | P0-02 | `20261101-d32f55ecc1` | river idx=18 | value_vs_raise_over_bet_call | 59.7% → 1.0% | 11.2% | cross_down | ready |
 | P0-03 | `20261101-b3c7d710f7` | river idx=13 | self_lead_not_donk | 69.6% → 40.6% | 24.9% | stay_above | ready |
-| P0-04 | `20261030-4d6df87e6e` | flop idx=9 | middle_pair_multiway | 22.3% → 28.2% | 22.6% | cross_up | ready |
+| P0-04 | `20261030-4d6df87e6e` | flop idx=9 | middle_pair_multiway | 13.2% → 17.6% | 22.6% | stay_below | ready |
 | P0-05 | `20261030-2e9aeb101c` | flop idx=12 | oesd_vs_raise_allin | 29.4% → 30.9% | 33.3% | stay_below | ready |
 | P0-06 | `20261030-acf43ea34f` | river idx=17 | full_house_vs_lag_jam | 91.0% → 70.9% | 18.2% | stay_above | ready |
 | P1-01 | `20261101-bb24534caa` | flop idx=12 | overpair_vs_short_jam | 41.4% → 54.6% | 14.5% | stay_above | ready |
@@ -74,6 +74,17 @@ fallback、或输出被 `MAX_TOKENS` 截断，看起来都可能像「建议变�
 | P3-02 | `h75` |  | counterfeited_two_pair_bomb_pot | — → — | — | n/a | needs_reconstruction |
 | P3-03 | `h100` |  | counterfeited_two_pair_river | — → — | — | n/a | needs_reconstruction |
 | P3-04 | `h104` |  | pot_odds_contradiction | — → — | — | n/a | needs_reconstruction |
+
+### 2.1 数据修正记录（2026-11-02）
+
+- `20261030-4d6df87e6e`（P0-04）：落库时大盲被判成「翻前弃牌」——实际是
+  1BB 已投、无人加注的默认过牌；hero 的翻牌弃牌也没记。已按帧/筹码/底池
+  对账修正：大盲改 `check`，补 hero 翻牌 `fold`，`street_active` 翻牌补
+  BB、turn/river 去掉 hero。修正后 P0-04 从 `cross_up`（22.3%→28.2%）
+  变为 `stay_below`（13.2%→17.6%），模型两路都 fold；原 cross_up 是
+  「假弃牌」把 BB 从范围里丢掉造成的。
+- 对应源码修复见 `2bcbef1`：弃牌改为「手牌图标消失 + 头像中间『弃牌』」
+  双条件，头像块走 det+rec（rec-only 会把大号白字读成 奔牌/井脚/空）。
 
 ## 3. 状态含义
 
