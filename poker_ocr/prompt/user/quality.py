@@ -1,7 +1,10 @@
 """数据质量：把技术告警翻成 1–4 条可读中文，并区分硬缺口/范围缺口。
 
-硬缺口（底牌/公共牌/底池/需跟/后手/在局人数）会改变可用动作；范围/画像/
-桌况缺口只降低可信度。system 的保守线只对硬缺口生效，这段就是它的输入。
+硬缺口只有两类：① 可选动作真的被砍（`Situation.options_degraded` 非空，
+底池/后手未读全或翻后 0 对手）；② 底牌/公共牌缺失，根本没法评估。
+其余（范围未知、街前底池未读全、对手筹码未读出）都只降低可信度——
+system 的保守线只对硬缺口生效，这段就是它的输入。分类靠显式短语表
+（`_HARD_PATTERNS`），不从译文里猜宽词。
 """
 
 from __future__ import annotations
@@ -14,6 +17,10 @@ def _gap_zh(text: str) -> str:
         return ""
     if any("\u4e00" <= ch <= "\u9fff" for ch in text):
         return text
+    if "hero hole cards unread" in text:
+        return "底牌未读出，无法评估牌力"
+    if "hero opening stack unread" in text:
+        return "开池后手未读出，套池比例未知"
     if "range unknown" in text or "range not found" in text:
         return "某座位范围未知"
     if "ranges unavailable" in text or "contradict" in text:
@@ -23,8 +30,8 @@ def _gap_zh(text: str) -> str:
     if "bet size without an action badge" in text:
         return "有下注额但没抓到动作徽章，范围按更宽处理"
     if "no preflop action" in text:
-        return ("翻前动作线缺失，翻前形态/PFR 未知（按未开池处理："
-                "open 或弃；BB 可过牌）")
+        # 按座位报的缺口：这个座位的翻前动作没记到 → 它的范围只能用未开池先验。
+        return "部分座位翻前动作线缺失，范围按未开池先验估计"
     if "no action this street" in text:
         return "部分座位本街行动线缺失，范围按未行动处理（不是已过牌）"
     if "no range table" in text or "4-bet+ pot" in text:
@@ -39,12 +46,23 @@ def _gap_zh(text: str) -> str:
     return ""
 
 
-_HARD_GAP_MARKERS = ("未读全", "筹码未读出", "状态帧", "牌面缺张")
+# 硬缺口只登记「动作空间被砍 / 根本没法评估」的几条，并用足够长的短语匹配。
+# 历史教训：早先用「未读全」「筹码未读出」做宽匹配，把「街前底池未读全
+# （范围 SPR 近似）」「对手筹码未读出（有效筹码未算）」也升级成保守线，
+# 河牌明明赔率/筹码齐全却被劝弃。宁可漏判成软缺口，也不要误判成弃牌。
+_HARD_PATTERNS = (
+    "底牌未读出",
+    "开池后手未读出",
+    "牌面缺张",
+    "底池/后手未读全",
+    "状态帧",
+    "可选动作已降级",
+)
 
 
 def _is_hard_gap(gap: str) -> bool:
-    """硬缺口 = 会改变可用动作的事实缺失；范围/信息缺口不算。"""
-    return any(marker in gap for marker in _HARD_GAP_MARKERS)
+    """硬缺口 = 动作空间被砍 / 底牌或公共牌缺失；其余只算范围/信息缺口。"""
+    return any(pattern in gap for pattern in _HARD_PATTERNS)
 
 
 def _summarize_gaps(gaps: list[str], *, has_range_equity: bool = False) -> list[str]:
@@ -81,18 +99,24 @@ def render_data_quality_zh(sit) -> list[str]:
                 and not any("只建模前" in gap for gap in gaps)):
             gaps.append(f"只建模前 {modeled} 名对手；另有 "
                         f"{actual - modeled - random_fill} 名未计入范围权益")
-    lines = ["## 数据质量（硬缺口影响可用动作；范围/画像缺口只降低可信度）"]
+    lines = ["## 数据质量（硬缺口 = 可选动作已被降级，或底牌/公共牌缺失；"
+             "其余只降低可信度）"]
     summary = _summarize_gaps(
         gaps, has_range_equity=sit.hand_ranges is not None)
-    if summary:
-        hard = [gap for gap in summary if _is_hard_gap(gap)]
-        soft = [gap for gap in summary if gap not in hard]
-        if hard:
-            lines.append("- 硬缺口（走保守线）：" + "；".join(hard))
-        if soft:
-            lines.append("- 范围/信息缺口（范围/画像缺口只降低诈唬频率；"
-                         "动作线缺失按决策顺序的未开池/未行动口径）："
-                         + "；".join(soft))
-    else:
+    hard = [gap for gap in summary if _is_hard_gap(gap)]
+    soft = [gap for gap in summary if gap not in hard]
+    degraded = getattr(sit, "options_degraded", None)
+    if degraded and not hard:
+        # 选项确实降级了，但告警文案没被抓到：补一条硬缺口，
+        # 让「说硬缺口」与「动作空间真的被砍」永远是同一件事。
+        hard.append("底池/后手未读全" if degraded == "unsized"
+                    else "状态帧异常（在局对手为 0）")
+    if hard:
+        lines.append("- 硬缺口（走保守线）：" + "；".join(hard))
+    if soft:
+        lines.append("- 范围/信息缺口（范围/画像缺口只降低诈唬频率；"
+                     "动作线缺失按决策顺序判断：未开池/面对加注/未行动）："
+                     + "；".join(soft))
+    if not hard and not soft:
         lines.append("无已知硬缺口（未列出的技术告警不影响动作）")
     return lines

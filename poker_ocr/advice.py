@@ -77,6 +77,7 @@ from .prompt.offline.strategy import (  # noqa: F401
 )
 from .prompt.user.action_line import _fmt_actions_zh  # noqa: F401
 from .prompt.user.attack import render_attack_zh  # noqa: F401
+from .prompt.user.board import unmapped_gt_warnings  # noqa: F401
 from .prompt.user.explosive import render_explosive_zh  # noqa: F401
 from .prompt.user.notes import _notes_ace_weakness  # noqa: F401
 from .prompt.user.options import render_options_zh  # noqa: F401
@@ -694,7 +695,13 @@ def _facts_snapshot(sit: Situation) -> dict:
         "range_verdict": sit.range_verdict,
         "explosive_pot": bool(sit.explosive_pot),
         "bomb_pot": bool(snap.bomb_pot),
-        "warnings": list(sit.warnings or ()),
+        "warnings": (
+            list(sit.warnings or ())
+            # 未映射的牌面告警只进这里（复盘可查），不进 prompt：
+            # 模型看到「另有 N 条未展开」既读不懂也用不上。
+            + [f"board warning unmapped: {w}"
+               for w in unmapped_gt_warnings(sit.ground_truth)]
+        ),
         "options": [option.to_dict() for option in sit.options],
     }
     return {key: value for key, value in facts.items()

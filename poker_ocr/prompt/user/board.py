@@ -27,7 +27,7 @@ def _street_change_zh(gt: GroundTruth) -> str:
     """这一街新发的牌改变了什么（成花 / 公对面成三条 / 成对）。"""
     board = gt.board
     if len(board) < 4:
-        return "无（翻牌没有上一街可比）"
+        return ""
     last, prev = board[-1], board[:-1]
     changes: list[str] = []
     suit = last[1]
@@ -60,6 +60,51 @@ def _draws_zh(gt: GroundTruth) -> str:
     return "；".join(parts) if parts else "无"
 
 
+# 通用句：已经在「坚果」「牌力」「街道」里说过，再渲染只会重复并放大恐惧。
+_LOW_SIGNAL = (
+    "You are the ABSOLUTE NUTS", "You are the NUTS",
+    "You are NOT the nuts", "This is a DRAW, not a made hand",
+    "River: no more cards",
+)
+
+
+def _map_gt_warning(warning: str, gt: GroundTruth) -> str | None:
+    """单条英文告警 → 中文；None = 不映射（低信号或未登记）。"""
+    if warning.startswith("A flush is ALREADY possible"):
+        return "牌面已成花：同花打败当前成牌，不能当坚果"
+    if warning.startswith("The board is paired"):
+        return "牌面成对：葫芦或四条可能"
+    if warning.startswith("One of your two pairs is the BOARD pair"):
+        # 公对只是两对里的一对；另一对如果是自己的口袋对/手牌对，
+        # 仍是真两对，能拿价值。旧文案一律写「抓诈牌」，f2f 的
+        # 66 在 99T 转牌就被劝成过牌。
+        hero_ranks = {r for r, _ in (gt.hero or ())}
+        counts: dict[int, int] = {}
+        for rank, _suit in (gt.made.best_five or ()):
+            counts[rank] = counts.get(rank, 0) + 1
+        pair_ranks = {r for r, n in counts.items() if n >= 2}
+        # 两对里只要有一对用到了 Hero 的底牌（口袋对或手牌对），
+        # 就不是纯「打牌面」；只有两对都来自公面才是抓诈牌。
+        own_pair = any(r in hero_ranks for r in pair_ranks)
+        return ("两对里有一对来自公对面；另一对用到了你的底牌，仍是真两对，"
+                "可以下注拿价值，但别当坚果（更大口袋对/顶对能压过）"
+                if own_pair else
+                "两对都来自公面/你只共享公对，这是抓诈牌")
+    if warning.startswith("There are trips on the board"):
+        return "牌面有三条：四条可能"
+    if warning.startswith("An opponent can complete a straight"):
+        return "对手可以用两张牌补成顺子"
+    if warning.startswith("At most 2 of any suit are on the river board"):
+        return "河牌最多两张同花：不存在同花"
+    if warning.startswith("Only a flush DRAW is possible"):
+        return "牌面最多两张同花：只有花听，没有成花"
+    if warning.startswith("You are the nuts NOW"):
+        return "现在是坚果，但后续第三张同花可以成花"
+    if warning.startswith("Your flush draw is on a paired board"):
+        return "花听在公对面上：葫芦可能已经存在，中花未必是坚果"
+    return None
+
+
 def render_gt_warnings_zh(gt: GroundTruth | None,
                           draw_focus: bool = False) -> list[str]:
     """把 ground_truth 的英文警告映射成中文牌面提示。
@@ -69,58 +114,20 @@ def render_gt_warnings_zh(gt: GroundTruth | None,
     「坚果」「牌力」「街道」里说过，再渲染只会重复并放大恐惧。
 
     `draw_focus` 保留参数兼容旧调用；听牌的通用警告现在一律不渲染。
+    未映射的告警**不进 prompt**（模型拿到「另有 N 条」也处理不了），
+    只由 `unmapped_gt_warnings()` 送去日志/JSONL，留作映射表的维护信号。
     """
     if gt is None:
         return []
-    low_signal = (
-        "You are the ABSOLUTE NUTS", "You are the NUTS",
-        "You are NOT the nuts", "This is a DRAW, not a made hand",
-        "River: no more cards",
-    )
-    out: list[str] = []
-    unknown = 0
-    for warning in gt.warnings:
-        if warning.startswith(low_signal):
-            continue
-        if warning.startswith("A flush is ALREADY possible"):
-            text = "牌面已成花：同花打败当前成牌，不能当坚果"
-        elif warning.startswith("The board is paired"):
-            text = "牌面成对：葫芦或四条可能"
-        elif warning.startswith("One of your two pairs is the BOARD pair"):
-            # 公对只是两对里的一对；另一对如果是自己的口袋对/手牌对，
-            # 仍是真两对，能拿价值。旧文案一律写「抓诈牌」，f2f 的
-            # 66 在 99T 转牌就被劝成过牌。
-            hero_ranks = {r for r, _ in (gt.hero if gt is not None else ())}
-            counts: dict[int, int] = {}
-            for rank, _suit in (gt.made.best_five if gt is not None else ()):
-                counts[rank] = counts.get(rank, 0) + 1
-            pair_ranks = {r for r, n in counts.items() if n >= 2}
-            # 两对里只要有一对用到了 Hero 的底牌（口袋对或手牌对），
-            # 就不是纯「打牌面」；只有两对都来自公面才是抓诈牌。
-            own_pair = any(r in hero_ranks for r in pair_ranks)
-            text = ("两对里有一对来自公对面；另一对用到了你的底牌，仍是真两对，"
-                    "可以下注拿价值，但别当坚果（更大口袋对/顶对能压过）"
-                    if own_pair else
-                    "两对都来自公面/你只共享公对，这是抓诈牌")
-        elif warning.startswith("There are trips on the board"):
-            text = "牌面有三条：四条可能"
-        elif warning.startswith("An opponent can complete a straight"):
-            text = "对手可以用两张牌补成顺子"
-        elif warning.startswith("At most 2 of any suit are on the river board"):
-            text = "河牌最多两张同花：不存在同花"
-        elif warning.startswith("Only a flush DRAW is possible"):
-            text = "牌面最多两张同花：只有花听，没有成花"
-        elif warning.startswith("You are the nuts NOW"):
-            text = "现在是坚果，但后续第三张同花可以成花"
-        elif warning.startswith("Your flush draw is on a paired board"):
-            text = "花听在公对面上：葫芦可能已经存在，中花未必是坚果"
-        else:
-            unknown += 1
-            continue
-        out.append(text)
-    if out:
-        # 去重但保留顺序：同一条牌面风险只提醒一次。
-        out = list(dict.fromkeys(out))
-    if unknown:
-        out.append(f"另有 {unknown} 条未展开的牌面提示")
-    return out
+    out = [_map_gt_warning(w, gt) for w in gt.warnings]
+    # 去重但保留顺序：同一条牌面风险只提醒一次。
+    return list(dict.fromkeys(text for text in out if text))
+
+
+def unmapped_gt_warnings(gt: GroundTruth | None) -> list[str]:
+    """未登记映射的告警原文：只服务可观测性，绝不渲染。"""
+    if gt is None:
+        return []
+    return [w for w in gt.warnings
+            if not w.startswith(_LOW_SIGNAL)
+            and _map_gt_warning(w, gt) is None]

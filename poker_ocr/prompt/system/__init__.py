@@ -1,8 +1,8 @@
 """system 提示词的组装入口。
 
-顺序固定：角色 → 输出契约 → 事实优先级 → 决策顺序 → 指标口径 → 筹码深度，
-最后按**局面场景**追加条件段：前注局（`ante.py`）与短码/多人池/单挑/听牌/
-河牌（`scenario.py`），只在该场景成立时出现。
+顺序固定：角色 → 输出契约 → 事实优先级 → 规则仲裁 → 决策顺序 → 指标口径 →
+筹码深度，最后按**局面场景**追加条件段：前注局（`ante.py`）与短码/多人池/
+单挑/听牌/河牌（`scenario.py`），只在该场景成立时出现。
 
 为什么按段拆文件：一段规则一个文件，改「听牌口径」不用在 2000 行里找；
 `SYSTEM_SECTIONS` 也就是提示词的骨架，测试可以逐段断言。
@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from ..shared.format import _fmt_num
 from .ante import ANTE_SECTION
+from .arbitration import ARBITRATION
 from .decision import DECISION_ORDER
 from .intro import ROLE_INTRO
 from .metrics import METRICS
@@ -25,6 +26,7 @@ SYSTEM_SECTIONS = (
     ROLE_INTRO,
     OUTPUT_CONTRACT,
     FACTS_PRIORITY,
+    ARBITRATION,
     DECISION_ORDER,
     METRICS,
     STACK_DEPTH,

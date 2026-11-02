@@ -72,8 +72,6 @@ def render_side_pot_zh(sit) -> list[str]:
         lines.append("短码/side pot：未知（Hero 后手未读出）")
     elif _unknown_stack_opponents(snap):
         lines.append("短码/side pot：未知（有对手筹码未读出）")
-    else:
-        lines.append("短码/side pot：无")
     if snap.hero_invested is not None:
         lines.append(f"本手已投入：{_fmt_num(snap.hero_invested)}BB")
     return lines

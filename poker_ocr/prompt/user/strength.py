@@ -122,7 +122,8 @@ def render_hand_strength_zh(sit: Situation) -> list[str]:
                           else "没有范围权益时不要假设自己领先")
             lines.append(
                 "（程序建议）有牌又有听：成牌 + 强听（combo draw，不是纯听牌）；"
-                "可作为保护/半诈唬下注，不是默认；多人池或没有弃牌率时优先过牌。"
+                "可作为保护/半诈唬下注，不是默认；多人池或无位置默认过牌，"
+                "没有弃牌率也别硬开。"
                 + combo_tail)
         if gt.draws.total_outs:
             # 纯两高张不是「补牌成牌」，是反超当前顶对的权益；分开写，
@@ -243,10 +244,13 @@ def render_hand_strength_zh(sit: Situation) -> list[str]:
 
     if gt is not None:
         lines.append(f"牌面结构：{_board_structure_zh(gt)}")
-        lines.append(f"转河变化：{_street_change_zh(gt)}")
+        change = _street_change_zh(gt)
+        if change:
+            lines.append(f"转河变化：{change}")
         warnings = [w.rstrip("。；")
                     for w in render_gt_warnings_zh(gt, draw_focus=is_draw)]
-        lines.append("牌面警告：" + ("；".join(warnings) + "。" if warnings else "无"))
+        if warnings:
+            lines.append("牌面警告：" + "；".join(warnings) + "。")
 
     # 只有标题、没有任何事实时整段省略。
     return lines if len(lines) > 1 else []

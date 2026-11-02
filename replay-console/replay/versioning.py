@@ -70,7 +70,10 @@ from poker_ocr.table_dynamics import (  # noqa: E402
 # 2026-11-03.2：场景段叠加仲裁（短码限翻前/单挑让位听牌/多人池价值例外）、
 #               「后手」与「本手总筹码」拆分、行动线「未记录」、4-bet 形态、
 #               硬/软缺口分栏、程序建议标记、reason 上限 60。
-CURRENT_ADVICE_VERSION = "advice-2026-11-03.2"
+# 2026-11-03.3：硬缺口改由 options_mode 派生、新增规则仲裁段、恒定段的
+#               场景规则下沉、顶对强踢 T→J、删恒定「无」行。
+# 版本号由 PROMPT_VERSION 派生：只 bump 提示词包，advice 版本自动跟随。
+CURRENT_ADVICE_VERSION = "advice-" + PROMPT_VERSION.removeprefix("lean-zh-")
 # 改动 decisions.py 的重建语义时 bump。
 # recon-3：翻前底池补上盲注（实时 pbs 只记前注，h39 4.5 → 6.0）。
 # recon-4：决策点 action_index 改成整手牌全局动作数，与 live Advice 对齐。

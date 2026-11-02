@@ -20,7 +20,9 @@ from .coach import (
 )
 from .ground_truth import GroundTruth, compute_ground_truth
 from .hand_track import PREFLOP, HandSnapshot
-from .options import LOOSE_OPEN_BONUS, _abnormal_options, build_options
+from .options import (
+    LOOSE_OPEN_BONUS, _abnormal_options, build_options, options_mode,
+)
 from .pot_math import (
     _no_opponent_anomaly, _playable_depth, _unknown_stack_opponents,
     count_limpers, hero_in_position, is_explosive_pot, players_left_to_act,
@@ -130,6 +132,10 @@ class Situation:
     # 翻后状态帧显示在局对手为 0、底池却有钱：事实自相矛盾。
     # 这种帧必须硬闸：不渲染筹码几何/牌力落后，只给过牌/弃牌。
     abnormal_no_opponents: bool = False
+    # 「可选动作」是否被降级（`abnormal` / `unsized` / None=完整动作空间）。
+    # 提示词的硬缺口/保守线由它派生，保证「说硬缺口」与「选项真的不全」同源；
+    # 见 `options.options_mode()`。
+    options_degraded: str | None = None
 
     @property
     def street(self) -> str:
@@ -240,7 +246,12 @@ def build_situation(snap: HandSnapshot,
     warnings: list[str] = list(snap.warnings)
     if (snap.street == PREFLOP and not snap.actions_of(PREFLOP)
             and not snap.bomb_pot):
+        # 「按未开池处理」只在没人下注时成立；to_call > 1.5BB 说明有人下过注，
+        # 只是动作线没抓到 —— 这时按面对加注处理，选项也会是 raise-*。
+        bb = snap.blinds.bb if snap.blinds else 1.0
         warnings.append(
+            "翻前动作线缺失，翻前形态/PFR 未知（本轮已有人下注，按面对加注处理）"
+            if (snap.to_call or 0.0) > bb * 1.5 else
             "翻前动作线缺失，翻前形态/PFR 未知（按未开池处理：open 或弃；BB 可过牌）")
     unknown_stacks = _unknown_stack_opponents(snap)
     if unknown_stacks:
@@ -304,12 +315,14 @@ def build_situation(snap: HandSnapshot,
                     if table_stats is not None
                     and table_stats.passive is not None
                     else is_passive_table(table_dynamics))
+    degraded = options_mode(snap, anomaly=anomaly)
     sit = Situation(
         snap=snap,
-        options=(_abnormal_options(snap) if anomaly
+        options=(_abnormal_options(snap) if degraded == "abnormal"
                  else build_options(snap,
                                     open_bonus=(LOOSE_OPEN_BONUS
                                                 if loose_flag else 0.0))),
+        options_degraded=degraded,
         hand_label=read.label if read else None,
         hand_tier=read.tier if read else None,
         category=read.category if read else None,

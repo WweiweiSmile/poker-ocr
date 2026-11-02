@@ -1704,8 +1704,11 @@ def test_prompt_has_no_rule_layers() -> None:
     check("事实优先级" in system, "system 应说明事实优先级")
     check("深码不要用 all-in 代替正常尺度" in system,
           "system 应约束深码 all-in")
-    check("本手总筹码 ≤20BB 的翻前推/弃区全下是标准动作" in system,
-          "system 应说明短码推/弃区全下是标准动作")
+    # 短码推/弃已下沉到「场景：短码」，只在 ≤20BB 的局面出现。
+    short_system, _ = build_messages(build_situation(
+        make_point(hero_stack=18.0, pot=6.0, to_call=0.0)))
+    check("翻前优先把 all-in 或弃牌当作默认分支" in short_system,
+          "短码段应说明推/弃区全下是标准动作")
 
 
 def test_system_scenario_sections_follow_the_spot() -> None:
@@ -2228,8 +2231,8 @@ def test_combo_draw_facts_show_combo_and_fair_share_ratio() -> None:
           f"combo draw 应有「有牌又有听」：\n{text}")
     check("可作为保护/半诈唬下注，不是默认" in text,
           f"combo draw 不能给默认下注：\n{text}")
-    check("多人池或没有弃牌率时优先过牌" in text,
-          f"combo draw 要提示多人池/无弃牌率先过牌：\n{text}")
+    check("多人池或无位置默认过牌" in text,
+          f"combo draw 要提示多人池/无位置先过牌：\n{text}")
     check("公平份额 20.0%，权益是它的" in text,
           f"combo draw 应给权益/公平份额倍数：\n{text}")
 
@@ -2377,7 +2380,8 @@ def test_street_change_is_chinese() -> None:
     text = render_facts_zh(sit)
     check("转河变化：" in text, f"应有转河变化：\n{text}")
     check("2h 让牌面成花" in text, f"应说明新牌成花：\n{text}")
-    check("牌面警告：" in text, "应有牌面警告行")
+    check("牌面警告：无" not in text,
+          "没有牌面风险时不该写一行「无」（恒定空值行已删）")
 
 
 def test_all_in_option_follows_geometry() -> None:
@@ -4229,7 +4233,12 @@ def test_system_contract_has_valid_json_examples_and_mappings() -> None:
     check("3x/4x=上家加注" in system, "应说明 raise-3x/4x 是上家加注倍数")
     check("位置/行动线/有效筹码/底池类型" in system,
           "硬事实优先级应包含位置/行动线/有效筹码/底池类型")
-    check("4 人以上顶对/超对降级" in system, "多人池要定义 4 人以上")
+    # 人数降级只对多人池成立，规则在「场景：多人池」里。
+    from poker_ocr.hand_track import OpponentSnapshot
+    multi_system, _ = build_messages(build_situation(make_point(
+        opponents=tuple(OpponentSnapshot(f"o{i}", None, pos, 90.0, 0.0, False)
+                        for i, pos in enumerate(("CO", "BB"))))))
+    check("4 人以上顶对/超对降级" in multi_system, "多人池要定义 4 人以上")
 
 
 def test_ace_high_is_conditional_not_automatic() -> None:
@@ -4602,7 +4611,11 @@ def test_system_removes_river_default_fold_and_bomb_rules() -> None:
     system, _ = build_messages(build_situation(make_point()))
     check("被加注默认弃" not in system,
           "河牌不再写「被加注默认弃」")
-    check("非坚果默认不打三条街" in system,
+    # 河牌规则只在河牌局面出现（恒定段不再重复）。
+    river_system, _ = build_messages(build_situation(make_point(
+        street="river", board=("Ks", "7d", "2c", "9h", "3s"),
+        pot=30.0, pot_before_street=20.0)))
+    check("非坚果默认不打三条街" in river_system,
           "河牌仍保留「非坚果默认不打三条街」")
     check("炸弹池" not in system,
           "炸弹池特殊规则应从 system 移除")
@@ -4894,6 +4907,37 @@ def test_data_quality_splits_hard_and_soft() -> None:
           f"动作线缺失应与 system 的未开池口径一致：\n{text}")
 
 
+def test_missing_action_line_with_a_bet_is_treated_as_facing_raise() -> None:
+    """动作线漏抓但有下注额：按面对加注建选项，不能给 open-*。
+
+    `to_call` 是第 1 层硬事实，形态缺失只是「没记到动作」。以前只看
+    `preflop_shapes`，6BB 的下注会被当成「未开池/溜入」：选项给 open-*、
+    call 标成「平跟 6BB（溜入）」，模型于是用 RFI 范围去打一个面对加注的池。
+    """
+    from poker_ocr.hand_track import StreetRecord
+
+    snap = make_point(
+        street="preflop", board=(), hero_cards=("Ah", "Kd"),
+        hero_position="BTN", hero_stack=90.0, hero_bet=0.0, to_call=6.0,
+        pot=9.0, pot_before_street=1.5, table_size=6,
+        preflop_shapes=(), hero_is_pfr=False,
+        streets=(StreetRecord("preflop", 1.5, ()),))
+    sit = build_situation(snap)
+    ids = [o.id for o in sit.options]
+    check("raise-3x" in ids and "raise-4x" in ids,
+          f"面对下注应给 3-bet 选项：{ids}")
+    check(not any(i.startswith("open-") for i in ids),
+          f"面对下注不该给开池选项：{ids}")
+    labels = [o.label for o in sit.options]
+    check(not any("溜入" in label for label in labels),
+          f"面对下注不该标成溜入：{labels}")
+    _, user = build_messages(sit)
+    check("按面对加注处理" in user,
+          f"事实块应说明按面对加注处理：\n{user}")
+    check("按未开池处理" not in user,
+          f"已有人下注时不该再说未开池：\n{user}")
+
+
 def test_capped_allin_has_one_executable_option() -> None:
     from poker_ocr.hand_track import (
         ActionRecord, OpponentSnapshot, StreetRecord,
@@ -4920,6 +4964,66 @@ def test_capped_allin_has_one_executable_option() -> None:
           f"全下只能有一个可执行选项：\n{opts}")
     check("等同全下" not in opts,
           f"不应同时给「5-bet 到 130」和「全下 97」：\n{opts}")
+
+
+def test_hard_gap_tracks_degraded_options_not_warning_text() -> None:
+    """硬缺口必须与「可选动作降级」同源，不能从告警文案里猜。
+
+    2026-11-03.3 之前用「未读全 / 筹码未读出」做宽匹配，把「街前底池未读全
+    （范围 SPR 近似）」「对手筹码未读出（有效筹码未算）」也升级成保守线，
+    河牌明明赔率/筹码齐全也会被劝弃；同时「底牌未读出」却被静默丢掉。
+    """
+    # 只缺街前底池：范围模型的近似值，选项完整 → 软缺口
+    soft = build_situation(make_point(
+        to_call=15.0, pot=50.0, hero_stack=60.0, street="river",
+        board=("Ks", "7d", "2c", "9h", "3s"),
+        warnings=("flop: pot at street start unread; SPR is approximate",)))
+    _, soft_user = build_messages(soft)
+    check(soft.options_degraded is None, "范围近似值不该降级选项")
+    check("硬缺口（走保守线）" not in soft_user,
+          f"范围近似值不该算硬缺口：\n{soft_user}")
+    check("街前底池未读全" in soft_user, "软缺口仍应展示")
+    check(any(o.kind == "raise" for o in soft.options),
+          "软缺口不该砍掉下注/加注选项")
+
+    # 底池缺失：选项真的降级 → 硬缺口
+    unsized = build_situation(make_point(pot=None))
+    _, unsized_user = build_messages(unsized)
+    check(unsized.options_degraded == "unsized", "底池未知应标记选项降级")
+    check("硬缺口（走保守线）" in unsized_user,
+          f"选项降级必须报硬缺口：\n{unsized_user}")
+    check(all(o.kind in ("call", "fold", "check") for o in unsized.options),
+          "降级后只应保留过牌/跟注/弃牌")
+
+    # 底牌缺失：选项完整，但根本没法评估 → 硬缺口
+    no_cards = build_situation(make_point(
+        hero_cards=(), warnings=("hero hole cards unread",)))
+    _, cards_user = build_messages(no_cards)
+    check("底牌未读出" in cards_user and "硬缺口（走保守线）" in cards_user,
+          f"底牌缺失必须是硬缺口：\n{cards_user}")
+
+    # 对手筹码未知：只影响有效筹码/SPR → 软缺口
+    stacks = build_situation(make_point(
+        warnings=("3 名对手筹码未读出，有效筹码/SPR 未计算",)))
+    _, stacks_user = build_messages(stacks)
+    check("硬缺口（走保守线）" not in stacks_user,
+          f"对手筹码未知不该是硬缺口：\n{stacks_user}")
+
+
+def test_constant_sections_have_no_scenario_specific_rules() -> None:
+    """场景规则只放场景段；恒定段只留定义、顺序与仲裁表。"""
+    from poker_ocr.prompt.system import SYSTEM_SECTIONS
+    from poker_ocr.prompt.system.arbitration import ARBITRATION
+
+    constant = "\n".join(s for s in SYSTEM_SECTIONS if s != ARBITRATION)
+    for moved in ("≥8 outs", "4 人以上顶对/超对降级",
+                  "非坚果默认不打三条街", "推/弃区全下是标准动作"):
+        check(moved not in constant, f"「{moved}」应下沉到场景段")
+
+    system, _ = build_messages(build_situation(make_point()))
+    check("## 规则仲裁" in system, "system 应含规则仲裁段")
+    check("硬缺口保守线，任何场景段或建议块不得覆盖" in system,
+          "仲裁表应声明输出契约最高")
 
 
 def main() -> int:

@@ -222,10 +222,15 @@ def build_preflop_options(snap: HandSnapshot,
         by_id = {o.id: o for o in options}
         return [by_id[i] for i in OPTION_ORDER if i in by_id]
 
-    # 判断「前面有没有人加注」用形态，不用 to_call：小盲面对大盲时 to_call=0.5，
-    # 那是补齐盲注，不是面对加注
-    facing_raise = any(s in ("single-raise", "three-bet")
-                       for s in snap.preflop_shapes)
+    # 「前面有没有人加注」优先看形态；形态缺失（动作线没记到）时用 to_call
+    # 兜底：小盲面对大盲 to_call=0.5、BB 补齐 to_call=1，那都不是加注，
+    # 超过 1.5 个大盲一定是有人下注/加注过。没有这条兜底，一份漏抓动作线的
+    # 快照会被当成「未开池」，给出 open-* 而不是 raise-*，模型就会用 RFI
+    # 范围去打一个面对加注的底池。
+    bb_for_raise = snap.blinds.bb if snap.blinds else 1.0
+    facing_raise = (any(s in ("single-raise", "three-bet")
+                        for s in snap.preflop_shapes)
+                    or to_call > bb_for_raise * 1.5)
 
     options: list[Option] = []
     if facing_raise and to_call > 0:
@@ -427,6 +432,20 @@ def _abnormal_options(snap: HandSnapshot) -> list[Option]:
     return [by_id[i] for i in OPTION_ORDER if i in by_id]
 
 
+def options_mode(snap: HandSnapshot, *, anomaly: bool = False) -> str | None:
+    """选项是否被降级：``"abnormal"`` / ``"unsized"`` / ``None``（完整动作空间）。
+
+    提示词的「硬缺口（走保守线）」不再从告警文案里猜，而是由这个函数派生：
+    只有动作空间真的被砍过，才允许让模型放弃下注/加注。两条降级路径分别对应
+    `_abnormal_options()`（翻后 0 对手）与 `_unsized_options()`（底池/后手未读全）。
+    """
+    if anomaly:
+        return "abnormal"
+    if snap.pot is None or snap.pot <= 0 or snap.hero_stack is None:
+        return "unsized"
+    return None
+
+
 def build_options(snap: HandSnapshot,
                   open_bonus: float = 0.0) -> list[Option]:
     """按现场底池与下注算出全部可执行选项。
@@ -447,7 +466,7 @@ def build_options(snap: HandSnapshot,
     超过后手的要封顶并注明等同全下。深码/短码场景在末尾追加 `all-in`。
     底池或后手缺失时只给过牌/跟注/弃牌：算不出尺度就不要伪造尺度。
     """
-    if snap.pot is None or snap.pot <= 0 or snap.hero_stack is None:
+    if options_mode(snap) == "unsized":
         return _unsized_options(snap)
     if snap.street == PREFLOP:
         return build_preflop_options(snap, open_bonus=open_bonus)
