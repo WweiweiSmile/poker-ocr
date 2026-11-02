@@ -10,7 +10,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:                       # 只在类型检查时引入，避免循环 import
-    from ...advice import Situation
+    from ...situation import Situation
 
 
 _RANGE_MODE_ZH = {

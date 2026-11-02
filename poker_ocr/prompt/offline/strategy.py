@@ -25,7 +25,7 @@ from ...pot_math import call_amount, winnable_pot
 from ...table_dynamics import value_heavy_aggression
 
 if TYPE_CHECKING:                       # 只在类型检查时引入，避免循环 import
-    from ...advice import Situation
+    from ...situation import Situation
 
 
 # 成手牌「**单个对手**能赢我」的比例超过这个值，就不再按价值牌处理。

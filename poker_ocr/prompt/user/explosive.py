@@ -13,7 +13,7 @@ from ...hand_track import PREFLOP
 from ..shared.format import _fmt_num
 
 if TYPE_CHECKING:                       # 只在类型检查时引入，避免循环 import
-    from ...advice import Situation
+    from ...situation import Situation
 
 
 def render_explosive_zh(sit: Situation) -> list[str]:

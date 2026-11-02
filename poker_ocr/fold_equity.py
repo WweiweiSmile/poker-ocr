@@ -572,7 +572,7 @@ def _size_lines(options, pot_now: float, owed: float) -> list[tuple[str, float]]
 
 
 def lookup(sit) -> FoldEquityReport | None:
-    """从 `advice.Situation` 生成报告。缺数据/出错一律 None（fail open）。"""
+    """从 `situation.Situation` 生成报告。缺数据/出错一律 None（fail open）。"""
     if not enabled():
         return None
     try:

@@ -16,7 +16,7 @@ from .notes import _notes_ace_weakness
 from .table_stats import _TABLE_SMALL_OPPS
 
 if TYPE_CHECKING:                       # 只在类型检查时引入，避免循环 import
-    from ...advice import Situation
+    from ...situation import Situation
     from ...opponent_profile import PooledStats
 
 

@@ -30,7 +30,8 @@ from pathlib import Path
 from typing import Callable, Mapping, Protocol, TYPE_CHECKING
 
 if TYPE_CHECKING:                       # 只用于类型，避免运行时循环导入
-    from .advice import Advice, Option
+    from .advice import Advice
+    from .options import Option
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config" / "clicker_local.json"

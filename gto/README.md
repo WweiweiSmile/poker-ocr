@@ -168,7 +168,7 @@ gto/
 ## 10. M1：接进 AI 建议（已实现）
 
 - `poker_ocr/gto_lookup.py`：查表 + 渲染事实块，同步 <10ms。
-- `advice.Situation.gto`：`build_situation()` 末尾查一次；frozen dataclass 用
+- `situation.Situation.gto`：`build_situation()` 末尾查一次；frozen dataclass 用
   `dataclasses.replace` 带出。
 - `render_hand_facts()` 在牌力事实后追加 `## GTO baseline`。
 - system 提示新增「GTO baseline」优先级：数学/读牌/桌面动态 > GTO > 通用尺度规则。

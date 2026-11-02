@@ -19,7 +19,7 @@ from ...preflop_ranges import range_verdict, sb_completable
 from .strategy import IMPLIED_ODDS_CAP_PCT, _is_set_mine_pair
 
 if TYPE_CHECKING:                       # 只在类型检查时引入，避免循环 import
-    from ...advice import Situation
+    from ...situation import Situation
 
 
 # ─────────────────── 离线审计（legacy offline only） ───────────────────

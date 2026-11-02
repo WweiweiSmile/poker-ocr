@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:                       # 只在类型检查时引入，避免循环 import
-    from ...advice import Situation
+    from ...situation import Situation
 
 from ...coach import (
     HIGH_CARD, MID_BOTTOM, ONE_PAIR, OVERPAIR, STRAIGHT, STRONG_DRAW, TPTK,

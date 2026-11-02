@@ -21,7 +21,7 @@ from .strategy import (
 )
 
 if TYPE_CHECKING:                       # 只在类型检查时引入，避免循环 import
-    from ...advice import Situation
+    from ...situation import Situation
 
 
 # ─────────────────────── 英文标签 ───────────────────────

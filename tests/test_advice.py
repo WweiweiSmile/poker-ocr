@@ -1756,6 +1756,29 @@ def test_system_scenario_sections_follow_the_spot() -> None:
         check(banned not in scenario_text, f"场景段不该写绝对规则：{banned}")
 
 
+def test_advice_module_only_keeps_model_layer() -> None:
+    """advice 只负责调模型：事实/选项的函数定义在 situation/options。
+
+    re-export 是为了旧调用方不换 import；但定义必须留在各自模块，否则
+    advice 会重新长回 5000 行。
+    """
+    from poker_ocr.options import Option as OptionsOption
+    from poker_ocr.situation import Situation as SituationModel
+
+    check(build_situation.__module__ == "poker_ocr.situation",
+          f"build_situation 应在 situation.py：{build_situation.__module__}")
+    check(build_options.__module__ == "poker_ocr.options",
+          f"build_options 应在 options.py：{build_options.__module__}")
+    check(OptionsOption.__module__ == "poker_ocr.options",
+          f"Option 应在 options.py：{OptionsOption.__module__}")
+    check(SituationModel.__module__ == "poker_ocr.situation",
+          f"Situation 应在 situation.py：{SituationModel.__module__}")
+    check(advice_mod.build_situation is build_situation,
+          "advice 应 re-export situation.build_situation，而不是另定义一份")
+    check(advice_mod.build_options is build_options,
+          "advice 应 re-export options.build_options，而不是另定义一份")
+
+
 def test_prompt_is_chinese_with_english_contract() -> None:
     """文案中文；option id / JSON key / 牌码保持英文契约。"""
     import re

@@ -117,7 +117,7 @@ def _thresholds(env=None) -> tuple[float, float, float, float]:
 
 
 def compute_hand_strength(sit) -> HandStrengthRead | None:
-    """输入 `advice.Situation`（hand_ranges 已算好），输出牌力判定。
+    """输入 `situation.Situation`（hand_ranges 已算好），输出牌力判定。
 
     依赖 `hand_ranges`；None（翻前/范围缺失）或任何异常都返回 None —— fail open，
     绝不影响主建议链路。

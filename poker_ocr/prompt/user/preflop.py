@@ -20,7 +20,7 @@ from ..shared.format import _fmt_num
 from ..shared.labels import _PREFLOP_SHAPE_ZH
 
 if TYPE_CHECKING:                       # 只在类型检查时引入，避免循环 import
-    from ...advice import Situation
+    from ...situation import Situation
 
 
 # 面对加注时还能继续的强牌：不管多人池多紧，这些牌都不该被范围结论劝退。
