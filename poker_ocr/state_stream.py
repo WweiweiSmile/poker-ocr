@@ -37,7 +37,9 @@ from .card_icon import read_card_icons
 from .dealer import DealerResult, build_detector
 from .frame_state import FrameState, NameTracker, build_state, signature
 from .name_lexicon import NameLexicon
-from .parse import Blinds, is_all_in_badge, parse_action, parse_blinds
+from .parse import (
+    Blinds, is_all_in_badge, parse_action, parse_blinds, waiting_badge,
+)
 from .ocr import OcrEngine
 from .profile import Profile
 from .roi_dedup import RoiStream
@@ -59,6 +61,15 @@ NAME_PIN_MIN_SCORE = 0.8         # 低于这个分数不钉，等下帧重读到
 # 手牌图标消失要连续几帧才判弃牌：单帧漏检（压缩/动画/遮挡）不该把人判出局。
 # 6Hz 采样下 2 帧≈0.3s，弃牌动画结束后足够确认。
 CARD_ICON_ABSENT_FRAMES = 2
+# 头像「在座未入局」文案（等待审核 / 等待中）要连续几帧读到才生效。
+# rec 对这两组字读得很飘（`等待中` → `练待中`/`#待中`），单帧误读会把一个
+# 真在局的人从**名单锁**里踢出去 —— 那一手他就再也不被识别了（不在 roster
+# 里的座位本手不参与）。所以先当「没读到」，稳住再认。
+WAIT_BADGE_CONFIRM_FRAMES = 2
+# 名单锁为未确认的等待文案最多推迟几帧。文案本身可能抖（读到/没读到交替），
+# 无限推迟会让整手都没有 roster（位置随在场人数重排）——宁可锁错一个人，
+# 也不能让位置整手都在飘。
+ROSTER_DEFER_MAX = 3
 # 爆炸底池横幅在开局出现，而换手信号（庄位落位 / hero 换牌）可能晚 1–2 帧。
 # 横幅刚出现过就遇到换手时保留标记，否则新手开局会把刚读到的炸弹池清掉。
 BOMB_BANNER_GRACE_SAMPLES = 3
@@ -157,6 +168,10 @@ class StateStream:
         self._all_in_gone: dict[str, int] = {}
         # 头像底角手牌图标「连续没看到」的帧数：够 2 帧才判弃牌。
         self._icon_absent: dict[str, int] = {}
+        # 头像「在座未入局」文案的连续帧计数：seat_id → (kind, 连续帧数)。
+        self._wait_seen: dict[str, tuple[str, int]] = {}
+        # 名单锁已经为等待文案推迟了几帧（换手时清零）。
+        self._roster_defer = 0
         self.prev_dealer: str | None = None
         self.vanish: dict[str, int] = defaultdict(int)
         # ── 一手牌内的座位身份锁（只有 live 传 extra_signature 时启用）──
@@ -276,6 +291,7 @@ class StateStream:
         avatars = read_avatars(img, self.profile, self.engine,
                                self.stream.cache, self.detect_fold,
                                executor=self._roi_pool, det_seats=det_seats)
+        avatars = self._confirm_wait_badges(avatars)
 
         # 头像 All-in 徽章：既用于 build_state 的 all_in，也用于换手判断。
         # 徽章消失必须连续 2 帧可读的非 All-in 文本，避免单帧遮挡/照片幻觉。
@@ -371,7 +387,11 @@ class StateStream:
         # 锁定的 roster 处理（见 _track_vanished / build_state 的说明）。
         # 只有 live 有可靠换手边界（extra_signature），离线视频不启用。
         if sticky and not self._roster_locked:
-            self._lock_roster(state)
+            if self._wait_pending() and self._roster_defer < ROSTER_DEFER_MAX:
+                self._roster_defer += 1
+            else:
+                self._roster_defer = 0
+                self._lock_roster(state)
         # 名字：名单建立后才可能有「锁定值 → 纠正值」的修正；存疑告警每帧都看，
         # 但同一个原文只报一次（见 _note_name_suspects）。
         self._repair_roster_names(state)
@@ -647,6 +667,39 @@ class StateStream:
                 out.add(sid)
         return out
 
+    def _wait_pending(self) -> bool:
+        """有座位读到了「在座未入局」文案、但连续帧数还不够。
+
+        这时候不能锁 roster：真没被发牌的人一旦锁进名单，这一手就再也摘不
+        出来（名单里的座位不受头像文案影响），人数/位置/行动线会整手都错。
+        等一两帧确认完再锁 —— 代价只是名单晚建一两帧。
+        """
+        return any(n < WAIT_BADGE_CONFIRM_FRAMES
+                   for _, n in self._wait_seen.values())
+
+    def _confirm_wait_badges(self, avatars: dict[str, tuple[str, float]]
+                             ) -> dict[str, tuple[str, float]]:
+        """「在座未入局」文案连续 WAIT_BADGE_CONFIRM_FRAMES 帧才生效。
+
+        未确认前把这块读数换成空文本：它就不会影响 `is_fold_badge` /
+        `is_all_in_badge` 的判定，也不会把一个人从在局里踢出去。确认后原样
+        透传，由 `build_state` 决定状态。
+        """
+        out = dict(avatars)
+        for sid, (text, score) in avatars.items():
+            kind = waiting_badge(text, score)
+            if kind is None:
+                self._wait_seen.pop(sid, None)
+                continue
+            prev_kind, n = self._wait_seen.get(sid, (None, 0))
+            # 「正在带入 → 等待中」是同一个人在同一条路上往前走了，不该把
+            # 连续帧数清零：两段文案的语义都是「这一手没他份」。
+            n = n + 1 if prev_kind is not None else 1
+            self._wait_seen[sid] = (kind, n)
+            if n < WAIT_BADGE_CONFIRM_FRAMES:
+                out[sid] = ("", 0.0)
+        return out
+
     def _read_icons(self, img) -> dict[str, bool | None]:
         """头像底角手牌图标 → 三态，并按「连续 2 帧没看到」确认弃牌。
 
@@ -711,6 +764,8 @@ class StateStream:
         self.prev_all_in_badges = set()
         self._all_in_gone.clear()
         self._icon_absent.clear()
+        self._wait_seen.clear()
+        self._roster_defer = 0
         # 换手：上一手的座位身份锁作废，下一帧按当前画面重新锁 roster。
         # 中途离桌/新入座只在一手内沿用旧信息，换手后必须重新识别。
         self.hand_roster = {}
@@ -764,6 +819,8 @@ class StateStream:
         self.prev_all_in_badges = set()
         self._all_in_gone.clear()
         self._icon_absent.clear()
+        self._wait_seen.clear()
+        self._roster_defer = 0
         self.prev_dealer = None
         self.vanish.clear()
         self.hand_roster = {}

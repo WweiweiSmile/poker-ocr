@@ -574,6 +574,89 @@ def test_show_after_fold_keeps_fold() -> None:
               f"亮牌不该洗掉之前的弃牌：{out3.state.player('lowL').to_debug()}")
 
 
+def test_waiting_badge_needs_two_frames() -> None:
+    """头像「等待中」要连续 2 帧才认：单帧误读不能把人从在局里踢出去。
+
+    rec 对这三个字的读数很不稳（`等待中` → `练待中`/#待中，0.50–0.58），
+    而名单锁建立时只要漏掉一个人，他这一手就再也不被识别（不在 roster 里
+    的座位本手不参与）。所以先当「没读到」，稳住再认。
+    """
+    with stub_env():
+        s = new_stream()
+        rows = {k: dict(v) for k, v in BASE.items()}
+        rows["lowR"] = {"name": "越call越幸", "chip": "200BB", "bet": ""}
+        s.stream.frames.extend([make_frame(rows) for _ in range(3)])
+        img = np.zeros((4, 4, 3), np.uint8)
+        with patch.object(ss, "read_avatars",
+                          lambda *a, **k: {"lowR": ("练待中", 0.54)}):
+            out1 = s.ingest(img, "f1", 0.0)
+            out2 = s.ingest(img, "f2", 0.2)
+        check(out1.state.player("lowR").in_hand,
+              f"第 1 帧还不该判未入局：{out1.state.player('lowR').to_debug()}")
+        lowr = out2.state.player("lowR")
+        check(not lowr.in_hand and lowr.status == "sitting_out",
+              f"连续 2 帧后才判未入局：{lowr.to_debug()}")
+        check(lowr.stack == 200.0, f"筹码要照常保留：{lowr.stack!r}")
+        check(out2.state.players_in_hand == 8,
+              f"未入局的人不算人数，实际 {out2.state.players_in_hand}")
+
+
+def test_roster_lock_waits_for_waiting_badge() -> None:
+    """有座位读到「等待中」但还没确认时，先别锁 roster。
+
+    锁早了会把一个真没发到牌的人写进名单，而名单里的座位不再受头像文案
+    影响 —— 他这一手都会被当成在局玩家（人数/位置/行动线全错）。
+    """
+    with stub_env():
+        s = new_stream()
+        rows = {k: dict(v) for k, v in BASE.items()}
+        rows["lowR"] = {"name": "越call越幸", "chip": "200BB", "bet": ""}
+        feed(s, make_frame(rows), extra_signature=(("As", "Kd"), ()))
+        check(len(s.hand_roster) == 9,
+              f"第一手应锁 9 人：{sorted(s.hand_roster)}")
+
+        # 换手：lowR 头像「等待中」。第 1 帧只读到、还没确认。
+        s.stream.frames.extend([make_frame(rows) for _ in range(2)])
+        img = np.zeros((4, 4, 3), np.uint8)
+        with patch.object(ss, "read_avatars",
+                          lambda *a, **k: {"lowR": ("等待中", 0.9)}):
+            first = s.ingest(img, "n1", 1.0,
+                             extra_signature=(("Qs", "Jd"), ()))
+            check(first.new_hand, "换手应被识别")
+            check(s.hand_roster == {},
+                  f"未确认的等待文案不该锁名单：{sorted(s.hand_roster)}")
+            second = s.ingest(img, "n2", 1.2,
+                              extra_signature=(("Qs", "Jd"), ()))
+        check(s.hand_roster and "lowR" not in s.hand_roster,
+              f"确认后锁名单应排除他：{sorted(s.hand_roster)}")
+        check(not second.state.player("lowR").in_hand,
+              f"确认后应判未入局：{second.state.player('lowR').to_debug()}")
+
+
+def test_roster_lock_defers_at_most_three_frames() -> None:
+    """文案在「等待中/正在带入」之间抖时，最多推迟 3 帧就照常锁名单。
+
+    无限推迟会让整手都没有 roster：位置会随在场人数重排，行动顺序和 AI 上下文
+    跟着错。宁可锁错一个人，也不能让位置整手都在飘。
+    """
+    with stub_env():
+        s = new_stream()
+        rows = {k: dict(v) for k, v in BASE.items()}
+        rows["lowR"] = {"name": "越call越幸", "chip": "200BB", "bet": ""}
+        feed(s, make_frame(rows), extra_signature=(("As", "Kd"), ()))
+        s.stream.frames.extend([make_frame(rows) for _ in range(5)])
+        img = np.zeros((4, 4, 3), np.uint8)
+        seq = iter([("等待中", 0.9), ("正在带入", 0.9)] * 3)
+        with patch.object(ss, "read_avatars",
+                          lambda *a, **k: {"lowR": next(seq)}):
+            for i in range(5):
+                s.ingest(img, f"n{i}", 1.0 + 0.2 * i,
+                         extra_signature=(("Qs", "Jd"), ()))
+        check(s._roster_locked, "抖动的文案不能无限推迟名单锁")
+        check("lowR" not in s.hand_roster,
+              f"锁名单时仍应排除未入局的人：{sorted(s.hand_roster)}")
+
+
 def test_discard_breaks_consecutive_stability() -> None:
     """动画里被质量闸丢掉的帧要打断「连续三帧」，不能跨过去凑数。"""
     with stub_env():
@@ -742,6 +825,9 @@ def main() -> int:
         test_slow_fields_pinned_until_hand_switch,
         test_bomb_banner_latches_across_frames,
         test_card_icon_fold_needs_two_absent_frames,
+        test_waiting_badge_needs_two_frames,
+        test_roster_lock_waits_for_waiting_badge,
+        test_roster_lock_defers_at_most_three_frames,
         test_show_after_fold_keeps_fold,
         test_roster_name_repaired_after_correction,
         test_roster_name_not_repaired_before_confirmation,

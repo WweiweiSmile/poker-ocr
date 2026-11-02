@@ -227,6 +227,54 @@ def is_all_in_badge(avatar_text: str | None, score: float = 0.0,
         None, compact, "allin").ratio() >= 0.72
 
 
+# 「人坐在桌边但这一手没被发牌」的头像文案有三种：正在带入 / 等待审核 / 等待中。
+# 真机依据：`人在桌未入局.mp4`（864x1920）。hero 右手边第一位 lowR 的完整生命周期
+# 都在这段视频里：1.2s 头像 `正在带入11`、筹码 100BB → 6s 起变成 `等待中`、
+# 筹码 200BB（**筹码照常显示**，所以不能再用「筹码 0」当判据）。
+#
+# 读数有两条差异很大的路径，判据必须同时容得下：
+#   · 头像区 **det+rec**（对没有手牌图标的座位才跑）读得几乎是原文：
+#     `等待中` / `等待审核179` / `正在带入11`，分数 1.00；
+#   · 纯 rec 只读到碎片：`#中`(0.68) / `#德中`(0.52) / `练待中`(0.54) ——
+#     3 个字里常只对 1–2 个，整词匹配等于不识别。
+# 所以按**命中的不同字数**判，并且只数汉字：det 会把旁边的计时数字一起框进来
+# （`正在带入11`），数字不是证据。
+_WAITING_PHRASES: tuple[tuple[str, tuple[str, ...], int], ...] = (
+    ("buying_in", ("正", "在", "带", "入"), 3),   # 正在带入（4 字命中 3 个）
+    ("waiting", ("等", "待", "审", "核"), 3),     # 等待审核（4 字命中 3 个）
+    ("waiting", ("等", "待", "中"), 2),           # 等待中（3 字命中 2 个）
+)
+# 汉字数上限：只防头像照片里的长句噪声（实测 det 最长读到 `等待审核179`，汉字 4）。
+_WAITING_MAX_LEN = 6
+_WAITING_MIN_SCORE = 0.45
+
+
+def waiting_badge(text: str | None, score: float = 0.0,
+                  min_score: float = _WAITING_MIN_SCORE) -> str | None:
+    """头像读数是不是「在座但没入局」的文案。
+
+    返回 `"buying_in"`（正在带入）或 `"waiting"`（等待审核 / 等待中），
+    读不到、分数不够、文本不像都返回 `None` —— 与 `is_fold_badge` 同一套三态
+    语义：`None` 只表示「没法判断」，调用方必须允许它。
+
+    中文短文本，命中即认（`带入` 是「正在带入」的稳定子串）。**不做整词匹配**：
+    实测 `等待中` 会被读成 `练待中` / `#待中`，整词匹配等于不识别。
+    """
+    t = (text or "").strip()
+    if not t or score < min_score:
+        return None
+    # 只留汉字：det 会把计时数字（`等待审核179`）、图标字样（`POKER`）一起框进来
+    compact = "".join(ch for ch in t if "\u4e00" <= ch <= "\u9fff")
+    if not compact or len(compact) > _WAITING_MAX_LEN:
+        return None
+    if "带入" in compact:
+        return "buying_in"
+    for kind, chars, need in _WAITING_PHRASES:
+        if sum(1 for ch in chars if ch in compact) >= need:
+            return kind
+    return None
+
+
 # 只认**整段**就是胜率文本：`30%`、`胜率 69%`。不能 `search`，否则
 # 下注槽里的 HUD 文本（`入池36%`）会被当成全下胜率，把真正的下注乱码放过去。
 _PERCENT_RE = re.compile(r"^\s*(?:胜率\s*)?(\d+(?:\.\d+)?)\s*%\s*$")

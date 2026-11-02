@@ -132,6 +132,74 @@ def test_idle_zero_player_is_not_in_hand() -> None:
     check(s.player("lowR").name == "Dragon333", "人还坐在桌上，名字要留着")
 
 
+def test_waiting_badge_keeps_player_out_of_hand() -> None:
+    """头像写「等待中」= 人在座、这一手没他份，**筹码不为 0 也照样成立**。
+
+    实机依据 `人在桌未入局.mp4`：hero 右手边第一位头像显示「等待中」、筹码
+    200BB 正常渲染，rec 读成 `练待中`(0.54)。旧逻辑只认「带入 + 筹码 0」，
+    这个人会被算进 players_in_hand 和行动线。
+    """
+    rows = {k: dict(v) for k, v in BASE.items()}
+    rows["lowR"] = {"name": "越call越幸", "chip": "200BB", "bet": ""}
+    s = build_state(make_frame(rows), PROFILE,
+                    avatar_reads={"lowR": ("练待中", 0.54)})
+    lowr = s.player("lowR")
+    check(not lowr.in_hand and lowr.status == "sitting_out",
+          f"等待中应判 sitting_out，实际 {lowr.to_debug()}")
+    check(lowr.stack == 200.0, f"筹码要照常保留：{lowr.stack!r}")
+    check(lowr.name == "越call越幸", "人还坐在桌上，名字要留着")
+    check(any("等待" in n or "未入局" in n for n in lowr.notes),
+          f"要留一条可复盘的 note：{lowr.notes}")
+    check(s.players_in_hand == 8, f"在场人数应为 8，实际 {s.players_in_hand}")
+    check(not s.errors, f"未入局的人不该触发质量闸：{s.errors}")
+
+
+def test_waiting_badge_variants() -> None:
+    """三种文案都算在座未入局；「正在带入」映射到 buying_in。"""
+    for text, score in (("等待中", 0.9), ("#待中", 0.5), ("等待审核", 0.8)):
+        rows = {k: dict(v) for k, v in BASE.items()}
+        rows["lowR"] = {"name": "X", "chip": "88BB", "bet": ""}
+        s = build_state(make_frame(rows), PROFILE,
+                        avatar_reads={"lowR": (text, score)})
+        lowr = s.player("lowR")
+        check(not lowr.in_hand and lowr.status == "sitting_out",
+              f"{text!r} 应判 sitting_out，实际 {lowr.to_debug()}")
+
+    rows = {k: dict(v) for k, v in BASE.items()}
+    rows["lowR"] = {"name": "X", "chip": "0", "bet": ""}
+    s = build_state(make_frame(rows), PROFILE,
+                    avatar_reads={"lowR": ("正在带入", 0.9)})
+    lowr = s.player("lowR")
+    check(not lowr.in_hand and lowr.status == "buying_in",
+          f"正在带入应判 buying_in，实际 {lowr.to_debug()}")
+
+
+def test_waiting_badge_yields_to_in_hand_evidence() -> None:
+    """有明确在局证据时，头像文案作废：它只说明「没发到牌」。
+
+    弃牌 / 全下 / 亮牌 / 还挂着手牌图标 —— 任意一条成立，这一手显然有牌。
+    （实测：已弃牌的座位显示的是「弃牌」，不会变成「等待中」；这条是防误读。）
+    """
+    rows = {k: dict(v) for k, v in BASE.items()}
+    rows["lowR"] = {"name": "Dragon333", "chip": "80BB", "bet": ""}
+    cases = (
+        {"card_icons": {"lowR": True}},                     # 手牌图标还在
+        {"card_icons": {"lowR": False},
+         "avatar_reads": {"lowR": ("弃牌", 0.95)}},          # 刚确认弃牌
+        {"avatar_reads": {"lowR": ("等待中", 0.9)},
+         "shown_seats": {"lowR"}},                          # 这帧亮牌
+    )
+    for kw in cases:
+        reads = {"lowR": ("等待中", 0.9)}
+        reads.update(kw.get("avatar_reads", {}))
+        s = build_state(make_frame(rows), PROFILE,
+                        avatar_reads=reads,
+                        card_icons=kw.get("card_icons"),
+                        shown_seats=kw.get("shown_seats"))
+        lowr = s.player("lowR")
+        check(lowr.in_hand, f"有在局证据时不该判未入局：{kw} → {lowr.to_debug()}")
+
+
 def test_empty_seat_is_not_in_hand() -> None:
     """没坐满时那个虚线「+」空座不能被当成在场玩家。
 
@@ -716,6 +784,9 @@ def main() -> int:
         test_full_state,
         test_action_badge_keeps_sticky_name,
         test_idle_zero_player_is_not_in_hand,
+        test_waiting_badge_keeps_player_out_of_hand,
+        test_waiting_badge_variants,
+        test_waiting_badge_yields_to_in_hand_evidence,
         test_empty_seat_is_not_in_hand,
         test_fold_needs_icon_gone_and_text,
         test_missing_icon_alone_does_not_fold_a_bettor,

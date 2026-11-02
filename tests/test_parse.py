@@ -19,7 +19,7 @@ sys.path.insert(0, str(ROOT))
 from poker_ocr.parse import (  # noqa: E402
     NameTracker, is_all_in_badge, is_fold_badge, names_similar, parse_action,
     parse_amount, parse_blinds, parse_chip_loose, parse_equity, parse_percent,
-    sticky_name,
+    sticky_name, waiting_badge,
 )
 
 FAILS: list[str] = []
@@ -180,6 +180,31 @@ def test_all_in_badge_and_equity() -> None:
     check(parse_equity("69") is None, "非胜率槽不接受裸数字")
 
 
+def test_waiting_badge_three_phrases() -> None:
+    """头像上的「在座未入局」三种文案：正在带入 / 等待审核 / 等待中。
+
+    变异形态全部来自真机视频 `人在桌未入局.mp4` 的 864x1920 读数：
+    `等待中` 被读成 `练待中` / `#待中`（0.50–0.58），3 个字里常只对 2 个。
+    """
+    check(waiting_badge("等待中", 0.9) == "waiting", "等待中 应判在座未入局")
+    check(waiting_badge("练待中", 0.54) == "waiting", "练待中(0.54) 应判在座未入局")
+    check(waiting_badge("#待中", 0.50) == "waiting", "#待中(0.50) 应判在座未入局")
+    check(waiting_badge("等待", 0.8) == "waiting", "只读到「等待」也应判（与审核同义）")
+    check(waiting_badge("等待审核", 0.8) == "waiting", "等待审核 应判在座未入局")
+    check(waiting_badge("等待申核", 0.6) == "waiting", "等待申核（审→申）应判")
+    check(waiting_badge("正在带入", 0.9) == "buying_in", "正在带入 应判带入中")
+    check(waiting_badge("带入", 0.6) == "buying_in", "只读到「带入」也应判")
+    check(waiting_badge("正在带人", 0.7) == "buying_in", "带人（入→人）应判")
+
+    # 头像照片噪声：不能因为出现单个字就判「未入局」
+    for text, score in (("", 0.9), ("D", 0.27), ("S", 0.35), ("®", 0.39),
+                        ("盖牌", 0.71), ("奔牌", 0.98), ("弃牌", 0.9),
+                        ("中", 0.5), ("A中", 0.5), ("等待中", 0.3),
+                        ("等待中请稍候片刻", 0.8)):
+        check(waiting_badge(text, score) is None,
+              f"{text!r}({score}) 不该判在座未入局：{waiting_badge(text, score)}")
+
+
 def test_names_similar() -> None:
     """实测抖动要合并，真实换人要分开。"""
     for a, b in (("YKY", "YkY"), ("YKY", "YKkY"), ("一只猫i", "一只猫ii"),
@@ -331,6 +356,7 @@ def main() -> int:
         test_actions,
         test_fold_badge_is_best_effort,
         test_all_in_badge_and_equity,
+        test_waiting_badge_three_phrases,
         test_names_similar,
         test_sticky_name,
         test_name_tracker_needs_confirmation,

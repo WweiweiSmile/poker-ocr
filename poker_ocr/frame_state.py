@@ -26,7 +26,7 @@ from dataclasses import dataclass, field as dc_field
 from .parse import (
     Amount, Blinds, NameTracker, is_all_in_badge, is_fold_badge, names_similar,
     parse_action, parse_amount, parse_blinds, parse_chip_loose, parse_equity,
-    parse_percent, sticky_name,
+    parse_percent, sticky_name, waiting_badge,
 )
 from .positions import assign_positions
 from .profile import Profile
@@ -289,6 +289,12 @@ def build_state(frame: RoiFrame, profile: Profile,
         icon = icons.get(sid)
         shown_here = sid in shown
         avatar_text, avatar_score = avatar_reads.get(sid, ("", 0.0))
+        # 头像上的「在座但没入局」文案：正在带入 / 等待审核 / 等待中。
+        # 真机依据 `人在桌未入局.mp4`：hero 右手边第一位头像显示「等待中」、
+        # 筹码 200BB 照常渲染 —— 所以这组文案本身就是判据，不看筹码。
+        # 它只说明「没被发牌」，所以下面还要过一道「在局证据优先」：已经弃牌/
+        # 全下/亮牌/还挂着手牌图标的人，这一手显然有牌，不能被转场文案推翻。
+        wait_kind = waiting_badge(avatar_text, avatar_score)
         fold_text = (is_fold_badge(avatar_text, avatar_score)
                      if (sid in avatar_reads and not shown_here) else None)
         # 弃牌 = 头像底角的红色手牌图标消失 **且** 头像中间出现「弃牌」。
@@ -313,6 +319,10 @@ def build_state(frame: RoiFrame, profile: Profile,
             fold = (prev_fold or {}).get(sid)
 
         all_in_badge = is_all_in_badge(avatar_text, avatar_score)
+        if wait_kind is not None and (fold is True or shown_here
+                                      or all_in_badge is True or icon is True):
+            # 有明确在局证据 → 头像文案作废（它只表示「没发到牌」）
+            wait_kind = None
 
         # 全下后筹码/下注位可能显示实时胜率（`30%`/`69%`）。百分数不是金额，
         # parse_amount 会拒掉；这里单独解析成 equity，并让 stack/bet 保持 None。
@@ -410,7 +420,14 @@ def build_state(frame: RoiFrame, profile: Profile,
         # 光靠头像文字不够（实测 rec 时好时坏，人数会在 8/9 之间跳）——再加一条
         # 结构化判据：**筹码 0、本街没下注、也没有动作** 的人一定不在这一手
         # （全下的人 bet>0；跟注/下注过的人 pill 至少在结算前还在；hero 除外）。
-        buying_in = "带入" in avatar_text and stack == 0.0
+        #
+        # 2026-11-02 起补上另外两种文案：等待审核 / 等待中。这三个词都表示
+        # 「人坐在桌边、这一手没他份」，而且**筹码可能照常显示**（实测 200BB），
+        # 所以文案命中就认，不再要求筹码 0。上面那道「在局证据优先」已经把
+        # 明显有牌的人排除了，走到这里的人才是真的没被发牌。
+        buying_in = (wait_kind == "buying_in"
+                     or ("带入" in avatar_text and stack == 0.0))
+        waiting = wait_kind == "waiting"
         # 全下玩家在**下注结算后**会变成「筹码 0、pill 已收走」，看起来和离桌一样。
         # 用上一帧的全下集合区分：他全下过、筹码还是 0，就还是全下。
         was_all_in = sid in prev_all_in
@@ -436,7 +453,9 @@ def build_state(frame: RoiFrame, profile: Profile,
         empty_zero = (no_cards and stack == 0.0 and (bet or 0) == 0
                       and sid != frame.hero_seat_id)
         no_player = empty_slot or (empty_zero and name is None)
-        sitting_out = (zero_idle or (empty_zero and not no_player)) \
+        # 在座未入局：筹码 0 的空转态（zero_idle / empty_zero）**或** 头像文案
+        # 直接说明在等（等待审核 / 等待中）。后者筹码可以不为 0，所以单独一项。
+        sitting_out = (zero_idle or waiting or (empty_zero and not no_player)) \
             and not buying_in
 
         # 空座位（牌桌没坐满时那个虚线「+」）三块槽位都是空文本：名字 None、
@@ -479,6 +498,11 @@ def build_state(frame: RoiFrame, profile: Profile,
             notes.append(f"bet: {bet_a.error}")
         if equity is not None:
             notes.append(f"equity: {equity:g}%")
+        if wait_kind is not None:
+            # 把**原始读数**写出来：这三个词 rec 常读错（等待中 → 练待中/#待中），
+            # 复盘时要能一眼看出「是没读到，还是读成了别的」。
+            label = "正在带入" if wait_kind == "buying_in" else "在座未入局"
+            notes.append(f"头像 {avatar_text.strip()!r} → {label}，本手不参与")
 
         # ── 一手牌内的座位身份锁 ─────────────────────────────
         # 离桌的人肯定已经弃牌：本手剩余时间继续保留在 players 里，沿用锁定

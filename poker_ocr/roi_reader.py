@@ -50,7 +50,7 @@ import numpy as np
 
 from .dealer import DealerDetector, DealerResult
 from .ocr import OcrEngine, preprocess_variant
-from .parse import is_fold_badge
+from .parse import is_fold_badge, waiting_badge
 from .profile import Profile, Size, Slot
 
 # 每个座位读哪几块。这份顺序就是最终输出顺序，改它等于改接口。
@@ -602,6 +602,11 @@ def read_avatars(img: np.ndarray, profile: Profile, engine: OcrEngine,
 
     `det_seats=None` 不做复核（保持纯 rec 的旧口径，测试和速度敏感路径用）。
     「是不是弃牌」仍由 `frame_state.is_fold_badge` 判。
+
+    det 复核也用来读「在座未入局」文案（正在带入 / 等待审核 / 等待中）：
+    纯 rec 只能读出 `#中` / `#德中` 这种碎片（实测 0.52–0.68），det+rec 是
+    原文 `等待中`（1.00）。复核只对**没有手牌图标**的座位做，所以正好覆盖
+    这类玩家，正常帧不会多跑 det。
     pad=0：头像槽本来就是照片的紧框，不需要再留白。
     """
     if not detect_fold:
@@ -628,7 +633,8 @@ def read_avatars(img: np.ndarray, profile: Profile, engine: OcrEngine,
         read = read_slot(
             img, profile, engine, seat.avatar_slot, "avatar", size,
             pad=0.0, cache=cache, cache_key=f"{sid}.@avatar.det", use_det=True)
-        if is_fold_badge(read.text, read.score) is True:
+        if (is_fold_badge(read.text, read.score) is True
+                or waiting_badge(read.text, read.score) is not None):
             out[sid] = (read.text, read.score)
     return out
 
