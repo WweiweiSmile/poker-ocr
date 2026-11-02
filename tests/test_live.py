@@ -2051,6 +2051,44 @@ def test_start_stack_backfilled_with_posted_chips() -> None:
           f"对手起始筹码也要带（后手 200 + 前注 0.5）：{rec.get('start_stacks')}")
 
 
+def test_hand_record_uses_latest_confirmed_name() -> None:
+    """落库用「这一手最后确认的名字」覆盖名单/动作上的旧拼法。
+
+    2026-11-01 的 `20261101-7cf9412b92`：名单在换手第一帧就锁成了 `ssvhmbm`，
+    之后名字被纠正也没回写，整手牌（含每条动作的 name）都带着错拼法进了
+    outbox 和对手画像。一个座位在一手牌里不可能换人，按 seat_id 覆盖是安全的。
+    """
+    tr = LiveHandTracker(confirm_frames=1)
+    tr.observe(_start_stack_state(98.5, 1.0, action="raise"), ["Ah", "Kd"], [])
+    check(tr.hand is not None, "应先开出一手牌")
+    # 名单锁定时的错名字
+    tr.hand.table_roster = [
+        {"seat_id": "hero", "name": "ssvhmbm", "position": "BB"},
+        {"seat_id": "a", "name": "台风来吧多", "position": "BTN"},
+    ]
+    tr.hand.seat_names.update({"hero": "ssvhmbm", "a": "台风来吧多"})
+    tr.observe(_start_stack_state(96.5, 3.0, pot=7.5, action="raise"),
+               ["Ah", "Kd"], [])
+
+    # 名字被纠正之后再来两帧：落库应使用最新拼法
+    state = _start_stack_state(96.5, 3.0, pot=7.5)
+    for p in state.players:
+        p.name = {"hero": "svsvbmbm", "a": "台风来咯咯"}[p.seat_id]
+    tr.observe(state, ["Ah", "Kd"], [])
+    rec = tr._hand_dict(tr.hand)
+
+    roster = {row["seat_id"]: row["name"] for row in rec["table_roster"]}
+    check(roster["hero"] == "svsvbmbm", f"名单应用最新名字：{roster}")
+    check(roster["a"] == "台风来咯咯", f"名单应用最新名字：{roster}")
+    actions = [a for rec2 in rec["streets"] for a in rec2["actions"]]
+    check(actions, "这一手应该有动作记录")
+    stale = {"ssvhmbm", "台风来吧多"}
+    bad = [(a["seat_id"], a["name"]) for a in actions if a["name"] in stale]
+    check(not bad, f"动作上不该再有旧拼法：{bad}")
+    names = {a["seat_id"]: a["name"] for a in actions}
+    check(names.get("hero") == "svsvbmbm", f"hero 动作名字应统一：{names}")
+
+
 def test_start_stack_rejects_zero_read() -> None:
     """开局把筹码图标读成裸 0 时不能当起始筹码（人不可能 0BB 入池）。"""
     tr = LiveHandTracker(confirm_frames=1)
@@ -2229,6 +2267,7 @@ def main() -> int:
         test_hand_memory_flushes_on_switch_frame,
         test_hand_gap_without_hero_is_skipped_by_default,
         test_start_stack_backfilled_with_posted_chips,
+        test_hand_record_uses_latest_confirmed_name,
         test_start_stack_rejects_zero_read,
         test_start_stack_read_after_street_change_includes_preflop,
         test_hero_card_flicker_is_correction_not_new_hand,

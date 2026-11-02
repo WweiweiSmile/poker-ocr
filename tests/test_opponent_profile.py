@@ -554,6 +554,54 @@ def test_store_update_dedupe_and_persistence() -> None:
               "clear 后同一 hand_uid 应能重新计入")
 
 
+def test_name_lexicon_source_and_alias_merge() -> None:
+    """词表来源与别名合并：分裂成两条的同一人并回一条。
+
+    实测（2026-11-01）`台风来咯咯` 68 手 / `台风来吧多` 16 手 —— 两个键都是
+    「精确命中」，实时词表救不了，只能靠别名把历史样本合并。
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "p.json"
+        store = ProfileStore(path, "0.5/1-9max")
+        for i in range(12):
+            store.update_hand(_lag_hand(f"s01-h{i}"))
+        key = "芒果与西米"
+
+        # temp: 键和 0 样本的条目不能进词表（拿它当规范拼写会固化错值）
+        store.players["temp:seat3"] = OpponentStats(key="temp:seat3")
+        store.players["空样本"] = OpponentStats(key="空样本")
+        names = store.known_names(min_hands=1.0)
+        check(key in names, f"有样本的玩家应进词表：{names}")
+        check(not any(n.startswith("temp:") for n in names),
+              f"temp 键不是人名：{names}")
+        check("空样本" not in names, f"0 样本的不算已知拼法：{names}")
+
+        # 造一个「同一人的另一种拼法」，合并样本并写别名
+        stats = store.players[key]
+        alias = "芒果与西米2"
+        store.players[alias] = OpponentStats(
+            key=alias, display_name=alias, pool_key="0.5/1-9max",
+            hands=6.0, sample_hands=6.0, preflop_opps=6.0,
+            sample_preflop_opps=6.0, vpip=4.0, pfr=1.0)
+        before = store.players[key].hands
+        check(store.add_alias(alias, key), "add_alias 应成功")
+        check(store.players[key].hands == before + 6.0,
+              f"样本应并进目标：{store.players[key].hands}")
+        check(alias not in store.players, "别名条目应被合并掉")
+        check(store.read_one(alias).source == store.read_one(key).source,
+              "两种拼法应解析到同一条画像")
+        check(stats.preflop_opps > 0, "合并后目标统计仍在")
+        check(not store.add_alias(alias, "不存在的人"), "目标不存在时不应生效")
+
+        store.save(force=True)
+        again = ProfileStore(path, "0.5/1-9max")
+        again.load()
+        check(again.aliases.get(alias) == key,
+              f"别名应持久化：{again.aliases}")
+        check(again.known_names(min_hands=1.0).count(key) == 1,
+              "词表里同一个名字只应出现一次")
+
+
 def test_pin_beats_auto() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         store = ProfileStore(Path(tmp) / "p.json", "0.5/1-9max")
@@ -1300,6 +1348,7 @@ def run() -> int:
         test_fold_to_three_bet_and_missing_fold_inference,
         test_population_prior_shrinkage,
         test_facing_bet_by_street,
+        test_name_lexicon_source_and_alias_merge,
     ]
     for t in tests:
         before = len(FAILS)

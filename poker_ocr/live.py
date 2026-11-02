@@ -72,6 +72,7 @@ from .full_table import (DealerTracker, FullOutcome, FullStateRecorder,
 from .hand_outbox import HandOutbox
 from .hand_ingest import HandIngestWorker, IngestConfig
 from .hand_track import LiveHandTracker
+from .name_lexicon import NameLexicon, duplicate_pairs
 from .ocr import OcrEngine
 from .parse import parse_blinds
 from .profile import Profile
@@ -747,6 +748,19 @@ def _state_body(record: dict, cards: CardsResult | None, recognizer: str) -> dic
     return body
 
 
+def _name_tail(body: dict) -> str:
+    """把名字诊断挂到状态行尾巴上：一条一行，多了只报条数。
+
+    名字读错不会丢帧（不进质量闸），所以最容易「悄悄地错」—— 必须在控制台
+    上就看得见，而不是等人翻 JSONL 才发现。
+    """
+    warns = body.get("name_warnings") or []
+    if not warns:
+        return ""
+    extra = f" …另 {len(warns) - 1} 条" if len(warns) > 1 else ""
+    return f"  名字⚠ {warns[0]}{extra}"
+
+
 def _state_line(t: float, body: dict, tail: str = "") -> str:
     """日志行：顺序与 JSONL 一致（我 → 公共牌 → 全局 → 对手）。"""
     hero = body.get("hero") or {}
@@ -1203,7 +1217,7 @@ class LiveProcessor:
                 self.log(_state_line(
                     t, body,
                     f"  pot={state.pot} pbs={state.pot_before_street} "
-                    f"轮到我={state.hero_turn}"))
+                    f"轮到我={state.hero_turn}" + _name_tail(body)))
         # 丢弃 / 无变化的帧不会进 JSONL，属于「没被使用」的图片：不逐帧打印，
         # 只保留记录状态的行（丢弃原因在退出汇总里仍会打印）。
         # 注意 `_track_hand` 仍要跑：行动线/建议吃的是被接受的状态，不只是记录。
@@ -2124,6 +2138,10 @@ def build_parser() -> argparse.ArgumentParser:
                          "--no-opponent-profile 回退到 .table_dy）")
     ap.add_argument("--reset-opponents", action="store_true",
                     help="启动时清空本地对手画像（身份已全局合并，不再按池清）")
+    ap.add_argument("--name-lexicon", action=argparse.BooleanOptionalAction,
+                    default=True,
+                    help="用画像库里已知玩家的拼法纠正名字读数（默认开启；"
+                         "--no-name-lexicon 只看当帧读数）")
     ap.add_argument("--ai-timeout", type=float, default=None,
                     help="单次 AI 建议的超时秒数（默认读 AI_SERVER_TIMEOUT，"
                          "否则 20）。实时链路建议 5–8 秒")
@@ -2392,6 +2410,28 @@ def main(argv: list[str] | None = None) -> int:
                             if p.preflop_opps > 0)
                 _log(f"[对手] 已有样本的玩家 {known} 人；"
                      f"n<{8} 只显示不改变建议")
+            # 名字词表：拿「已认识的人」的拼法纠正当帧读数。置信度分不开对错
+            # （错读和读对都在 0.87–0.97），但「这个名字以前见过」能分开。
+            if args.name_lexicon and state_stream is not None:
+                aliases = profile_store.alias_map()
+                # 只拿「至少打过一手」的名字当锚：0 手的条目多是上一帧临时
+                # 建出来的键，拿它做规范拼写会把错的固化下来。
+                known = profile_store.known_names(min_hands=1.0)
+                lexicon = NameLexicon(known, aliases)
+                state_stream.set_name_lexicon(lexicon)
+                _log(f"[名字] 词表 {len(lexicon)} 个已知拼法"
+                     f"（别名 {len(aliases)} 条）；"
+                     "读数命中已知玩家时按已知拼写记录")
+                # 已经裂成两条的拼法（OCR 错读各记了几十手）运行时分不出来 ——
+                # 两边都是「精确命中」。启动时点名，人去合并。
+                dupes = duplicate_pairs(known, threshold=0.6)
+                if dupes:
+                    shown = "；".join(f"{a!r}≈{b!r}" for _, a, b in dupes[:3])
+                    more = f" 等 {len(dupes)} 组" if len(dupes) > 3 else ""
+                    _log(f"[名字] 画像里疑似同一个人的拼法：{shown}{more}"
+                         "（确认后用 tools/name_alias.py --add 别名=规范名字 合并）")
+            elif state_stream is not None:
+                _log("[名字] 词表已关闭（--no-name-lexicon），只看当帧读数")
         else:
             _log("[对手] 已关闭（--no-opponent-profile），回退到 .table_dy")
         sampling = []

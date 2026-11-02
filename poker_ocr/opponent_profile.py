@@ -2307,6 +2307,61 @@ class ProfileStore:
         return self._read_for_stats(self.players.get(key) if key else None,
                                     seat_id)
 
+    # ── 名字词表 / 别名 ──
+    def known_names(self, *, min_hands: float = 0.0) -> list[str]:
+        """已知玩家的拼法（给 `name_lexicon.NameLexicon` 当纠正目标）。
+
+        只给**有样本的**名字：样本 0 的条目多半是上一帧临时建出来的键，拿它
+        当规范拼写会把错的固化下来。`temp:` 键是「当时没读到名字」的占位，
+        不是人名，不能进词表。
+        """
+        out: list[str] = []
+        for key, stats in self.players.items():
+            if not key or key.startswith("temp:"):
+                continue
+            if (stats.hands or 0.0) < min_hands:
+                continue
+            out.append(stats.display_name or key)
+        return out
+
+    def alias_map(self) -> dict[str, str]:
+        """`别名 → 规范拼写`。两边都换成展示名，方便词表直接比较。"""
+        out: dict[str, str] = {}
+        for alias, target in self.aliases.items():
+            stats = self.players.get(target)
+            if stats is None:
+                continue
+            out[alias] = stats.display_name or target
+        return out
+
+    def add_alias(self, alias: str, target: str, *, merge: bool = True) -> bool:
+        """把 `alias` 记成 `target` 的另一个拼法（并把样本并过去）。
+
+        用途：OCR 把同一个人读成两种拼法，画像库里会裂成两条
+        （实测 `台风来咯咯` 68 手 / `台风来吧多` 16 手）。加别名之后
+        `_resolve_key` 会把两种写法都解析到同一个键，历史样本也合并。
+        返回是否真的改动了什么。
+        """
+        if not self.enabled:
+            return False
+        alias_key = normalize_name(alias)
+        target_key = normalize_name(target)
+        if not alias_key or not target_key or alias_key == target_key:
+            return False
+        target_stats = self.players.get(target_key)
+        if target_stats is None:
+            return False
+        old = self.players.get(alias_key)
+        if old is not None and merge and old is not target_stats:
+            self._merge_stats(target_stats, old)
+            self.players.pop(alias_key, None)
+        self.aliases[alias_key] = target_key
+        if len(self.aliases) > MAX_ALIASES:
+            for stale in list(self.aliases)[:len(self.aliases) - MAX_ALIASES]:
+                self.aliases.pop(stale, None)
+        self._dirty = True
+        return True
+
     def archetype_for(self, name: str | None) -> str | None:
         return self.read_one(name).archetype
 

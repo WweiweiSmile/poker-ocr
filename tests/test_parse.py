@@ -210,6 +210,113 @@ def test_name_tracker_needs_confirmation() -> None:
     check(t.resolve("lowL", "咸蛋鸡柳饭") == "咸蛋鸡柳饭", "第 3 帧确认换人")
 
 
+def test_name_tracker_corrects_similar_misread() -> None:
+    """相似读法不再被永久丢弃 —— 2026-11-01 实盘的回归用例。
+
+    当晚 21:22:51 两个座位同时被读错（`svsvbmbm`→`ssvhmbm`、
+    `台风来咯咯`→`台风来吧多`）。两者的 difflib 相似度是 0.667 / 0.600，
+    都过了 `names_similar` 的 0.6 门槛 —— 旧实现把它们当成「同一个人的另一
+    种写法」直接扔掉，于是之后 10 分钟、3700+ 帧的正确读数一次都改不回来。
+    现在相似读数也进候选计票：连读 3 帧就改回正确拼法。
+    """
+    t = NameTracker(confirm=3)
+    check(t.resolve("hero", "svsvbmbm") == "svsvbmbm", "首读直接认")
+    check(t.resolve("midL", "台风来咯咯") == "台风来咯咯", "首读直接认")
+    # 错读出现：单帧不换
+    check(t.resolve("hero", "ssvhmbm") == "svsvbmbm", "单帧错读不能改口")
+    check(t.resolve("midL", "台风来吧多") == "台风来咯咯", "单帧错读不能改口")
+    # 正确读数回来：连续 3 帧（这中间没有错读）就改口
+    check(t.resolve("hero", "svsvbmbm") == "svsvbmbm", "正确读数保持")
+    # 反过来：错读数连读 3 帧也会被采纳（系统性错读要能被看见，不能死锁）
+    for _ in range(2):
+        t.resolve("midL", "台风来吧多")
+    check(t.resolve("midL", "台风来吧多") == "台风来吧多",
+          "连读 3 帧的读数应该被采纳（哪怕它是错的），否则会永远卡在旧值")
+
+
+def test_name_tracker_keeps_identity_across_flapping() -> None:
+    """两种拼法交替出现（OCR 抖动）：不来回改口，保持已确认的那个。"""
+    t = NameTracker(confirm=3)
+    check(t.resolve("lowL", "YKY") == "YKY", "首读直接认")
+    out = []
+    for i in range(9):
+        raw = "YkY" if i % 2 else "YKkY"
+        out.append(t.resolve("lowL", raw))
+    check(all(n == "YKY" for n in out), f"交替抖动不该改口：{out}")
+
+
+def test_name_tracker_absent_keeps_memory() -> None:
+    """整座暂时没证据：名字下线，但「上一次的名字」留着。
+
+    留着是为了让座位重新出现时的读数先当候选，而不是又变成「首读无条件
+    采信」—— 那就是 21:22 那次锁定错名的入口。
+    """
+    t = NameTracker(confirm=3)
+    check(t.resolve("midL", "台风来咯咯") == "台风来咯咯", "首读直接认")
+    t.absent("midL")
+    check("midL" not in t.current(), "没证据时名字不该继续输出")
+    # 重新出现、读数「像」上一位的名字：先当候选，不直接改口
+    check(t.resolve("midL", "台风来吧多") is None, "相似读数要先确认")
+    check(t.resolve("midL", "台风来吧多") is None, "第 2 帧仍不认")
+    check(t.resolve("midL", "台风来吧多") == "台风来吧多", "第 3 帧才确认")
+    # 完全不像的名字（真换人）仍然直接认，不让换人慢半秒
+    t.absent("midL")
+    check(t.resolve("midL", "Dragon333") == "Dragon333", "换人应立刻生效")
+
+
+def test_name_tracker_recent_window_expires() -> None:
+    """「上一次的名字」只在窗口内有效：太久以前的名字不该拦住新的读数。"""
+    now = [100.0]
+    t = NameTracker(confirm=3, recent_keep=5.0, clock=lambda: now[0])
+    check(t.resolve("midL", "台风来咯咯") == "台风来咯咯", "首读直接认")
+    t.absent("midL")
+    now[0] += 1.0
+    check(t.resolve("midL", "台风来吧多") is None,
+          "窗口内的相似读数要先确认")
+    t.absent("midL")
+    now[0] += 60.0                      # 远超 recent_keep
+    check(t.resolve("midL", "台风来吧多") == "台风来吧多",
+          "窗口过期后按首读处理（别让很久以前的名字拦住新读数）")
+
+
+def test_name_tracker_votes_and_changes() -> None:
+    """votes/confirmed 是给「名单修复」用的：只信连续读对的名字。"""
+    t = NameTracker(confirm=3)
+    t.resolve("lowL", "YKY")
+    check(t.votes("lowL") == 1 and not t.confirmed("lowL"), "首读只是候选级别")
+    t.resolve("lowL", "YKY")
+    t.resolve("lowL", "YKY")
+    check(t.confirmed("lowL"), f"连读 3 帧应确认，实际 votes={t.votes('lowL')}")
+    check(t.take_change("lowL") is None, "没有改口时不该有变更事件")
+    # 改口事件要能被上层取走（写进 name_warnings）
+    t2 = NameTracker(confirm=3)
+    t2.resolve("lowL", "YKY")
+    for _ in range(3):
+        t2.resolve("lowL", "Dragon333")
+    check(t2.take_change("lowL") == ("YKY", "Dragon333"),
+          f"应记下改口：{t2.take_change('lowL')}")
+    check(t2.take_change("lowL") is None, "取走后不该重复上报")
+
+
+def test_name_tracker_uses_corrector() -> None:
+    """词表纠正：读数先归一化到已知拼写，再进票数统计。"""
+    seen = []
+
+    def correct(raw, seat_id=None):
+        seen.append((raw, seat_id))
+        return "台风来咯咯" if raw == "台风来吧多" else None
+
+    t = NameTracker(confirm=3, corrector=correct)
+    check(t.resolve("midL", "台风来吧多") == "台风来咯咯",
+          "词表命中后应直接采用规范拼写")
+    check(seen and seen[0] == ("台风来吧多", "midL"),
+          f"corrector 应拿到原文和座位号：{seen}")
+    t.resolve("midL", "台风来吧多")
+    t.resolve("midL", "台风来咯咯")
+    check(t.confirmed("midL"),
+          f"纠正后的读数应累计票数，实际 votes={t.votes('midL')}")
+
+
 def main() -> int:
     tests = [
         test_amount_accepts_real_shapes,
@@ -227,6 +334,12 @@ def main() -> int:
         test_names_similar,
         test_sticky_name,
         test_name_tracker_needs_confirmation,
+        test_name_tracker_corrects_similar_misread,
+        test_name_tracker_keeps_identity_across_flapping,
+        test_name_tracker_absent_keeps_memory,
+        test_name_tracker_recent_window_expires,
+        test_name_tracker_votes_and_changes,
+        test_name_tracker_uses_corrector,
     ]
     for t in tests:
         before = len(FAILS)

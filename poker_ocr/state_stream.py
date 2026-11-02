@@ -36,6 +36,7 @@ import numpy as np
 from .card_icon import read_card_icons
 from .dealer import DealerResult, build_detector
 from .frame_state import FrameState, NameTracker, build_state, signature
+from .name_lexicon import NameLexicon
 from .parse import Blinds, is_all_in_badge, parse_action, parse_blinds
 from .ocr import OcrEngine
 from .profile import Profile
@@ -105,6 +106,7 @@ class StateStream:
                  detect_fold: bool = True, dedup: bool = True,
                  stable_frames: int = 2, max_vanish: int = 3,
                  name_confirm: int = 3,
+                 name_lexicon: NameLexicon | None = None,
                  initial_blinds: Blinds | None = None,
                  lenient_chips: bool = False,
                  ante_fallback: float | None = None,
@@ -141,7 +143,11 @@ class StateStream:
         self.stream = RoiStream(profile, self.engine, detector,
                                 with_dealer=True, dedup=dedup,
                                 executor=self._roi_pool)
-        self.names = NameTracker(confirm=self.name_confirm)
+        # 名字词表：把读数映射到「已认识的人」的规范拼写（见 name_lexicon）。
+        # 没有画像库时传 None，行为与以前完全一致。
+        self.name_lexicon = name_lexicon
+        self.names = NameTracker(confirm=self.name_confirm,
+                                 corrector=self._name_corrector())
 
         self.prev: FrameState | None = None
         self.prev_all_in: set[str] = set()
@@ -161,6 +167,12 @@ class StateStream:
         self.hand_roster: dict[str, tuple[str | None, str | None]] = {}
         self.hand_left: set[str] = set()
         self._roster_locked = False
+        # 名字诊断的累计计数（写进 session summary）：名单名字修正次数、
+        # 「像某个已知玩家但没自动改」的告警次数。都只增不减，reset 不清。
+        self.name_fixes = 0
+        self.name_suspects = 0
+        # 同一个存疑读数只报一次：seat_id → 已经报过的原文字
+        self._name_suspect_note: dict[str, str] = {}
         # 本手是否见过爆炸底池横幅。横幅只在开局出现 ~2s，之后的帧很可能
         # 已经消失或被质量闸丢弃；一旦看到就钉住，换手时清空。
         self.bomb_pot_seen = False
@@ -355,6 +367,11 @@ class StateStream:
         # 只有 live 有可靠换手边界（extra_signature），离线视频不启用。
         if sticky and not self._roster_locked:
             self._lock_roster(state)
+        # 名字：名单建立后才可能有「锁定值 → 纠正值」的修正；存疑告警每帧都看，
+        # 但同一个原文只报一次（见 _note_name_suspects）。
+        self._repair_roster_names(state)
+        self._note_name_suspects(state)
+        self._learn_names(state)
         # 横幅是瞬时信号（开局 ~2s），但「这手是爆炸底池」要一直有效：
         # 看到就钉住，本手内所有状态都带 bomb_pot=True；换手时
         # _restart_sticky() 清空。被质量闸丢弃的帧也照常读横幅 ——
@@ -446,6 +463,108 @@ class StateStream:
         }
         self.hand_left = set()
         self._roster_locked = True
+
+    # ── 名字：词表纠正 / roster 修复 / 存疑告警 ─────────────────
+
+    def _name_corrector(self):
+        """给 NameTracker 用的纠正函数；没有词表时返回 None。
+
+        把「这张桌上别的座位已经在用的名字」一起传进去：同一个名字不可能同时
+        坐在两把椅子上，所以候选拼写被别人占着时不算命中 —— 否则
+        `俊伯老婆`（0.75）会被并进 `俊伯老公`，两个人的画像混成一份。
+        """
+        lexicon = getattr(self, "name_lexicon", None)
+        if lexicon is None:
+            return None
+
+        def correct(raw: str, seat_id: str | None = None) -> str | None:
+            taken = [p.name for p in (self.prev.players if self.prev else ())
+                     if p.name and p.seat_id != seat_id]
+            return lexicon.canonical(raw, taken)
+
+        return correct
+
+    def set_name_lexicon(self, lexicon) -> None:
+        """画像库加载完之后再把词表接进来（它比 StateStream 建得晚）。
+
+        已经跑过几帧也没关系：词表只影响之后的读数，已确认的名字保持不变。
+        """
+        self.name_lexicon = lexicon
+        self.names.set_corrector(self._name_corrector())
+
+    def _repair_roster_names(self, state: FrameState) -> None:
+        """roster 锁定之后名字才被纠正：把修正同步进名单和本帧输出。
+
+        名单在换手第一帧就锁死了，而名字的纠正（换人确认/词表命中）往往晚
+        一两帧才发生。不同步的话，这一手的 `table_roster`、离桌座位沿用名、
+        hand_id 的名单指纹都会停在那个错拼法上（2026-11-01 实盘就是这么把
+        `ssvhmbm` 写进整手牌的）。这里只改名字，不动位置和成员。
+        """
+        if not self._roster_locked or not self.hand_roster:
+            return
+        tracked_all = self.names.current()
+        for sid, (name, position) in list(self.hand_roster.items()):
+            # 中途离桌的座位现在坐着的是**另一个人**（本手不参与），tracker
+            # 读到的新名字属于下一手，绝不能盖到这一手的名单上。
+            if sid in self.hand_left:
+                continue
+            tracked = tracked_all.get(sid)
+            if not tracked or tracked == name:
+                continue
+            # 只修**确认过**的名字：刚读到的第一帧还可能是错读，改来改去
+            # 会让名单跟着噪声跳（名单是这一手的身份基准，宁可晚半秒）。
+            if not self.names.confirmed(sid):
+                continue
+            self.hand_roster[sid] = (tracked, position)
+            for p in state.players:
+                if p.seat_id == sid and p.in_hand:
+                    p.name = tracked
+                    p.name_tracked = tracked
+            self.name_fixes += 1
+            state.name_warnings.append(
+                f"{sid}: 名单名字已修正 {name!r} → {tracked!r}")
+
+    def _note_name_suspects(self, state: FrameState) -> None:
+        """读数没到「自动改」的门槛、却很像某个已知玩家：写出来让人看一眼。
+
+        不自动改是因为 0.6–0.8 这一档也容得下「真有两个像的名字」
+        （一家人用 `俊伯老公/俊伯老婆`）。告警比悄悄改错更有用。
+        """
+        lexicon = getattr(self, "name_lexicon", None)
+        if lexicon is None:
+            return
+        for p in state.players:
+            raw = p.name_raw
+            if not raw or p.action:
+                continue
+            match = lexicon.match(raw)
+            if match is None or match.auto:
+                continue
+            if self._name_suspect_note.get(p.seat_id) == raw:
+                continue                       # 同一个存疑读数只报一次
+            self._name_suspect_note[p.seat_id] = raw
+            self.name_suspects += 1
+            state.name_warnings.append(
+                f"{p.seat_id}: 名字 {raw!r} 疑似已知玩家 {match.text!r}"
+                f"（相似度 {match.score:.2f}，确认是同一人后可加别名）")
+
+    def _learn_names(self, state: FrameState) -> None:
+        """把本场**确认过**的新名字加进词表，下次再遇到同一个人就能纠正。
+
+        只收「跟已知拼法都不像」的名字：存疑档（0.6–0.8）不入表，否则一次
+        错读会被固化成规范拼写，之后每次都「纠正」到错的那个上。
+        """
+        lexicon = getattr(self, "name_lexicon", None)
+        if lexicon is None:
+            return
+        for p in state.players:
+            name = p.name
+            if not name or not p.in_hand or name in lexicon:
+                continue
+            if not self.names.confirmed(p.seat_id):
+                continue
+            # remember 自己会拒掉「像某个已知名字」的读数，见 NameLexicon.remember
+            lexicon.remember(name)
 
     def _track_vanished(self, state: FrameState) -> None:
         """整座消失确认：连续 max_vanish 帧不见才算人走了。
@@ -592,6 +711,8 @@ class StateStream:
         self.hand_roster = {}
         self.hand_left = set()
         self._roster_locked = False
+        # 存疑名字按手重新报：一整场只报一次的话，换到下一手就没人记得了。
+        self._name_suspect_note.clear()
         self.vanish.clear()
         # 换手信号可能比横幅晚一两帧；刚看到过的横幅属于新手，别清掉。
         if self.sampled - self._bomb_seen_sample > BOMB_BANNER_GRACE_SAMPLES:
@@ -613,7 +734,11 @@ class StateStream:
             read = seat_roi.fields.get("name")
             if (read is not None and read.text
                     and read.score >= NAME_PIN_MIN_SCORE
-                    and parse_action(read.text) is None):
+                    and parse_action(read.text) is None
+                    # 名字还没被稳定器确认就先别钉：钉住 = 这一手不再重读，
+                    # 错读就没有任何纠正机会了（2026-11-01 那次整手牌都错）。
+                    # 代价是每个座位每手多读 ≤ confirm 帧（≈12ms/块）。
+                    and self.names.confirmed(seat_roi.seat_id)):
                 cache.pin(key)
         if not cache.is_pinned("@blinds"):
             read = frame.globals.get("blinds")
@@ -641,7 +766,9 @@ class StateStream:
         self._roster_locked = False
         self.bomb_pot_seen = False
         self._bomb_seen_sample = -10**9
-        self.names = NameTracker(confirm=self.name_confirm)
+        self.names = NameTracker(confirm=self.name_confirm,
+                                 corrector=self._name_corrector())
+        self._name_suspect_note.clear()
         self.last_sig = None
         self.cand_sig = None
         self.cand_n = 0
@@ -673,6 +800,9 @@ class StateStream:
             "roi_threads": self.roi_threads,
             "hand_roster": len(self.hand_roster),
             "hand_left": sorted(self.hand_left),
+            # 名字质量：名单被纠正过多少次、有多少读数像已知玩家但没自动改。
+            "name_fixes": self.name_fixes,
+            "name_suspects": self.name_suspects,
             "roi_reuse": (self.stream.cache.to_debug()
                           if self.stream.cache is not None else {"disabled": True}),
         }

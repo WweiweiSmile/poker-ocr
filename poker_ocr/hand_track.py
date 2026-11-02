@@ -221,6 +221,14 @@ class _LiveHand:
     # 开手时**在座所有人**的名单快照（不只是本手发牌的人）。手牌库按玩家/
     # 按桌分析要用；seat_meta 仍然只给本手在局者，两者语义不同。
     table_roster: list[dict] = field(default_factory=list)
+    # 本手内每个座位**最近一次确认过的名字**：seat_id → name。
+    #
+    # 名单（table_roster）是换手第一帧的快照，动作上盖的名字是「那一帧的读数」。
+    # 名字被纠正（换人确认 / 词表命中 / NameTracker 改口）之后，这两处仍然是
+    # 旧拼法 —— 2026-11-01 的 `20261101-7cf9412b92` 就是这样把 `ssvhmbm` /
+    # `台风来吧多` 写进了整手牌和对手画像。落库前用这张表把同一座位的名字统一：
+    # 一个座位在一手牌里不可能换人，所以按 seat_id 覆盖是安全的。
+    seat_names: dict[str, str] = field(default_factory=dict)
     hero_cards: tuple[str, ...] = ()
     hero_position: str | None = None
     table_size: int = 0
@@ -372,6 +380,10 @@ class LiveHandTracker:
         for p in state.players:
             if p.seat_id != state.hero_seat_id:
                 self._seat_meta[p.seat_id] = (p.name, p.position)
+            # 本手最近一次确认的名字（含 hero）。落库前统一覆盖名单/动作上的
+            # 旧拼法，见 _LiveHand.seat_names。
+            if self.hand is not None and p.name:
+                self.hand.seat_names[p.seat_id] = p.name
 
         cards = tuple(hero_cards)
         board = tuple(board)
@@ -1519,12 +1531,19 @@ class LiveHandTracker:
         return self._hand_dict(hand) if hand is not None else None
 
     def _hand_dict(self, hand: _LiveHand) -> dict:
+        names = hand.seat_names
+
+        def latest(seat_id: str | None, name: str | None) -> str | None:
+            """这一手最后确认的名字。没有更正过时原样返回。"""
+            return (names.get(seat_id) if seat_id else None) or name
+
+        roster = [{**row, "name": latest(row.get("seat_id"), row.get("name"))}
+                  for row in hand.table_roster]
         out = {
             "hand_id": hand.hand_id,
             **({"table_signature": hand.table_signature}
                if hand.table_signature else {}),
-            **({"table_roster": hand.table_roster}
-               if hand.table_roster else {}),
+            **({"table_roster": roster} if roster else {}),
             "hero_cards": list(hand.hero_cards),
             "hero_position": hand.hero_position,
             "table_size": hand.table_size,
@@ -1536,7 +1555,8 @@ class LiveHandTracker:
                     "street": rec.street,
                     "pot_start": rec.pot_start,
                     "actions": [
-                        {"seat_id": a.seat_id, "name": a.name,
+                        {"seat_id": a.seat_id,
+                         "name": latest(a.seat_id, a.name),
                          "position": a.position, "action": a.action,
                          "amount": a.amount, "all_in": a.all_in,
                          "is_hero": a.is_hero,
@@ -1567,7 +1587,7 @@ class LiveHandTracker:
         for entry in hand.start_stacks.values():
             seat_meta[entry["seat_id"]] = {
                 "seat_id": entry["seat_id"],
-                "name": entry.get("name"),
+                "name": latest(entry["seat_id"], entry.get("name")),
                 "position": entry.get("position"),
                 "stack": entry.get("stack"),
             }
@@ -1577,7 +1597,7 @@ class LiveHandTracker:
             if item.get("name") is None or item.get("position") is None:
                 name, position = self._seat_info(hand, seat_id)
                 if item.get("name") is None:
-                    item["name"] = name
+                    item["name"] = latest(seat_id, name)
                 if item.get("position") is None:
                     item["position"] = position
         if seat_meta:
@@ -1587,16 +1607,22 @@ class LiveHandTracker:
         if hand.start_stack is not None:
             out["hero_stack_bb"] = round(hand.start_stack, 2)
         if hand.start_stacks:
-            out["start_stacks"] = [hand.start_stacks[seat_id]
-                                   for seat_id in hand.start_stacks]
+            out["start_stacks"] = [
+                {**hand.start_stacks[seat_id],
+                 "name": latest(seat_id, hand.start_stacks[seat_id].get("name"))}
+                for seat_id in hand.start_stacks]
         # 摊牌/主动秀牌读到的对手手牌。没有亮牌时连键都不出现。
         if hand.shows:
-            out["shows"] = [hand.shows[seat_id]
-                            for seat_id in sorted(hand.shows)]
+            out["shows"] = [
+                {**hand.shows[seat_id],
+                 "name": latest(seat_id, hand.shows[seat_id].get("name"))}
+                for seat_id in sorted(hand.shows)]
         # 全下座位、金额与实时胜率。没有全下时连键都不出现。
         if hand.all_ins:
-            out["all_ins"] = [hand.all_ins[seat_id]
-                              for seat_id in sorted(hand.all_ins)]
+            out["all_ins"] = [
+                {**hand.all_ins[seat_id],
+                 "name": latest(seat_id, hand.all_ins[seat_id].get("name"))}
+                for seat_id in sorted(hand.all_ins)]
         # 牌面异常只在发生过时出现；cards_unreliable=True 说明这手至少有一帧
         # 因牌面不可靠跳过了 AI 建议。
         if hand.cards_warnings:

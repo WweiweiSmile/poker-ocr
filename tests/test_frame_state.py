@@ -446,6 +446,60 @@ def test_name_tracker_used_when_given() -> None:
     check(s.player("lowL").name == "YKY", f"应保持 YKY，实际 {s.player('lowL').name}")
 
 
+def test_absent_seat_keeps_name_memory() -> None:
+    """整座暂时没证据：名字下线，但读数记忆留着 —— 回来时相似读数要先确认。
+
+    2026-11-01 的入口就在这里：换手空档里座位短暂「没有人的证据」，
+    旧实现立刻 forget()，下一帧就成了「首读无条件采信」，一帧错读被锁死。
+    """
+    tracker = NameTracker(confirm=3)
+    rows = {k: dict(v) for k, v in BASE.items()}
+    s = build_state(make_frame(rows), PROFILE, name_tracker=tracker)
+    check(s.player("midL").name == "伯克利丁真", "基线名字应直接认")
+
+    # 该座位抽掉（筹码/下注/名字都空）→ 名字下线，但记忆保留
+    gone = {k: dict(v) for k, v in BASE.items()}
+    gone["midL"] = {"name": "", "chip": "", "bet": ""}
+    s = build_state(make_frame(gone), PROFILE, name_tracker=tracker)
+    check(s.player("midL").name is None, f"没证据时名字应下线：{s.player('midL').name}")
+    check("midL" not in tracker.current(), "当前名字应清掉")
+
+    # 重新出现、读数「像」原来的名字 → 先当候选，不能一帧就改口
+    back = {k: dict(v) for k, v in BASE.items()}
+    back["midL"] = {"name": "伯克利丁真啊", "chip": "88BB"}
+    first = build_state(make_frame(back), PROFILE, name_tracker=tracker)
+    check(first.player("midL").name is None,
+          f"相似读数要先确认，实际 {first.player('midL').name}")
+    build_state(make_frame(back), PROFILE, name_tracker=tracker)
+    third = build_state(make_frame(back), PROFILE, name_tracker=tracker)
+    check(third.player("midL").name == "伯克利丁真啊",
+          f"连读 3 帧应改口，实际 {third.player('midL').name}")
+
+
+def test_name_diagnostics_are_recorded() -> None:
+    """名字的原始读数/分数/改口告警要能落库 —— 没有它们就无法复盘。"""
+    tracker = NameTracker(confirm=3)
+    s = build_state(make_frame(), PROFILE, name_tracker=tracker)
+    low = s.player("lowL")
+    check(low.name_raw == "YKY", f"应记下原始读数：{low.name_raw!r}")
+    check(abs(low.name_score - 0.9) < 1e-9, f"应记下 rec 分数：{low.name_score}")
+    check(low.name_tracked == "YKY", f"应记下 tracker 结论：{low.name_tracked!r}")
+    dbg = low.to_debug()
+    check(dbg.get("name_score") == 0.9 and "name_raw" not in dbg,
+          f"原始读数与名字相同时不必重复写：{dbg}")
+
+    # 改口时要写一条可读的告警（抖动 / 换人分开）
+    rows = {k: dict(v) for k, v in BASE.items()}
+    rows["lowL"]["name"] = "Dragon333"
+    tracker2 = NameTracker(confirm=3)
+    build_state(make_frame(), PROFILE, name_tracker=tracker2)
+    for _ in range(3):
+        s2 = build_state(make_frame(rows), PROFILE, name_tracker=tracker2)
+    check(any("名字换人" in w for w in s2.name_warnings),
+          f"换人应写进 name_warnings：{s2.name_warnings}")
+    check(not s2.errors, "名字告警不能进质量闸")
+
+
 # ─────────────────────────── 质量闸 ───────────────────────────
 
 def test_missing_dealer() -> None:
@@ -656,6 +710,8 @@ def main() -> int:
         test_bare_equity_slot_number_is_not_all_in,
         test_buying_in_by_avatar,
         test_name_tracker_used_when_given,
+        test_absent_seat_keeps_name_memory,
+        test_name_diagnostics_are_recorded,
         test_leaving_seat_does_not_keep_old_name,
         test_missing_dealer,
         test_pot_label_without_number,

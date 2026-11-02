@@ -24,9 +24,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field as dc_field
 
 from .parse import (
-    Amount, Blinds, NameTracker, is_all_in_badge, is_fold_badge, parse_action,
-    parse_amount, parse_blinds, parse_chip_loose, parse_equity, parse_percent,
-    sticky_name,
+    Amount, Blinds, NameTracker, is_all_in_badge, is_fold_badge, names_similar,
+    parse_action, parse_amount, parse_blinds, parse_chip_loose, parse_equity,
+    parse_percent, sticky_name,
 )
 from .positions import assign_positions
 from .profile import Profile
@@ -55,6 +55,17 @@ class PlayerState:
     # 下一手重新识别这个座位（可能已经换人）。
     left: bool = False
     notes: list[str] = dc_field(default_factory=list)
+    # ── 名字诊断（落库用，不影响判定）──
+    # 本帧名字槽的**原始读数**和它的 rec 分数。用户反馈里最常见的追问就是
+    # 「这个字到底是读错了还是没读到」，没有这两个字段就完全无法复盘
+    # （2026-11-01 那次原始分数已经永久丢失）。分数是 rec 自评，别拿它当「对
+    # 不对」的概率用 —— 见 name_lexicon 的模块注释。
+    name_raw: str | None = None
+    name_score: float = 0.0
+    # tracker 给出的名字（可能被词表纠正过）。`name` 可能被 roster 兜底或
+    # 离桌逻辑覆盖，这个字段始终保留 tracker 的当前结论，供 StateStream 比对
+    # 后修复 roster。
+    name_tracked: str | None = None
 
     def to_debug(self) -> dict:
         return {
@@ -69,6 +80,13 @@ class PlayerState:
             "all_in": self.all_in,
             **({"equity": self.equity} if self.equity is not None else {}),
             "status": self.status,
+            # 只在真有名字相关读数时写：老记录的键集合保持原样
+            **({"name_score": round(self.name_score, 4)}
+               if self.name_score else {}),
+            **({"name_raw": self.name_raw}
+               if self.name_raw and self.name_raw != self.name else {}),
+            **({"name_tracked": self.name_tracked}
+               if self.name_tracked and self.name_tracked != self.name else {}),
             **({"left": True} if self.left else {}),
             **({"notes": self.notes} if self.notes else {}),
         }
@@ -92,6 +110,9 @@ class FrameState:
     # 看到横幅；跨帧保持由 StateStream / LiveHandTracker 负责。
     bomb_pot: bool = False
     errors: list[str] = dc_field(default_factory=list)
+    # 名字相关的诊断（改口/抖动/词表存疑）。**不进 errors**：名字读不准不该
+    # 让整帧被质量闸丢掉，那会把牌面和底池一起扔了。
+    name_warnings: list[str] = dc_field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -119,6 +140,8 @@ class FrameState:
             **({"bomb_pot": True} if self.bomb_pot else {}),
             "players": [p.to_debug() for p in self.players],
             **({"errors": self.errors} if self.errors else {}),
+            **({"name_warnings": self.name_warnings}
+               if self.name_warnings else {}),
         }
 
 
@@ -252,9 +275,12 @@ def build_state(frame: RoiFrame, profile: Profile,
 
     # ── 每个座位 ──────────────────────────────────────────
     players: list[PlayerState] = []
+    name_warnings: list[str] = []
     for seat_roi in frame.seats:
         sid = seat_roi.seat_id
         name_raw = frame.text("name", sid)
+        name_read = seat_roi.fields.get("name")
+        name_score = float(getattr(name_read, "score", 0.0) or 0.0)
         chip_raw = frame.text("chip", sid)
         bet_raw = frame.text("bet", sid)
 
@@ -363,13 +389,27 @@ def build_state(frame: RoiFrame, profile: Profile,
             or (bet or 0) > 0
             or icon is True or shown_here
             or all_in_badge is True or equity is not None)
+        tracked: str | None = None
         if name_tracker is not None:
             if present:
-                name = name_tracker.resolve(sid, name_text or None, action)
+                tracked = name_tracker.resolve(sid, name_text or None, action)
+                change = name_tracker.take_change(sid)
+                if change is not None and change[0]:
+                    # 只有「确实是两种拼法」时才记：换人（不像）和抖动（像）
+                    # 分开写，复盘时能一眼看出是 OCR 抖还是座位换了人。
+                    old, new = change
+                    kind = ("名字抖动" if names_similar(old, new) else "名字换人")
+                    name_warnings.append(f"{sid}: {kind} {old!r} → {new!r}")
             else:
-                # 整座没人：连同名字缓存一起清掉，换人坐下时不能继承旧名字。
-                name_tracker.forget(sid)
-                name = None
+                # 整座暂时没有「还有人」的证据：**不再立刻抹掉名字记忆**。
+                # 旧代码这里调 forget()，下一次读数就成了「首读无条件采信」，
+                # 于是换手空档里的一帧错读会被锁成整场的名字
+                # （2026-11-01 21:22 实盘，锁了 10 分钟）。
+                # absent() 只把当前名字下线并保留「上一次的名字」，座位重新
+                # 出现时它会先被判成「候选」而不是直接覆盖。
+                name_tracker.absent(sid)
+                tracked = None
+            name = tracked
         else:
             prev_name = prev_names.get(sid)
             name = (None if not present else
@@ -504,6 +544,12 @@ def build_state(frame: RoiFrame, profile: Profile,
             seat_id=sid, name=name, stack=stack, bet=bet, action=action,
             fold=fold, in_hand=in_hand, all_in=all_in, equity=equity,
             status=status, left=left_here, notes=notes,
+            # 诊断字段：原始读数 / rec 分数 / tracker 的结论。名字被动作徽章
+            # 盖住时 name_raw 是徽章文字，不写出来免得误导。
+            name_raw=(name_text or None) if action is None else None,
+            name_score=name_score if (action is None and name_text) else 0.0,
+            # 离桌座位的 tracker 结论属于**下一手**的占用者，不能写进这一手
+            name_tracked=None if left_here else tracked,
         ))
 
     in_hand = [p for p in players if p.in_hand]
@@ -573,6 +619,7 @@ def build_state(frame: RoiFrame, profile: Profile,
         street_bet_total=street_total,
         bomb_pot=_bomb_banner(frame),
         errors=errors,
+        name_warnings=name_warnings,
     )
 
 

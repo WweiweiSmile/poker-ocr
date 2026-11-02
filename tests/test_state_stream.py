@@ -466,11 +466,15 @@ def test_hand_boundaries_from_cards_and_board() -> None:
 
 
 def test_slow_fields_pinned_until_hand_switch() -> None:
-    """名字/盲注读到可信值就钉住；动作徽章不钉；换手整批解钉。"""
+    """名字/盲注读到可信值就钉住；动作徽章不钉；换手整批解钉。
+
+    名字**要先被稳定器确认**才钉：钉住等于这一手不再重读，一帧错读就再也
+    纠正不了（2026-11-01 实盘整手牌都错）。所以这里先喂 3 帧再测钉图。
+    """
     from poker_ocr.roi_reader import RoiFrame, RoiRead, SeatRoi
 
     with stub_env():
-        s = new_stream()
+        s = new_stream(name_confirm=3)
         s.stream.cache = FakeCache()
         frame = RoiFrame(
             frame_id="f", size=(100, 100), hero_seat_id="hero",
@@ -479,6 +483,15 @@ def test_slow_fields_pinned_until_hand_switch() -> None:
                                             [("Alice", 0.95)])})],
             globals={"blinds": RoiRead("blinds", (0, 0, 1, 1),
                                        [("1/2(）30301600:24:28", 0.9)])})
+        # 还没确认（只读到一帧）→ 不钉，下一帧还能重读、纠正
+        s.names.resolve("hero", "Alice")
+        s._pin_slow_fields(frame)
+        check("hero.name" not in s.stream.cache.pinned,
+              f"没确认的名字不该钉住：{s.stream.cache.pinned}")
+
+        for _ in range(3):
+            s.names.resolve("hero", "Alice")
+        check(s.names.confirmed("hero"), "3 帧之后应算确认")
         s._pin_slow_fields(frame)
         check("hero.name" in s.stream.cache.pinned,
               f"可信名字应钉住：{s.stream.cache.pinned}")
@@ -603,6 +616,106 @@ def test_stable_seconds_floor() -> None:
               f"稳定满 1 秒后应记录，实际 {out.kind}")
 
 
+def test_roster_name_repaired_after_correction() -> None:
+    """名单锁定后名字才被纠正：roster 要跟上，不能带着错拼法过完整手。
+
+    2026-11-01 实盘：换手第一帧把 `svsvbmbm` 读成 `ssvhmbm` 并锁进 roster，
+    之后 10 分钟的正确读数都被 roster 压住，整手牌/画像键全是错的。
+    """
+    with stub_env():
+        s = new_stream(max_vanish=3, name_confirm=3)
+        sig = (("Kd", "Qd"), ())
+        rows = {k: dict(v) for k, v in BASE.items()}
+        rows["lowL"]["name"] = "ssvhmbm"          # 锁名单时是错的
+        feed(s, make_frame(rows), t=0.0, extra_signature=sig)
+        check(s.hand_roster.get("lowL", (None,))[0] == "ssvhmbm",
+              f"名单先按当时的读数锁定：{s.hand_roster.get('lowL')}")
+
+        # 正确读数回来（连续 3 帧一致）
+        rows["lowL"]["name"] = "svsvbmbm"
+        out = None
+        for i in range(3):
+            out = feed(s, make_frame(rows), t=0.5 * (i + 1),
+                       extra_signature=sig)
+        check(s.hand_roster["lowL"][0] == "svsvbmbm",
+              f"确认之后名单应被修正：{s.hand_roster['lowL']}")
+        check(out.state.player("lowL").name == "svsvbmbm",
+              f"本帧输出也应用新名字：{out.state.player('lowL').name}")
+        check(any("名单名字已修正" in w for w in out.state.name_warnings),
+              f"修正要能看见：{out.state.name_warnings}")
+        check(s.summary()["name_fixes"] >= 1, "summary 应统计修正次数")
+
+
+def test_roster_name_not_repaired_before_confirmation() -> None:
+    """只读到一帧的新名字（还没确认）不能改名单 —— 名单是这一手的身份基准。"""
+    with stub_env():
+        s = new_stream(max_vanish=3, name_confirm=3)
+        sig = (("Kd", "Qd"), ())
+        rows = {k: dict(v) for k, v in BASE.items()}
+        rows["lowL"]["name"] = "ssvhmbm"
+        feed(s, make_frame(rows), t=0.0, extra_signature=sig)
+
+        rows["lowL"]["name"] = "svsvbmbm"
+        out = feed(s, make_frame(rows), t=0.5, extra_signature=sig)
+        check(s.hand_roster["lowL"][0] == "ssvhmbm",
+              f"没确认前不能改名单：{s.hand_roster['lowL']}")
+        check(out.state.player("lowL").name == "ssvhmbm",
+              f"输出仍按名单：{out.state.player('lowL').name}")
+
+
+def test_lexicon_corrects_known_player_name() -> None:
+    """词表命中已知玩家：读数直接按已知拼写记录，并留下说明。"""
+    from poker_ocr.name_lexicon import NameLexicon
+
+    with stub_env():
+        lexicon = NameLexicon(["台风来咯咯", "爽歪的麻雀"])
+        s = new_stream(max_vanish=3, name_lexicon=lexicon)
+        rows = {k: dict(v) for k, v in BASE.items()}
+        rows["midL"]["name"] = "台风来吧多"       # 尾巴被读坏
+        out = feed(s, make_frame(rows), t=0.0, extra_signature=(("Kd",), ()))
+        check(out.state.player("midL").name == "台风来咯咯",
+              f"应纠正到已知拼法：{out.state.player('midL').name}")
+        check(out.state.player("midL").name_raw == "台风来吧多",
+              f"原始读数要保留下来：{out.state.player('midL').name_raw}")
+
+def test_lexicon_flags_suspect_without_changing() -> None:
+    """存疑档（像但不够把把握）：不改名字，只写告警。"""
+    from poker_ocr.name_lexicon import NameLexicon
+
+    with stub_env():
+        lexicon = NameLexicon(["svsvbmbm"])
+        s = new_stream(max_vanish=3, name_lexicon=lexicon)
+        rows = {k: dict(v) for k, v in BASE.items()}
+        rows["upL"]["name"] = "ssvhmbm"          # 0.667，公共前缀只有 1
+        out = feed(s, make_frame(rows), t=0.0, extra_signature=(("Kd",), ()))
+        check(out.state.player("upL").name == "ssvhmbm",
+              f"存疑档不该自动改：{out.state.player('upL').name}")
+        check(any("疑似已知玩家" in w for w in out.state.name_warnings),
+              f"存疑读数要告警：{out.state.name_warnings}")
+        check(not out.state.errors, "名字告警不能进质量闸")
+
+
+def test_lexicon_never_merges_two_live_players() -> None:
+    """桌上同时有「俊伯老公」和「俊伯老婆」时，不能把后者并进前者。"""
+    from poker_ocr.name_lexicon import NameLexicon
+
+    with stub_env():
+        lexicon = NameLexicon(["俊伯老公"])
+        s = new_stream(max_vanish=3, name_lexicon=lexicon)
+        rows = {k: dict(v) for k, v in BASE.items()}
+        rows["midL"]["name"] = "俊伯老公"
+        rows["lowL"]["name"] = "俊伯老婆"
+        out = None
+        for i in range(3):
+            out = feed(s, make_frame(rows), t=0.5 * i,
+                       extra_signature=(("Kd",), ()))
+        check(out.state.player("lowL").name == "俊伯老婆",
+              f"另一个座位已经在用「俊伯老公」，不能并名："
+              f"{out.state.player('lowL').name}")
+        check(out.state.player("midL").name == "俊伯老公",
+              f"原来的那位不应改名：{out.state.player('midL').name}")
+
+
 def main() -> int:
     tests = [
         test_first_frame_is_baseline,
@@ -630,6 +743,11 @@ def main() -> int:
         test_bomb_banner_latches_across_frames,
         test_card_icon_fold_needs_two_absent_frames,
         test_show_after_fold_keeps_fold,
+        test_roster_name_repaired_after_correction,
+        test_roster_name_not_repaired_before_confirmation,
+        test_lexicon_corrects_known_player_name,
+        test_lexicon_flags_suspect_without_changing,
+        test_lexicon_never_merges_two_live_players,
     ]
     for t in tests:
         before = len(FAILS)

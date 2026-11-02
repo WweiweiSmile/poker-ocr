@@ -12,7 +12,9 @@ from __future__ import annotations
 
 import difflib
 import re
+import time
 from dataclasses import dataclass
+from typing import Callable
 
 # ─────────────────────────── 金额 ───────────────────────────
 
@@ -283,27 +285,93 @@ def sticky_name(prev: str | None, new: str | None) -> str | None:
     return new
 
 
+# 「上一次那个名字」在整座暂时没证据后还要记多久（秒）。只用来判断
+# 「重新出现的读数是不是同一个人的另一种写法」，不参与输出。
+NAME_RECENT_KEEP = 30.0
+
+
 class NameTracker:
-    """每座名字的稳定器：新读法要**连续确认 N 帧**才换身份。
+    """每座名字的稳定器：新读法要**连续确认 N 帧**才改口。
 
     实测同一个座位会被读成 `YKY / YkY / YKkY / 東Yk丫`，而真正的换人
     （`Dragon333` → `咸蛋鸡柳饭`）是低频事件。所以策略是「先信旧名字，
-    候选连续出现 confirm 次才换」—— 比调相似度阈值可靠：单帧/两帧的乱码
-    根本进不了输出，换人也只需要 1.5s（confirm=3 @ 0.5s）就能反映出来。
+    候选连续出现 confirm 次才换」。
+
+    **2026-11-01 实盘教训：以前「相似」的读法被无条件丢弃，等于把一次错读
+    锁成永久。** 21:22:51 两个座位同时被读错（`svsvbmbm`→`ssvhmbm`，
+    `台风来咯咯`→`台风来吧多`），两者的 difflib 相似度分别是 0.667 / 0.600，
+    都刚好过 `names_similar` 的 0.6 —— 于是之后 10 分钟、3700+ 帧的正确读数
+    全被当成「同一个人的另一种写法」扔掉，直到进程重启才恢复。整手牌的
+    名单、对手画像键、AI 上下文都吃的是那个错名字。
+
+    现在「相似」不再有特权：**任何**与当前名字不同的读数都进候选计数，连读
+    `confirm` 帧就改口（0.5s @6Hz）。相似度只用来决定两件事：
+      · 整座重新出现时的「首读」要不要先确认（见 resolve 的 cur is None 分支）；
+      · 改口/抖动时该记 `name_change`（换人）还是 `name_flicker`（同一人抖动）。
     """
 
-    def __init__(self, confirm: int = 3) -> None:
+    def __init__(self, confirm: int = 3, *,
+                 recent_keep: float = NAME_RECENT_KEEP,
+                 corrector: Callable[..., str | None] | None = None,
+                 clock: Callable[[], float] | None = None) -> None:
         self.confirm = max(1, int(confirm))
+        self.recent_keep = max(0.0, float(recent_keep))
+        # 用时钟而不是帧计数：一帧会按座位调用 9 次，用次数算窗口会让
+        # 「10 秒」变成「1 秒」，窗口长度还会随座位数漂。
+        self._clock = clock or time.monotonic
+        # 词表纠正（可选）：把读数映射到「已知玩家的规范拼写」。见 name_lexicon。
+        self._corrector = corrector
         self._names: dict[str, str] = {}
         self._cand: dict[str, str] = {}
         self._count: dict[str, int] = {}
+        # 座位 → 当前名字已经**逐字读对**的帧数。用来区分「确认过的名字」和
+        # 「刚第一次读到的名字」—— 名单锁定/roster 修正只认前者。
+        self._votes: dict[str, int] = {}
+        # 座位 → (上一次的名字, 记下时的时刻)。absent() 清掉当前名字时保留，
+        # 让座位重新出现时还能判断「像不像同一个人的另一次读法」。
+        self._recent: dict[str, tuple[str, float]] = {}
+        # 座位 → (旧名, 新名)：最近一次改口。调用方取走写进诊断。
+        self._changes: dict[str, tuple[str | None, str]] = {}
+
+    def __len__(self) -> int:
+        return len(self._names)
 
     def current(self) -> dict[str, str]:
         return dict(self._names)
 
+    def votes(self, seat_id: str) -> int:
+        """当前名字逐字读对过多少帧（首读算 1）。"""
+        return self._votes.get(seat_id, 0)
+
+    def confirmed(self, seat_id: str) -> bool:
+        """当前名字是否已经连续读对 confirm 帧 —— 名单修复只认确认过的。"""
+        return seat_id in self._names and self.votes(seat_id) >= self.confirm
+
+    def take_change(self, seat_id: str) -> tuple[str | None, str] | None:
+        """取走最近一次改口（没有就返回 None）。给上层写诊断用。"""
+        return self._changes.pop(seat_id, None)
+
+    def set_corrector(self, corrector: Callable[..., str | None] | None) -> None:
+        self._corrector = corrector
+
     def forget(self, seat_id: str) -> None:
-        """整座没人时清掉这桌记的名字，避免换人后继续沿用上一位的名字。"""
+        """**显式**清掉这个座位的名字（断流重连 / 换桌）。
+
+        整座暂时没证据走 `absent()`：那个要保留「上一次的名字」，
+        否则座位重新出现时又退化成「首读无条件采信」。
+        """
         self._names.pop(seat_id, None)
+        self._votes.pop(seat_id, None)
+        self._recent.pop(seat_id, None)
+        self._changes.pop(seat_id, None)
+        self._clear(seat_id)
+
+    def absent(self, seat_id: str) -> None:
+        """整座这一帧没有「还有人」的证据：名字不再输出，但记着上一次的名字。"""
+        cur = self._names.pop(seat_id, None)
+        self._votes.pop(seat_id, None)
+        if cur is not None:
+            self._recent[seat_id] = (cur, self._clock())
         self._clear(seat_id)
 
     def resolve(self, seat_id: str, raw: str | None,
@@ -311,24 +379,81 @@ class NameTracker:
         cur = self._names.get(seat_id)
         if action:                       # 动作徽章盖住了名字：沿用旧名字
             return cur
-        if not raw:
+        text = (raw or "").strip()
+        if not text:
             return cur
-        if cur is None:                  # 第一次见：直接认
-            self._names[seat_id] = raw
-            self._clear(seat_id)
-            return raw
-        if names_similar(cur, raw):      # 同一人的另一个读法：保留首读
+
+        if self._corrector is not None:
+            fixed = self._correct(seat_id, text)
+            if fixed:
+                text = fixed
+
+        if cur is None:
+            recent = self._recent_name(seat_id)
+            # 座位刚重新出现、读数又「像」上一位的名字：先当候选。
+            # 完全不像的（真换人）直接认，别让换人慢半秒。
+            if recent is not None and recent != text and names_similar(recent, text):
+                adopted = self._candidate(seat_id, text, None)
+                return adopted
+            self._commit(seat_id, text)
+            return text
+
+        if text == cur:
+            self._votes[seat_id] = self._votes.get(seat_id, 1) + 1
             self._clear(seat_id)
             return cur
-        if self._cand.get(seat_id) == raw:
-            self._count[seat_id] += 1
+
+        # 与当前名字不同：**不再因为「相似」直接丢弃**，一律计票。
+        adopted = self._candidate(seat_id, text, cur)
+        return cur if adopted is None else adopted
+
+    # ── 内部 ──
+    def _correct(self, seat_id: str, text: str) -> str | None:
+        """问一次词表。协议是 `corrector(text, seat_id)`；单参数的老写法也认。"""
+        corrector = self._corrector
+        if corrector is None:
+            return None
+        try:
+            return corrector(text, seat_id)          # type: ignore[call-arg]
+        except TypeError:
+            try:
+                return corrector(text)               # type: ignore[call-arg]
+            except Exception:                        # 词表坏了不该带崩识别
+                return None
+        except Exception:
+            return None
+
+    def _candidate(self, seat_id: str, text: str, cur: str | None) -> str | None:
+        """候选计数；连读 confirm 帧就改口，否则返回 None（保持当前名字）。"""
+        if self._cand.get(seat_id) == text:
+            self._count[seat_id] = self._count.get(seat_id, 0) + 1
         else:
-            self._cand[seat_id], self._count[seat_id] = raw, 1
-        if self._count[seat_id] >= self.confirm:
-            self._names[seat_id] = raw
-            self._clear(seat_id)
-            return raw
-        return cur
+            self._cand[seat_id], self._count[seat_id] = text, 1
+        if self._count[seat_id] < self.confirm:
+            return None
+        self._commit(seat_id, text)
+        return text
+
+    def _commit(self, seat_id: str, text: str) -> None:
+        old = self._names.get(seat_id)
+        self._names[seat_id] = text
+        self._votes[seat_id] = max(1, min(self.confirm, self._count.get(seat_id, 1)))
+        self._recent[seat_id] = (text, self._clock())
+        # 首读不算「改口」（old is None）：那是新出现的座位/新的一手，
+        # 当成改口会让上层每手都报一次「名字修正」。
+        if old is not None and old != text:
+            self._changes[seat_id] = (old, text)
+        self._clear(seat_id)
+
+    def _recent_name(self, seat_id: str) -> str | None:
+        item = self._recent.get(seat_id)
+        if item is None:
+            return None
+        name, when = item
+        if self._clock() - when > self.recent_keep:
+            self._recent.pop(seat_id, None)
+            return None
+        return name
 
     def _clear(self, seat_id: str) -> None:
         self._cand.pop(seat_id, None)
