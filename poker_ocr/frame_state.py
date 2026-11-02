@@ -288,29 +288,30 @@ def build_state(frame: RoiFrame, profile: Profile,
         action = parse_action(name_raw)
         icon = icons.get(sid)
         shown_here = sid in shown
+        avatar_text, avatar_score = avatar_reads.get(sid, ("", 0.0))
+        fold_text = (is_fold_badge(avatar_text, avatar_score)
+                     if (sid in avatar_reads and not shown_here) else None)
+        # 弃牌 = 头像底角的红色手牌图标消失 **且** 头像中间出现「弃牌」。
+        # 两个条件缺一不可：
+        #   · 只看图标（没图标=弃牌）会在换手残留/遮挡/压缩时把在池玩家判成
+        #     弃牌（4d6d 的大盲就是这样被丢掉的）；
+        #   · 只看文字会被头像照片里的噪声误导。
+        # 任一条件不满足 = 未知（None），交给筹码/下注/动作等结构化事实；
+        # 不再用「没看到图标」这种负证据直接判弃。
         fold = None
-        fold_from_avatar = False
-        # 亮牌时头像被两张明牌顶掉：头像区的 rec（读到的是牌面）和图标都
-        # 不可信，不能拿它们判弃牌。
-        if sid in avatar_reads and not shown_here:
-            fold = is_fold_badge(*avatar_reads[sid])
-            fold_from_avatar = fold is True
-        if action == "fold":
-            fold = True
-            fold_from_avatar = False
-        # 头像底角的手牌图标是最硬的「还在池里」证据：看到就是没弃牌，
-        # 即使 rec 把「弃牌」读成了别的字也不能反过来判。（没图标 → 弃牌
-        # 要等筹码/在场都定下来再判，见下面 in_hand 之后。）
         if icon is True:
             fold = False
-            fold_from_avatar = False
+        elif icon is False and fold_text is True:
+            fold = True
+        elif sid == frame.hero_seat_id and fold_text is True:
+            # hero 头像从不挂手牌图标，没有条件 1，只能用「弃牌」二字。
+            fold = True
         if shown_here:
             # 河底亮牌不代表没弃牌：早已弃牌的人也可能 show 牌。亮牌时头像
             # 被牌顶掉、图标也没有，只能沿用**前面动作**得出的弃牌判定
             # （上一帧被接受的状态）；没有历史就保持未知。
-            fold = True if action == "fold" else (prev_fold or {}).get(sid)
+            fold = (prev_fold or {}).get(sid)
 
-        avatar_text, avatar_score = avatar_reads.get(sid, ("", 0.0))
         all_in_badge = is_all_in_badge(avatar_text, avatar_score)
 
         # 全下后筹码/下注位可能显示实时胜率（`30%`/`69%`）。百分数不是金额，
@@ -356,18 +357,6 @@ def build_state(frame: RoiFrame, profile: Profile,
                0.0 if (not bet_raw.strip() or bet_label) else
                (bet_a.value if bet_a.ok else None))
         stack = None if chip_equity is not None else (chip.value if chip.ok else None)
-
-        # 本街已经主动投入 >BB 的玩家不可能已经弃牌：图标消失/头像 OCR 误读
-        # 不能覆盖这个硬事实。0c2e 的 LJ 在 22:07:59 已 3-bet 到 20BB，
-        # 却被图标缺失判成弃牌，直到 5-bet all-in 才恢复。
-        fold_ignored_bet = False
-        if (fold is True and not fold_from_avatar
-                and sid not in left and action != "fold"
-                and (prev_fold or {}).get(sid) is not True
-                and bet is not None
-                and bet > (blinds.bb if blinds else 1.0) + 1e-9):
-            fold = False
-            fold_ignored_bet = True
 
         # 名字粘性只在**这一座还有人的证据**时生效。不能拿「文本非空」当证据：
         # 人走后的空座位，筹码/下注槽也常被 rec 读成 `--`/`·` 之类乱码；
@@ -465,12 +454,6 @@ def build_state(frame: RoiFrame, profile: Profile,
         all_in = bool(in_hand and (
             all_in_badge is True or equity is not None
             or (stack == 0.0 and ((bet or 0) > 0 or was_all_in))))
-        # 明确没看到图标 + 这一座确实坐着人（有名字/筹码）+ 不是 hero/全下
-        # → 判定已弃牌。hero 的头像从不挂这张图标，不能用「没图标」推；
-        # 亮牌时图标被牌顶掉，也不能用「没图标」推。
-        if (icon is False and not shown_here and in_hand and not all_in
-                and sid != frame.hero_seat_id):
-            fold = True
         if all_in:
             fold = False
         if no_player:
@@ -482,9 +465,6 @@ def build_state(frame: RoiFrame, profile: Profile,
                   "folded" if fold else "playing")
 
         notes: list[str] = []
-        if fold_ignored_bet:
-            notes.append(
-                f"fold: 本街已下注 {bet:g}BB，图标缺失不判弃牌")
         if chip_loose:
             notes.append(f"chip: 宽松解析 {chip_raw!r} → {chip.value}")
         elif chip_raw.strip() and not chip.ok and not all_in:

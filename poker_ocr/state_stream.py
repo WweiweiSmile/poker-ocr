@@ -268,9 +268,14 @@ class StateStream:
             # 轮转动画可能还没落位，换手后再多读两帧
             self._dealer_confirm_left = DEALER_CONFIRM_FRAMES
 
+        # 只在**确认不是 hero 回合**时复核 hero：计时器动画会让头像每帧都变，
+        # det 跑一次约 85ms，hero_turn 探针也认不出来时就别硬跑。
+        det_seats = {sid for sid, flag in icons.items() if flag is False}
+        if frame.hero_turn is False:
+            det_seats.add(self.profile.hero_seat_id)
         avatars = read_avatars(img, self.profile, self.engine,
                                self.stream.cache, self.detect_fold,
-                               executor=self._roi_pool)
+                               executor=self._roi_pool, det_seats=det_seats)
 
         # 头像 All-in 徽章：既用于 build_state 的 all_in，也用于换手判断。
         # 徽章消失必须连续 2 帧可读的非 All-in 文本，避免单帧遮挡/照片幻觉。

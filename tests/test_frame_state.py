@@ -185,47 +185,67 @@ def test_dealer_left_mid_hand_is_dead_button_not_discard() -> None:
           f"{s.player('topL').position}")
 
 
-def test_card_icon_decides_fold_without_ocr() -> None:
-    """头像底角的手牌图标：有=还在池里，没有=弃牌。
+def test_fold_needs_icon_gone_and_text() -> None:
+    """弃牌 = 手牌图标消失 **且** 头像中间出现「弃牌」，两个条件缺一不可。
 
-    弃牌后头像被「弃牌」遮罩盖住，rec 经常读成「奔牌/水/风/O」；
-    图标是颜色+几何判断，不受 OCR 抖动影响。
+    4d6d 的大盲只满足条件 1（图标在换手动画里没读到），旧逻辑就判弃牌，
+    整手把 BB 从在局集合里丢掉。任一条件不满足只能算未知。
     """
     rows = {k: dict(v) for k, v in BASE.items()}
     rows["topR"] = {"name": "雷霆战吉", "chip": "176BB"}
+    # 只有图标缺失：未知，不判弃
     s = build_state(make_frame(rows), PROFILE,
                     card_icons={"topR": False, "hero": False})
-    check(s.player("topR").fold is True
-          and s.player("topR").status == "folded",
-          f"没图标应判弃牌：{s.player('topR').to_debug()}")
-    check(s.player("hero").fold is not True,
-          "hero 头像从不挂图标，不能据此判 hero 弃牌")
+    check(s.player("topR").fold is None,
+          f"只有图标缺失不能判弃：{s.player('topR').to_debug()}")
+    check(s.player("topR").in_hand,
+          "图标缺失但人还在座/在池，不能顺手把整座丢掉")
+
+    # 两个条件都满足 → 弃牌
+    folded = build_state(make_frame(rows), PROFILE,
+                         card_icons={"topR": False},
+                         avatar_reads={"topR": ("弃牌", 0.9)})
+    check(folded.player("topR").fold is True
+          and folded.player("topR").status == "folded",
+          f"图标消失 + 弃牌文字应判弃：{folded.player('topR').to_debug()}")
+
+    # 只有文字、图标还在 → 不判弃（旧逻辑会被头像噪声带偏）
+    kept = build_state(make_frame(rows), PROFILE,
+                       card_icons={"topR": True},
+                       avatar_reads={"topR": ("弃牌", 0.9)})
+    check(kept.player("topR").fold is False,
+          f"看到图标就不能判弃：{kept.player('topR').to_debug()}")
+
+    # hero 头像从不挂图标，没有条件 1，只能用「弃牌」二字
+    hero_folded = build_state(make_frame(rows), PROFILE,
+                              avatar_reads={"hero": ("弃牌", 0.9)})
+    check(hero_folded.player("hero").fold is True,
+          f"hero 读到弃牌应判弃：{hero_folded.player('hero').to_debug()}")
+
     check(s.player("lowL").fold is None,
-          "没给图标的座位应保持未知")
+          "没给图标/文字的座位应保持未知")
 
 
-def test_card_icon_missing_does_not_fold_a_bettor() -> None:
-    """本街已下注 >BB 的人不能被「图标缺失」判成弃牌。
+def test_missing_icon_alone_does_not_fold_a_bettor() -> None:
+    """本街在下注的人，图标暂时缺失不能判弃；两个条件都满足才信（下注后弃牌）。
 
-    0c2e 的 LJ 已 3-bet 到 20BB，图标在动画里消失，旧逻辑连续两帧判弃牌，
-    翻后事实写成「本手在局 1 人」。下注是比图标更硬的事实。
+    4d6d：大盲只投 1BB、默认过牌没有筹码变化，图标在换手动画里没读到，
+    旧逻辑直接判弃；翻牌/转牌的下注证明它一直在池里。
     """
     rows = {k: dict(v) for k, v in BASE.items()}
     rows["lowL"] = {"name": "YKY", "chip": "234.5BB", "bet": "20BB"}
     s = build_state(make_frame(rows), PROFILE,
                     card_icons={"lowL": False})
     low = s.player("lowL")
-    check(low.fold is False and low.in_hand,
-          f"已下注 20BB 的玩家不能判弃牌：{low.to_debug()}")
-    check(any("图标缺失不判弃牌" in n for n in low.notes),
-          f"应留下覆盖原因：{low.to_debug()}")
+    check(low.fold is not True and low.in_hand,
+          f"只有图标缺失不能判弃：{low.to_debug()}")
 
     # 头像是明确的「弃牌」遮罩时，即使本街下过注也要信头像（下注后弃牌）。
     folded = build_state(make_frame(rows), PROFILE,
                          card_icons={"lowL": False},
                          avatar_reads={"lowL": ("弃牌", 0.9)})
     check(folded.player("lowL").fold is True,
-          f"头像明确弃牌应保留：{folded.player('lowL').to_debug()}")
+          f"两个条件都满足应判弃：{folded.player('lowL').to_debug()}")
 
 
 def test_card_icon_overrides_fold_text() -> None:
@@ -697,7 +717,8 @@ def main() -> int:
         test_action_badge_keeps_sticky_name,
         test_idle_zero_player_is_not_in_hand,
         test_empty_seat_is_not_in_hand,
-        test_card_icon_decides_fold_without_ocr,
+        test_fold_needs_icon_gone_and_text,
+        test_missing_icon_alone_does_not_fold_a_bettor,
         test_card_icon_overrides_fold_text,
         test_show_cards_do_not_clear_fold,
         test_empty_plus_seat_is_away,

@@ -34,6 +34,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from poker_ocr.card_icon import read_card_icons                # noqa: E402
 from poker_ocr.dealer import build_detector                   # noqa: E402
 from poker_ocr.frame_state import build_state                 # noqa: E402
 from poker_ocr.live import AspectFit, plan_crop               # noqa: E402
@@ -215,10 +216,15 @@ def main() -> int:
 
         frame = read_frame(img, profile, engine, frame_id=path.stem,
                            dealer_detector=detector, with_dealer=not args.no_dealer)
+        # 与实时链路同口径：弃牌 = 图标消失 + 头像中间「弃牌」，两个条件都要。
+        icons = read_card_icons(img, profile)
+        det_seats = {sid for sid, flag in icons.items() if flag is False}
+        det_seats.add(profile.hero_seat_id)     # 离线校验不计时，hero 总是复核
         avatars = read_avatars(img, profile, engine,
-                               detect_fold=not args.no_avatars)
+                               detect_fold=not args.no_avatars,
+                               det_seats=det_seats)
         state = build_state(frame, profile, avatar_reads=avatars,
-                            prev_blinds=initial_blinds)
+                            card_icons=icons, prev_blinds=initial_blinds)
         records.append(_frame_record(path.stem, frame, state))
 
         if frame.dealer and frame.dealer.status == "found":

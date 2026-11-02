@@ -50,6 +50,7 @@ import numpy as np
 
 from .dealer import DealerDetector, DealerResult
 from .ocr import OcrEngine, preprocess_variant
+from .parse import is_fold_badge
 from .profile import Profile, Size, Slot
 
 # 每个座位读哪几块。这份顺序就是最终输出顺序，改它等于改接口。
@@ -264,12 +265,20 @@ def crop_slot(img: np.ndarray, profile: Profile, slot: Slot, size: Size,
     return (x1, y1, x2, y2), img[y1:y2, x1:x2]
 
 
-def _rec_read(engine: OcrEngine, prepared: np.ndarray,
+def _rec_read(engine: OcrEngine, prepared: np.ndarray, use_det: bool = False,
               ) -> tuple[list[tuple[str, float]] | None, float, str | None]:
-    """跑一块已预处理好的 ROI。返回 (hits, ms, error)；异常不往外抛。"""
+    """跑一块已预处理好的 ROI。返回 (hits, ms, error)；异常不往外抛。
+
+    `use_det=True` 走 det+rec（检测框+识别），头像/弃牌这类**大号白字**
+    必须走这条路：rec-only 会把「弃牌」读成「奔牌/井脚/不」甚至空，
+    det 先框出文字行再 rec，实测 9/9 都能读成「弃牌」(score 1.0)。
+    """
     t0 = time.perf_counter()
     try:
-        hits = engine.read_text(prepared)
+        if use_det:
+            hits = [(b.text, b.score) for b in engine.read_boxes(prepared)]
+        else:
+            hits = engine.read_text(prepared)
     except Exception as exc:                       # 单块失败不该带崩整帧
         return None, (time.perf_counter() - t0) * 1000, \
             f"rec 抛异常：{type(exc).__name__}"
@@ -277,11 +286,11 @@ def _rec_read(engine: OcrEngine, prepared: np.ndarray,
 
 
 def _run_reads(engine: OcrEngine, images: list[np.ndarray],
-               executor: Executor | None) -> list[tuple]:
+               executor: Executor | None, use_det: bool = False) -> list[tuple]:
     """并行跑一批 rec；结果顺序与输入一致。"""
     if executor is None or len(images) <= 1:
-        return [_rec_read(engine, img) for img in images]
-    futures = [executor.submit(_rec_read, engine, img) for img in images]
+        return [_rec_read(engine, img, use_det) for img in images]
+    futures = [executor.submit(_rec_read, engine, img, use_det) for img in images]
     return [future.result() for future in futures]
 
 
@@ -300,13 +309,19 @@ def read_slots(img: np.ndarray, profile: Profile, engine: OcrEngine,
                slots: list[tuple[Slot, str, str]], size: Size,
                mode: str = "raw", upscale: float = 1.0, pad: float = ROI_PAD,
                cache: RoiCache | None = None,
-               executor: Executor | None = None) -> list[RoiRead]:
+               executor: Executor | None = None,
+               use_det: bool = False) -> list[RoiRead]:
     """批量读多块槽位，返回顺序与 `slots` 一致。
 
     `slots` 是 `[(slot, key, cache_key)]`。**裁剪、缓存 check/store 都在调用
     线程（主线程）里做** —— `RoiDedupCache` 的 dict 没有锁，不能跨线程；
     `cache.check` 还会写「这一帧的 hash」，并发调用会互相踩。真正值得并行的
-    只有 `engine.read_text`（单块约 12ms），所以只把它交给 `executor`。
+    只有单块 OCR，所以只把它交给 `executor`。
+
+    `use_det=True` 走 det+rec，只给**头像块**用：弃牌的白字「弃牌」在
+    rec-only 下会被读成「奔牌/井脚/不」甚至空；det 先框出文字行再 rec，
+    实测两张真实样张 9/9 座位全对（弃牌 1.0、在池 POKER 0.9）。头像块
+    靠 ROI 去重缓存摊薄成本，画面不变时不跑 OCR。
 
     共享同一个 `OcrEngine`/ONNX session 并发跑 rec：RapidOCR 在
     `use_det=False` 路径上只读 session、不写共享状态，实测结果与串行逐字一致。
@@ -332,7 +347,7 @@ def read_slots(img: np.ndarray, profile: Profile, engine: OcrEngine,
 
         pending.append((i, rect, preprocess_variant(roi, mode, upscale)))
 
-    results = _run_reads(engine, [p[2] for p in pending], executor)
+    results = _run_reads(engine, [p[2] for p in pending], executor, use_det)
     for (i, rect, _), (hits, ms, error) in zip(pending, results):
         key, cache_key = slots[i][1], slots[i][2]
         read = _read_from_hits(key, rect, hits, ms, error)
@@ -350,11 +365,13 @@ def read_slot(img: np.ndarray, profile: Profile, engine: OcrEngine, slot: Slot,
               key: str, size: Size, mode: str = "raw", upscale: float = 1.0,
               pad: float = ROI_PAD, cache: RoiCache | None = None,
               cache_key: str | None = None,
-              executor: Executor | None = None) -> RoiRead:
+              executor: Executor | None = None,
+              use_det: bool = False) -> RoiRead:
     """裁一块槽位跑纯 rec（缓存命中就一次 rec 都不跑）。
 
-    **只调 engine.read_text（use_det=False）** —— 全图 det 是一次都不跑的，
-    这是这一层速度的全部来源，也是它和 pipeline.extract 的分水岭。
+    默认**只调 engine.read_text（use_det=False）** —— 全图 det 是一次都不跑的，
+    这是这一层速度的全部来源，也是它和 pipeline.extract 的分水岭。头像块
+    传 `use_det=True`：弃牌白字必须 det+rec 才读得准（见 `read_slots`）。
 
     `key` 是给人看的字段名（name/chip/…），`cache_key` 必须**全场唯一**
     （座位字段传 `座位.字段`，全局传 `@字段`）—— 否则 9 个座位的 name 会互相顶掉。
@@ -363,7 +380,7 @@ def read_slot(img: np.ndarray, profile: Profile, engine: OcrEngine, slot: Slot,
     """
     return read_slots(img, profile, engine, [(slot, key, cache_key or key)],
                       size, mode=mode, upscale=upscale, pad=pad, cache=cache,
-                      executor=executor)[0]
+                      executor=executor, use_det=use_det)[0]
 
 
 def _seat_slot(seat, key: str) -> tuple[Slot | None, str]:
@@ -573,23 +590,47 @@ def read_avatars(img: np.ndarray, profile: Profile, engine: OcrEngine,
                  cache: RoiCache | None = None,
                  detect_fold: bool = True,
                  executor: Executor | None = None,
+                 det_seats: set[str] | None = None,
                  ) -> dict[str, tuple[str, float]]:
     """每座的头像区读一遍，用于弃牌 / 正在带入检测（best-effort）。
 
-    头像不是文字，rec 只会吐碎片；这里只把原文和分数原样交出去，
-    「是不是弃牌」由 `frame_state.is_fold_badge` 判。
+    默认只跑 rec（快）。`det_seats` 里的座位会**额外用 det+rec 复核**：
+    弃牌遮罩上是大号白字「弃牌」，rec-only 会读成「奔牌/井脚/不」甚至空，
+    det 先框出文字行再 rec 才能稳定读对（实测两张真实样张 9/9 座位全对）。
+    复核只对疑似弃牌的座位做（图标已消失 / hero），且按 ROI 缓存摊薄，
+    正常帧不会多跑 det。
+
+    `det_seats=None` 不做复核（保持纯 rec 的旧口径，测试和速度敏感路径用）。
+    「是不是弃牌」仍由 `frame_state.is_fold_badge` 判。
     pad=0：头像槽本来就是照片的紧框，不需要再留白。
     """
     if not detect_fold:
         return {}
     size = (img.shape[1], img.shape[0])
+    seats = list(profile.seats)
     reads = read_slots(
         img, profile, engine,
         [(seat.avatar_slot, "avatar", f"{seat.seat_id}.@avatar")
-         for seat in profile.seats],
+         for seat in seats],
         size, pad=0.0, cache=cache, executor=executor)
-    return {seat.seat_id: (read.text, read.score)
-            for seat, read in zip(profile.seats, reads)}
+    out = {seat.seat_id: (read.text, read.score)
+           for seat, read in zip(seats, reads)}
+    if not det_seats:
+        return out
+    # 弃牌文字兜底：rec-only 没读出「弃牌」的疑似弃牌座位，再用 det+rec 复核。
+    for seat in seats:
+        sid = seat.seat_id
+        if sid not in det_seats:
+            continue
+        text, score = out[sid]
+        if is_fold_badge(text, score) is True:
+            continue
+        read = read_slot(
+            img, profile, engine, seat.avatar_slot, "avatar", size,
+            pad=0.0, cache=cache, cache_key=f"{sid}.@avatar.det", use_det=True)
+        if is_fold_badge(read.text, read.score) is True:
+            out[sid] = (read.text, read.score)
+    return out
 
 
 def read_frame(img: np.ndarray, profile: Profile, engine: OcrEngine,
