@@ -215,13 +215,16 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  {k:12}{v:5}  {v / len(rows):5.1%}")
     print("\n按街：" + "，".join(f"{k} {v}" for k, v in streets.most_common()))
 
+    # system 现在按局面场景拼装（前注/短码/多人池/单挑/听牌/河牌），
+    # 每条样本带自己的 system；system.txt 只是第一条的参考版本。
     system = rows[0]["system"]
-    print(f"\nsystem {len(system)} 字符；平均 facts "
-          f"{sum(len(r['row']['instruction']) for r in rows) // len(rows)} 字符")
+    avg_system = sum(len(r["row"]["system"]) for r in rows) // len(rows)
+    avg_facts = sum(len(r["row"]["instruction"]) for r in rows) // len(rows)
+    print(f"\nsystem 首条 {len(system)} 字符 / 平均 {avg_system} 字符"
+          f"（按局面场景变化）；平均 facts {avg_facts} 字符")
     # 中文按约 1.5 字符/token 粗估。
-    print(f"粗估 token/条 ≈ "
-          f"{(len(system) + sum(len(r['row']['instruction']) for r in rows) // len(rows)
-              + 24) * 2 // 3}（中文按 1.5 字符/token）")
+    print(f"粗估 token/条 ≈ {(avg_system + avg_facts + 24) * 2 // 3}"
+          "（中文按 1.5 字符/token）")
 
     if args.dry_run:
         return 0
@@ -238,7 +241,8 @@ def main(argv: list[str] | None = None) -> int:
         encoding="utf-8")
 
     # dataset_info.json：system 走 columns.system（alpaca 的官方口径）。
-    # 推理时 advice.build_messages() 给的 system 必须与 system.txt 逐字节一致。
+    # 每条 row 自带 system，推理时必须用同一条样本的 system；system.txt
+    # 只是第一条的参考，不再假设整份数据集共用一个 system。
     cols = {"prompt": "instruction", "response": "output", "system": "system"}
     info = {
         "poker_sft": {

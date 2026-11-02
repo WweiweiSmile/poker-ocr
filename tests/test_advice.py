@@ -1708,6 +1708,54 @@ def test_prompt_has_no_rule_layers() -> None:
           "system 应说明短码推/弃区全下是标准动作")
 
 
+def test_system_scenario_sections_follow_the_spot() -> None:
+    """场景段只在对应局面出现：短码/多人池/单挑/听牌/河牌互不串场。
+
+    提示词长度不设产品上限，但「条件规则」不能读成「普适规则」：没有听牌
+    就不该出现听牌段，翻前不该出现河牌段。
+    """
+    from poker_ocr.hand_track import OpponentSnapshot
+
+    def scenes(**kw):
+        system, _ = build_messages(build_situation(make_point(**kw)))
+        return [line for line in system.splitlines()
+                if line.startswith("## 场景")]
+
+    hu = scenes()
+    check("## 场景：单挑" in hu, f"1 名对手应是单挑：{hu}")
+    check(not any("多人池" in s for s in hu), f"单挑不该有多人池段：{hu}")
+    check(not any("短码" in s for s in hu), f"深码不该有短码段：{hu}")
+
+    multi = scenes(opponents=tuple(
+        OpponentSnapshot(f"o{i}", None, pos, 90.0, 0.0, False)
+        for i, pos in enumerate(("BB", "SB", "CO"))))
+    check("## 场景：多人池（本手 4 人）" in multi,
+          f"4 人池应有多人池段：{multi}")
+    check(not any("单挑" in s for s in multi), f"多人池不该有单挑段：{multi}")
+
+    short = scenes(hero_stack=14.0)
+    check("## 场景：短码（Hero 后手约 14BB）" in short,
+          f"14BB 应有短码段：{short}")
+
+    draw = scenes(hero_cards=("Qh", "Jh"), board=("Kh", "7h", "2c"))
+    check("## 场景：听牌" in draw, f"同花听牌应有听牌段：{draw}")
+
+    river = scenes(street="river",
+                   board=("Ks", "7d", "2c", "Th", "4s"))
+    check("## 场景：河牌" in river, f"河牌应有河牌段：{river}")
+
+    pre = scenes(street="preflop", board=(), hero_cards=("Qs", "Qd"))
+    check(not any("河牌" in s for s in pre), f"翻前不该有河牌段：{pre}")
+    check(not any("听牌" in s for s in pre), f"翻前不该有听牌段：{pre}")
+
+    # 场景段必须是条件句：不写「只用/绝不/永远」这类绝对规则。
+    system, _ = build_messages(build_situation(make_point(
+        hero_cards=("Qh", "Jh"), board=("Kh", "7h", "2c"))))
+    scenario_text = system.split("## 场景：", 1)[1]
+    for banned in ("绝不", "只用", "永远"):
+        check(banned not in scenario_text, f"场景段不该写绝对规则：{banned}")
+
+
 def test_prompt_is_chinese_with_english_contract() -> None:
     """文案中文；option id / JSON key / 牌码保持英文契约。"""
     import re
@@ -2070,8 +2118,10 @@ def test_lean_prompt_is_compact_facts_only() -> None:
     check("## 可选动作" in user, "仍要给合法选项")
     check("SPR" in user, "应有 SPR")
     check("赔率门槛" in user or "需跟 0BB" in user, "应有价格事实")
-    check(len(system) < 3000,
-          f"system 应保持极简（< 3000），实际 {len(system)}")
+    # 预算只是防重复膨胀的回归闸，不是产品上限：条件场景段（短码/多人池/
+    # 单挑/听牌/河牌）会按局面追加，长一点换来更少的误读是划算的。
+    check(len(system) < 6000,
+          f"system 不应无限膨胀（< 6000），实际 {len(system)}")
 
 
 def test_hand_vs_ranges_facts_block() -> None:
@@ -3236,7 +3286,7 @@ def test_system_has_id_mapping_and_budget() -> None:
           "system 应说明翻后加注用 raise-1/3…1.2")
     check("翻前面对加注" in system and "raise-3x/raise-4x" in system,
           "system 应把 raise-3x/4x 限定在翻前")
-    check(len(system) <= 2400, f"system 不应重新膨胀，实际 {len(system)}")
+    check(len(system) <= 6000, f"system 不应重新膨胀，实际 {len(system)}")
 
 
 def test_short_stack_prompt_dedupes_capped_options() -> None:
@@ -3469,7 +3519,7 @@ def test_system_ante_module_is_conditional() -> None:
           f"前注局不能默认 SPR 低：\n{ante}")
     check("范围通常放宽" not in ante,
           f"前注局不能无条件放宽范围：\n{ante}")
-    check(len(ante) < 2600, f"前注局 system 不应过长：{len(ante)}")
+    check(len(ante) < 6000, f"前注局 system 不应无限膨胀：{len(ante)}")
 
 
 def test_all_in_amount_uses_effective_stack() -> None:

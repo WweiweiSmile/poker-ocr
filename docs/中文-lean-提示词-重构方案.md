@@ -4,7 +4,9 @@
 > 日期：2026-10-29  
 > 后续变更：system 已拆成 core + 前注条件模块；新增五级事实优先级、指标口径、
 > all-in 几何门控、缺失底池/后手不伪造下注、数据质量中文摘要、范围内部 id 下线。
-> 本文件 3.1 的 system 文本是历史版本，以代码 `SYSTEM_CORE_ZH` 为准。
+> 本文件 3.1 的 system 文本是历史版本。2026-11-03 起提示词代码已按功能/场景
+> 拆到 `poker_ocr/prompt/`（system / user / shared / offline），以
+> `prompt/system/` 与 `prompt/user/` 为准，见 `docs/提示词模块拆分-2026-11-03.md`。
 > 适用代码：当前 `main`（`advice.py` 的 `lean` / `lean-rules` / `skills` 三套提示词）  
 > 结论：按推荐方案 **1A / 2A / 3A / 4A / 5A / 6B** 实施
 
