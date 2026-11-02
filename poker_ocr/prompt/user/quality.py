@@ -23,9 +23,10 @@ def _gap_zh(text: str) -> str:
     if "bet size without an action badge" in text:
         return "有下注额但没抓到动作徽章，范围按更宽处理"
     if "no preflop action" in text:
-        return "翻前动作线缺失，翻前形态/PFR 未知（按未知处理）"
+        return ("翻前动作线缺失，翻前形态/PFR 未知（按未开池处理："
+                "open 或弃；BB 可过牌）")
     if "no action this street" in text:
-        return "本街行动线缺失，范围按未行动处理（不是已过牌）"
+        return "部分座位本街行动线缺失，范围按未行动处理（不是已过牌）"
     if "no range table" in text or "4-bet+ pot" in text:
         return "4-bet+ 池没有范围表，范围未知"
     if "inferred action" in text:
@@ -36,6 +37,14 @@ def _gap_zh(text: str) -> str:
         return "街前底池未读全，范围 SPR 为近似值"
     # 未知技术告警对模型没有可执行信息（它看不到日志），不再占一行。
     return ""
+
+
+_HARD_GAP_MARKERS = ("未读全", "筹码未读出", "状态帧", "牌面缺张")
+
+
+def _is_hard_gap(gap: str) -> bool:
+    """硬缺口 = 会改变可用动作的事实缺失；范围/信息缺口不算。"""
+    return any(marker in gap for marker in _HARD_GAP_MARKERS)
 
 
 def _summarize_gaps(gaps: list[str], *, has_range_equity: bool = False) -> list[str]:
@@ -50,9 +59,7 @@ def _summarize_gaps(gaps: list[str], *, has_range_equity: bool = False) -> list[
         out.append(f"{range_unknown} 名对手范围未知，{tail}")
     # 硬事实缺口（底池/后手/筹码未读全、0 对手异常）优先于普通技术告警，
     # 不能被 cap 挤掉。
-    hard = [g for g in rest
-            if ("未读全" in g or "筹码未读出" in g or "状态帧" in g
-                or "翻前动作线缺失" in g)]
+    hard = [g for g in rest if _is_hard_gap(g)]
     unacted = [g for g in rest if "本街行动线缺失" in g]
     out.extend(hard)
     out.extend(unacted)
@@ -74,12 +81,18 @@ def render_data_quality_zh(sit) -> list[str]:
                 and not any("只建模前" in gap for gap in gaps)):
             gaps.append(f"只建模前 {modeled} 名对手；另有 "
                         f"{actual - modeled - random_fill} 名未计入范围权益")
-    lines = ["## 数据质量（硬事实缺失会影响可用动作；"
-             "范围缺口会降低范围权益可信度）"]
+    lines = ["## 数据质量（硬缺口影响可用动作；范围/画像缺口只降低可信度）"]
     summary = _summarize_gaps(
         gaps, has_range_equity=sit.hand_ranges is not None)
     if summary:
-        lines.extend(f"- {gap}" for gap in summary)
+        hard = [gap for gap in summary if _is_hard_gap(gap)]
+        soft = [gap for gap in summary if gap not in hard]
+        if hard:
+            lines.append("- 硬缺口（走保守线）：" + "；".join(hard))
+        if soft:
+            lines.append("- 范围/信息缺口（范围/画像缺口只降低诈唬频率；"
+                         "动作线缺失按决策顺序的未开池/未行动口径）："
+                         + "；".join(soft))
     else:
-        lines.append("无已知硬缺口")
+        lines.append("无已知硬缺口（未列出的技术告警不影响动作）")
     return lines

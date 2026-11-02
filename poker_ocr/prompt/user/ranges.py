@@ -213,14 +213,16 @@ def render_ranges_zh(sit: Situation) -> list[str]:
              if getattr(o, "mode", None) == "unacted"
              and not getattr(o, "events", ())]
     if stale:
-        lines.append("- 本街还没有动作：范围沿用翻前先验，不是已过牌")
+        names = "、".join(o.position or o.seat_id for o in stale)
+        lines.append(f"- 本街还没有动作的座位：{names}"
+                     "（范围沿用翻前先验，不是已过牌；不代表整条街没人下注）")
 
     for edge in shown:
         composition = _composition_zh(edge)
         detail = composition + "；" if composition else ""
         position = edge.position or edge.seat_id
         lead = max(0.0, 1.0 - edge.behind - edge.tie)
-        lines.append(f"- {position}：{detail}当前成牌领先我 "
+        lines.append(f"- {position}：{detail}对手成牌领先我 "
                      f"{edge.behind:.1%}（平局 {edge.tie:.1%}；"
                      f"你领先 {lead:.1%}）")
 
@@ -269,19 +271,19 @@ def render_ranges_zh(sit: Situation) -> list[str]:
             if behind >= 0.80:
                 if air < 0.02:
                     lines.append(
-                        f"- 范围警告：河牌面对全下，这个范围里 {behind:.0%} 压过你，"
+                        f"- 范围警告（程序建议）：河牌面对全下，这个范围里 {behind:.0%} 压过你，"
                         "几乎没有诈唬；不要拿「我现在有牌」当跟注理由，"
                         "按权益和价格判断")
                 else:
                     lines.append(
-                        f"- 范围警告：河牌面对全下，{behind:.0%} 压过你，"
+                        f"- 范围警告（程序建议）：河牌面对全下，{behind:.0%} 压过你，"
                         f"你只能赢那 {air:.0%} 的诈唬；不要拿「我现在有牌」"
                         "当跟注理由，按权益和价格判断")
         else:
             semi = max(e.composition.draw for e in jammers)
             if semi >= 0.10:
                 lines.append(
-                    f"- 范围警告：全下范围里听牌约 {semi:.0%}，"
+                    f"- 范围警告（程序建议）：全下范围里听牌约 {semi:.0%}，"
                     "权益要按剩余牌发完算，不能只看「他现在还没成牌」")
 
     if random_fill:

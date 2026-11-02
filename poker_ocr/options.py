@@ -15,8 +15,8 @@ from dataclasses import dataclass
 
 from .hand_track import PREFLOP, HandSnapshot
 from .pot_math import (
-    PREFLOP_MIN_RAISE_BB, _effective_stack, _preflop_raise_count,
-    call_amount, winnable_pot,
+    PREFLOP_MIN_RAISE_BB, _effective_stack, _hero_total_stack,
+    _preflop_raise_count, call_amount, winnable_pot,
 )
 
 
@@ -94,7 +94,9 @@ def _all_in_option(snap: HandSnapshot) -> Option | None:
         return None
 
     if snap.street == PREFLOP:
-        short_stack = stack <= PREFLOP_ALLIN_MAX_STACK_BB
+        total_stack = _hero_total_stack(snap)
+        short_stack = (total_stack is not None
+                       and total_stack <= PREFLOP_ALLIN_MAX_STACK_BB)
         facing_threebet = "three-bet" in (snap.preflop_shapes or ())
         if not (short_stack or facing_threebet):
             return None
@@ -124,8 +126,8 @@ def _all_in_option(snap: HandSnapshot) -> Option | None:
 
     note = ""
     if effective is not None and effective < hero_max - 1e-9:
-        note = (f"实际后手 {hero_max:g}BB；有效筹码只有 {effective:g}BB，"
-                f"多出的 {hero_max - effective:g}BB 不会被跟")
+        note = (f"本手总筹码 {hero_max:g}BB；有效筹码只有 {effective:g}BB，"
+                f"多出的 {hero_max - effective:g}BB 不会被跟（退回）")
     return Option("all-in", f"全下 {all_in_amount:g}BB", "allin",
                   all_in_amount, note)
 

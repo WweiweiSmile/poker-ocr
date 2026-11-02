@@ -122,5 +122,5 @@ def render_gt_warnings_zh(gt: GroundTruth | None,
         # 去重但保留顺序：同一条牌面风险只提醒一次。
         out = list(dict.fromkeys(out))
     if unknown:
-        out.append(f"另有 {unknown} 条牌面提示（技术细节见日志）")
+        out.append(f"另有 {unknown} 条未展开的牌面提示")
     return out

@@ -43,7 +43,25 @@ def render_options_zh(sit: Situation) -> list[str]:
     """
     lines = ["## 可选动作"]
     seen: set[tuple] = set()
+    allin = next((o for o in sit.options if o.kind == "allin"), None)
+    capped = [o for o in sit.options
+              if o.kind in ("raise", "bet")
+              and "等同全下" in (o.note or "")]
+    drop: set[str] = set()
+    if allin is not None:
+        same_as_allin = (o for o in capped
+                         if o.amount is not None and allin.amount is not None
+                         and abs(o.amount - allin.amount) < 1e-9)
+        if any(same_as_allin):
+            # 封顶 raise 与 all-in 金额相同：保留带级别的 5-bet/4-bet 标签，
+            # 删掉冗余的 all-in 行。
+            drop.add(allin.id)
+        else:
+            # 封顶 raise 的金额超过有效筹码：只保留真正能执行的 all-in。
+            drop.update(o.id for o in capped)
     for option in sit.options:
+        if option.id in drop:
+            continue
         if option.amount is not None:
             key = (option.kind, option.amount)
             if key in seen:

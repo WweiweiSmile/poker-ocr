@@ -29,7 +29,7 @@ def _action_zh(action: ActionRecord) -> str:
 
 def _fmt_actions_zh(actions: list[ActionRecord]) -> str:
     if not actions:
-        return "（无行动）"
+        return "（未记录到行动）"
     parts = []
     for action in actions:
         who = ("Hero" if action.is_hero
@@ -51,6 +51,8 @@ def render_action_line_zh(sit) -> list[str]:
     lines: list[str] = ["## 行动线"]
     lines.append("（行动线来自 OCR/视频解码，可能有归因或顺序误差；"
                  "与「当前局面」硬事实冲突时，以硬事实为准。）")
+    lines.append("「未记录到行动」只表示没抓到，不等于没人行动；"
+                 "以底池变化和硬事实为准。")
     if any(a.inferred for rec in snap.streets for a in rec.actions):
         lines.append("标注「推断」的动作是视频漏抓后按底池对账补出来的；"
                      "金额是「本街加到总额」。")

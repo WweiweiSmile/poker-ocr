@@ -9,7 +9,7 @@ from __future__ import annotations
 from ...opponent_profile import render_reads_zh
 
 
-def render_profiles_zh(sit) -> list[str]:
+def render_profiles_zh(sit, *, suppress_action_hints: bool = False) -> list[str]:
     """「## 对手画像」整段；没有可信画像时返回空列表。"""
     snap = sit.snap
     active = {o.seat_id: (o.position or o.seat_id)
@@ -18,4 +18,5 @@ def render_profiles_zh(sit) -> list[str]:
                      if r.archetype != "unknown" and r.seat_id in active]
     return render_reads_zh(
         in_hand_reads, active,
-        header="## 对手画像（逐座位；优先于全场统计）")
+        header="## 对手画像（逐座位；优先于全场统计）",
+        include_exploit=not suppress_action_hints)

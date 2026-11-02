@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-# 2026-11-03：提示词按功能/场景拆成 prompt 包（system / user / shared / offline），
-# system 增加条件场景段；事实块文本保持不变。
-PROMPT_VERSION = "lean-zh-2026-11-03.1"
+# 2026-11-03.2：场景段叠加仲裁、后手/本手总筹码拆分、行动线「未记录」、
+# 4-bet 形态按实际级别、硬/软缺口分栏、建议标记与 reason 60 字。
+PROMPT_VERSION = "lean-zh-2026-11-03.2"
 PROMPT_LANGUAGE = "zh"

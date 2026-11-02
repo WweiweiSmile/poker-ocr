@@ -55,18 +55,20 @@ def render_facts_zh(sit) -> str:
         lines.append("")
         lines.extend(strength)
 
-    # ── 逐座位画像：优先于全场统计 ──
-    profiles = render_profiles_zh(sit)
+    # 攻击块会给出本街弃牌率的单一裁决；有攻击块、或某个座位已经有
+    # 「别开火」的反向证据时，逐座位/桌级的 c-bet 建议都不再单独出现，
+    # 避免同一份 prompt 里三个「能不能开火」的来源。
+    attack = render_attack_zh(sit)
+    trap_callers, trap_raisers = attack_signals(sit)
+    suppress_cbet = bool(attack) or bool(trap_callers or trap_raisers)
+
+    # ── 逐座位画像：优先于全场统计；攻击块在场时只留描述性数据 ──
+    profiles = render_profiles_zh(
+        sit, suppress_action_hints=suppress_cbet)
     if profiles:
         lines.append("")
         lines.extend(profiles)
 
-    # 攻击块会给出本街弃牌率的最终裁决；有攻击块、或某个座位已经有
-    # 「别开火」的反向证据时，桌级 c-bet 建议不再单独出现，避免同一份
-    # prompt 里两个「能不能开火」的来源。
-    attack = render_attack_zh(sit)
-    trap_callers, trap_raisers = attack_signals(sit)
-    suppress_cbet = bool(attack) or bool(trap_callers or trap_raisers)
     table_stats = render_table_stats_zh(
         sit.table_stats, opponents_in_hand=sit.opponents_in_hand,
         street=snap.street, suppress_cbet=suppress_cbet,
@@ -82,7 +84,7 @@ def render_facts_zh(sit) -> str:
         lines.append("")
         lines.extend(notes)
 
-    # ── 攻击/剥削结论：放在统计与观察之后，模型最后读到裁决 ──
+    # ── 攻击/剥削结论：带「程序建议」标记，不是事实；与画像冲突时按画像 ──
     if attack:
         lines.append("")
         lines.extend(attack)

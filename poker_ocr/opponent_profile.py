@@ -2524,7 +2524,8 @@ def render_reads(reads: Iterable[OpponentRead],
 def render_reads_zh(reads: Iterable[OpponentRead],
                     positions: Mapping[str, str],
                     *,
-                    header: str = "## 对手画像（逐座位；优先于全场统计）") -> list[str]:
+                    header: str = "## 对手画像（逐座位；优先于全场统计）",
+                    include_exploit: bool = True) -> list[str]:
     """按座位渲染中文画像行，供中文 lean 事实块使用。
 
     `positions` 只含本手还在局的座位（seat_id → 位置）：不在其中（已弃牌）或
@@ -2568,7 +2569,14 @@ def render_reads_zh(reads: Iterable[OpponentRead],
             lines.append(f"  打法：{profile}")
         exploit = exploit_hint_zh(read)
         if exploit:
-            lines.append(f"  可剥削：{exploit}")
+            if include_exploit:
+                lines.append(f"  可剥削（程序建议）：{exploit}")
+            else:
+                # 攻击块已经给出本街单一裁决；画像仍保留证据，但不再给
+                # 第二个动作方向（只取「——」前的描述部分）。
+                evidence = exploit.split("——")[0].split("；")[0].strip()
+                if evidence:
+                    lines.append(f"  可剥削证据：{evidence}")
     return lines
 
 

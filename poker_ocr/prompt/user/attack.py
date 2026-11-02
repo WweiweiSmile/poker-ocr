@@ -233,7 +233,9 @@ def render_attack_zh(sit: Situation) -> list[str]:
     wet = _board_wet(sit)
 
     if raisers or callers or table_sticky:
-        lines = ["## 剥削判断（宽范围/死钱）", dead_money]
+        lines = ["## 剥削判断（宽范围/死钱）",
+                 "（以下结论是程序建议，不是事实；与逐座位画像冲突时以画像为准）",
+                 dead_money]
         lines.append(_checkraise_note(checked))
         lines.append("但他们的过牌不一定是放弃：")
         if raisers:
@@ -255,7 +257,9 @@ def render_attack_zh(sit: Situation) -> list[str]:
             lines.append("A 高面也一样：对手 xc/xr 高时，怕 A 不等于会弃牌。")
         return lines
 
-    lines = ["## 攻击机会（宽范围/死钱）", dead_money]
+    lines = ["## 攻击机会（宽范围/死钱）",
+             "（以下结论是程序建议，不是事实；与逐座位画像冲突时以画像为准）",
+             dead_money]
     lines.append(_checkraise_note(checked))
     if not xr_known:
         lines.append(

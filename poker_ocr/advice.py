@@ -624,7 +624,7 @@ def _canonical_choice(choice: str, by_id: dict) -> tuple[str, str | None]:
     return target, raw
 
 
-def _clip_reason(text: str, limit: int = 40) -> str:
+def _clip_reason(text: str, limit: int = 60) -> str:
     """reason 截到 limit 字：优先在标点处断，避免 JSON 被长理由撑爆。"""
     text = " ".join(str(text or "").split())
     if len(text) <= limit:

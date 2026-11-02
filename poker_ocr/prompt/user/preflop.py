@@ -13,8 +13,8 @@ from ...hand_track import PREFLOP, ActionRecord, HandSnapshot
 from ...opponent_profile import AGGRESSIVE_ARCHETYPES
 from ...positions import BB, POSITIONS_BY_TABLE_SIZE, SB
 from ...pot_math import (
-    PREFLOP_MIN_RAISE_BB, behind_opponents, call_amount, count_limpers,
-    winnable_pot,
+    PREFLOP_MIN_RAISE_BB, _preflop_raise_count, behind_opponents,
+    call_amount, count_limpers, winnable_pot,
 )
 from ..shared.format import _fmt_num
 from ..shared.labels import _PREFLOP_SHAPE_ZH
@@ -243,56 +243,56 @@ def _facing_raise_zh(sit: Situation) -> list[str]:
         spot += "（" + "；".join(detail) + "）"
     if behind:
         if len(behind) > 3:
-            spot += f"；身后还有 {len(behind)} 人没响应加注"
+            spot += f"；本轮还有 {len(behind)} 人要响应加注"
         else:
             names = "、".join(o.position or o.seat_id for o in behind)
-            spot += f"；身后的 {names} 还没响应加注"
+            spot += f"；本轮还要响应加注：{names}"
     lines = [f"面对加注：{spot}"]
 
     if in_range is None:
-        lines.append("对加注的牌力：范围表缺失（对手位置/先验不可用），"
+        lines.append("对加注的牌力（程序建议）：范围表缺失（对手位置/先验不可用），"
                      "只能按牌力和价格自行判断")
         return lines
     shape = _hand_shape_zh(key)
     width_text = f"（{width:.0f}%）" if width else ""
     if in_range is False and tightened:
-        lines.append(f"对加注的牌力：{key} 在单加注收尾的宽防守里；当前有 "
+        lines.append(f"对加注的牌力（程序建议）：{key} 在单加注收尾的宽防守里；当前有 "
                      f"{'、'.join(tight_reasons)}，按{label}{width_text}不在内"
                      f"{shape} → 默认弃牌")
     elif in_range is False:
-        lines.append(f"对加注的牌力：{key} 不在 {label}{width_text}内"
+        lines.append(f"对加注的牌力（程序建议）：{key} 不在 {label}{width_text}内"
                      f"{shape} → 默认弃牌")
     elif tightened:
-        lines.append(f"对加注的牌力：{key} 在 {label}{width_text}内{shape}"
+        lines.append(f"对加注的牌力（程序建议）：{key} 在 {label}{width_text}内{shape}"
                      f" → 可以跟注（多人池按边缘牌处理，别把顶对当坚果）")
     elif n_raises >= 3:
         bet = f"{n_raises + 2}-bet"
         if key in five_keys:
-            lines.append(f"对加注的牌力：{key} 在 {label}{width_text}内{shape}"
+            lines.append(f"对加注的牌力（程序建议）：{key} 在 {label}{width_text}内{shape}"
                          f" → 价值牌，可以 {bet} 或跟注"
                          f"（{profile_desc}；{bet} 范围 {five_range}）")
         else:
-            lines.append(f"对加注的牌力：{key} 在 {label}{width_text}内{shape}"
+            lines.append(f"对加注的牌力（程序建议）：{key} 在 {label}{width_text}内{shape}"
                          f" → 可以跟注，不 {bet}"
                          f"（{profile_desc}；{bet} 默认只用 {five_range}）")
     elif n_raises == 2:
         if key in ("AA", "KK"):
-            lines.append(f"对加注的牌力：{key} 在 {label}{width_text}内"
+            lines.append(f"对加注的牌力（程序建议）：{key} 在 {label}{width_text}内"
                          " → 价值牌，可以 4-bet 或跟注")
         elif profile == "wide" and key in ("QQ", "AKs", "AKo"):
-            lines.append(f"对加注的牌力：{key} 在 {label}{width_text}内"
+            lines.append(f"对加注的牌力（程序建议）：{key} 在 {label}{width_text}内"
                          f" → 可以 4-bet 或跟注（{profile_desc}；"
                          "对手会拿 JJ/QQ/AK 4-bet）")
         else:
-            lines.append(f"对加注的牌力：{key} 在 {label}{width_text}内"
+            lines.append(f"对加注的牌力（程序建议）：{key} 在 {label}{width_text}内"
                          f" → 可以跟注，不 4-bet（{profile_desc}；"
                          "4-bet 默认只用 KK/AA）")
     elif key in range_mod.expand_tokens(("QQ+", "AKs", "AKo")):
-        lines.append(f"对加注的牌力：{key} 在 {label}{width_text}内"
+        lines.append(f"对加注的牌力（程序建议）：{key} 在 {label}{width_text}内"
                      " → 可以 3-bet 或跟注")
     else:
         tail = " → 可以跟注或 3-bet" if key in strong else " → 可以跟注"
-        lines.append(f"对加注的牌力：{key} 在 {label}{width_text}内{tail}")
+        lines.append(f"对加注的牌力（程序建议）：{key} 在 {label}{width_text}内{tail}")
 
     # 价格提醒：只在「不该跟」时出现，免得诱导模型用赔率给弱牌找理由。
     if in_range is False or tightened:
@@ -333,17 +333,36 @@ def _pfr_label_zh(snap: HandSnapshot) -> str:
     return "否"
 
 
+def _preflop_shape_labels(snap: HandSnapshot) -> list[str]:
+    """把 ``three-bet`` 这个内部上限展开成实际级别（4-bet/5-bet）。"""
+    out: list[str] = []
+    for shape in (snap.preflop_shapes or ()):
+        if shape != "three-bet":
+            out.append(_PREFLOP_SHAPE_ZH.get(shape, shape))
+            continue
+        raises = _preflop_raise_count(snap)
+        if raises >= 4:
+            out.append(f"{raises + 1}-bet")
+        elif raises == 3:
+            out.append("4-bet")
+        elif raises == 2:
+            out.append("3-bet")
+        else:
+            out.append("3-bet+")
+    return out
+
+
 def render_preflop_zh(sit: Situation) -> list[str]:
     """「翻前信息」；只在翻前渲染。面对加注给继续范围，不给 RFI 结论。"""
     if sit.street != PREFLOP:
         return []
     snap = sit.snap
     lines = ["## 翻前信息"]
-    shapes = [ _PREFLOP_SHAPE_ZH.get(s, s) for s in (snap.preflop_shapes or ())]
+    shapes = _preflop_shape_labels(snap)
     lines.append("翻前形态：" + ("、".join(shapes) if shapes else "未知"))
     lines.append("最后翻前加注者（PFR）：" + _pfr_label_zh(snap))
     if sit.range_verdict:
-        lines.append(f"翻前范围结论：{sit.range_verdict}")
+        lines.append(f"翻前范围结论（程序建议）：{sit.range_verdict}")
     lines.extend(_facing_raise_zh(sit))
     limpers = count_limpers(snap)
     if limpers:
@@ -354,7 +373,7 @@ def render_preflop_zh(sit: Situation) -> list[str]:
         if len(raises) > 1 or raises[0] > PREFLOP_MIN_RAISE_BB + 1e-9:
             lines.append(f"本桌翻前最低加注：{PREFLOP_MIN_RAISE_BB:g}BB —— 这是牌桌"
                          "下限（更小的会被客户端拒绝）；开池尺度按底池放大，"
-                         "以上面的选项金额为准")
+                         "以「可选动作」的金额为准")
         else:
             lines.append(f"本桌翻前最低加注：{PREFLOP_MIN_RAISE_BB:g}BB；"
                          "当前可选开池金额都受这个下限约束")

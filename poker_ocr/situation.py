@@ -191,21 +191,27 @@ def _range_conclusion_zh(snap: HandSnapshot,
     if verdict.in_range is None:
         return (f"{verdict.hand} 在 {verdict.position} 没有开池范围"
                 "（盲注位按补盲/过牌/防守处理）")
-    if verdict.in_range:
-        text = f"{verdict.hand} 在 {verdict.position} 的开池范围内"
-    else:
-        text = f"{verdict.hand} 不在 {verdict.position} 的开池范围内"
+    # 小对子抽 set 是「非盲位平跟」的一个明确例外；不要把所有平跟都写死。
+    small_pair = (len(verdict.hand) == 2
+                  and verdict.hand[0] == verdict.hand[1])
     if verdict.limpers > 0 and verdict.isolation_ok is not None:
-        iso = (f"收紧范围（≈{verdict.isolation_position}）仍包括它"
-               if verdict.isolation_ok
-               else f"收紧范围（≈{verdict.isolation_position}）已不包括它")
-        text += (f"；前面有 {verdict.limpers} 个溜入者，{iso} → "
-                 + ("可以加注隔离，不要平跟" if verdict.isolation_ok
-                    else "默认弃牌，不要平跟"))
+        iso = f"≈{verdict.isolation_position}"
+        if verdict.isolation_ok:
+            text = (f"{verdict.hand}：{verdict.limpers} 个溜入者后"
+                    f"收紧范围（{iso}）仍包括它 → 建议加注隔离，不要平跟")
+            if small_pair:
+                text += ("；若后手深/桌松，可按约 10:1 隐含赔率平跟抽 set"
+                         "（非盲位平跟的例外）")
+        else:
+            text = (f"{verdict.hand}：{verdict.limpers} 个溜入者后"
+                    f"收紧范围（{iso}）已不包括它 → "
+                    "建议默认弃牌，不要平跟（开池范围不等于隔离许可）")
     elif verdict.in_range:
-        text += " → 可以开池加注，不要平跟"
+        text = (f"{verdict.hand} 在 {verdict.position} 的开池范围内 → "
+                "建议可以开池加注，不要平跟（非盲位平跟是例外）")
     else:
-        text += " → 默认弃牌"
+        text = (f"{verdict.hand} 不在 {verdict.position} 的开池范围内 → "
+                "建议默认弃牌")
     if verdict.depth_note:
         text += f"（{verdict.depth_note}）"
     return text
@@ -235,7 +241,7 @@ def build_situation(snap: HandSnapshot,
     if (snap.street == PREFLOP and not snap.actions_of(PREFLOP)
             and not snap.bomb_pot):
         warnings.append(
-            "翻前动作线缺失，翻前形态/PFR 未知（按未知处理）")
+            "翻前动作线缺失，翻前形态/PFR 未知（按未开池处理：open 或弃；BB 可过牌）")
     unknown_stacks = _unknown_stack_opponents(snap)
     if unknown_stacks:
         warnings.append(

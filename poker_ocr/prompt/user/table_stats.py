@@ -47,22 +47,22 @@ def _table_stab_read_zh(stats: "PooledStats", *,
     last_to_act = players_left_to_act == 0
     if stab >= 40:
         if last_to_act:
-            return (f"桌况读法：前面没人下注时这桌爱开火（{stab:.0f}%）。"
+            return (f"桌况读法（程序建议）：前面没人下注时这桌爱开火（{stab:.0f}%）。"
                     "你是最后行动，过牌免费；下注后被对手 check-raise 的"
                     "风险仍在，强牌下注拿价值、中等牌控池。")
-        return (f"桌况读法：前面没人下注时这桌爱开火（{stab:.0f}%）。"
+        return (f"桌况读法（程序建议）：前面没人下注时这桌爱开火（{stab:.0f}%）。"
                 "你过牌不是免费看牌——强牌可以过牌诱导 check-raise，"
                 "中等牌别主动下注把他们的空气打走；但他们加注范围仍偏强，"
                 "别用中对跟加注。")
     if stab >= 30:
         if last_to_act:
-            return (f"桌况读法：前面没人下注时这桌会开火（{stab:.0f}%）。"
+            return (f"桌况读法（程序建议）：前面没人下注时这桌会开火（{stab:.0f}%）。"
                     "你是最后行动，过牌免费；下注后被 check-raise 要提前想好。")
-        return (f"桌况读法：前面没人下注时这桌会开火（{stab:.0f}%）。"
+        return (f"桌况读法（程序建议）：前面没人下注时这桌会开火（{stab:.0f}%）。"
                 "过牌别当免费看牌；强牌可过牌诱导，中等牌下注前先想清楚"
                 "被加注怎么办。")
     if stab <= 15:
-        return (f"桌况读法：前面没人下注时这桌很少开火（{stab:.0f}%）。"
+        return (f"桌况读法（程序建议）：前面没人下注时这桌很少开火（{stab:.0f}%）。"
                 "你过牌大概率能免费看下一张；没摊牌价值时可以在下一街"
                 "主动偷池。")
     return ""
@@ -172,5 +172,5 @@ def render_table_stats_zh(stats: "PooledStats | None",
         if exploit:
             label = ("当前桌可剥削" if stats.scope == "current_table"
                      else "全场可剥削")
-            lines.append(label + "：" + exploit)
+            lines.append(label + "（程序建议）：" + exploit)
     return lines

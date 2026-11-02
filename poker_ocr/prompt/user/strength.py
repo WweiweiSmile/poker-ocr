@@ -100,7 +100,10 @@ def render_hand_strength_zh(sit: Situation) -> list[str]:
         if not gt.hero_is_nuts:
             stronger = []
             for beaten in gt.rank.beaten_by:
-                if beaten.category == ONE_PAIR:
+                if beaten.category == HIGH_CARD:
+                    # 「高牌」作为类别时涵盖比英雄更小的 A 高，写成威胁会误导。
+                    name = "更大的高牌"
+                elif beaten.category == ONE_PAIR:
                     name = ("更大的对子（一对）"
                             if gt.made.category == ONE_PAIR else "一对")
                 else:
@@ -118,7 +121,7 @@ def render_hand_strength_zh(sit: Situation) -> list[str]:
                           if sit.hand_ranges is not None
                           else "没有范围权益时不要假设自己领先")
             lines.append(
-                "有牌又有听：成牌 + 强听（combo draw，不是纯听牌）；"
+                "（程序建议）有牌又有听：成牌 + 强听（combo draw，不是纯听牌）；"
                 "可作为保护/半诈唬下注，不是默认；多人池或没有弃牌率时优先过牌。"
                 + combo_tail)
         if gt.draws.total_outs:
@@ -143,6 +146,9 @@ def render_hand_strength_zh(sit: Situation) -> list[str]:
             behind += ("；这是当前五张被至少一家压过的概率，"
                        "不是输牌概率/权益")
         lines.append(behind + "）")
+        if snap.to_call and snap.to_call > 0:
+            lines.append("范围：不可用（只有随机牌下界，不能当对手范围；"
+                         "按价格/线路/保守先验判断）")
     if hr is not None:
         modeled_players = len(hr.opponents) + 1
         random_fill = getattr(hr, "random_opponents", 0)
@@ -154,7 +160,8 @@ def render_hand_strength_zh(sit: Situation) -> list[str]:
         fair_share = 1.0 / actual_players if actual_players > 0 else 0.0
         equity_note = f"按河牌、未计后续下注，{total_players} 人池"
         if snap.to_call and snap.to_call > 0:
-            equity_note += "；这是对当前/跟注范围的估计，不是对加注范围"
+            equity_note += ("；这是对当前建模范围的估计，"
+                            "不是对未建模的加注范围")
         unacted = [o for o in hr.opponents
                    if getattr(o, "mode", None) == "unacted"
                    and not getattr(o, "events", ())]

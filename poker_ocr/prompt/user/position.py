@@ -9,8 +9,8 @@ from __future__ import annotations
 
 from ...hand_track import PREFLOP
 from ...pot_math import (
-    _action_order, _big_blind_option_pending, _street_bet, behind_opponents,
-    hero_first_to_act,
+    _action_order, _big_blind_option_pending, _can_act, _street_bet,
+    behind_opponents, hero_first_to_act,
 )
 from ..shared.format import _fmt_num
 
@@ -40,8 +40,11 @@ def render_position_zh(sit) -> list[str]:
         else:
             position.append(_behind_detail_zh(snap)
                             or f"跟注/过牌后待行动：{sit.players_left_to_act} 人")
-        position.append("下注/加注会重新打开行动，已过牌/跟注/下注的对手仍可再行动"
-                        "（位置优势≠没人能加注）")
+        if any(_can_act(o) for o in snap.opponents):
+            position.append("下注/加注会重新打开行动，已过牌/跟注/下注的对手"
+                            "仍可再行动（位置优势≠没人能加注）")
+        elif (snap.to_call or 0.0) > 0:
+            position.append("对手已全下，无人能再加注")
     elif snap.street == PREFLOP:
         position.insert(0, "翻前行动：未知（有对手位置未读出）")
     if position:

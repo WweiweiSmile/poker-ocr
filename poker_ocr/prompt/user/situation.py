@@ -33,6 +33,9 @@ def render_current_state_zh(sit) -> list[str]:
     hero_cards = " ".join(snap.hero_cards) or "未知"
     stack_text = (f"{_fmt_num(snap.hero_stack)}BB"
                   if snap.hero_stack is not None else "未知")
+    if snap.hero_stack is not None and (snap.hero_bet or 0.0) > 0:
+        total = float(snap.hero_stack) + float(snap.hero_bet or 0.0)
+        stack_text += f"（本手总筹码 {_fmt_num(total)}BB）"
     lines.append(f"Hero：{snap.hero_position or '位置未知'}｜底牌 {hero_cards}｜"
                  f"后手 {stack_text}")
     board = " ".join(snap.board) or "无"

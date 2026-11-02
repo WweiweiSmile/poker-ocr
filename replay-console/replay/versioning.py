@@ -67,7 +67,10 @@ from poker_ocr.table_dynamics import (  # noqa: E402
 # 2026-11-03.1：提示词按功能/场景拆成 poker_ocr.prompt（system / user /
 #               shared / offline）；system 增加条件场景段（短码/多人池/单挑/
 #               听牌/河牌），事实块文本不变；prompt 代码位置变化不影响 hash。
-CURRENT_ADVICE_VERSION = "advice-2026-11-03.1"
+# 2026-11-03.2：场景段叠加仲裁（短码限翻前/单挑让位听牌/多人池价值例外）、
+#               「后手」与「本手总筹码」拆分、行动线「未记录」、4-bet 形态、
+#               硬/软缺口分栏、程序建议标记、reason 上限 60。
+CURRENT_ADVICE_VERSION = "advice-2026-11-03.2"
 # 改动 decisions.py 的重建语义时 bump。
 # recon-3：翻前底池补上盲注（实时 pbs 只记前注，h39 4.5 → 6.0）。
 # recon-4：决策点 action_index 改成整手牌全局动作数，与 live Advice 对齐。
