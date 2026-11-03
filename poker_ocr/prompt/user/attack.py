@@ -156,7 +156,7 @@ def _attack_evidence(sit: Situation, stats: "PooledStats | None", street: str,
     if _board_wet(sit):
         lines.append(
             "牌面有花/顺可能：对手范围更容易连上，降低开火频率；"
-            "优先用有后门/阻断的牌，纯空气别硬开。")
+            "优先用有摊牌价值或能改进的牌，纯空气别硬开。")
 
     if any(str(card)[:1].upper() == "A" for card in sit.snap.board):
         if _notes_ace_weakness(sit.table_dynamics):
@@ -249,9 +249,14 @@ def render_attack_zh(sit: Situation) -> list[str]:
             lines.append(
                 f"{scope_label}对 c-bet 只弃 {stats.fold_to_cbet:.0f}%"
                 f"（{_fmt_num(cbet_opps)} 次机会）—— 诈唬没有弃牌率。")
-        lines.append(
-            "结论：跟着过牌，看免费牌；只有可下注价值（两对+/超对/顶对强踢）"
-            "可以下注拿价值；强听没有弃牌率、按默认过牌，空气过牌。")
+        if snap.street == "river":
+            lines.append(
+                "结论：跟着过牌，进入摊牌；只有可下注价值（两对+/超对/顶对强踢）"
+                "可以下注拿价值；空气不要为看牌而下注。")
+        else:
+            lines.append(
+                "结论：跟着过牌，看免费牌；只有可下注价值（两对+/超对/顶对强踢）"
+                "可以下注拿价值；强听没有弃牌率、按默认过牌，空气过牌。")
         if (any(str(card)[:1].upper() == "A" for card in snap.board)
                 and _notes_ace_weakness(sit.table_dynamics)):
             lines.append("A 高面也一样：对手 xc/xr 高时，怕 A 不等于会弃牌。")

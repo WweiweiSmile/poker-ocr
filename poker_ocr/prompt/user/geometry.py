@@ -7,11 +7,13 @@ SPR 决定「顶对能不能打光」，有效筹码决定「对手能不能把�
 from __future__ import annotations
 
 from ...pot_math import (
-    _effective_stack, _hero_total_stack, _opponent_total_stack, _playable_depth,
-    _unknown_stack_opponents,
+    _effective_stack, _playable_depth, _unknown_stack_opponents,
 )
 from ..shared.format import _fmt_num
 from ..shared.labels import _POT_TYPE_ZH
+
+# 对手后手低于这个数才提示「短码对手」；Hero 自己的短码线仍是 20BB。
+OPPONENT_SHORT_STACK_BB = 50.0
 
 
 def render_geometry_zh(sit) -> list[str]:
@@ -45,33 +47,31 @@ def render_geometry_zh(sit) -> list[str]:
 
 
 def render_side_pot_zh(sit) -> list[str]:
-    """短码/side pot 关系 + 本手已投入（沉没成本，只作事实）。"""
+    """短码对手（后手 <50BB）+ 本手已投入（沉没成本，只作事实）。"""
     snap = sit.snap
     anomaly = sit.abnormal_no_opponents
     lines: list[str] = []
 
-    hero_total = _hero_total_stack(snap)
     short: list[tuple] = []
     for o in snap.opponents:
         if o.folded:
             continue
-        total = _opponent_total_stack(snap, o)
-        if (total is not None and hero_total is not None
-                and total < hero_total * 0.95):
-            short.append((o, total))
+        stack = o.stack
+        if stack is not None and stack < OPPONENT_SHORT_STACK_BB:
+            short.append((o, stack))
     if short:
         detail = "、".join(
-            f"{o.position or o.seat_id} {_fmt_num(total)}BB"
-            for o, total in short)
-        lines.append(f"短码/side pot：{detail}（side pot 未建模；"
+            f"{o.position or o.seat_id} 后手 {_fmt_num(stack)}BB"
+            for o, stack in short)
+        lines.append(f"短码对手：{detail}（side pot 未建模；"
                      "能争夺的是他们本手还能投入的总额 = 后手 + 本街已下注）")
     elif anomaly:
-        lines.append("短码/side pot：未知（状态帧异常，在局对手为 0）")
-    elif hero_total is None:
+        lines.append("短码对手：未知（状态帧异常，在局对手为 0）")
+    elif snap.hero_stack is None:
         # 自己的后手没读出来时，不能写「无」：短码关系根本没算过。
-        lines.append("短码/side pot：未知（Hero 后手未读出）")
+        lines.append("短码对手：未知（Hero 后手未读出）")
     elif _unknown_stack_opponents(snap):
-        lines.append("短码/side pot：未知（有对手筹码未读出）")
+        lines.append("短码对手：未知（有对手筹码未读出）")
     if snap.hero_invested is not None:
         lines.append(f"本手已投入：{_fmt_num(snap.hero_invested)}BB")
     return lines

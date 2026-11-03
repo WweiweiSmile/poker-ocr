@@ -2096,7 +2096,7 @@ def test_lean_system_priorities() -> None:
     draw_system, _ = build_messages(build_situation(make_point(
         hero_cards=("Qh", "Jh"), board=("Kh", "7h", "2c"))))
     check("剥削程度 L2+" in draw_system
-          and "强听/好阻断" in draw_system,
+          and "强听（≥8 outs）" in draw_system,
           "system 应要求节点证据后再进行听牌半诈唬")
     for phrase in ("剥削强度按 L0–L3", "当前行动顺序",
                    "被加注后的回退", "更差牌会跟"):
@@ -2597,16 +2597,46 @@ def test_postflop_zero_opponents_is_flagged() -> None:
           f"无对手时不能写有位置/先行动：\n{text}")
 
 
+def test_three_bet_pot_scenario_shrinks_ranges() -> None:
+    """3-bet+ 池要有独立场景，明确对手范围极度收缩。"""
+    system, _ = build_messages(build_situation(make_point(
+        preflop_shapes=("three-bet",))))
+    check("## 场景：3-bet+ 池" in system,
+          f"3-bet 池应有独立场景：\n{system}")
+    check("极度收缩" in system,
+          f"3-bet 池应收缩对手范围：\n{system}")
+
+
+def test_conflict_detector_flags_bet_mismatch() -> None:
+    """行动线最高下注与当前帧总额对不上时，数据质量要写明冲突。"""
+    from poker_ocr.hand_track import ActionRecord, StreetRecord
+
+    point = make_point(
+        hero_bet=0.0, to_call=4.0, pot=10.0,
+        streets=(
+            StreetRecord("preflop", 0.0, ()),
+            StreetRecord("flop", 6.0, (
+                ActionRecord("flop", "bb", None, "BB", "bet", 10.0,
+                             False, False),)),
+        ))
+    sit = build_situation(point)
+    check(any("行动线与当前帧下注额冲突" in c for c in sit.conflicts),
+          f"应检测到下注额冲突：{sit.conflicts}")
+    text = render_facts_zh(sit)
+    check("冲突（按当前帧）" in text,
+          f"数据质量应展示冲突：\n{text}")
+
+
 def test_short_stack_is_flagged_not_silently_effective() -> None:
-    """短码总额 = 后手 + 本街下注；side pot 必须单独说清。"""
+    """对手后手 <50BB 才标短码；side pot 必须单独说清。"""
     from poker_ocr.hand_track import OpponentSnapshot
 
     point = make_point(
         to_call=30.0, pot=75.0, hero_stack=100.0,
         opponents=(OpponentSnapshot("a", "老王", "BB", 2.5, 30.0, False),))
     user = render_facts_zh(build_situation(point))
-    check("短码/side pot：BB 32.5BB" in user,
-          f"短码要写总额（后手 2.5 + 本街 30）：\n{user}")
+    check("短码对手：BB 后手 2.5BB" in user,
+          f"短码要写对手后手（2.5BB）：\n{user}")
     check("side pot 未建模" in user,
           f"要说清 side pot 没建模：\n{user}")
 
@@ -3659,8 +3689,8 @@ def test_effective_stack_includes_current_street_bet() -> None:
           f"note 要写有效筹码：{by['all-in'].note}")
     user = render_facts_zh(sit)
     check("有效筹码：51.5BB" in user, f"有效筹码要含本街下注：\n{user}")
-    check("短码/side pot：CO 51.5BB" in user,
-          f"短码也要按总额写：\n{user}")
+    check("短码对手：CO 后手 24BB" in user,
+          f"短码要写对手后手：\n{user}")
     # 身后 SB 下注 5 < 27.5，还没跟到，会在我之后行动。
     check("跟注后待行动：1 人（SB 还没跟到 27.5BB）" in user,
           f"未跟注的 SB 应算身后：\n{user}")
@@ -4131,9 +4161,9 @@ def test_unacted_range_is_not_called_check_range() -> None:
 
 def test_hero_unknown_stack_short_stack_is_unknown() -> None:
     text = render_facts_zh(build_situation(make_point(hero_stack=None)))
-    check("短码/side pot：无" not in text,
+    check("短码对手：无" not in text,
           f"Hero 后手未知时不能写「无」：\n{text}")
-    check("短码/side pot：未知（Hero 后手未读出）" in text,
+    check("短码对手：未知（Hero 后手未读出）" in text,
           f"应写 Hero 后手未读出：\n{text}")
 
 
@@ -4330,7 +4360,7 @@ def test_zero_opponents_hard_gate() -> None:
     text = render_facts_zh(sit)
     check("有效筹码/SPR：未知（状态帧异常" in text,
           f"异常帧不能算有效筹码/SPR：\n{text}")
-    check("短码/side pot：未知（状态帧异常" in text,
+    check("短码对手：未知（状态帧异常" in text,
           f"异常帧不能写短码：无：\n{text}")
     check("## 实时牌力" not in text and "当前成牌落后至少一家" not in text,
           f"异常帧不能渲染按假想对手算的牌力：\n{text}")

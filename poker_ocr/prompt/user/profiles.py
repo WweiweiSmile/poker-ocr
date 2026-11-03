@@ -31,8 +31,13 @@ def render_profiles_zh(sit, *, suppress_action_hints: bool = False) -> list[str]
         in_hand_reads,
         key=lambda read: (order_rank.get(active.get(read.seat_id, ""), len(order_rank)),
                           active.get(read.seat_id, "")))
-    return render_reads_zh(
+    lines = render_reads_zh(
         ordered_reads, active,
         header="## 对手画像（逐座位；Hero 下注后行动顺序；优先于全场统计）",
         include_exploit=not suppress_action_hints,
         preserve_input_order=True)
+    if lines:
+        lines.append(
+            "（n=手数；置信=0–1 的可信度；≈=向人群先验收缩的估计值；"
+            "暂定=样本不足只作参考；推断%=动作中由视频补出的比例）")
+    return lines

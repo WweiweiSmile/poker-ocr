@@ -71,6 +71,8 @@ class Situation:
     plays_board: bool
     opponent_strength: dict | None
     warnings: list[str] = field(default_factory=list)
+    # 当前帧硬字段与行动线/形态的冲突；渲染在「数据质量」，按当前帧执行。
+    conflicts: tuple[str, ...] = ()
     # 英文渲染：coach 的中文标签是 /coach/advice 的口径，给模型的提示词用英文
     hand_label_en: str | None = None
     texture_en: str | None = None
@@ -170,6 +172,61 @@ class Situation:
                 gt is not None and (gt.draws.flush_draw or gt.draws.straight_draw))
             return "combo" if has_combo_draw else "made"
         return "air"
+
+
+def _conflict_warnings(snap: HandSnapshot) -> tuple[str, ...]:
+    """当前帧硬字段与行动线/形态的冲突，供数据质量段展示。
+
+    只检测能由快照直接对账的几类；无法确认的冲突不猜，避免把正常 OCR
+    抖动写成「冲突」。所有冲突都以当前帧硬字段为准。
+    """
+    out: list[str] = []
+    pre = snap.actions_of(PREFLOP)
+
+    # 炸弹池横幅会串到下一手；翻前有真实动作时以动作为准。
+    if snap.bomb_pot and pre:
+        out.append("炸弹池标记与翻前行动冲突（按有行动处理）")
+
+    # 本街行动线的最高下注 vs 当前帧的「本街总额」。
+    street_acts = snap.actions_of(snap.street)
+    bets = [float(a.amount) for a in street_acts
+            if a.action in ("bet", "raise", "allin") and a.amount is not None]
+    frame_max = float(snap.hero_bet or 0.0) + float(snap.to_call or 0.0)
+    if bets and frame_max > 0:
+        line_max = max(bets)
+        if abs(line_max - frame_max) > max(1.0, frame_max * 0.25):
+            out.append(
+                f"行动线与当前帧下注额冲突（行动线 {line_max:g}BB / "
+                f"当前帧 {frame_max:g}BB，按当前帧）")
+
+    # 翻前形态 vs 实际加注次数。动作线为空时不判：形态可能是水位兜底。
+    if pre:
+        raises = sum(
+            1 for a in pre
+            if a.action in ("raise", "bet")
+            or (a.action == "call" and a.all_in))
+        shapes = set(snap.preflop_shapes or ())
+        bad = False
+        if "three-bet" in shapes:
+            bad = raises < 2
+        elif "single-raise" in shapes:
+            bad = raises != 1
+        elif shapes & {"unopened", "limped"}:
+            bad = raises > 0
+        if bad:
+            shape_text = "/".join(sorted(shapes)) or "未知"
+            out.append(
+                f"翻前形态与行动线冲突（形态：{shape_text} / "
+                f"行动线 {raises} 次加注，按当前帧）")
+
+    # 行动线把动作记在 Hero 的位置上，却不是 Hero。
+    for action in street_acts:
+        if (not action.is_hero and action.position
+                and action.position == snap.hero_position):
+            out.append("行动线把动作记在 Hero 位置上但不是 Hero（按当前帧）")
+            break
+
+    return tuple(dict.fromkeys(out))
 
 
 def _read(snap: HandSnapshot):
@@ -363,6 +420,7 @@ def build_situation(snap: HandSnapshot,
         plays_board=bool(read and read.plays_board),
         opponent_strength=opp,
         warnings=warnings,
+        conflicts=_conflict_warnings(snap),
         hand_label_en=read.label_en if read else None,
         texture_en=_precise_texture_en(gt, texture),
         opponent_strength_en=opp_en,

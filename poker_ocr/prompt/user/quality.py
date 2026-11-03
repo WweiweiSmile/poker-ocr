@@ -117,6 +117,9 @@ def render_data_quality_zh(sit) -> list[str]:
         lines.append("- 范围/信息缺口（范围/画像缺口只降低诈唬频率；"
                      "动作线缺失按决策顺序判断：未开池/面对加注/未行动）："
                      + "；".join(soft))
-    if not hard and not soft:
+    conflicts = tuple(getattr(sit, "conflicts", ()) or ())
+    if conflicts:
+        lines.append("- 冲突（按当前帧）：" + "；".join(conflicts))
+    if not hard and not soft and not conflicts:
         lines.append("无已知硬缺口（未列出的技术告警不影响动作）")
     return lines

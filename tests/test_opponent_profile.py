@@ -886,6 +886,8 @@ def test_prompt_renders_opponent_reads() -> None:
     check("加注/开池时是窄而强的范围" in facts,
           f"松弱=加注窄必须写进事实：\n{facts}")
     check("路人" not in facts, "unknown 不应输出，避免噪声")
+    check("n=手数" in facts and "≈=向人群先验收缩" in facts,
+          f"画像段要有数据图例：\n{facts}")
 
 
 def test_postflop_sequence_observations() -> None:
