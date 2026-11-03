@@ -1725,7 +1725,7 @@ def test_system_scenario_sections_follow_the_spot() -> None:
                 if line.startswith(("## 场景", "## 牌型"))]
 
     hu = scenes()
-    check("## 场景：单挑" in hu, f"1 名对手应是单挑：{hu}")
+    check("## 场景：单挑（2 人）" in hu, f"1 名对手应是单挑：{hu}")
     check(not any("多人池" in s for s in hu), f"单挑不该有多人池段：{hu}")
     check(not any("短码" in s for s in hu), f"深码不该有短码段：{hu}")
 
@@ -2088,14 +2088,14 @@ def test_lean_system_priorities() -> None:
     check("事实优先级" in system, "system 应含事实优先级")
     check("硬事实" in system and "逐座位画像" in system,
           "system 应说明硬事实与逐座位画像的优先级")
-    check("现场观察" in system and "桌况统计" in system,
-          "system 应给现场观察/桌况统计排位")
+    check("现场观察" in system and "本桌统计" in system,
+          "system 应给现场观察/本桌统计排位")
     check("文字建议块" in system, "system 应说明文字建议块不是硬事实")
     check("更差的牌会不会跟" in system,
           "system 的翻后决策顺序应问「更差的牌会不会跟」")
     draw_system, _ = build_messages(build_situation(make_point(
         hero_cards=("Qh", "Jh"), board=("Kh", "7h", "2c"))))
-    check("当前节点弃牌证据足" in draw_system
+    check("剥削程度 L2+" in draw_system
           and "强听/好阻断" in draw_system,
           "system 应要求节点证据后再进行听牌半诈唬")
     for phrase in ("剥削强度按 L0–L3", "当前行动顺序",
@@ -2523,9 +2523,9 @@ def test_facts_include_spot_spr_and_position() -> None:
     check(pending.players_left_to_act == 1,
           f"BB 未跟到 4BB，应算身后 1 人：{pending.players_left_to_act}")
     pending_text = render_facts_zh(pending)
-    check("位置：Hero 有位置（按座位顺序最后行动）" in pending_text,
+    check("位置：Hero 有位置（还能行动的对手里最后）" in pending_text,
           f"位置只看座位，不看当前下注状态：\n{pending_text}")
-    check("跟注/过牌后待行动：1 人（BB 还没跟到 4BB）" in pending_text,
+    check("跟注后待行动：1 人（BB 还没跟到 4BB）" in pending_text,
           f"有未响应玩家时要单独写行动状态：\n{pending_text}")
     check("下注/加注会重新打开行动" in pending_text,
           f"要提醒加注会重新打开行动：\n{pending_text}")
@@ -2548,7 +2548,7 @@ def test_facts_include_spot_spr_and_position() -> None:
             OpponentSnapshot("utg", "UTG", "UTG", 100.0, 0.0, False),
             OpponentSnapshot("btn", "BTN", "BTN", 100.0, 0.0, False))))
     middle_text = render_facts_zh(middle)
-    check("Hero 无位置（翻后身后还有在局对手）" in middle_text,
+    check("Hero 无位置（翻后身后还有能行动的对手）" in middle_text,
           f"CO 在 UTG 之后、BTN 之前，不能写先行动：\n{middle_text}")
     check("Hero 无位置（翻后先行动）" not in middle_text,
           f"CO 不是全场第一个行动：\n{middle_text}")
@@ -3060,6 +3060,16 @@ def test_explosive_pot_from_screen_banner() -> None:
     check("EXPLOSIVE POT" in (d or "") and "bomb pot" in (d or "")
           and "forced ante" in (d or ""),
           f"离线价值指令仍应写炸弹池强制前注：{d}")
+
+
+def test_bomb_pot_preflop_has_no_decision_point() -> None:
+    """炸弹池翻前只有强制前注，没有下注轮，不应产生建议。"""
+    tr = LiveHandTracker(confirm_frames=1)
+    players = (player("hero", position="BTN"),
+               player("a", position="BB", name="老王"))
+    point = feed(tr, state(*players, bomb_pot=True, hero_turn=True),
+                 ["Ah", "Kd"], [])
+    check(point is None, f"炸弹池翻前不应给建议：{point}")
 
 
 def test_tracker_latches_bomb_pot_across_frames() -> None:
@@ -3652,7 +3662,7 @@ def test_effective_stack_includes_current_street_bet() -> None:
     check("短码/side pot：CO 51.5BB" in user,
           f"短码也要按总额写：\n{user}")
     # 身后 SB 下注 5 < 27.5，还没跟到，会在我之后行动。
-    check("跟注/过牌后待行动：1 人（SB 还没跟到 27.5BB）" in user,
+    check("跟注后待行动：1 人（SB 还没跟到 27.5BB）" in user,
           f"未跟注的 SB 应算身后：\n{user}")
 
 
@@ -4059,7 +4069,7 @@ def test_preflop_bb_option_is_counted_as_pending() -> None:
     text = render_facts_zh(btn)
     check("翻前行动：1 人（BB 还没行动，你跟注后 BB 仍有加注选项）" in text,
           f"翻前要单独写 BB option：\n{text}")
-    check("翻后位置：Hero 有位置（按座位顺序最后行动）" in text,
+    check("翻后位置：Hero 有位置（还能行动的对手里最后）" in text,
           f"翻前位置必须标成翻后位置：\n{text}")
     check("翻后位置：Hero 有位置（身后没有在局对手）" not in text,
           f"不能再说「身后没有在局对手」：\n{text}")
@@ -4667,8 +4677,10 @@ def test_system_removes_river_default_fold_and_bomb_rules() -> None:
     river_system, _ = build_messages(build_situation(make_point(
         street="river", board=("Ks", "7d", "2c", "9h", "3s"),
         pot=30.0, pot_before_street=20.0)))
-    check("非坚果默认不打三条街" in river_system,
-          "河牌仍保留「非坚果默认不打三条街」")
+    check("河牌只剩一条下注街" in river_system,
+          "河牌应改成「只剩一条下注街」")
+    check("非坚果默认不打三条街" not in river_system,
+          "河牌不再写「非坚果默认不打三条街」")
     check("炸弹池" not in system,
           "炸弹池特殊规则应从 system 移除")
     check("4-bet 只用 KK/AA" not in system,

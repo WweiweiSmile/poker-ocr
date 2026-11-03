@@ -72,7 +72,7 @@ def render_hand_strength_zh(sit: Situation) -> list[str]:
         # 已经由 hand_tier / ground_truth / hand_ranges 的数字覆盖，不再重复。
         label = sit.hand_label
         if sit.hand_class == "combo" and gt is not None:
-            label = f"成牌+听花/听顺（{label}；{_draws_zh(gt)}）"
+            label = f"成牌+听花/听顺（{label}）｜{_draws_zh(gt)}"
         lines.append(f"牌力：{label}")
 
     if gt is not None:

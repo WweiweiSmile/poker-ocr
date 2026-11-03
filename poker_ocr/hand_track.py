@@ -1339,6 +1339,14 @@ class LiveHandTracker:
             self.turn_frames = 0
             return None
 
+        # 炸弹池翻前只有每人 5BB 强制前注，没有下注轮，不产生决策点。
+        bomb_ante = bool(hand.blinds and
+                         (hand.blinds.ante or 0.0) >= BOMB_ANTE_BB)
+        if ((hand.bomb_pot or bomb_ante) and hand.street == PREFLOP
+                and not hand.street_actions(PREFLOP)):
+            self.turn_frames = 0
+            return None
+
         self.turn_frames += 1
         if self.turn_frames < self.confirm_frames:
             return None

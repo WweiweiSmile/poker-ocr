@@ -12,10 +12,13 @@ from ..shared.labels import _SUIT_ZH
 
 def _board_structure_zh(gt: GroundTruth) -> str:
     b = gt.board_info
+    on_river = len(gt.board) >= 5
     if b.flush_made_possible:
         flush = "成花面（同花已可能）"
-    elif b.flush_draw_possible:
+    elif b.flush_draw_possible and not on_river:
         flush = "花听面（未成花）"
+    elif b.flush_draw_possible:
+        flush = "最多两张同花（不可能成花）"
     else:
         flush = "彩虹面（无同花可能）"
     straight = "顺子可能" if b.straight_possible else "顺子不可能"
@@ -52,8 +55,9 @@ def _draws_zh(gt: GroundTruth) -> str:
     d = gt.draws
     parts: list[str] = []
     if d.flush_draw:
+        suit = _SUIT_ZH.get(str(d.flush_suit), str(d.flush_suit))
         parts.append(("坚果同花听牌" if d.nut_flush_draw else "同花听牌")
-                     + f"（{d.flush_suit}，{d.flush_outs} outs）")
+                     + f"（{suit} {d.flush_outs} outs）")
     if d.straight_draw:
         kind = "两头顺/双卡顺听牌" if d.oesd else "卡顺听牌"
         parts.append(f"{kind}（{d.straight_outs} outs）")
@@ -119,7 +123,17 @@ def render_gt_warnings_zh(gt: GroundTruth | None,
     """
     if gt is None:
         return []
-    out = [_map_gt_warning(w, gt) for w in gt.warnings]
+    on_river = len(gt.board) >= 5
+    out = []
+    for warning in gt.warnings:
+        # 河牌没有下一张牌：花听类警告会把死听写成活听。
+        if on_river and warning.startswith((
+                "Only a flush DRAW is possible",
+                "Your flush draw is on a paired board",
+                "You are the nuts NOW",
+                "An opponent can complete a straight")):
+            continue
+        out.append(_map_gt_warning(warning, gt))
     # 去重但保留顺序：同一条牌面风险只提醒一次。
     return list(dict.fromkeys(text for text in out if text))
 
