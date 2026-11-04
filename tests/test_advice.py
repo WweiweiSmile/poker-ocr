@@ -2143,6 +2143,32 @@ def test_lean_prompt_targets_aggression_frequency() -> None:
           f"SB 应明确「别为 0.5BB 补齐」：\n{sb_user}")
 
 
+def test_pool_prior_fills_missing_seat_data() -> None:
+    """2026-11-04.4：逐座位缺数据时用池子先验兜底；有逐尺寸 EV/面对下注/翻前都不渲染。"""
+    from poker_ocr.hand_track import OpponentSnapshot
+
+    single = build_situation(make_point())
+    _, single_user = build_messages(single)
+    check("池子先验" not in single_user,
+          "事实块已给逐尺寸 EV 时不该再给池子均值")
+
+    mw = build_situation(make_point(opponents=(
+        OpponentSnapshot("a", "老王", "BB", 97.0, 0.0, False),
+        OpponentSnapshot("b", "小李", "CO", 97.0, 0.0, False))))
+    _, mw_user = build_messages(mw)
+    check("池子先验" in mw_user, "多人池缺逐尺寸 EV 时应给池子先验兜底")
+    check("1/3 池需要 25%" in mw_user, "要先给盈亏平衡对照再给结论")
+    check("不是这个座位" in mw_user, "必须写明这是池子均值，不是这个座位")
+
+    facing = build_situation(make_point(to_call=4.0, pot=10.0))
+    _, facing_user = build_messages(facing)
+    check("池子先验" not in facing_user, "面对下注不给池子先验（它描述的是对手弃牌）")
+
+    pre = build_situation(make_point(street="preflop", board=()))
+    _, pre_user = build_messages(pre)
+    check("池子先验" not in pre_user, "翻前不给池子先验")
+
+
 # ─────────────────────────── 模型调用 ───────────────────────────
 
 SETTINGS = AISettings(api_key="k", base_url="https://example.invalid", model="m")

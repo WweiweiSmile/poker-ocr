@@ -247,6 +247,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--hands", type=Path, default=Path("hands.json"))
     ap.add_argument("--model", action="store_true", help="真的调模型重出建议")
     ap.add_argument("--limit", type=int, default=0, help="只跑前 N 个决策点")
+    ap.add_argument("--since", default=None,
+                    help="只重跑 ts >= 该时间的决策（ISO，如 2026-11-04T20:00）")
+    ap.add_argument("--until", default=None,
+                    help="只重跑 ts < 该时间的决策（ISO，如 2026-11-05）")
     ap.add_argument("--losses-only", action="store_true")
     ap.add_argument("--timeout", type=float, default=30.0)
     ap.add_argument("--json", type=Path, default=None,
@@ -271,6 +275,10 @@ def main(argv: list[str] | None = None) -> int:
     records = load(args.log)
     states = [r for r in records if r.get("type") == "state" and r.get("hero")]
     advices = [r for r in records if r.get("type") == "advice"]
+    if args.since:
+        advices = [a for a in advices if str(a.get("ts") or "") >= args.since]
+    if args.until:
+        advices = [a for a in advices if str(a.get("ts") or "") < args.until]
     hands = {}
     if args.hands.exists():
         for h in json.loads(args.hands.read_text(encoding="utf-8")):

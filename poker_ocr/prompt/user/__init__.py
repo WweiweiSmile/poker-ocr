@@ -20,6 +20,7 @@ from .geometry import render_geometry_zh, render_side_pot_zh
 from .notes import render_notes_zh
 from .options import render_options_zh
 from .position import render_position_zh
+from .pool import render_pool_prior_zh
 from .preflop import render_preflop_zh
 from .price import render_price_zh
 from .profiles import render_profiles_zh
@@ -74,6 +75,16 @@ def render_facts_zh(sit) -> str:
     if profiles:
         lines.append("")
         lines.extend(profiles)
+
+    # ── 池子先验：逐座位数据缺失时的兜底 ──
+    # 攻击块在场、或事实块已经给了逐尺寸 EV 时不渲染：那两处已经是同一节点的
+    # 结论来源，再补一条历史均值只会让模型比较两个不该比较的数。
+    has_sizes = bool(getattr(sit, "fold_eq", None) and sit.fold_eq.lines)
+    if not attack and not has_sizes:
+        pool = render_pool_prior_zh(sit)
+        if pool:
+            lines.append("")
+            lines.extend(pool)
 
     # ── 人工观察（.table_dy）：只覆盖它明确描述的范围 ──
     notes = render_notes_zh(sit)
