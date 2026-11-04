@@ -14,6 +14,7 @@ from __future__ import annotations
 from ..system import build_system
 from .action_line import render_action_line_zh
 from .attack import attack_signals, render_attack_zh
+from .exploit import render_exploit_zh
 from .explosive import render_explosive_pot_zh
 from .geometry import render_geometry_zh, render_side_pot_zh
 from .notes import render_notes_zh
@@ -59,6 +60,13 @@ def render_facts_zh(sit) -> str:
     attack = render_attack_zh(sit)
     trap_callers, trap_raisers = attack_signals(sit)
     suppress_action_hints = bool(attack) or bool(trap_callers or trap_raisers)
+
+    # ── 条件弃牌率（按本手线路）：攻击块已给裁决的节点不重复渲染 ──
+    if not attack:
+        exploit = render_exploit_zh(sit)
+        if exploit:
+            lines.append("")
+            lines.extend(exploit)
 
     # ── 逐座位画像：优先于全场统计；攻击块在场时只留描述性数据 ──
     profiles = render_profiles_zh(

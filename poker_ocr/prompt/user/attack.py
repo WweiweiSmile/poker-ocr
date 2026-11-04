@@ -10,6 +10,11 @@
 
 「对手过牌-加注频繁 / 跟 c-bet 多」走另一条分支（跟着过牌）：那条分支
 不给弃牌率证据，否则又变成「他们其实会弃，可以开火」的第二套结论。
+
+2026-11-04.3：样本不足/一般/没有实测三档不再等于「空气过牌」——改成
+「价值牌照常下注，强听/空气可以 1/3 池小注，大注才要实测」。这与恒定段
+「频率目标」（无人下注默认下注、目标 40%）对齐；实测偏低（weak）与
+xc/xr 高的分支不变，仍然不开火。
 """
 
 from __future__ import annotations
@@ -395,13 +400,14 @@ def render_attack_zh(sit: Situation) -> list[str]:
         conclusion = ("不开火：可下注价值（两对+/超对/顶对强踢）下注拿价值，"
                       "强听/空气按默认过牌")
     elif fold_verdict == "small":
-        conclusion = ("仅可下注价值牌下注（弃牌率样本不足）；"
-                      "强听没有弃牌率支撑，按默认过牌")
+        conclusion = ("价值牌下注拿价值；强听/空气按攻击口径可以 1/3 池小注"
+                      "（样本不足，不做大注）")
     elif fold_verdict == "neutral":
-        conclusion = ("仅可下注价值牌下注（弃牌率一般，不能单独作为开火理由）；"
-                      "强听/空气过牌")
+        conclusion = ("价值牌下注拿价值；强听/空气按攻击口径可以 1/3 池小注"
+                      "（弃牌率一般，不能作为大注理由）")
     else:
-        conclusion = "仅可下注价值牌下注（没有该街弃牌率）；强听/空气过牌"
+        conclusion = ("价值牌下注拿价值；强听/空气可以 1/3 池小注"
+                      "（没有该街实测，按范围估计；大注仍要 L2–L3）")
     reason = _verdict_reason(seats, fold_verdict)
     lines.append("结论：" + conclusion + (f"（{reason}）" if reason else ""))
     lines.extend(_attack_evidence(sit, seats, street, fold_verdict))

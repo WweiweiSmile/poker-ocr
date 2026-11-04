@@ -2078,14 +2078,69 @@ def test_lean_system_priorities() -> None:
           "system 的翻后决策顺序应问「更差的牌会不会跟」")
     draw_system, _ = build_messages(build_situation(make_point(
         hero_cards=("Qh", "Jh"), board=("Kh", "7h", "2c"))))
-    check("剥削程度 L2+" in draw_system
-          and "强听（≥8 outs）" in draw_system,
-          "system 应要求节点证据后再进行听牌半诈唬")
+    check("攻击口径" in draw_system and "他弃 ≥ 需要" in draw_system
+          and "强听" in draw_system,
+          "system 应要求按 EV/节点证据再进行听牌半诈唬")
     for phrase in ("剥削强度按 L0–L3", "当前行动顺序",
                    "被加注后的回退", "更差牌会跟"):
         check(phrase in system, f"system 缺少统一剥削仲裁规则：{phrase}")
     check("不要引用未提供的规则" in system,
           "system 应禁止编造规则/图表")
+
+
+def test_lean_prompt_targets_aggression_frequency() -> None:
+    """2026-11-04.3：把「紧弱」改写成频率目标 + 隔离尺寸（665 手复盘）。
+
+    全量复盘：无人下注节点的下注率只有 14%（池子 stab 45%），河牌两对+
+    过牌 27 次 vs 下注 5 次，PFR 只有 8%。提示词要给出可执行的默认线，
+    而不是又一条「除非有实测否则过牌」。
+    """
+    from poker_ocr.hand_track import (ActionRecord, OpponentSnapshot,
+                                      StreetRecord)
+
+    system, _ = build_messages(build_situation(make_point()))
+    for phrase in ("频率目标", "≥40%", "翻前加注优先", "14–16%",
+                   "5.5BB + 1BB", "接近 100% 隔离", "半池只在"):
+        check(phrase in system, f"system 缺少攻击频率目标：{phrase}")
+
+    # 河牌成牌：两对+ 默认下注，不许过牌收摊。
+    river = build_situation(make_point(
+        street="river", board=("Ks", "7d", "2c", "5h", "9s"),
+        hero_cards=("Kd", "Qc"), to_call=0.0, pot=30.0, hero_stack=80.0))
+    river_system, _ = build_messages(river)
+    check("两对+/三条+" in river_system and "2/3 池拿价值" in river_system,
+          f"河牌段应要求两对+ 下注：\n{river_system[-900:]}")
+    check("27 次强牌过牌 vs 5 次下注" in river_system,
+          "河牌段应写清「过牌是最贵的漏」的依据")
+
+    # 翻前有溜入者：事实块给隔离尺寸，SB 明确别为 0.5BB 补齐。
+    streets = (StreetRecord("preflop", 1.5, (
+        ActionRecord("preflop", "a", "V1", "LJ", "call", 1.0, False, False),
+        ActionRecord("preflop", "b", "V2", "HJ", "call", 1.0, False, False),
+    )),)
+    pre = build_situation(make_point(
+        street="preflop", board=(), hero_cards=("Kh", "Jd"), hero_position="CO",
+        to_call=1.0, pot=4.5, streets=streets, preflop_shapes=("limped",),
+        hero_is_pfr=False, cbet_spot=False,
+        opponents=(OpponentSnapshot("a", "V1", "LJ", 95.0, 1.0, False),
+                   OpponentSnapshot("b", "V2", "HJ", 95.0, 1.0, False),
+                   OpponentSnapshot("c", "V3", "BB", 95.0, 1.0, False))))
+    _, pre_user = build_messages(pre)
+    check("隔离尺寸" in pre_user and "6.5BB" in pre_user,
+          f"翻前事实块应给隔离尺寸：\n{pre_user}")
+    check("不要选跟注/补齐档" in pre_user,
+          "翻前事实块应禁止用跟注/补齐档")
+
+    sb = build_situation(make_point(
+        street="preflop", board=(), hero_cards=("2d", "4d"), hero_position="SB",
+        to_call=0.5, pot=4.5, streets=streets, preflop_shapes=("limped",),
+        hero_is_pfr=False, cbet_spot=False,
+        opponents=(OpponentSnapshot("a", "V1", "LJ", 95.0, 1.0, False),
+                   OpponentSnapshot("b", "V2", "HJ", 95.0, 1.0, False),
+                   OpponentSnapshot("c", "V3", "BB", 95.0, 1.0, False))))
+    _, sb_user = build_messages(sb)
+    check("你在 SB" in sb_user and "补齐" in sb_user,
+          f"SB 应明确「别为 0.5BB 补齐」：\n{sb_user}")
 
 
 # ─────────────────────────── 模型调用 ───────────────────────────
@@ -2221,7 +2276,7 @@ def test_combo_draw_facts_show_combo_and_fair_share_ratio() -> None:
           f"combo draw 应有专属牌型段：\n{combo_system}")
     check("当前已有摊牌价值且有真实听花或听顺" in combo_system,
           f"combo draw 不能按纯听牌打：\n{combo_system}")
-    check("诈唬仍需当前节点弃牌证据" in combo_system,
+    check("诈唬按攻击口径（该尺寸他弃 ≥ 需要）" in combo_system,
           f"combo draw 不该套用纯听牌默认过牌：\n{combo_system}")
     check("只有这两类补牌听牌归 combo" in combo_system,
           f"combo 仅应包括听花/听顺：{combo_system}")
@@ -3803,10 +3858,12 @@ def test_attack_verdict_is_per_seat_not_pooled() -> None:
     )
     small_text = render_facts_zh(build_situation(_limped_point(),
                                                  opponent_reads=small))
-    check("结论：仅可下注价值牌下注（弃牌率样本不足）" in small_text,
+    check("结论：价值牌下注拿价值" in small_text and "样本不足，不做大注" in small_text,
           f"合计 12 次机会应判样本不足：\n{small_text}")
     check("机会合计只有 12 次" in small_text,
           f"要说明样本为什么不够：\n{small_text}")
+    check("1/3 池小注" in small_text,
+          f"样本不足不等于禁止小注（2026-11-04.3）：\n{small_text}")
 
     partial = (
         _fold_read("bb", "flop", 80.0, 10.0),
@@ -3816,8 +3873,10 @@ def test_attack_verdict_is_per_seat_not_pooled() -> None:
                                                    opponent_reads=partial))
     check("CO 无画像（按未知处理）" in partial_text,
           f"未知座位要占位：\n{partial_text}")
-    check("结论：仅可下注价值牌下注（弃牌率一般" in partial_text,
+    check("结论：价值牌下注拿价值" in partial_text and "弃牌率一般" in partial_text,
           f"有未知座位最高只能 neutral：\n{partial_text}")
+    check("1/3 池小注" in partial_text,
+          f"未知座位也不该把空气小注一并禁掉：\n{partial_text}")
 
     # 「只有先验估计」和「完全没有数据」都要停在 neutral，但理由不能混写：
     # 证据行明明列了 ≈58%，结论再写「没有可用数据」就是自相矛盾。
@@ -3883,6 +3942,21 @@ def test_attack_pool_notes_are_descriptive_only() -> None:
           f"没有画像时不渲染合并：\n{no_data}")
     check("没有任何对手有该街面对下注的记录" in no_data,
           f"没有数据要说明：\n{no_data}")
+
+
+def test_exploit_block_shows_conditional_fold_equity() -> None:
+    """事实块给「他这条线路弃多少 / 这个尺寸需要多少」与跟注 EV。"""
+    from poker_ocr.prompt.user.exploit import render_exploit_zh
+
+    sit = build_situation(make_point(to_call=2.0, pot=8.0))
+    lines = render_exploit_zh(sit)
+    text = "\n".join(lines)
+    check("## 范围弱点与弃牌率" in text, f"应有条件弃牌率段：\n{text}")
+    check("全部弃牌" in text and "组合" in text, f"应有范围构成：\n{text}")
+    check("跟注" in text and "门槛" in text, f"应有跟注 EV：\n{text}")
+    check("需要" in text and "EV" in text, f"应有尺寸对照：\n{text}")
+    check("不是实测" in text, f"要标明是范围估计：\n{text}")
+
 
 
 def test_attack_fact_checks_opponent_xc_xr() -> None:
@@ -4111,7 +4185,7 @@ def test_attack_outputs_one_conclusion() -> None:
     )
     low_text = render_facts_zh(build_situation(_limped_point(),
                                                opponent_reads=low))
-    check("结论：仅可下注价值牌下注（弃牌率一般" in low_text,
+    check("结论：价值牌下注拿价值" in low_text and "弃牌率一般" in low_text,
           f"40% 左右应判 neutral：\n{low_text}")
     check("高频小注攻击" not in low_text, f"neutral 不能高频：\n{low_text}")
     check("弃牌率支持开火" not in low_text,

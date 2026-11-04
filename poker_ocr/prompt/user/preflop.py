@@ -367,6 +367,22 @@ def render_preflop_zh(sit: Situation) -> list[str]:
     limpers = count_limpers(snap)
     if limpers:
         lines.append(f"前面溜入人数：{limpers}")
+        if _preflop_raise_count(snap) == 0:
+            iso = PREFLOP_MIN_RAISE_BB + max(0, limpers - 1)
+            if snap.hero_position == BB:
+                lines.append(
+                    f"隔离尺寸：从「可选动作」挑最接近 {iso:g}BB 的加注档"
+                    f"（{PREFLOP_MIN_RAISE_BB:g}BB 起，每多 1 个溜入者 +1BB）；"
+                    "BB 可以过牌看翻牌，要抢主动权才加注，弱牌别为证明自己而加注")
+            else:
+                lines.append(
+                    f"隔离尺寸：从「可选动作」挑最接近 {iso:g}BB 的加注档"
+                    f"（{PREFLOP_MIN_RAISE_BB:g}BB 起，每多 1 个溜入者 +1BB）；"
+                    "不要选跟注/补齐档")
+                if snap.hero_position == SB:
+                    lines.append(
+                        "你在 SB：补齐只花 0.5BB 但翻后无位置；"
+                        "不在隔离范围就弃，要玩就加注——别用 23o/24s 这类牌补齐")
     raises = sorted({o.amount for o in sit.options
                      if o.kind in ("raise", "bet") and o.amount is not None})
     if raises:
