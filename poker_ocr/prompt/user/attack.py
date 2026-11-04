@@ -1,23 +1,28 @@
 """攻击/剥削块：宽范围死钱局里「能不能开火」的单一裁决。
 
 触发条件很窄：翻前溜入池 + 本街没人下注 + Hero 最后一个行动。这里只输出
-**一个结论**（不开火 / 仅强牌下注 / 可小注 / 可高频小注），依据里的弃牌率、
-xr、牌面、A 高面都只描述单项，不另下结论。
+**一个结论**（不开火 / 仅强牌下注 / 可小注 / 可高频小注）。
+
+弃牌率证据来自**逐座位画像**（`OpponentRead.fold_to_bet_{street}_pct` +
+机会数），不再有「桌况合并值」这一层：多人池真正需要的是「每个仍能行动
+的对手都会弃」，那不是均值能表达的量。合并均值与全弃估计只作描述、
+不作裁决依据，放在块末。
+
+「对手过牌-加注频繁 / 跟 c-bet 多」走另一条分支（跟着过牌）：那条分支
+不给弃牌率证据，否则又变成「他们其实会弃，可以开火」的第二套结论。
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from ...hand_track import PREFLOP, HandSnapshot
 from ...pot_math import _action_order, _can_act, _same_actor, count_limpers
-from ..shared.format import _fmt_num
 from .notes import _notes_ace_weakness
-from .table_stats import _TABLE_SMALL_OPPS
 
 if TYPE_CHECKING:                       # 只在类型检查时引入，避免循环 import
     from ...situation import Situation
-    from ...opponent_profile import PooledStats
 
 
 def _attack_trap_reads(sit: Situation) -> tuple[list[str], list[str]]:
@@ -52,6 +57,153 @@ def _attack_trap_reads(sit: Situation) -> tuple[list[str], list[str]]:
 
 _ATTACK_FOLD_SUPPORT_PCT = 50.0
 _ATTACK_FOLD_WEAK_PCT = 35.0
+# 样本门槛按「所有有实测的座位合计机会数」算。单人河牌面对下注的机会数
+# 普遍只有 6–12 次，按单人 20 次判会把所有结论都压成「样本不足」。
+_ATTACK_MIN_TOTAL_OPPS = 20.0
+
+_STREET_CN = {"flop": "翻牌", "turn": "转牌", "river": "河牌"}
+
+
+@dataclass(frozen=True)
+class _SeatFold:
+    """一个在局对手在当前街的弃牌率证据。"""
+
+    position: str
+    pct: float | None          # 实测百分比；None = 没有可用数据
+    opps: float | None         # 机会数
+    measured: bool             # 实测且未被先验收缩（才能进裁决与合并）
+    note: str = ""             # 无数据时的原因：无画像 / 已全下 / 没有记录
+
+
+def _fold_seats(sit: Situation, street: str) -> list[_SeatFold]:
+    """本手在局对手的当前街弃牌率，按行动顺序（Hero 之后依次）。"""
+    live = [o for o in sit.snap.opponents if not o.folded]
+    order = _action_order(sit.snap) or []
+    rank = {position: i for i, position in enumerate(order)}
+    live.sort(key=lambda o: (rank.get(o.position, len(rank)), o.position or ""))
+    reads = {r.seat_id: r for r in sit.opponent_reads}
+    out: list[_SeatFold] = []
+    for opponent in live:
+        position = opponent.position or opponent.seat_id
+        if not _can_act(opponent):
+            # 全下的人不会再弃牌，把他算进「弃牌率」等于虚增弃牌率。
+            out.append(_SeatFold(position, None, None, False, "已全下，不会弃牌"))
+            continue
+        read = reads.get(opponent.seat_id)
+        if read is None or read.archetype == "unknown":
+            out.append(_SeatFold(position, None, None, False,
+                                 "无画像（按未知处理）"))
+            continue
+        metric = f"fold_to_bet_{street}"
+        pct = getattr(read, f"{metric}_pct", None)
+        opps = read.opp(metric)
+        if pct is None:
+            out.append(_SeatFold(position, None, opps, False,
+                                 "没有该街面对下注记录"))
+            continue
+        measured = metric not in read.prior_dominated
+        out.append(_SeatFold(position, pct, opps, measured))
+    return out
+
+
+def _fold_verdict(seats: list[_SeatFold]) -> str:
+    """逐座位弃牌率 → 单一裁决（support/weak/neutral/small/unknown）。
+
+    顺序有讲究：任何一家实测偏低就是 weak（不能被别人达标盖过去）；
+    合计机会数不够是 small；只要还有座位没有可用数据，最高只能到 neutral
+    ——「已知的人会弃」不等于「全部人都会弃」。
+    """
+    measured = [seat for seat in seats if seat.measured]
+    if not measured:
+        return "unknown"
+    if any(seat.pct < _ATTACK_FOLD_WEAK_PCT for seat in measured):
+        return "weak"
+    total = sum(seat.opps or 0.0 for seat in measured)
+    if total < _ATTACK_MIN_TOTAL_OPPS:
+        return "small"
+    if len(measured) < len(seats):
+        return "neutral"
+    if all(seat.pct >= _ATTACK_FOLD_SUPPORT_PCT for seat in measured):
+        return "support"
+    return "neutral"
+
+
+def _verdict_reason(seats: list[_SeatFold], verdict: str) -> str:
+    """结论后面那句最短理由：说明「为什么不是全开火/为什么不能开火」。"""
+    measured = [seat for seat in seats if seat.measured]
+    if verdict == "weak":
+        weak = [seat for seat in measured
+                if seat.pct < _ATTACK_FOLD_WEAK_PCT]
+        return "；".join(f"{seat.position} 只有 {seat.pct:.0f}%"
+                        for seat in weak[:2])
+    if verdict == "small":
+        total = sum(seat.opps or 0.0 for seat in measured)
+        return f"机会合计只有 {total:.0f} 次"
+    if verdict == "neutral":
+        # 区分「完全没有数据」和「只有被先验收缩的估计」：这两件事都让裁决
+        # 停在 neutral，但理由不一样，不能都写成「没有可用数据」（证据行
+        # 明明列了 ≈58%，再写没有数据就是自相矛盾）。
+        blank = [seat.position for seat in seats if seat.pct is None]
+        shrunk = [seat.position for seat in seats
+                  if seat.pct is not None and not seat.measured]
+        parts: list[str] = []
+        if blank:
+            parts.append(f"{'、'.join(blank[:3])} 没有可用数据")
+        if shrunk:
+            parts.append(f"{'、'.join(shrunk[:3])} 只有先验估计")
+        if parts:
+            return "；".join(parts)
+        low = [seat for seat in measured if seat.pct < _ATTACK_FOLD_SUPPORT_PCT]
+        if low:
+            return "；".join(f"{seat.position} 只有 {seat.pct:.0f}%"
+                            for seat in low[:2])
+        return ""
+    if verdict == "unknown":
+        return "没有任何对手有该街面对下注的记录"
+    return ""
+
+
+def _seat_evidence_line(seats: list[_SeatFold], street: str) -> str:
+    """「依据」第一行：全部在局对手，逐座位，按行动顺序。"""
+    parts: list[str] = []
+    for seat in seats:
+        if seat.pct is None:
+            parts.append(f"{seat.position} {seat.note}")
+            continue
+        mark = "" if seat.measured else "≈"
+        text = f"{seat.position} {mark}{seat.pct:.0f}%"
+        if seat.opps:
+            text += f"（{seat.opps:.0f} 次）"
+        parts.append(text)
+    cn = _STREET_CN.get(street, street)
+    return f"依据（{cn}面对下注弃牌，逐座位；按行动顺序）：" + "｜".join(parts)
+
+
+def _pool_notes(seats: list[_SeatFold]) -> list[str]:
+    """块末的描述性两行：机会加权合并 + 全弃估计。
+
+    **不作裁决依据**：裁决已经由 `_fold_verdict()` 按逐座位下过了。这里
+    只回答「这几个人整体多久弃一次」和「同时都弃有多罕见」，避免模型拿
+    单家数字自己脑补成「三家都会弃」。
+    只统计实测且机会数达标的座位：被先验收缩的（≈）和没有数据的都不进
+    分母 —— 否则一个 5 次机会的 100% 就能把均值拉走。
+    """
+    measured = [seat for seat in seats if seat.measured and seat.opps]
+    if len(measured) < 2:
+        # 只剩一家时「合并值」就是那个人的数字，纯重复，不渲染。
+        return []
+    opps = sum(seat.opps for seat in measured)
+    mean = sum(seat.pct / 100.0 * seat.opps for seat in measured) / opps * 100
+    lines = [f"合并（机会加权，仅描述，不作裁决依据）：{mean:.0f}%"
+             f"（合计 {opps:.0f} 次机会，{len(measured)} 名机会达标）"]
+    all_fold = 1.0
+    for seat in measured:
+        all_fold *= seat.pct / 100.0
+    unknown = len(seats) - len(measured)
+    tail = f"；另 {unknown} 人未计入" if unknown else ""
+    lines.append(f"{len(measured)} 家全弃约 {all_fold * 100:.0f}%"
+                 f"（按独立相乘的粗略估计，仅参考{tail}）")
+    return lines
 
 
 def _checked_before_hero(snap: HandSnapshot) -> list:
@@ -104,56 +256,26 @@ def _xr_data_known(sit: Situation) -> bool:
         for r in sit.opponent_reads)
 
 
-def _attack_fold(stats: "PooledStats | None", street: str):
-    """当前街「面对下注弃牌率」的值和机会数。"""
-    value = getattr(stats, f"fold_to_bet_{street}", None) if stats else None
-    opps = (stats.opportunities or {}).get(street, 0.0) if stats else 0.0
-    return value, opps
+def _board_wet(sit: Situation, street: str) -> bool:
+    """牌面是否「更容易连上」。河牌没有听牌：花听不算湿，只剩成花/顺子可能。
 
-
-def _attack_fold_verdict(value: float | None, opps: float) -> str:
-    """只看弃牌率这一项的结论；最终开火/不开火由攻击块统一裁决。"""
-    if value is None:
-        return "unknown"
-    if opps < _TABLE_SMALL_OPPS:
-        return "small"
-    if value >= _ATTACK_FOLD_SUPPORT_PCT:
-        return "support"
-    if value <= _ATTACK_FOLD_WEAK_PCT:
-        return "weak"
-    return "neutral"
-
-
-def _board_wet(sit: Situation) -> bool:
+    `flush_draw_possible` 在河牌仍然为真（牌面确实有两张同花），但那时它
+    描述的是「不可能成花」，拿它说「降低开火频率」会无故压低结论。
+    """
     gt = sit.ground_truth
-    return bool(gt is not None and (
-        gt.board_info.flush_draw_possible
-        or gt.board_info.flush_made_possible
-        or gt.board_info.straight_possible))
+    if gt is None:
+        return False
+    info = gt.board_info
+    draw = info.flush_draw_possible and street != "river"
+    return bool(info.flush_made_possible or info.straight_possible or draw)
 
 
-def _attack_evidence(sit: Situation, stats: "PooledStats | None", street: str,
-                     scope_label: str, fold_verdict: str = "unknown") -> list[str]:
-    """攻击块的「依据」：只陈述单项事实，不再给第二套结论。"""
-    lines: list[str] = []
-    value, opps = _attack_fold(stats, street)
-    if value is not None:
-        cn = {"flop": "翻牌", "turn": "转牌", "river": "河牌"}.get(
-            street, street)
-        line = f"{scope_label}：对手面对{cn}下注弃 {value:.0f}%"
-        if opps < _TABLE_SMALL_OPPS:
-            line += f"（仅 {_fmt_num(opps)} 次机会）"
-            verdict = "机会数不足，不能单独作为开火理由"
-        elif value >= _ATTACK_FOLD_SUPPORT_PCT:
-            verdict = "弃牌率支持开火"
-        elif value <= _ATTACK_FOLD_WEAK_PCT:
-            verdict = "弃牌率不足，不支持开火"
-        else:
-            verdict = "弃牌率一般，不能单独作为开火理由"
-        # 「只描述这一项」避免和上面的总裁决读成两句相反建议。
-        lines.append(line + f" → {verdict}（只描述这一项，结论见上）")
+def _attack_evidence(sit: Situation, seats: list[_SeatFold], street: str,
+                     fold_verdict: str) -> list[str]:
+    """攻击块的「依据」：先给全部对手的逐座位事实，再给牌面/A 高面约束。"""
+    lines: list[str] = [_seat_evidence_line(seats, street)]
 
-    if _board_wet(sit):
+    if _board_wet(sit, street):
         lines.append(
             "牌面有花/顺可能：对手范围更容易连上，降低开火频率；"
             "优先用有摊牌价值或能改进的牌，纯空气别硬开。")
@@ -218,21 +340,12 @@ def render_attack_zh(sit: Situation) -> list[str]:
             "不能确认全部过牌（按可能 check-raise 处理）→ "
             "对手范围可能仍宽，底池是死钱，但不能当无风险开火点。")
     callers, raisers = _attack_trap_reads(sit)
-    stats = sit.table_stats
-    scope = (getattr(stats, "scope", "population")
-             if stats is not None else "population")
-    scope_label = "本桌" if scope == "current_table" else "全场先验"
-    cbet_opps = (stats.opportunities or {}).get("fcbet", 0.0) if stats else 0.0
-    table_sticky = bool(
-        stats is not None and scope == "current_table"
-        and stats.fold_to_cbet is not None
-        and cbet_opps >= _TABLE_SMALL_OPPS and stats.fold_to_cbet <= 35)
     xr_known = _xr_data_known(sit)
-    fold_value, fold_opps = _attack_fold(stats, street)
-    fold_verdict = _attack_fold_verdict(fold_value, fold_opps)
-    wet = _board_wet(sit)
+    wet = _board_wet(sit, street)
 
-    if raisers or callers or table_sticky:
+    if raisers or callers:
+        # 这条分支不给弃牌率证据：结论是「跟着过牌」，再列一遍「他们其实
+        # 会弃多少」会变成第二套相反结论（旧桌况河牌 hint 就栽在这里）。
         lines = ["## 剥削判断（宽范围/死钱）",
                  "（以下结论是程序建议，不是事实；与逐座位画像冲突时以画像为准）",
                  dead_money]
@@ -245,10 +358,6 @@ def render_attack_zh(sit: Situation) -> list[str]:
         if callers:
             lines.append(
                 "、".join(callers) + " —— 跟 c-bet 多，小注诈唬没有弃牌率。")
-        if table_sticky:
-            lines.append(
-                f"{scope_label}对 c-bet 只弃 {stats.fold_to_cbet:.0f}%"
-                f"（{_fmt_num(cbet_opps)} 次机会）—— 诈唬没有弃牌率。")
         if snap.street == "river":
             lines.append(
                 "结论：跟着过牌，进入摊牌；只有可下注价值（两对+/超对/顶对强踢）"
@@ -261,6 +370,9 @@ def render_attack_zh(sit: Situation) -> list[str]:
                 and _notes_ace_weakness(sit.table_dynamics)):
             lines.append("A 高面也一样：对手 xc/xr 高时，怕 A 不等于会弃牌。")
         return lines
+
+    seats = _fold_seats(sit, street)
+    fold_verdict = _fold_verdict(seats)
 
     lines = ["## 攻击机会（宽范围/死钱）",
              "（以下结论是程序建议，不是事实；与逐座位画像冲突时以画像为准）",
@@ -290,14 +402,15 @@ def render_attack_zh(sit: Situation) -> list[str]:
                       "强听/空气过牌")
     else:
         conclusion = "仅可下注价值牌下注（没有该街弃牌率）；强听/空气过牌"
-    lines.append("结论：" + conclusion)
-    lines.append("依据：")
-    lines.extend(_attack_evidence(sit, stats, street, scope_label,
-                                  fold_verdict))
+    reason = _verdict_reason(seats, fold_verdict)
+    lines.append("结论：" + conclusion + (f"（{reason}）" if reason else ""))
+    lines.extend(_attack_evidence(sit, seats, street, fold_verdict))
     if fold_verdict == "support" and xr_known and not wet:
         lines.append(
             "范围封顶 + 弃牌率达标 + 没有高 xr/高跟注证据；"
             "被跟注后按下一街权益继续，被加注要放弃。")
+    # 描述性两行放在块末：不参与上面的裁决。
+    lines.extend(_pool_notes(seats))
     return lines
 
 

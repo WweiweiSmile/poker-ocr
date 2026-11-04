@@ -16,7 +16,9 @@ from poker_ocr.advice import (
     AIError, Advice, AISettings, PROMPT_VERSION, advise, audit_advice_tags,
     complete_json,
 )
-from poker_ocr.opponent_profile import OpponentRead, PooledStats
+from poker_ocr.opponent_profile import (
+    OpponentRead, PooledStats, TENDENCY_PCT_FIELDS,
+)
 
 from .decisions import DecisionPoint, call_amount, decision_facts
 from .util import cards_of
@@ -122,6 +124,13 @@ def reads_from_context(context: dict) -> tuple[OpponentRead, ...]:
         if not isinstance(item, dict):
             continue
         try:
+            opps = tuple(
+                (str(key), float(value))
+                for key, value in (item.get("opps") or {}).items()
+                if isinstance(value, (int, float)))
+            pcts = {name: float(item[name])
+                    for name in TENDENCY_PCT_FIELDS
+                    if isinstance(item.get(name), (int, float))}
             out.append(OpponentRead(
                 seat_id=item.get("seat_id"),
                 key=str(item.get("key") or ""),
@@ -135,6 +144,10 @@ def reads_from_context(context: dict) -> tuple[OpponentRead, ...]:
                 source=str(item.get("source") or "auto"),
                 note="replayed from live context",
                 gate=str(item.get("gate") or "unknown"),
+                prior_dominated=tuple(item.get("prior_dominated") or ()),
+                opps=opps,
+                inferred_ratio=float(item.get("inferred_ratio") or 0.0),
+                **pcts,
             ))
         except (TypeError, ValueError):
             continue

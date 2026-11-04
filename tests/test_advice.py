@@ -1883,51 +1883,34 @@ def test_table_dynamics_in_prompt() -> None:
           f"没有观察时不该多出这段：\n{plain_user}")
 
 
-def test_table_stats_come_from_profiles() -> None:
-    """桌子的松紧改成**事实注入**：全场合并统计进提示词，不再是形容词。"""
+def test_table_stats_no_longer_render_but_stay_in_context() -> None:
+    """桌况段已删除：数字不再进 prompt，但聚合数据仍入库供复盘。"""
     from poker_ocr.opponent_profile import PooledStats
 
-    stats = PooledStats(hands=294, players=30, vpip=38.0, pfr=12.0,
-                        threebet=5.9, limp=46.0, fold_to_cbet=79.0, stab=5.0,
-                        fold_to_bet_flop=87.0, fold_to_bet_turn=72.0,
-                        fold_to_bet_river=92.0,
-                        opportunities={"river": 41.0, "fcbet": 41.0,
-                                       "limp": 248.0, "threebet": 305.0})
+    stats = PooledStats(
+        hands=294, players=30, vpip=38.0, pfr=12.0, threebet=5.9, limp=46.0,
+        fold_to_cbet=79.0, stab=5.0, fold_to_bet_flop=87.0,
+        fold_to_bet_turn=72.0, fold_to_bet_river=92.0,
+        opportunities={"river": 41.0, "fcbet": 41.0, "limp": 248.0,
+                       "threebet": 305.0})
     sit = build_situation(make_point(to_call=4.0, pot=10.0, hero_stack=90.0),
                           table_stats=stats)
     _, user = build_messages(sit)
-    check("## 全场数据" in user, f"应渲染全场数据段：\n{user}")
-    check("VPIP 38%" in user and "对 c-bet 弃 79%" in user,
-          f"应写出具体比例：\n{user}")
-    check("整体：松、3-bet 少" in user, f"应给出松/3-bet 少的结论：\n{user}")
-    check("被动" not in user, f"3-bet 少不能写成整体被动：\n{user}")
-    check("河牌 92%" in user, f"分街弃牌率应包含河牌：\n{user}")
-    # 河牌建议只能出现在河牌 prompt，不能穿越到翻牌。
+    check("## 全场数据" not in user and "## 当前牌桌数据" not in user,
+          f"桌况段不该再渲染：\n{user}")
     check("河牌大注基本没人跟" not in user,
-          f"翻牌 prompt 不该出现河牌建议：\n{user}")
-    river = build_situation(make_point(
-        street="river", board=("2c", "3d", "4h", "5s", "9c"),
-        to_call=4.0, pot=10.0, hero_stack=90.0), table_stats=stats)
-    _, river_user = build_messages(river)
-    check("河牌大注基本没人跟" in river_user,
-          f"河牌 prompt 应指出河牌没人跟：\n{river_user}")
-    check("价值下注要收小" in river_user or "收小注" in river_user,
-          f"应同时提示价值下注要收小：\n{river_user}")
+          f"河牌 hint 随桌况段一起删除：\n{user}")
+    check("VPIP 38%" not in user,
+          f"画像才是唯一数字来源，不再有合并段：\n{user}")
+    ctx = advice_mod._advice_context(sit)
+    check((ctx.get("table_stats") or {}).get("fold_to_bet_river") == 92.0,
+          f"聚合数据仍要入库：{ctx.get('table_stats')}")
 
-    # 机会数不够时不给全场级结论
-    thin_river = PooledStats(hands=30, players=9, vpip=40.0,
-                             fold_to_bet_river=95.0,
-                             opportunities={"river": 4.0})
-    _, thin_user = build_messages(build_situation(
-        make_point(to_call=4.0, pot=10.0, hero_stack=90.0), table_stats=thin_river))
-    check("河牌大注基本没人跟" not in thin_user,
-          f"河牌机会不足时不该下结论：\n{thin_user}")
-
-    # 样本太小时不渲染：十手牌算出来的「全场 VPIP」比没有更误导
-    thin = PooledStats(hands=12, players=3, vpip=60.0)
-    _, small_user = build_messages(build_situation(
-        make_point(to_call=4.0, pot=10.0, hero_stack=90.0), table_stats=thin))
-    check("## 全场数据" not in small_user, f"样本太小时不该渲染：\n{small_user}")
+    # 0 对手状态帧异常：画像段也不渲染。
+    empty = build_situation(make_point(opponents=()), table_stats=stats)
+    _, empty_user = build_messages(empty)
+    check("## 对手画像" not in empty_user and "无画像：" not in empty_user,
+          f"0 对手不渲染画像段：\n{empty_user}")
 
 
 def test_value_heavy_aggression_flags() -> None:
@@ -3410,197 +3393,35 @@ def test_short_stack_prompt_dedupes_capped_options() -> None:
     check(len(lines) == 1, f"封顶档位应只显示一个：{lines}")
 
 
-def test_table_stats_label_marks_current_table_scope() -> None:
-    """当前桌统计要标明「本手在局」，不能再说「可能跨桌」。"""
-    from poker_ocr.hand_track import OpponentSnapshot
-    from poker_ocr.opponent_profile import PooledStats
+def test_profile_river_only_fold_and_unknown_seats() -> None:
+    """只有河牌数据也要渲染「面对下注弃」，并列出没有画像的座位。"""
+    from poker_ocr.hand_track import OpponentSnapshot, StreetRecord
 
-    stats = PooledStats(hands=294, players=4, total_players=6,
-                        scope="current_table", approx_hands=True,
-                        vpip=38.0, pfr=12.0, threebet=5.9, limp=46.0,
-                        fold_to_cbet=79.0, stab=5.0)
     point = make_point(
-        to_call=4.0, pot=10.0, hero_stack=90.0,
-        opponents=tuple(OpponentSnapshot(f"o{i}", "", pos, 100.0, 0.0, False)
-                        for i, pos in enumerate(("BB", "UTG", "LJ", "CO"))))
-    sit = build_situation(point, table_stats=stats)
-    _, user = build_messages(sit)
-    check("当前牌桌数据" in user and "本手在局" in user,
-          f"应标明当前桌口径：\n{user}")
-    check("4 名在局对手有画像" in user, f"应给出画像覆盖：\n{user}")
-    check("可能跨桌" not in user and "画像库" not in user,
-          f"不应再出现跨桌免责：\n{user}")
+        street="river", board=("Ks", "7d", "2c", "9s", "3d"),
+        hero_cards=("Qc", "Jd"), hero_position="BTN", hero_stack=90.0,
+        hero_bet=0.0, to_call=8.0, pot=40.0, pot_before_street=32.0,
+        table_size=6, players_dealt=3, preflop_shapes=("single-raise",),
+        opponents=(OpponentSnapshot("bb", "BB", "BB", 90.0, 0.0, False),
+                   OpponentSnapshot("co", "CO", "CO", 90.0, 0.0, False)),
+        streets=(StreetRecord("preflop", 3.0, ()),
+                 StreetRecord("river", 32.0, ())))
+    text = render_facts_zh(build_situation(
+        point, opponent_reads=(_fold_read("bb", "river", 75.0, 12.0),)))
+    check("面对下注弃 河牌 75%（12 次）" in text,
+          f"只有河牌数据也要渲染：\n{text}")
+    check("无画像：CO（按未知对手处理，不伪造数据）" in text,
+          f"未知座位要单独列出：\n{text}")
 
-    prior = PooledStats(hands=294, players=30, vpip=38.0, pfr=12.0,
-                        threebet=5.9, limp=46.0, fold_to_cbet=79.0, stab=5.0)
-    _, prior_user = build_messages(build_situation(
-        make_point(to_call=4.0, pot=10.0, hero_stack=90.0),
-        table_stats=prior))
-    check("全场先验" in prior_user and "非本桌" in prior_user,
-          f"冷启动先验要标明不是本桌：\n{prior_user}")
-
-
-def test_table_stab_read_is_actionable() -> None:
-    """桌况 stab 要翻成动作提示：高 stab = 过牌不是免费看牌。"""
-    from poker_ocr.advice import _table_stab_read_zh
-    from poker_ocr.opponent_profile import PooledStats
-
-    high = PooledStats(hands=294, players=4, scope="current_table",
-                       stab=43.0, opportunities={"stab": 161.5})
-    text = _table_stab_read_zh(high)
-    check("爱开火" in text and "过牌不是免费看牌" in text,
-          f"高 stab 要说明过牌不是免费看牌：\n{text}")
-    check("加注范围仍偏强" in text,
-          f"高 stab 不能推成加注也宽：\n{text}")
-
-    mid = PooledStats(hands=294, players=4, scope="current_table",
-                      stab=33.0, opportunities={"stab": 100.0})
-    check("会开火" in _table_stab_read_zh(mid),
-          f"30–40% 应给「会开火」：\n{_table_stab_read_zh(mid)}")
-
-    low = PooledStats(hands=294, players=4, scope="current_table",
-                      stab=10.0, opportunities={"stab": 100.0})
-    check("很少开火" in _table_stab_read_zh(low),
-          f"低 stab 才说免费看下一张：\n{_table_stab_read_zh(low)}")
-
-    thin = PooledStats(hands=294, players=4, scope="current_table",
-                       stab=43.0, opportunities={"stab": 5.0})
-    check(_table_stab_read_zh(thin) == "",
-          "机会太少不该给桌况读法")
-
-
-def test_table_stats_counts_hero_and_flags_small_samples() -> None:
-    """当前桌：人数含 Hero；小样本指标要标机会数；3-bet 少不写成被动。"""
-    from poker_ocr.hand_track import OpponentSnapshot
-    from poker_ocr.opponent_profile import PooledStats
-
-    stats = PooledStats(
-        hands=66, players=2, total_players=3,
-        scope="current_table", approx_hands=True,
-        vpip=45.0, pfr=17.0, threebet=8.9, limp=48.0,
-        fold_to_cbet=82.0, stab=11.0, fold_to_bet_river=100.0,
-        opportunities={"preflop": 50.0, "threebet": 22.5, "limp": 21.0,
-                       "fcbet": 5.5, "stab": 9.0, "river": 4.5})
-    _, user = build_messages(build_situation(
-        make_point(street="preflop", board=(), to_call=4.0, pot=10.0,
-                   hero_stack=90.0,
-                   opponents=(
-                       OpponentSnapshot("a", "老王", "BB", 97.0, 0.0, False),
-                       OpponentSnapshot("b", "小李", "CO", 97.0, 0.0, False))),
-        table_stats=stats))
-    check("本手在局：3 人（Hero + 2 名对手）" in user,
-          f"人数必须含 Hero：\n{user}")
-    check("2 名在局对手有画像" in user and "单人最多约 66 手" in user,
-          f"样本口径要写单人不写整桌：\n{user}")
-    check("对 c-bet 弃 82%（仅 5.5 次机会）" in user,
-          f"5.5 次机会的 82% 必须标样本：\n{user}")
-    check("河牌 100%（仅 4.5 次机会）" in user,
-          f"4.5 次机会的 100% 必须标样本：\n{user}")
-    check("整体：松" in user and "被动" not in user,
-          f"3-bet 9% 不能写成被动：\n{user}")
-    check("3-bet 少" not in user,
-          f"3-bet 8.9% 不应打「3-bet 少」：\n{user}")
-    check("前位也可以放宽开池" not in user,
-          f"溜入 48% 时不该推前位放宽：\n{user}")
-    check("本桌爱溜入" in user, f"当前桌应说本桌：\n{user}")
-
-
-def test_table_stats_low_coverage_suppresses_table_exploit() -> None:
-    """9 人在局只有 1 人有画像时，不给「当前桌可剥削」的整桌结论。"""
-    from poker_ocr.hand_track import OpponentSnapshot
-    from poker_ocr.opponent_profile import PooledStats
-
-    seats = ("SB", "BB", "UTG", "UTG+1", "UTG+2", "LJ", "HJ", "CO")
-    opponents = tuple(
-        OpponentSnapshot(f"o{i}", "", pos, 100.0, 0.0, False)
-        for i, pos in enumerate(seats))
-    point = make_point(
-        to_call=4.0, pot=10.0, hero_stack=90.0,
-        hero_position="BTN", table_size=9, players_dealt=9,
-        opponents=opponents)
-    stats = PooledStats(
-        hands=66, players=1, total_players=9,
-        scope="current_table", approx_hands=True,
-        vpip=45.0, threebet=5.0, limp=50.0,
-        opportunities={"preflop": 50.0, "threebet": 50.0, "limp": 50.0})
-    _, user = build_messages(build_situation(point, table_stats=stats))
-    check("另外 7 名在局对手没有画像" in user,
-          f"覆盖率要写清：\n{user}")
-    check("当前桌可剥削" not in user,
-          f"1/8 覆盖不该给整桌结论：\n{user}")
-
-    # 2/8 仍低于一半覆盖，也不该把两个人算成整桌。
-    partial = PooledStats(
-        hands=66, players=2, total_players=9,
-        scope="current_table", approx_hands=True,
-        vpip=45.0, threebet=5.0, limp=50.0,
-        opportunities={"preflop": 50.0, "threebet": 50.0, "limp": 50.0})
-    _, partial_user = build_messages(
-        build_situation(point, table_stats=partial))
-    check("当前桌可剥削" not in partial_user,
-          f"2/8 覆盖也不该给整桌结论：\n{partial_user}")
-
-
-def test_table_stats_uses_main_in_hand_count() -> None:
-    """桌况标题不能再用另一套在局人数，和主事实块打架。"""
-    from poker_ocr.hand_track import OpponentSnapshot
-    from poker_ocr.opponent_profile import PooledStats
-
-    seats = ("SB", "BB", "UTG", "UTG+1", "UTG+2", "LJ", "HJ", "CO")
-    opponents = tuple(
-        OpponentSnapshot(f"o{i}", "", pos, 100.0, 0.0, False)
-        for i, pos in enumerate(seats))
-    stats = PooledStats(
-        hands=66, players=2, total_players=3,
-        scope="current_table", approx_hands=True,
-        vpip=45.0, threebet=5.0, limp=50.0,
-        opportunities={"preflop": 50.0, "threebet": 50.0, "limp": 50.0})
-    point = make_point(
-        hero_position="BTN", table_size=9, players_dealt=9,
-        opponents=opponents)
-    _, user = build_messages(build_situation(point, table_stats=stats))
-    check("本手在局：9 人（Hero + 8 名对手）" in user,
-          f"主事实人数应含 Hero：\n{user}")
-    check("本手在局 3 人" not in user,
-          f"桌况标题不能再写另一套人数：\n{user}")
-    check("另外 6 名在局对手没有画像" in user,
-          f"未知对手数应按主事实算：\n{user}")
-
-
-def test_table_stats_suppressed_when_no_opponents() -> None:
-    """0 对手状态帧异常时，不能再写「N 名在局对手有画像」。"""
-    from poker_ocr.advice import render_table_stats_zh
-    from poker_ocr.opponent_profile import PooledStats
-
-    stats = PooledStats(
-        hands=66, players=3, total_players=4,
-        scope="current_table", approx_hands=True,
-        vpip=45.0, threebet=5.0, limp=50.0,
-        opportunities={"preflop": 50.0, "threebet": 50.0, "limp": 50.0})
-    check(render_table_stats_zh(stats, opponents_in_hand=0) == [],
-          "0 名在局对手时不应渲染桌况聚合")
-    text = render_table_stats_zh(stats, opponents_in_hand=1)
-    check("1 名在局对手有画像" in "".join(text),
-          f"正常人数仍应显示桌况：\n{text}")
-
-
-def test_table_stats_low_3bet_with_limpers_does_not_widen_early_open() -> None:
-    """低 3-bet + 高溜入：提示词应说前位不要放宽，而不是放宽。"""
-    from poker_ocr.opponent_profile import PooledStats
-
-    stats = PooledStats(
-        hands=66, players=3, total_players=4,
-        scope="current_table", approx_hands=True,
-        vpip=35.0, threebet=5.0, limp=50.0,
-        opportunities={"preflop": 80.0, "threebet": 80.0, "limp": 80.0})
-    _, user = build_messages(build_situation(
-        make_point(street="preflop", board=(), to_call=4.0, pot=10.0,
-                   hero_stack=90.0),
-        table_stats=stats))
-    check("3-bet 很少，但溜入/入池多" in user,
-          f"低 3-bet + 溜入多应提示前位收紧：\n{user}")
-    check("前位也可以放宽开池" not in user,
-          f"不能推前位放宽：\n{user}")
+    ctx = advice_mod._advice_context(build_situation(
+        point, opponent_reads=(_fold_read("bb", "river", 75.0, 12.0),)))
+    item = (ctx.get("opponent_reads") or [{}])[0]
+    check(item.get("fold_to_bet_river_pct") == 75.0,
+          f"打法数字要进 advice.context：{item}")
+    check(dict(item.get("opps") or {}).get("fold_to_bet_river") == 12.0,
+          f"机会数也要进 advice.context：{item}")
+    check(item.get("vpip") == 45.0,
+          f"基础数字也要进 advice.context：{item}")
 
 
 def test_made_hand_facts_include_better_one_pair_and_caveat() -> None:
@@ -3917,109 +3738,151 @@ def _limped_point(*, board=("As", "7d", "2c"), cards=("Kd", "Qd"),
                  StreetRecord("flop", 5.5, flop_actions)))
 
 
-def test_attack_fact_for_limped_pot_checked_to_hero() -> None:
-    """溜入池、全过牌到收尾 Hero：给攻击事实，但没有 xr 数据不默认高频开火。"""
-    from poker_ocr.opponent_profile import OpponentRead, PooledStats
+def _fold_read(seat: str, street: str, pct: float, opps: float, **kw):
+    """带机会数的逐座位弃牌率画像（新链路里攻击块与画像的唯一数字来源）。"""
+    from poker_ocr.opponent_profile import OpponentRead
 
-    stats = PooledStats(
-        hands=105, players=4, total_players=5, scope="current_table",
-        approx_hands=True, vpip=48.0, pfr=10.0, threebet=4.0, limp=60.0,
-        fold_to_cbet=44.0, stab=10.0, fold_to_bet_flop=73.0,
-        opportunities={"flop": 20.0, "turn": 10.0, "river": 8.0,
-                       "limp": 50.0, "fcbet": 10.0, "stab": 10.0})
-    dynamics = ("- 本池对手看到公共牌有 A 时抵抗力明显下降，容易弃牌："
-                "A 高面可以更频繁下注。")
-    sit = build_situation(_limped_point(), table_stats=stats,
-                          table_dynamics=dynamics)
-    text = render_facts_zh(sit)
-    check("## 攻击机会（宽范围/死钱）" in text,
-          f"溜入池全过牌应给攻击机会：\n{text}")
-    check("本街全部过牌到 Hero" in text,
-          f"要写清 Hero 收尾：\n{text}")
-    check("仍可过牌-加注" in text,
-          f"前面已过牌的人仍能 check-raise：\n{text}")
-    check("下注不会被身后加注惩罚" not in text,
-          f"不能说下注无人能加注：\n{text}")
-    check("没有对手过牌-加注数据" in text,
-          f"没有 xr 数据时不能给高频默认：\n{text}")
-    check("高频小注攻击" not in text,
-          f"没有 xr 数据时不该说高频开火：\n{text}")
-    check("对手面对翻牌下注弃 73%" in text,
-          f"弃牌率要进事实：\n{text}")
-    check("弃牌率支持开火" in text,
-          f"73% 弃牌率应支持开火：\n{text}")
-    check("A 高面：人工观察说本池对手见 A 抵抗力下降" in text,
-          f"A 高面要引用人工观察：\n{text}")
-
-    # 有 xr 实测值且不高时，才允许给「高频小注攻击」。
-    xr_low = OpponentRead(
-        seat_id="co", key="co", display_name="co", archetype="station",
+    metric = f"fold_to_bet_{street}"
+    base = dict(
+        seat_id=seat, key=seat, display_name=seat, archetype="station",
         confidence=0.85, n=100, vpip=45.0, pfr=8.0, af=0.7, source="auto",
-        note="", gate="stable", check_raise_pct=10.0)
-    xr_low_text = render_facts_zh(build_situation(
-        _limped_point(), table_stats=stats, opponent_reads=(xr_low,)))
-    check("高频小注攻击" in xr_low_text,
-          f"xr 实测值不高时可以高频开火：\n{xr_low_text}")
-    check("仍可过牌-加注" in xr_low_text,
-          f"xr 不高也要保留 check-raise 提醒：\n{xr_low_text}")
+        note="", gate="stable", opps=((metric, float(opps)),),
+        **{f"{metric}_pct": float(pct)})
+    base.update(kw)
+    return OpponentRead(**base)
 
-    # 弃牌率低于阈值时不能写「支持开火」。
-    low = PooledStats(
-        hands=105, players=4, total_players=5, scope="current_table",
-        approx_hands=True, fold_to_bet_flop=20.0,
-        opportunities={"flop": 30.0})
-    low_text = render_facts_zh(build_situation(
-        _limped_point(), table_stats=low))
-    check("弃牌率不足，不支持开火" in low_text,
-          f"20% 弃牌率不能支持开火：\n{low_text}")
-    check("弃牌率支持开火" not in low_text,
-          f"20% 弃牌率不该写支持开火：\n{low_text}")
 
-    # 全场先验不能写成「本桌」的 sticky。
-    population = PooledStats(
-        hands=105, players=30, scope="population",
-        fold_to_cbet=25.0, opportunities={"fcbet": 100.0})
-    pop_text = render_facts_zh(build_situation(
-        _limped_point(), table_stats=population))
-    check("本桌对 c-bet" not in pop_text,
-          f"全场先验不能写成本桌 sticky：\n{pop_text}")
+def test_attack_fact_for_limped_pot_checked_to_hero() -> None:
+    """溜入池全过牌到 Hero：逐座位弃牌率进依据，合并值只作描述。"""
+    reads = (
+        _fold_read("bb", "flop", 70.0, 12.0),
+        _fold_read("utg", "flop", 75.0, 10.0),
+        _fold_read("co", "flop", 72.0, 8.0, check_raise_pct=10.0),
+    )
+    text = render_facts_zh(build_situation(_limped_point(),
+                                          opponent_reads=reads))
+    check("## 攻击机会（宽范围/死钱）" in text, f"溜入池应给攻击机会：\n{text}")
+    check("本街全部过牌到 Hero" in text, f"要写清 Hero 收尾：\n{text}")
+    check("仍可过牌-加注" in text, f"前面已过牌的人仍能 xr：\n{text}")
+    check("依据（翻牌面对下注弃牌，逐座位；按行动顺序）" in text,
+          f"依据要逐座位列出：\n{text}")
+    for frag in ("BB 70%（12 次）", "UTG 75%（10 次）", "CO 72%（8 次）"):
+        check(frag in text, f"逐座位证据缺 {frag}：\n{text}")
+    check("合并（机会加权，仅描述，不作裁决依据）：72%" in text,
+          f"合并值只能描述：\n{text}")
+    check("3 家全弃约 38%" in text, f"全弃估计按逐座位相乘：\n{text}")
+    check("结论：可高频小注攻击" in text,
+          f"xr 不高且三家都达标才可高频：\n{text}")
+    check("弃牌率支持开火" not in text,
+          f"依据里不能再出现第二套结论：\n{text}")
 
     # 非溜入池（单加注）不触发：对手范围不是封顶的宽范围。
     raised = build_situation(_limped_point(shapes=("single-raise",)),
-                             table_stats=stats, table_dynamics=dynamics)
+                             opponent_reads=reads)
     check("攻击机会" not in render_facts_zh(raised),
           "单加注池不该给「宽范围死钱」攻击事实")
 
-    # Hero 不是收尾（OOP 先行动）不触发。
-    oop = build_situation(_limped_point(hero_position="BB"),
-                          table_stats=stats, table_dynamics=dynamics)
-    check("攻击机会" not in render_facts_zh(oop),
-          "Hero 不是最后一个行动时不该宣称对手都过牌")
 
-    # 没写人工观察时不能编「本池怕 A」；只能给通用的 A 高面事实。
-    no_note = build_situation(_limped_point(), table_stats=stats)
-    no_note_text = render_facts_zh(no_note)
-    check("人工观察说本池对手见 A" not in no_note_text,
-          f"没有人工观察不能编池级结论：\n{no_note_text}")
-    check("A 高面：A 是牌面最大张" in no_note_text,
-          f"没人工观察时给通用 A 高面事实即可：\n{no_note_text}")
+def test_attack_verdict_is_per_seat_not_pooled() -> None:
+    """逐座位裁决：一家偏低就不开火；样本按合计；未知/全下不进裁决。"""
+    weak = (
+        _fold_read("bb", "flop", 80.0, 10.0),
+        _fold_read("utg", "flop", 85.0, 10.0),
+        _fold_read("co", "flop", 20.0, 10.0),
+    )
+    weak_text = render_facts_zh(build_situation(_limped_point(),
+                                                opponent_reads=weak))
+    check("结论：不开火" in weak_text, f"一家 20% 就不该开火：\n{weak_text}")
+    check("CO 只有 20%" in weak_text,
+          f"结论要说明为什么不开火：\n{weak_text}")
 
-    # 牌面有花/顺可能时要给「降低开火频率」的相反约束。
-    wet = build_situation(
-        _limped_point(board=("8s", "7s", "6d"), cards=("Kd", "Qd")),
-        table_stats=stats, table_dynamics=dynamics)
-    wet_text = render_facts_zh(wet)
-    check("牌面有花/顺可能" in wet_text and "降低开火频率" in wet_text,
-          f"湿牌面要提醒降低频率：\n{wet_text}")
+    small = (
+        _fold_read("bb", "flop", 80.0, 4.0),
+        _fold_read("utg", "flop", 85.0, 4.0),
+        _fold_read("co", "flop", 90.0, 4.0),
+    )
+    small_text = render_facts_zh(build_situation(_limped_point(),
+                                                 opponent_reads=small))
+    check("结论：仅可下注价值牌下注（弃牌率样本不足）" in small_text,
+          f"合计 12 次机会应判样本不足：\n{small_text}")
+    check("机会合计只有 12 次" in small_text,
+          f"要说明样本为什么不够：\n{small_text}")
 
-    # 弃牌率样本不足时要标机会数。
-    small = PooledStats(
-        hands=105, players=4, total_players=5, scope="current_table",
-        approx_hands=True, fold_to_bet_flop=80.0,
-        opportunities={"flop": 6.0})
-    small_text = render_facts_zh(build_situation(
-        _limped_point(), table_stats=small))
-    check("仅 6 次机会" in small_text, f"小样本要标机会数：\n{small_text}")
+    partial = (
+        _fold_read("bb", "flop", 80.0, 10.0),
+        _fold_read("utg", "flop", 85.0, 10.0),
+    )
+    partial_text = render_facts_zh(build_situation(_limped_point(),
+                                                   opponent_reads=partial))
+    check("CO 无画像（按未知处理）" in partial_text,
+          f"未知座位要占位：\n{partial_text}")
+    check("结论：仅可下注价值牌下注（弃牌率一般" in partial_text,
+          f"有未知座位最高只能 neutral：\n{partial_text}")
+
+    # 「只有先验估计」和「完全没有数据」都要停在 neutral，但理由不能混写：
+    # 证据行明明列了 ≈58%，结论再写「没有可用数据」就是自相矛盾。
+    shrunk = (
+        _fold_read("bb", "flop", 80.0, 10.0),
+        _fold_read("co", "flop", 80.0, 10.0),
+        _fold_read("utg", "flop", 58.0, 5.0,
+                   prior_dominated=("fold_to_bet_flop",)),
+    )
+    shrunk_text = render_facts_zh(build_situation(_limped_point(),
+                                                 opponent_reads=shrunk))
+    check("UTG 只有先验估计" in shrunk_text,
+          f"收缩估计要写成先验估计：\n{shrunk_text}")
+    check("UTG 没有可用数据" not in shrunk_text,
+          f"不能把 ≈ 写成没有数据：\n{shrunk_text}")
+
+    from dataclasses import replace
+
+    from poker_ocr.hand_track import OpponentSnapshot
+
+    point = _limped_point()
+    allin = replace(point, opponents=(
+        point.opponents[0], point.opponents[1],
+        OpponentSnapshot("co", "CO", "CO", 0.0, 0.0, False)))
+    allin_text = render_facts_zh(build_situation(allin, opponent_reads=(
+        _fold_read("bb", "flop", 80.0, 10.0),
+        _fold_read("utg", "flop", 85.0, 10.0),
+        _fold_read("co", "flop", 20.0, 10.0))))
+    check("CO 已全下，不会弃牌" in allin_text,
+          f"全下的人不能算弃牌率：\n{allin_text}")
+
+
+def test_attack_pool_notes_are_descriptive_only() -> None:
+    """合并/全弃只描述：不进裁决，样本不足的座位剔除，只剩一家不渲染。"""
+    two = (
+        _fold_read("bb", "flop", 80.0, 12.0),
+        _fold_read("utg", "flop", 60.0, 10.0),
+    )
+    text = render_facts_zh(build_situation(_limped_point(), opponent_reads=two))
+    check("合并（机会加权，仅描述，不作裁决依据）：71%" in text,
+          f"两家 (80*12+60*10)/22 ≈ 71%：\n{text}")
+    check("2 家全弃约 48%" in text, f"0.8*0.6=0.48：\n{text}")
+    check("另 1 人未计入" in text, f"未知座位要标未计入：\n{text}")
+
+    shrunk = (
+        _fold_read("bb", "flop", 80.0, 12.0),
+        _fold_read("utg", "flop", 60.0, 5.0,
+                   prior_dominated=("fold_to_bet_flop",)),
+        _fold_read("co", "flop", 70.0, 5.0,
+                   prior_dominated=("fold_to_bet_flop",)),
+    )
+    shrunk_text = render_facts_zh(build_situation(_limped_point(),
+                                                 opponent_reads=shrunk))
+    check("（5 次）" in shrunk_text,
+          f"收缩过的样本要标机会数：\n{shrunk_text}")
+    check("合并（机会加权" not in shrunk_text,
+          f"只剩 1 家达标时不渲染合并：\n{shrunk_text}")
+    check("全弃约" not in shrunk_text,
+          f"只剩 1 家时不渲染全弃：\n{shrunk_text}")
+
+    no_data = render_facts_zh(build_situation(_limped_point()))
+    check("合并（机会加权" not in no_data,
+          f"没有画像时不渲染合并：\n{no_data}")
+    check("没有任何对手有该街面对下注的记录" in no_data,
+          f"没有数据要说明：\n{no_data}")
 
 
 def test_attack_fact_checks_opponent_xc_xr() -> None:
@@ -4053,21 +3916,23 @@ def test_attack_fact_checks_opponent_xc_xr() -> None:
     # 被先验收缩过的估计（≈）不能驱动硬结论：仍然按攻击机会走。
     prior = read("co", call_to_cbet_pct=70.0,
                  prior_dominated=("call_to_cbet",))
-    prior_text = render_facts_zh(build_situation(point, opponent_reads=(prior,)))
+    prior_text = render_facts_zh(build_situation(
+        point, opponent_reads=(prior,)))
     check("攻击机会" in prior_text,
           f"先验主导的 xc 不能拦住开火：\n{prior_text}")
     check("剥削判断" not in prior_text, f"不该给剥削判断：\n{prior_text}")
 
-    # 桌级「对 c-bet 弃得少」也算反向证据：没人跟画像时仍要看桌况。
+    # 桌级 sticky 不再压攻击块：没有逐座位证据就只能是「没有该街弃牌率」。
     sticky = PooledStats(
         hands=105, players=4, total_players=5, scope="current_table",
         approx_hands=True, fold_to_cbet=25.0,
         opportunities={"fcbet": 25.0, "flop": 20.0})
-    sticky_text = render_facts_zh(build_situation(
-        point, table_stats=sticky))
-    check("本桌对 c-bet 只弃 25%" in sticky_text,
-          f"桌级 sticky 要写出来：\n{sticky_text}")
-    check("跟着过牌" in sticky_text, f"桌级 sticky 也应过牌：\n{sticky_text}")
+    sticky_text = render_facts_zh(build_situation(point, table_stats=sticky))
+    check("本桌对 c-bet 只弃" not in sticky_text,
+          f"桌况层已删除，不该再有桌级 sticky：\n{sticky_text}")
+    check("没有该街弃牌率" in sticky_text,
+          f"没有画像时结论只能是「没有该街弃牌率」：\n{sticky_text}")
+
 
 def test_ace_weakness_only_when_observation_says_so() -> None:
     from poker_ocr.advice import _notes_ace_weakness
@@ -4238,59 +4103,41 @@ def test_draw_price_verdict_only_when_no_more_betting() -> None:
 
 
 def test_attack_outputs_one_conclusion() -> None:
-    from poker_ocr.opponent_profile import OpponentRead, PooledStats
+    """攻击块只给一个裁决；依据里不再出现第二套「支持/不支持开火」。"""
+    low = (
+        _fold_read("bb", "flop", 40.0, 10.0),
+        _fold_read("utg", "flop", 45.0, 10.0),
+        _fold_read("co", "flop", 42.0, 10.0),
+    )
+    low_text = render_facts_zh(build_situation(_limped_point(),
+                                               opponent_reads=low))
+    check("结论：仅可下注价值牌下注（弃牌率一般" in low_text,
+          f"40% 左右应判 neutral：\n{low_text}")
+    check("高频小注攻击" not in low_text, f"neutral 不能高频：\n{low_text}")
+    check("弃牌率支持开火" not in low_text,
+          f"依据不能另下结论：\n{low_text}")
 
-    read = OpponentRead(
-        seat_id="co", key="co", display_name="co", archetype="station",
-        confidence=0.85, n=100, vpip=45.0, pfr=8.0, af=0.7, source="auto",
-        note="", gate="stable", check_raise_pct=10.0)
+    high = (
+        _fold_read("bb", "flop", 70.0, 10.0),
+        _fold_read("utg", "flop", 75.0, 10.0),
+        _fold_read("co", "flop", 72.0, 10.0, check_raise_pct=10.0),
+    )
+    high_text = render_facts_zh(build_situation(_limped_point(),
+                                                opponent_reads=high))
+    check("结论：可高频小注攻击" in high_text,
+          f"都达标 + 低 xr 才可高频：\n{high_text}")
 
-    def stats(fold: float) -> PooledStats:
-        return PooledStats(
-            hands=120, players=4, total_players=5, scope="population",
-            fold_to_bet_flop=fold,
-            opportunities={"flop": 60.0, "turn": 40.0, "river": 30.0})
-
-    low = render_facts_zh(build_situation(
-        _limped_point(), table_stats=stats(25.0), opponent_reads=(read,)))
-    check("结论：不开火" in low, f"弃牌率不足应不开火：\n{low}")
-    check("高频小注攻击" not in low, f"弃牌率不足不能高频：\n{low}")
-    check("弃牌率不足，不支持开火（只描述这一项，结论见上）" in low,
-          f"依据要和结论分开：\n{low}")
-
-    high = render_facts_zh(build_situation(
-        _limped_point(), table_stats=stats(73.0), opponent_reads=(read,)))
-    check("结论：可高频小注攻击" in high, f"73% + 低 xr 才可高频：\n{high}")
-
-    no_xr = render_facts_zh(build_situation(
-        _limped_point(), table_stats=stats(73.0)))
-    check("结论：可小注，但不默认高频" in no_xr,
-          f"没有 xr 数据不能默认高频：\n{no_xr}")
-    check("高频小注攻击" not in no_xr, f"没有 xr 数据不能写高频：\n{no_xr}")
-
-
-def test_table_exploit_is_filtered_by_street() -> None:
-    from poker_ocr.opponent_profile import PooledStats
-
-    stats = PooledStats(
-        hands=120, players=5, total_players=5, scope="current_table",
-        vpip=35.0, threebet=5.0, limp=50.0, fold_to_cbet=75.0,
-        fold_to_bet_river=90.0,
-        opportunities={"preflop": 80.0, "threebet": 80.0, "limp": 80.0,
-                       "fcbet": 40.0, "river": 40.0})
-    flop = render_facts_zh(build_situation(make_point(), table_stats=stats))
-    check("对 c-bet 弃得多" in flop, f"翻牌应给 c-bet 事实：\n{flop}")
-    check("翻牌可以高频开火" not in flop,
-          f"桌级事实不能再直接推高频：\n{flop}")
-    check("后位多隔离加注" not in flop,
-          f"翻牌 prompt 不该出现翻前隔离建议：\n{flop}")
-
-    river = render_facts_zh(build_situation(
-        make_point(street="river", board=("2c", "3d", "4h", "5s", "9c")),
-        table_stats=stats))
-    check("河牌大注基本没人跟" in river, f"河牌应给河牌建议：\n{river}")
-    check("对 c-bet 弃得多" not in river,
-          f"河牌 prompt 不该出现翻牌 c-bet 建议：\n{river}")
+    no_xr = (
+        _fold_read("bb", "flop", 70.0, 10.0),
+        _fold_read("utg", "flop", 75.0, 10.0),
+        _fold_read("co", "flop", 72.0, 10.0),
+    )
+    no_xr_text = render_facts_zh(build_situation(_limped_point(),
+                                                 opponent_reads=no_xr))
+    check("结论：可小注，但不默认高频" in no_xr_text,
+          f"没有 xr 数据不能默认高频：\n{no_xr_text}")
+    check("高频小注攻击" not in no_xr_text,
+          f"没有 xr 数据不能写高频：\n{no_xr_text}")
 
 
 def test_bomb_pot_does_not_say_you_can_stack_off() -> None:
@@ -4328,23 +4175,22 @@ def test_system_contract_has_valid_json_examples_and_mappings() -> None:
 
 
 def test_ace_high_is_conditional_not_automatic() -> None:
-    from poker_ocr.opponent_profile import PooledStats
-
-    stats = PooledStats(
-        hands=120, players=4, total_players=5, scope="population",
-        fold_to_bet_flop=73.0, opportunities={"flop": 60.0})
-    no_note = render_facts_zh(build_situation(
-        _limped_point(), table_stats=stats))
+    no_note = render_facts_zh(build_situation(_limped_point()))
     check("不能只凭 A 高默认开火" in no_note,
           f"没有现场观察时 A 高面不能绝对化：\n{no_note}")
     check("小注攻击比平时更有效" not in no_note,
           f"不能无条件说 A 高面更有效：\n{no_note}")
 
+    reads = (
+        _fold_read("bb", "flop", 70.0, 10.0),
+        _fold_read("utg", "flop", 75.0, 10.0),
+        _fold_read("co", "flop", 72.0, 10.0, check_raise_pct=10.0),
+    )
     with_note = render_facts_zh(build_situation(
-        _limped_point(), table_stats=stats,
+        _limped_point(), opponent_reads=reads,
         table_dynamics="- 本池对手看到公共牌有 A 时抵抗力明显下降，容易弃牌。"))
     check("可以借 A 施压" in with_note,
-          f"有现场观察时才可借 A 施压：\n{with_note}")
+          f"弃牌率支持 + 有现场观察才可借 A 施压：\n{with_note}")
 
 
 def test_zero_opponents_hard_gate() -> None:
@@ -4518,26 +4364,26 @@ def test_default_fold_not_softened_by_table_dynamics_only() -> None:
 
 def test_ace_high_evidence_matches_conclusion() -> None:
     """弃牌率不足时，A 高面依据不能写「可以借 A 施压」。"""
-    from poker_ocr.opponent_profile import PooledStats
-
     dyn = "- 本池对手看到公共牌有 A 时抵抗力明显下降，容易弃牌。"
-    low = PooledStats(
-        hands=105, players=4, total_players=5, scope="current_table",
-        approx_hands=True, fold_to_bet_flop=20.0,
-        opportunities={"flop": 30.0})
+    low = (
+        _fold_read("bb", "flop", 20.0, 10.0),
+        _fold_read("utg", "flop", 25.0, 10.0),
+        _fold_read("co", "flop", 22.0, 10.0),
+    )
     low_text = render_facts_zh(build_situation(
-        _limped_point(), table_stats=low, table_dynamics=dyn))
+        _limped_point(), opponent_reads=low, table_dynamics=dyn))
     check("可以借 A 施压" not in low_text,
           f"弃牌率不足时不能借 A 施压：\n{low_text}")
     check("不能只凭 A 高开火" in low_text,
           f"应把 A 高面降为背景：\n{low_text}")
 
-    high = PooledStats(
-        hands=105, players=4, total_players=5, scope="current_table",
-        approx_hands=True, fold_to_bet_flop=73.0,
-        opportunities={"flop": 30.0})
+    high = (
+        _fold_read("bb", "flop", 73.0, 10.0),
+        _fold_read("utg", "flop", 78.0, 10.0),
+        _fold_read("co", "flop", 75.0, 10.0),
+    )
     high_text = render_facts_zh(build_situation(
-        _limped_point(), table_stats=high, table_dynamics=dyn))
+        _limped_point(), opponent_reads=high, table_dynamics=dyn))
     check("可以借 A 施压" in high_text,
           f"弃牌率支持时才可借 A 施压：\n{high_text}")
 
@@ -4737,33 +4583,20 @@ def test_bomb_pot_facts_have_no_special_hard_rule() -> None:
 
 
 def test_attack_block_uses_same_draw_rule_and_neutral_wording() -> None:
-    from poker_ocr.opponent_profile import PooledStats
-
     text = render_facts_zh(build_situation(_limped_point()))
     check("强听下注" not in text, f"攻击块不该再说强听下注：\n{text}")
     check("强听/空气" in text, f"攻击块应把强听/空气归到过牌：\n{text}")
 
-    stats = PooledStats(
-        hands=100, players=3, total_players=6, scope="current_table",
-        fold_to_bet_flop=40.0, opportunities={"flop": 100.0})
-    neutral = render_facts_zh(build_situation(_limped_point(), table_stats=stats))
+    neutral_reads = (
+        _fold_read("bb", "flop", 40.0, 10.0),
+        _fold_read("utg", "flop", 45.0, 10.0),
+        _fold_read("co", "flop", 42.0, 10.0),
+    )
+    neutral = render_facts_zh(build_situation(_limped_point(),
+                                              opponent_reads=neutral_reads))
     check("弃牌率一般" in neutral, f"40% 应写弃牌率一般：\n{neutral}")
     check("没有该街弃牌率" not in neutral,
           f"有 40% 数据不能说没有弃牌率：\n{neutral}")
-
-
-def test_stab_read_respects_last_to_act() -> None:
-    from poker_ocr.advice import _table_stab_read_zh
-    from poker_ocr.opponent_profile import PooledStats
-
-    stats = PooledStats(
-        hands=100, players=3, total_players=6, scope="current_table",
-        stab=50.0, opportunities={"stab": 100.0})
-    last = _table_stab_read_zh(stats, players_left_to_act=0, in_position=True)
-    check("过牌免费" in last, f"0 人待行动应说过牌免费：{last}")
-    check("过牌诱导" not in last, f"0 人待行动不该说过牌诱导：{last}")
-    not_last = _table_stab_read_zh(stats, players_left_to_act=2)
-    check("过牌不是免费" in not_last, f"有人待行动应保留原读法：{not_last}")
 
 
 def test_missing_preflop_action_is_a_data_gap() -> None:

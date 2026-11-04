@@ -37,7 +37,9 @@ import urllib.request
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from .opponent_profile import OpponentRead, pooled_stats_to_dict
+from .opponent_profile import (
+    OpponentRead, TENDENCY_PCT_FIELDS, pooled_stats_to_dict,
+)
 
 # ── 事实 / 选项：拆到独立模块，这里 re-export 保持旧调用口径 ──
 from .options import (  # noqa: F401
@@ -85,9 +87,6 @@ from .prompt.user.preflop import render_preflop_zh  # noqa: F401
 from .prompt.user.quality import _gap_zh, _summarize_gaps  # noqa: F401
 from .prompt.user.ranges import render_ranges_zh  # noqa: F401
 from .prompt.user.strength import render_hand_strength_zh  # noqa: F401
-from .prompt.user.table_stats import (  # noqa: F401
-    _table_stab_read_zh, render_table_stats_zh,
-)
 
 
 # ─────────────────────────── 模型调用 ───────────────────────────
@@ -527,13 +526,7 @@ class Advice:
     attempt: int = 1
 
     def to_dict(self) -> dict:
-        reads = [
-            {"seat_id": r.seat_id, "key": r.key,
-             "display_name": r.display_name, "archetype": r.archetype,
-             "confidence": r.confidence, "n": r.n, "source": r.source,
-             "gate": r.gate}
-            for r in self.opponent_reads
-        ]
+        reads = [_read_snapshot(r) for r in self.opponent_reads]
         return {
             "hand_id": self.hand_id,
             "street": self.street,
@@ -638,17 +631,32 @@ def _clip_reason(text: str, limit: int = 60) -> str:
     return cut[:max(1, limit - 1)] + "…"
 
 
+def _read_snapshot(read: OpponentRead) -> dict:
+    """画像快照：顶层 `opponent_reads` 与 `context.opponent_reads` 共用一份。
+
+    打法数字（百分比 + 机会数）必须一起存：攻击块的逐座位弃牌率证据、
+    画像的「（N 次）」都从这里还原，漏存会让复盘/A-B 的结论和线上不同。
+    """
+    item = {
+        "seat_id": read.seat_id, "key": read.key,
+        "display_name": read.display_name, "archetype": read.archetype,
+        "confidence": read.confidence, "n": read.n,
+        "vpip": read.vpip, "pfr": read.pfr, "af": read.af,
+        "source": read.source, "gate": read.gate,
+        "prior_dominated": list(read.prior_dominated),
+        "opps": dict(read.opps),
+        "inferred_ratio": read.inferred_ratio,
+    }
+    item.update({name: getattr(read, name) for name in TENDENCY_PCT_FIELDS
+                 if getattr(read, name) is not None})
+    return item
+
+
 def _advice_context(sit: Situation) -> dict:
     """线上建议的上下文快照：重跑/A-B 必须看到和线上同一份桌况。"""
     stats = sit.table_stats
     dynamics = (sit.table_dynamics or "").strip()
-    reads = [
-        {"seat_id": read.seat_id, "key": read.key,
-         "display_name": read.display_name, "archetype": read.archetype,
-         "confidence": read.confidence, "n": read.n,
-         "source": read.source, "gate": read.gate}
-        for read in sit.opponent_reads
-    ]
+    reads = [_read_snapshot(read) for read in sit.opponent_reads]
     context = {
         "table_dynamics": dynamics or None,
         "table_dynamics_sha": (hashlib.sha256(dynamics.encode("utf-8")).hexdigest()

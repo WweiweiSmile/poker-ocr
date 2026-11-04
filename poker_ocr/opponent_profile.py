@@ -1514,9 +1514,20 @@ class OpponentRead:
     fold_to_bet_river_pct: float | None = None
     # 哪些指标是被人群先验收缩过的（不是实测值）。渲染时加 ≈。
     prior_dominated: tuple[str, ...] = ()
+    # 每个指标的机会数：((metric, opps), ...)。键与 `TENDENCY_MIN_OPPS` 一致。
+    # 用 tuple 而不是 dict：OpponentRead 是 frozen dataclass，要可 hash。
+    # 渲染「（N 次）」、判断「机会是否达标」、攻击块逐座位证据都要用它。
+    opps: tuple[tuple[str, float], ...] = ()
     # 这手/这名对手的动作里有多少是推断补出来的（0–1）。高推断比例意味着
     # 统计只能作参考；渲染时标出来，避免把推断值当成逐帧实测。
     inferred_ratio: float = 0.0
+
+    def opp(self, metric: str) -> float | None:
+        """该指标的机会数；没有记录时返回 None（区别于 0 次机会）。"""
+        for key, value in self.opps:
+            if key == metric:
+                return float(value)
+        return None
 
     @property
     def aggressive(self) -> bool:
@@ -1695,6 +1706,17 @@ TENDENCY_MIN_OPPS = {
     "fold_to_bet_river": 8.0,
 }
 
+# `OpponentRead` 上的百分比字段名。序列化到 advice.context / 从 replay 还原
+# 时都用这一份，避免两边各写一份字段表后悄悄丢字段（之前就只存了 8 个基础
+# 字段，复盘里的画像段没有打法数字、攻击块也没有弃牌率证据）。
+TENDENCY_PCT_FIELDS: tuple[str, ...] = (
+    "open_ep_pct", "open_lp_pct", "cbet_pct", "barrel_pct", "stab_pct",
+    "check_raise_pct", "threebet_pct", "limp_pct", "fold_to_cbet_pct",
+    "call_to_cbet_pct", "fold_to_barrel_pct", "delay_cbet_pct",
+    "fold_to_3bet_pct", "fourbet_pct", "fold_to_bet_flop_pct",
+    "fold_to_bet_turn_pct", "barrel_call_pct", "fold_to_bet_river_pct",
+)
+
 
 def _tendency(hit: float, opps: float, kind: str,
               priors: Mapping[str, float]) -> tuple[float | None, bool]:
@@ -1717,14 +1739,22 @@ def _tendency(hit: float, opps: float, kind: str,
 
 def _tendencies(stats: OpponentStats,
                 priors: Mapping[str, float] | None = None
-                ) -> tuple[dict, tuple[str, ...]]:
-    """位置开池与翻后线路。低频样本向人群先验收缩，并记下哪些被收缩过。"""
+                ) -> tuple[dict, tuple[str, ...], tuple[tuple[str, float], ...]]:
+    """位置开池与翻后线路。低频样本向人群先验收缩，并记下哪些被收缩过。
+
+    第三个返回值是「指标 → 机会数」：渲染「（N 次）」、判断样本够不够、
+    攻击块逐座位证据都靠它，所以和百分比一起产出，避免两边各算一遍。
+    """
     priors = priors or DEFAULT_PRIORS
     fields: dict = {}
     low: list[str] = []
+    opp_counts: dict[str, float] = {}
 
     def put(name: str, hit: float, opps: float, kind: str | None = None) -> None:
-        pct, used_prior = _tendency(hit, opps, kind or name, priors)
+        kind = kind or name
+        if opps > 0:
+            opp_counts[kind] = float(opps)
+        pct, used_prior = _tendency(hit, opps, kind, priors)
         if pct is None:
             return
         fields[f"{name}_pct"] = pct
@@ -1754,7 +1784,7 @@ def _tendencies(stats: OpponentStats,
     put("barrel_call", stats.ftb_call, stats.ftb_opp, "barrel_call")
     put("fold_to_bet_river", stats.face_fold.get("river", 0.0),
         stats.face_opps("river"), "fold_to_bet_river")
-    return fields, tuple(low)
+    return fields, tuple(low), tuple(sorted(opp_counts.items()))
 
 
 def _unknown_read(stats: OpponentStats | None, *, seat_id: str | None = None,
@@ -1842,7 +1872,7 @@ def classify(stats: OpponentStats,
     note_parts.append(f"n={n}")
     if gate == "tentative":
         note_parts.append("tentative")
-    fields, prior_dominated = _tendencies(stats, priors)
+    fields, prior_dominated, opps = _tendencies(stats, priors)
     return OpponentRead(
         seat_id=None,
         key=stats.key,
@@ -1855,6 +1885,7 @@ def classify(stats: OpponentStats,
         af=round(af, 2) if af is not None else 0.0,
         **fields,
         prior_dominated=prior_dominated,
+        opps=opps,
         inferred_ratio=round(stats.inferred_ratio, 3),
         source="auto",
         note=", ".join(note_parts),
@@ -2587,10 +2618,23 @@ def _mark(read: OpponentRead, names: tuple[str, ...], text: str) -> str:
     return f"≈{text}" if any(n in read.prior_dominated for n in names) else text
 
 
+def _cnt(read: OpponentRead, metric: str) -> str:
+    """该指标的机会数，渲染成「（12 次）」；没有记录时不写。
+
+    桌况段删除后，逐座位画像要自己承担「这个百分比背后有多少次机会」，
+    否则模型无法判断 70% 是 3 次还是 30 次。
+    """
+    opps = read.opp(metric)
+    if not opps:
+        return ""
+    return f"（{opps:.0f} 次）"
+
+
 def render_tendencies_zh(read: OpponentRead) -> str:
     """位置开池 + 翻后线路的一行摘要；没有足够样本时返回空串。
 
-    `≈` 表示这一项样本不够、已向全场均值收缩 —— 是估计值不是实测值。
+    `≈` 表示这一项样本不够、已向全场均值收缩 —— 是估计值不是实测值；
+    后面的「（N 次）」是机会数，两者合起来说明「这条能不能当实测用」。
     """
     parts: list[str] = []
     opens = []
@@ -2600,34 +2644,49 @@ def render_tendencies_zh(read: OpponentRead) -> str:
         opens.append(f"LP {read.open_lp_pct:.0f}%")
     if opens:
         parts.append(_mark(read, ("open_ep", "open_lp"),
-                           "开池 " + " / ".join(opens)))
+                           "开池 " + " / ".join(opens)) + _cnt(read, "open"))
     if read.threebet_pct is not None:
-        parts.append(_mark(read, ("threebet",), f"3-bet {read.threebet_pct:.0f}%"))
+        parts.append(_mark(read, ("threebet",),
+                           f"3-bet {read.threebet_pct:.0f}%")
+                     + _cnt(read, "threebet"))
     if read.cbet_pct is not None:
-        parts.append(_mark(read, ("cbet",), f"翻牌 c-bet {read.cbet_pct:.0f}%"))
+        parts.append(_mark(read, ("cbet",),
+                           f"翻牌 c-bet {read.cbet_pct:.0f}%")
+                     + _cnt(read, "cbet"))
     if read.barrel_pct is not None:
-        parts.append(_mark(read, ("barrel",), f"转牌续打 {read.barrel_pct:.0f}%"))
+        parts.append(_mark(read, ("barrel",),
+                           f"转牌续打 {read.barrel_pct:.0f}%")
+                     + _cnt(read, "barrel"))
     if read.stab_pct is not None:
         parts.append(_mark(read, ("stab",),
-                           f"前面没人下注时他下注 {read.stab_pct:.0f}%"))
+                           f"前面没人下注时他下注 {read.stab_pct:.0f}%")
+                     + _cnt(read, "stab"))
     if read.check_raise_pct is not None:
         parts.append(_mark(read, ("check_raise",),
-                           f"过牌-加注 {read.check_raise_pct:.0f}%"))
+                           f"过牌-加注 {read.check_raise_pct:.0f}%")
+                     + _cnt(read, "check_raise"))
     if read.limp_pct is not None:
-        parts.append(_mark(read, ("limp",), f"溜入 {read.limp_pct:.0f}%"))
+        parts.append(_mark(read, ("limp",), f"溜入 {read.limp_pct:.0f}%")
+                     + _cnt(read, "limp"))
     if read.fold_to_cbet_pct is not None:
         seg = f"对 c-bet 弃 {read.fold_to_cbet_pct:.0f}%"
         if read.call_to_cbet_pct is not None:
             seg += f" / 跟 {read.call_to_cbet_pct:.0f}%"
-        parts.append(_mark(read, ("fold_to_cbet", "call_to_cbet"), seg))
+        parts.append(_mark(read, ("fold_to_cbet", "call_to_cbet"), seg)
+                     + _cnt(read, "fold_to_cbet"))
     if read.fold_to_barrel_pct is not None:
         parts.append(_mark(read, ("fold_to_barrel",),
-                           f"转牌再弃 {read.fold_to_barrel_pct:.0f}%"))
+                           f"转牌再弃 {read.fold_to_barrel_pct:.0f}%")
+                     + _cnt(read, "fold_to_barrel"))
     if read.delay_cbet_pct is not None:
         parts.append(_mark(read, ("delay_cbet",),
-                           f"延迟 c-bet {read.delay_cbet_pct:.0f}%"))
-    if (read.fold_to_bet_flop_pct is not None
-            or read.fold_to_bet_turn_pct is not None):
+                           f"延迟 c-bet {read.delay_cbet_pct:.0f}%")
+                     + _cnt(read, "delay_cbet"))
+    # 只要有一条街有数据就渲染：以前只判断翻/转，河牌单独有值时整段
+    # 「面对下注弃」会静默消失（而攻击块的河牌证据正要用这个数）。
+    if any(value is not None for value in (
+            read.fold_to_bet_flop_pct, read.fold_to_bet_turn_pct,
+            read.fold_to_bet_river_pct)):
         # 逐街单独标记：河牌样本通常比翻/转少，不能因为河牌是估计值就
         # 把整段都标成 ≈。
         seg = []
@@ -2636,16 +2695,19 @@ def render_tendencies_zh(read: OpponentRead) -> str:
                 ("转牌", "fold_to_bet_turn", read.fold_to_bet_turn_pct),
                 ("河牌", "fold_to_bet_river", read.fold_to_bet_river_pct)):
             if value is not None:
-                seg.append(_mark(read, (name,), f"{street} {value:.0f}%"))
+                seg.append(_mark(read, (name,), f"{street} {value:.0f}%")
+                           + _cnt(read, name))
         parts.append("面对下注弃 " + " / ".join(seg))
     if read.barrel_call_pct is not None:
         parts.append(_mark(read, ("barrel_call",),
-                           f"翻牌跟注→转牌再跟 {read.barrel_call_pct:.0f}%"))
+                           f"翻牌跟注→转牌再跟 {read.barrel_call_pct:.0f}%")
+                     + _cnt(read, "barrel_call"))
     if read.fold_to_3bet_pct is not None:
         seg = f"被 3-bet 弃 {read.fold_to_3bet_pct:.0f}%"
         if read.fourbet_pct is not None:
             seg += f" / 4-bet {read.fourbet_pct:.0f}%"
-        parts.append(_mark(read, ("fold_to_3bet", "fourbet"), seg))
+        parts.append(_mark(read, ("fold_to_3bet", "fourbet"), seg)
+                     + _cnt(read, "fold_to_3bet"))
     return "｜".join(parts)
 
 
