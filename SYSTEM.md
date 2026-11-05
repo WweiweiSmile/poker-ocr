@@ -22,6 +22,7 @@
 |---|---|---|
 | `api.py` | 单图识别 HTTP 服务 | `:8000`，`uvicorn api:app` |
 | `poker_ocr.live` | 实时推流 → 建议 → 自动点击 | CLI，`python -m poker_ocr.live` |
+| `poker_ocr.live --web` | 实时 Web 看板（只读：牌桌/建议/提示词/帧流） | `http://127.0.0.1:8020` |
 | `replay-console/` | 手牌库 + 多版本 A/B 复盘 | `:8010`，独立 FastAPI + MySQL |
 | `poker_ocr/tables/` | 策略表（对手范围 / 弃牌率数字的单一来源） | `STRATEGY_TABLES_PROFILE` 切 v0 / v1 |
 | `tools/` | 离线分析（画像 / 漏损 / SFT / 回放 / 表格对比） | 单文件 CLI |
@@ -36,14 +37,18 @@ extract_table.py        # 截图 → 识别结果 JSON（CLI）
 scan.py                 # ⚠ 已冻结的旧标定工具（仅保留 clean_number / preprocess / RapidEngine 被 import）
 rois.json               # ⚠ 现在是「识别结果」文件，不是配置！几何配置在 config/
 config/                 # 牌桌几何 profile（归一化坐标、环序、阈值）+ 点击器坐标 + MediaMTX
-poker_ocr/              # 全部核心逻辑（44 个模块 + __init__，见 §4）
+poker_ocr/              # 全部核心逻辑（45 个模块 + __init__，见 §4）
   prompt/               # 提示词包：system / user / shared / offline
   assets/               # 点数模板图集（工具生成，勿手改）
   tables/               # 策略表 JSON（26 张表：v0 手调 / v1 推导），改数字改这里
+  live_web.py           # 本地 Web 看板（stdlib HTTP + SSE，只读）
+  live_log.py           # 事件 JSONL + 控制台文本落盘
+  web/live/             # 看板前端（index/app/style，无构建）
 replay-console/         # 独立子项目：手牌库 + A/B 复盘控制台（Python 后端 + React 前端）
-tests/                  # 45 个测试文件 + golden/ 期望 JSON，run_all.py 分层执行
-tools/                  # 离线 CLI（回放 / 画像重建 / 报表 / SFT 数据集）
-docs/                   # 47 篇设计文档与复盘（业务语义的真正来源）
+tests/                  # 51 个测试文件 + golden/ 期望 JSON，run_all.py 分层执行
+tools/                  # 离线 CLI（回放 / 画像重建 / 报表 / SFT 数据集 /
+                        # hand_recognition_audit.py 手牌识别倒查）
+docs/                   # 51 篇设计文档与复盘（业务语义的真正来源）
 data/                   # 运行期数据：hand_outbox/、opponents/、sft/
 logs/                   # live.states.jsonl、复盘产物、incidents/
 images/                 # 标注样本与截图素材
@@ -88,6 +93,8 @@ AdviceRunner（后台线程，绝不阻塞 OCR 主循环）
    ▼
 Advice ──┬─ Clicker                 建议落到客户端按钮（macOS CoreGraphics）
          ├─ JsonlWriter             logs/live.states.jsonl（即时 flush）
+         ├─ LiveEventLog            logs/live.events.jsonl（帧级诊断索引）
+         ├─ LiveWebServer           :8020 看板（SSE，只读）
          └─ HandOutbox              一手一文件 → 异步进手牌库
 ```
 
@@ -206,6 +213,19 @@ offline/  旧英文提示词与策略层（只服务复盘，不进 live）
 每条立即 flush，硬杀最多丢最后半行。`state` 字段顺序固定：
 **个人手牌 → 位置 → 筹码 → 公共牌 → 全局 → 其他对手**（`opponents` 永远最后）。
 
+### 5.1.1 `logs/live.events.jsonl`（排查索引，不是业务契约）
+
+一行一个 `live.event.v1` 事件：`session_start / status / frame / decision / advice_skip /
+advice / hand / incident / session_end`。`frame` 每帧一条，带 `hand_id` /
+`kind` / `errors` / `cards.warnings` / `state_index`；`advice` 带
+`prompt_sha256` / `prompt_chars` / `source` / 兜底原因，但不重复 prompt 原文
+（原文在 states 的 `advice` 记录和 Web 看板里）。
+
+`session_start` 追加了 `session_id` / `events_out` / `web_url` / `log_file`
+四个键；旧消费者忽略即可。控制台文本另存为 `logs/live.log`（去 ANSI、加
+墙钟时间）。详细 schema 与排查流程见
+[docs/实时Web看板与日志排查-2026-11-05.md](docs/实时Web看板与日志排查-2026-11-05.md)。
+
 ### 5.2 `api.py`（`:8000`）
 
 | 接口 | 说明 |
@@ -274,11 +294,18 @@ offline/  旧英文提示词与策略层（只服务复盘，不进 live）
 .venv/bin/python -m uvicorn api:app --host 0.0.0.0 --port 8000
 #   生产：.venv/bin/gunicorn -c gunicorn.conf.py api:app
 
-# 实时推流（默认 cam:auto，自动点击需确认）
+# 实时推流（默认 cam:auto，自动点击需确认；默认开 Web 看板 :8020）
 .venv/bin/python -m poker_ocr.live \
     --profile config/table_wpk_live.json --initial-blinds 1/2 \
     --out logs/live.states.jsonl
 #   只看建议不点击：--no-auto-click    完全自动：--no-confirm
+#   不看板/不写事件日志：--no-web --no-events --no-log-file
+#   看板端口冲突：--web-port 8021
+
+# 手牌识别倒查（读 states + events）
+.venv/bin/python tools/hand_recognition_audit.py --top 20 \
+    --html logs/audit.html --json logs/audit.json
+.venv/bin/python tools/hand_recognition_audit.py --explain <hand_id>
 #   走 MediaMTX：--url rtsp://127.0.0.1:8554/live   竖屏手机源：--rotate 90
 
 # 跑全部测试（分层，从不需要图到需要图）
@@ -310,6 +337,7 @@ STRATEGY_TABLES_PROFILE=sourced .venv/bin/python -m poker_ocr.live ...
 - **`rois.json` 被 `scan.py run` 覆盖**：想保留结果就 `--out 别处.json`。
 - **`scan.clean_number()` 有静默错值路径**：单位丢失时返回错值且 `ok=True`。新管线绕开了，别在新代码里用它。
 - **`name_score` 不是「读对概率」**：形近字错读一样能到 0.9+。低于阈值只打 `name_review` 供人工看，不自动纠正。
+- **3/8 的闭合孔数不是硬保证**：低分辨率/JPEG 会把 3 的开口糊成 1–2 个假孔，也会把 8 的孔糊掉。现在用 `glyph_left_indent`（中段最左墨迹）判左开口兜底；6 的凹口在右侧，不能用凸包缺陷当左开口（会把 6 误判成 3）。
 - **同名不同人不做身份识别**：名字只是字符串。
 - **`board_range.build`（旧）与 `range_flow`（新）语义不同**：旧路径按街一次过滤会丢掉上一街的收窄信息；新代码用 `range_flow`。
 - **`table_default` 的 `region_gate.y_max=0.855` 会切掉 WPK 竖屏 hero 的筹码胶囊**：所以 `table_wpk_live.json` 改成 `0.99`。
@@ -346,6 +374,7 @@ STRATEGY_TABLES_PROFILE=sourced .venv/bin/python -m poker_ocr.live ...
 | 策略表（P0/P1） | [docs/策略表-P0-P1-2026-11-05.md](docs/策略表-P0-P1-2026-11-05.md)（抽表、推导模型、v0/v1 实测差异） |
 | 弃牌曲线 / 裁判 | [docs/弃牌曲线探针-2026-11-05.md](docs/弃牌曲线探针-2026-11-05.md) |
 | 复盘记录 | `docs/复盘-*.md`、`docs/复跑-*.md`（每次线上问题的事实来源） |
+| 实时看板 / 日志排查 | [docs/实时Web看板与日志排查-2026-11-05.md](docs/实时Web看板与日志排查-2026-11-05.md) |
 
 ---
 

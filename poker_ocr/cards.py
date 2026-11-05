@@ -523,21 +523,138 @@ def _ncc(a: np.ndarray, b: np.ndarray) -> float:
     return float((aa * bb).sum() / denom) if denom else 0.0
 
 
-def _glyph_holes(glyph: np.ndarray | None) -> int | None:
-    """点数字形里闭合孔的数量。
+def _glyph_topology(glyph: np.ndarray | None) -> dict[str, Any]:
+    """点数字形的拓扑 + 左侧轮廓特征，服务 3/8/6 的仲裁。
 
-    3 和 8 的字形轮廓几乎一样，NCC 在低分辨率/抗锯齿下只差 1–2 个百分点；
-    但拓扑差异是硬的：**3 没有闭合孔，8 有两个**。这个特征只用来给
-    「3 vs 8」这一对做兜底，不参与其他点数的判断。
+    只靠闭合孔数量不够：真实画面把牌区缩到 0.7–0.5 倍时，3 的两个开口会被
+    抗锯齿/JPEG 糊出 **1–2 个假孔**，而 8 的孔反而可能被糊掉一个。此时
+    `holes` 会把 3 判成 8（线上 3s→8s 的根因）。拓扑之外再加两个对低分辨率
+    更稳的特征：
+
+      · `left_indent`：字形中段（28%–72% 高度）每行最左墨迹的平均 x / 宽度。
+        3 的开口朝左，中段最左墨迹明显偏右；8 的左侧是闭合的，接近 0。
+      · `defect_ratio`：外轮廓最大凸包缺陷深度 / 宽度，仅作证据/调试。
+        不能单独用它判「左开口」：6 的上半段凹口在右侧，也会产生深缺陷。
+
+    这两个特征不参与其他点数判断；只在模板赢家/第二是 3、8、6 时使用。
     """
     if glyph is None:
-        return None
+        return {"holes": None, "hole_areas": [], "major_holes": None,
+                "ink": 0, "left_indent": None, "defect_ratio": None,
+                "open_left": None}
+    b = (glyph > 0).astype(np.uint8)
+    ys, xs = np.where(b)
+    if len(xs) == 0:
+        return {"holes": 0, "hole_areas": [], "major_holes": 0,
+                "ink": 0, "left_indent": None, "defect_ratio": None,
+                "open_left": None}
+    b = b[ys.min():ys.max() + 1, xs.min():xs.max() + 1]
+    h, w = b.shape
+
     contours, hierarchy = cv2.findContours(
-        (glyph > 0).astype(np.uint8), cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
-    if hierarchy is None:
-        return 0
-    # RETR_CCOMP 的层级里 parent != -1 的轮廓是孔（外层背景的 parent 为 -1）
-    return sum(1 for h in hierarchy[0] if h[3] != -1)
+        b, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
+    hole_areas: list[float] = []
+    if hierarchy is not None:
+        # RETR_CCOMP 的层级里 parent != -1 的轮廓是孔（外层背景的 parent 为 -1）
+        for i, item in enumerate(hierarchy[0]):
+            if item[3] != -1:
+                hole_areas.append(float(cv2.contourArea(contours[i])))
+    hole_areas.sort(reverse=True)
+    ink = int(b.sum())
+    # 「真孔」阈值：8 的两个孔在正常分辨率下约 30–80 px；低分辨率/JPEG 造出
+    # 的假孔通常只有几 px。阈值同时按 ink 缩放，避免小牌/大牌口径漂移。
+    major_threshold = max(8.0, 0.02 * ink)
+    major_holes = sum(1 for area in hole_areas if area >= major_threshold)
+
+    rows = np.where(b.sum(axis=1) > 0)[0]
+    left_x = np.array([
+        (np.argmax(b[r] > 0) if b[r].any() else w) for r in range(h)
+    ], dtype=np.float32) / max(1, w)
+    mid = [r for r in rows if h * 0.28 <= r <= h * 0.72]
+    left_indent = (float(left_x[mid].mean()) if mid
+                   else float(left_x[rows].mean() if len(rows) else 0.0))
+
+    defect_ratio = 0.0
+    outer, _ = cv2.findContours(b, cv2.RETR_EXTERNAL,
+                                cv2.CHAIN_APPROX_SIMPLE)
+    if outer:
+        contour = max(outer, key=cv2.contourArea)
+        hull = cv2.convexHull(contour, returnPoints=False)
+        try:
+            defects = cv2.convexityDefects(contour, hull)
+        except cv2.error:
+            defects = None
+        if defects is not None and len(defects):
+            # defects: (N, 4) = [start, end, farthest, depth / 256]
+            defect_ratio = float(defects[:, 3].max() / 256.0) / max(1, w)
+
+    # 左开口用「中段最左墨迹」单独判：6 的上半段也有一个很深的凹口，
+    # 但凹口在右侧，用凸包缺陷会把 6 误判成 3（实测 6h/6c 全部中招）。
+    open_left = bool(left_indent >= 0.06)
+    return {
+        "holes": len(hole_areas),
+        "hole_areas": [round(a, 1) for a in hole_areas],
+        "major_holes": major_holes,
+        "ink": ink,
+        "left_indent": round(left_indent, 4),
+        "defect_ratio": round(defect_ratio, 4),
+        "open_left": open_left,
+    }
+
+
+def _glyph_holes(glyph: np.ndarray | None) -> int | None:
+    """闭合孔数量（兼容旧调用/证据字段）。"""
+    return _glyph_topology(glyph)["holes"]
+
+
+def _resolve_rank_by_topology(rank: str, second_rank: str,
+                              topo: dict[str, Any]) -> tuple[str | None, str]:
+    """3/8/6 的拓扑仲裁，返回 (选中的 rank, 原因)；None = 不动 NCC 结果。
+
+    规则刻意保守：只在模板前两名落在 3/8/6 时介入，避免把其他点数误改。
+    `open_left` 是低分辨率下区分 3 与 8 的主特征；`major_holes` 只作辅助，
+    因为 3 缩到 0.5 倍时可能糊出两个假孔。
+    """
+    holes = topo.get("holes")
+    if holes is None:
+        return None, ""
+    major = int(topo.get("major_holes") or 0)
+    open_left = bool(topo.get("open_left"))
+    pair = {rank, second_rank}
+
+    # 低分辨率下 3 的模板分可能掉到第三、第四（第二变成 K/2），不能只靠
+    # 「前两名里有 3」才介入。左开口深 + 没有两个真孔，就是 3 的形状。
+    if open_left and major <= 1 and rank in ("8", "6"):
+        return "3", "open_left"
+
+    if "3" in pair and "8" in pair:
+        if rank == "8":
+            if open_left:
+                return "3", "open_left"
+            return "8", ("two_holes" if major >= 2 else "closed_left")
+        # rank == "3"
+        if open_left:
+            return "3", "open_left"
+        if major >= 1:
+            return "8", "closed_left_with_hole"
+        return "3", "no_holes"
+
+    if rank == "8" and second_rank == "6":
+        if major >= 2:
+            return "8", "two_holes"
+        if holes == 1:
+            return "6", "one_hole"
+        return "8", "closed_left"
+
+    if rank == "6" and second_rank == "8":
+        if major >= 2 and not open_left:
+            return "8", "two_holes"
+        return "6", "one_hole"
+
+    # 3 偶尔会与 6 竞争；同样用左开口兜底，避免把 3 读成 6。
+    if "3" in pair and "6" in pair and open_left and major <= 1:
+        return "3", "open_left"
+    return None, ""
 
 
 def _classify_rank(
@@ -551,44 +668,31 @@ def _classify_rank(
     ordered = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
     rank, score = ordered[0]
     second_rank, second_score = ordered[1]
-    holes = _glyph_holes(glyph)
+    topo = _glyph_topology(glyph)
+    holes = topo["holes"]
 
-    # 闭合孔拓扑兜底：3/8 与 6/8 的模板分数经常只差 0.01。
-    #   3 → 0 孔，8 → 2 孔；6 → 1 孔。
-    # 只在模板赢家是这几张时使用，避免影响其他点数。
-    topology_rank: str | None = None
-    override = False
-    if rank == "8" and holes is not None:
-        if holes == 0:
-            topology_rank, override = "3", True
-        elif holes == 1 and second_rank == "6":
-            topology_rank, override = "6", True
-        elif holes >= 2:
-            topology_rank = "8"
-    elif rank == "3" and holes is not None:
-        if holes >= 2:
-            topology_rank, override = "8", True
-        elif holes == 0:
-            topology_rank = "3"
-    elif rank == "6" and holes is not None and second_rank == "8":
-        if holes >= 2:
-            topology_rank, override = "8", True
-        elif holes == 1:
-            topology_rank = "6"
+    topology_rank, topology_reason = _resolve_rank_by_topology(
+        rank, second_rank, topo)
+    override = topology_rank is not None and topology_rank != rank
 
-    if override and topology_rank is not None:
+    if override:
         winner_score = score
-        rank = topology_rank
+        rank = topology_rank  # type: ignore[assignment]
         # 模板分不出胜负时，用两者较高的分数当作「字形匹配度」；
         # margin 记为 0，表示这一判由拓扑决定，而不是 NCC。
-        score = max(winner_score, scores.get(topology_rank, winner_score))
+        score = max(winner_score, scores.get(rank, winner_score))
         second_score = score
         margin = 0.0
     else:
         margin = score - second_score
     extra = {
         "glyph_holes": holes,
+        "glyph_hole_areas": topo.get("hole_areas"),
+        "glyph_major_holes": topo.get("major_holes"),
+        "glyph_left_indent": topo.get("left_indent"),
+        "glyph_defect_ratio": topo.get("defect_ratio"),
         "topology_rank": topology_rank,
+        "topology_reason": topology_reason or None,
         "topology_resolved": topology_rank is not None,
     }
     return (rank, float(score), float(margin),
@@ -1406,12 +1510,17 @@ def recognize_cards(img: np.ndarray, profile: Profile | None = None, *,
 
     resolved: dict[str, Slot] = dict(DEFAULT_CARD_SLOTS)
     source = "default"
-    if profile is not None and profile.global_slots:
-        for key in ("board", "hero_cards"):
-            slot = profile.global_slots.get(key)
-            if slot is not None:
-                resolved[key] = slot
-                source = "profile"
+    missing: list[str] = []
+    for key in ("board", "hero_cards"):
+        slot = (profile.global_slots.get(key)
+                if profile is not None and profile.global_slots else None)
+        if slot is not None:
+            resolved[key] = slot
+            source = "profile"
+        else:
+            # 只有一块是 profile、另一块仍走默认时，不能因为 source 变
+            # profile 就静默吞掉缺口；下面把缺的键写进 warnings。
+            missing.append(key)
     if slots:
         resolved.update(slots)
         source = "explicit"
@@ -1431,6 +1540,9 @@ def recognize_cards(img: np.ndarray, profile: Profile | None = None, *,
     if source == "default":
         warnings.append(
             "profile 没有 board / hero_cards 槽位，已使用 WPK 移动端默认牌区")
+    elif missing:
+        warnings.append(
+            f"profile 缺少 {' / '.join(missing)} 槽位，已使用 WPK 移动端默认牌区")
     if len(reads["hero_cards"].cards) not in (0, 2):
         warnings.append(
             f"hero 手牌识别出 {len(reads['hero_cards'].cards)} 张（正常是 2 张）")

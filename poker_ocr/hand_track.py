@@ -966,6 +966,19 @@ class LiveHandTracker:
             bet = p.bet or 0.0
             prev_amount = (prev.amount or 0.0) if prev is not None else 0.0
 
+            # 已经弃牌的人，本街残留的下注 pill 不能再推成一次新行动。
+            # 2026-11-06 实盘：SB 已 fold，bet 槽却读到 20.5；这里从下注额
+            # 反推成「SB 3-bet」，整手牌被误判成 3-bet 底池。
+            if p.fold is True and p.action is None:
+                continue
+            # 单人下注不可能超过本街总下注。`street_bet_total = pot -
+            # pot_before_street` 是底池口径的硬约束；单个 bet 超过它只能是
+            # 串位/动画残影，不能拿它推 raise。
+            street_total = state.street_bet_total
+            if (street_total is not None and street_total > 0
+                    and bet > street_total + 0.75):
+                continue
+
             action = p.action
             if action is None:
                 # 徽章漏读时从下注额变化反推。没变化 = 没有行动

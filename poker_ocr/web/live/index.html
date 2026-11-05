@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Poker Live · 实时牌桌与建议</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-mark" aria-hidden="true">♠</span>
+    <div>
+      <div class="brand-title">POKER LIVE</div>
+      <div class="brand-sub">实时牌桌 · AI 建议 · 识别诊断</div>
+    </div>
+  </div>
+  <div class="session">
+    <span id="conn" class="pill pill-off">连接中…</span>
+    <span class="pill" id="session-id" title="会话 ID">—</span>
+    <span class="pill pill-dim" id="profile-name" title="几何 profile">—</span>
+    <span class="pill pill-dim" id="prompt-version" title="提示词版本">—</span>
+  </div>
+  <div class="stats" aria-label="会话统计">
+    <span><b id="stat-frames">0</b><i>处理帧</i></span>
+    <span><b id="stat-accepted">0</b><i>接受</i></span>
+    <span><b id="stat-discard">0%</b><i>丢弃</i></span>
+    <span><b id="stat-proc">0</b><i>ms/帧</i></span>
+    <span><b id="stat-advice">0</b><i>建议</i></span>
+  </div>
+</header>
+
+<main class="layout">
+  <section class="col col-left">
+    <section class="panel table-panel">
+      <div class="panel-head">
+        <div class="panel-title">
+          <h2>牌桌</h2>
+          <span id="hand-street" class="subtle">等待一手牌</span>
+        </div>
+        <div class="panel-meta">
+          <span id="cards-badge" class="pill pill-dim">牌面未知</span>
+          <span id="hand-id" class="mono subtle" title="当前手牌 ID">—</span>
+        </div>
+      </div>
+
+      <div id="table-wrap" class="table-wrap">
+        <div class="felt" aria-hidden="true"></div>
+        <div class="felt-ring" aria-hidden="true"></div>
+        <div id="seats" class="seats"></div>
+
+        <div class="table-center">
+          <div class="pot-chip" title="底池已包含本街下注">
+            <span class="pot-label">底池</span>
+            <strong id="pot">—</strong>
+            <span class="pot-unit">BB</span>
+            <span id="street-bet-total" class="pot-sub">本街 0 BB</span>
+          </div>
+          <div id="bet-strip" class="bet-strip" aria-label="本街下注"></div>
+          <div id="board" class="board" aria-label="公共牌"></div>
+          <div id="blinds" class="blinds">盲注 —</div>
+        </div>
+
+        <div id="hero-panel" class="hero-panel is-empty">
+          <div class="hero-top">
+            <span id="hero-position" class="position-badge">—</span>
+            <span id="hero-name" class="hero-name">等待 hero</span>
+            <span id="hero-turn" class="turn-badge" hidden>轮到我</span>
+          </div>
+          <div id="hero-cards" class="hero-cards"></div>
+          <div class="hero-bottom">
+            <span id="hero-stack">— BB</span>
+            <span id="hero-bet" class="subtle"></span>
+          </div>
+        </div>
+
+        <div id="table-empty" class="table-empty">
+          <div class="empty-title">等待第一帧状态</div>
+          <div class="empty-sub">live 进程识别出可写状态后，这里会同步牌桌</div>
+        </div>
+        <div id="frame-flash" class="frame-flash" aria-hidden="true"></div>
+      </div>
+
+      <div class="panel-foot">
+        <span id="table-foot">—</span>
+        <span id="frame-meta" class="mono subtle">—</span>
+      </div>
+    </section>
+
+    <section class="panel hand-panel">
+      <div class="panel-head">
+        <div class="panel-title">
+          <h2>本手行动线</h2>
+          <span id="hand-quality" class="pill pill-dim">—</span>
+        </div>
+        <span id="hand-pot" class="subtle"></span>
+      </div>
+      <div id="hand-actions" class="hand-actions">
+        <div class="placeholder">还没有行动线。轮到我时，建议会出现在右侧。</div>
+      </div>
+      <div class="hand-history">
+        <div class="subhead">最近手牌</div>
+        <div id="hand-list" class="hand-list">
+          <div class="placeholder">暂无已结束手牌</div>
+        </div>
+      </div>
+    </section>
+  </section>
+
+  <aside class="col col-right">
+    <section class="panel advice-panel" aria-live="polite">
+      <div class="panel-head">
+        <div class="panel-title">
+          <h2>AI 建议</h2>
+          <span id="advice-street" class="subtle"></span>
+        </div>
+        <span id="advice-source" class="pill pill-dim">等待</span>
+      </div>
+      <div id="advice-body" class="advice-body">
+        <div class="advice-empty">
+          <div class="advice-empty-icon">♣</div>
+          <div>等待轮到我</div>
+          <p>触发决策点后，建议、原因、计划与完整提示词都会在这里出现。</p>
+        </div>
+      </div>
+      <div id="advice-actions" class="advice-actions" hidden>
+        <button id="btn-prompt" class="btn btn-primary" type="button">查看提示词 <kbd>P</kbd></button>
+        <button id="btn-copy-reason" class="btn" type="button">复制理由</button>
+      </div>
+    </section>
+
+    <section class="panel dock-panel">
+      <div class="dock-tabs" role="tablist" aria-label="辅助信息">
+        <button class="dock-tab is-active" type="button" data-dock="health" role="tab" aria-selected="true">
+          识别健康 <span id="health-dot" class="tab-dot"></span>
+        </button>
+        <button class="dock-tab" type="button" data-dock="history" role="tab" aria-selected="false">
+          建议历史 <span id="history-count" class="tab-count">0</span>
+        </button>
+        <button class="dock-tab" type="button" data-dock="feed" role="tab" aria-selected="false">
+          识别帧流
+        </button>
+      </div>
+      <div class="dock-body">
+        <div class="dock-view is-active" data-dock-view="health" role="tabpanel">
+          <div class="dock-view-head">
+            <span class="subtle">接受率 · 牌面 · 模型兜底</span>
+            <span id="health-level" class="pill pill-dim">—</span>
+          </div>
+          <div id="health-body" class="health-body">
+            <div class="placeholder">等待帧数据…</div>
+          </div>
+        </div>
+        <div class="dock-view" data-dock-view="history" role="tabpanel" hidden>
+          <div id="history-list" class="history-list">
+            <div class="placeholder">本次会话还没有建议</div>
+          </div>
+        </div>
+        <div class="dock-view" data-dock-view="feed" role="tabpanel" hidden>
+          <div class="dock-view-head">
+            <span class="subtle">逐帧 record / discard / stale</span>
+            <label class="feed-toggle"><input id="feed-pause" type="checkbox"> 暂停滚动</label>
+          </div>
+          <div id="feed-list" class="feed-list"></div>
+        </div>
+      </div>
+    </section>
+  </aside>
+</main>
+
+<div id="modal" class="modal" hidden>
+  <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+    <div class="modal-head">
+      <div>
+        <h3 id="modal-title">提示词</h3>
+        <div id="modal-sub" class="subtle"></div>
+      </div>
+      <div class="modal-tools">
+        <button id="modal-copy" class="btn btn-small" type="button">复制</button>
+        <button id="modal-close" class="btn btn-small btn-ghost" type="button">关闭 <kbd>Esc</kbd></button>
+      </div>
+    </div>
+    <div id="modal-tabs" class="modal-tabs"></div>
+    <div id="modal-body" class="modal-body"></div>
+    <div id="modal-foot" class="modal-foot"></div>
+  </div>
+</div>
+
+<div id="toast" class="toast" hidden></div>
+
+<script src="/app.js"></script>
+</body>
+</html>

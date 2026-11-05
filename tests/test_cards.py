@@ -153,6 +153,20 @@ def test_shape_disagreement_does_not_reject_color() -> None:
     check(ev.get("shape_agrees") is False, "应保留 shape_agrees=False 供复核")
 
 
+def test_live_profile_declares_card_slots() -> None:
+    """live profile 必须显式带 board/hero_cards，不能靠默认牌区兜底。"""
+    profile = Profile.load(SHOW_PROFILE_PATH)
+    check(profile.global_slots.get("board") is not None,
+          f"table_wpk_live 缺 board 槽位：{profile.global_slots}")
+    check(profile.global_slots.get("hero_cards") is not None,
+          f"table_wpk_live 缺 hero_cards 槽位：{profile.global_slots}")
+    result = recognize_cards_of_file(_unique_files()["redA"], profile)
+    check(not any("默认牌区" in w for w in result.warnings),
+          f"live profile 不应再回退默认牌区：{result.warnings}")
+    check(result.board_codes == ["3s", "2h", "5s"],
+          f"显式牌区后公共牌应保持：{result.board_codes}")
+
+
 def test_default_profile_falls_back_to_wpk_slots() -> None:
     """没有 board/hero_cards 槽位的 profile 也要能读 —— API 默认就是这种。
 
@@ -259,6 +273,58 @@ def test_card_back_is_classified_explicitly() -> None:
               f"{seat_id} 输出不能包含牌背")
 
 
+def _glyph_from_sample(key: str, slot_name: str, code: str):
+    """从标注样本里取一张牌的字形，做低分辨率回放用。"""
+    path = _unique_files()[key]
+    profile = Profile.load(PROFILE_PATH)
+    result = recognize_cards_of_file(path, profile)
+    slot = result.board if slot_name == "board" else result.hero_cards
+    card = next((c for c in slot.cards if c.code == code), None)
+    if card is None:
+        return None
+    img = cv2.imread(str(path))
+    x, y, w, h = card.rect
+    card_img = cards_mod._canonical_card(img[y:y + h, x:x + w], (0, 0, w, h))
+    return cards_mod._rank_glyph(card_img, card.suit)
+
+
+def _degrade(glyph, scale: float):
+    small = cv2.resize(
+        glyph, (max(8, int(glyph.shape[1] * scale)),
+                max(8, int(glyph.shape[0] * scale))),
+        interpolation=cv2.INTER_AREA)
+    return cv2.resize(small, (glyph.shape[1], glyph.shape[0]),
+                      interpolation=cv2.INTER_LINEAR)
+
+
+def test_three_eight_survives_low_resolution() -> None:
+    """3 缩到 0.7/0.5 倍时 NCC 会翻成 8，闭合孔还会被糊出 1–2 个假孔。
+
+    这是线上「黑桃 3 读成黑桃 8」的复现口径：不能只看 holes==0；要用
+    「左开口」特征（中段最左墨迹明显偏右）把 3 拉回来。
+    """
+    three = _glyph_from_sample("redA", "board", "3s")
+    eight = _glyph_from_sample("140", "hero_cards", "8s")
+    check(three is not None, "取不到 3s 字形")
+    check(eight is not None, "取不到 8s 字形")
+    if three is None or eight is None:
+        return
+    for scale in (0.7, 0.5, 0.35):
+        rank, score, margin, scores, evidence = cards_mod._classify_rank(
+            _degrade(three, scale))
+        check(rank == "3",
+              f"3s 降到 {scale:.2f}x 仍应是 3，实际 {rank}（{evidence}）")
+        check(evidence.get("topology_reason") in ("open_left", "no_holes"),
+              f"3s {scale:.2f}x 应由左开口/拓扑判出：{evidence}")
+
+        rank8, score8, margin8, scores8, evidence8 = cards_mod._classify_rank(
+            _degrade(eight, scale))
+        check(rank8 == "8",
+              f"8s 降到 {scale:.2f}x 仍应是 8，实际 {rank8}（{evidence8}）")
+        check(not evidence8.get("glyph_left_indent", 1) >= 0.06,
+              f"8s 不应被当成左开口：{evidence8}")
+
+
 def test_all_ranks_have_templates() -> None:
     from poker_ocr.cards import _load_templates
     templates = _load_templates()
@@ -273,10 +339,12 @@ def main() -> int:
         test_show_one_card_sample,
         test_card_back_is_classified_explicitly,
         test_three_eight_use_hole_topology,
+        test_three_eight_survives_low_resolution,
         test_all_labeled_samples,
         test_color_and_shape_agree,
         test_suit_shape_thresholds,
         test_shape_disagreement_does_not_reject_color,
+        test_live_profile_declares_card_slots,
         test_default_profile_falls_back_to_wpk_slots,
         test_preflop_has_no_false_positive,
     ]

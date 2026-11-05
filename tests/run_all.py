@@ -30,6 +30,11 @@
     test_frame_state 桌面状态 + 变化指纹（手工拼 RoiFrame）
     test_state_stream 防抖/丢弃/消失确认/断流重置（桩 RoiStream）
     test_live       实时邮箱/限速/重连/JSONL（不连 RTSP）
+    test_live_log   事件 JSONL / 控制台落盘（纯逻辑）
+    test_live_events 每帧事件：record 带 state / discard 带 errors（纯逻辑）
+    test_live_web   Web 看板快照/SSE/布局（本地端口，不连浏览器）
+    test_hand_recognition_audit 手牌识别倒查评分/导出（纯逻辑）
+    test_hand_track_folded_bet 已弃牌座位的残留下注不能推成 3-bet（纯逻辑）
     test_full_table 全图 OCR/座位聚类/D 庄位/位置（需要 table-8p.jpg）
     test_runtime_profile 全图标定 → runtime profile → ROI 回读（需要 table-8p.jpg）
     test_stable_cards 跨帧牌面稳定闸（纯逻辑，不读图）
@@ -61,7 +66,10 @@ SUITES = ["test_positions.py", "test_env.py", "test_coach.py",
           "test_ai_advice_replay.py", "test_dealer.py", "test_roi_reader.py",
           "test_roi_dedup.py", "test_parse.py", "test_name_lexicon.py",
           "test_frame_state.py", "test_empty_seats.py",
-          "test_state_stream.py", "test_live.py", "test_full_table.py",
+          "test_state_stream.py", "test_live.py",
+          "test_live_log.py", "test_live_web.py", "test_live_events.py",
+          "test_hand_recognition_audit.py", "test_hand_track_folded_bet.py",
+          "test_full_table.py",
           "test_runtime_profile.py", "test_stable_cards.py",
           "test_doubt_window.py", "test_export_live_hands.py",
           "test_hand_leak_report.py",

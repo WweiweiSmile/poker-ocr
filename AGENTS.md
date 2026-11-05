@@ -45,7 +45,8 @@
 .venv/bin/python tests/run_all.py                              # 全量测试（分层，先快后慢）
 .venv/bin/python -m uvicorn api:app --port 8000                # 单图识别服务
 .venv/bin/python -m poker_ocr.live --profile config/table_wpk_live.json \
-    --initial-blinds 1/2 --out logs/live.states.jsonl          # 实时链路
+    --initial-blinds 1/2 --out logs/live.states.jsonl          # 实时链路 + Web 看板 :8020
+.venv/bin/python tools/hand_recognition_audit.py --top 20 --html logs/audit.html # 手牌识别倒查
 cd replay-console && ./start.sh                                # 复盘控制台 :8010
 .venv/bin/python -m poker_ocr.strategy_tables --profile sourced # 策略表生效/回落情况
 .venv/bin/python tools/export_strategy_tables.py --check        # JSON↔代码逐值一致

@@ -48,6 +48,8 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
+import webbrowser
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
@@ -72,6 +74,9 @@ from .full_table import (DealerTracker, FullOutcome, FullStateRecorder,
 from .hand_outbox import HandOutbox
 from .hand_ingest import HandIngestWorker, IngestConfig
 from .hand_track import LiveHandTracker
+from .live_log import (ConsoleLog, LiveEventLog, derive_console_path,
+                       derive_event_path)
+from .live_web import LiveWebServer, build_layout
 from .name_lexicon import NameLexicon, duplicate_pairs
 from .ocr import OcrEngine
 from .parse import parse_blinds
@@ -117,8 +122,24 @@ FFMPEG_OPTIONS = ("rtsp_transport;tcp|fflags;nobuffer|flags;low_delay|max_delay;
 
 # ─────────────────────────── 基础组件 ───────────────────────────
 
+# 控制台文本落盘：主进程启动后由 main() 挂上；None = 只打终端。
+_console_sink: ConsoleLog | None = None
+
+
+def set_console_sink(sink: ConsoleLog | None) -> None:
+    global _console_sink
+    _console_sink = sink
+
+
 def _log(msg: str) -> None:
     print(msg, flush=True)
+    sink = _console_sink
+    if sink is not None:
+        try:
+            sink.write(msg)
+        except OSError:
+            # 日志文件写失败不能反过来拖垮识别；终端仍然有输出。
+            pass
 
 
 # 终端没法用 ANSI 改字号，「加大」靠加粗 + 高亮底色 + 上下留白来拉开层次。
@@ -1031,7 +1052,8 @@ class LiveProcessor:
                  incident_max: int = DEFAULT_INCIDENT_MAX,
                  card_confirm_frames: int = 2,
                  card_doubt_window: float = DEFAULT_DOUBT_WINDOW,
-                 clock=time.monotonic, log=_log) -> None:
+                 clock=time.monotonic, log=_log,
+                 events: Callable[[str, dict], None] | None = None) -> None:
         if recognizer not in ("roi", "full"):
             raise ValueError(f"未知 recognizer：{recognizer}")
         if recognizer == "full" and (engine is None or full_config is None):
@@ -1110,6 +1132,10 @@ class LiveProcessor:
         self._last_advice = None
         self.clock = clock
         self.log = log
+        # 事件出口：main() 里接成「写 live.events.jsonl + 推 Web 看板」。
+        # None = 不产生事件（单测/只跑识别时零开销）。回调自身必须吞异常，
+        # 这里再包一层 _publish()，保证日志/看板永远不能拖垮 OCR。
+        self.events = events
 
         # 跨帧牌面稳定闸：board 只前进、hero 只接受 0/2 张、新读数 2 帧确认。
         # doubt_window > 0 时，带疑点的读数改走「疑惑帧」时间窗仲裁。
@@ -1193,6 +1219,25 @@ class LiveProcessor:
                 self.log(f"[跳过] 陈旧帧 {age * 1000:.0f}ms（上限 "
                          f"{self.max_frame_age * 1000:.0f}ms）")
                 self._stale_logged = now
+            if self.events is not None:
+                hand = self._current_hand()
+                self._publish("frame", {
+                    "seq": packet.seq, "epoch": packet.epoch,
+                    "frame_id": None, "ts": _iso_now(),
+                    "t": round(now - self.started_mono, 2),
+                    "queue_ms": round(age * 1000, 1), "proc_ms": 0.0,
+                    "kind": "stale", "errors": ["stale_frame"],
+                    "cards": {"reliable": False,
+                              "warnings": ["stale_frame"]},
+                    "hand_id": (hand or {}).get("hand_id"),
+                    "street": (hand or {}).get("street"),
+                    "hand": hand,
+                    "processed": self.processed, "sampled": self.sampled,
+                    "accepted": self.accepted, "records": self.records,
+                    "avg_proc_ms": round(self.avg_proc_ms, 1),
+                    "advice_count": self.advice_count,
+                    "advice_done": self.advice_done,
+                })
             return "stale"
 
         if self.dump_dir is not None:
@@ -1237,6 +1282,7 @@ class LiveProcessor:
         self.total_proc_ms += proc_ms
         self.last_proc_ms = proc_ms
 
+        body = None
         if outcome.record is not None:
             body = _state_body(outcome.record, cards, "roi")
             self.writer.write({
@@ -1261,7 +1307,93 @@ class LiveProcessor:
         # AI 建议：吃**每一帧被接受的状态**（不只被记录的）。签名里没有 action /
         # hero_turn，只吃 record 会漏掉大部分行动线。
         self._track_hand(outcome, cards)
+        self._publish_frame(packet, t, frame_id, age, proc_ms, outcome,
+                            cards, body)
         return outcome.kind
+
+    # ── 事件出口（Web / 事件日志） ─────────────────────
+
+    def _publish(self, kind: str, payload: dict) -> None:
+        """事件回调永远不能反噬识别主链路。"""
+        if self.events is None:
+            return
+        try:
+            self.events(kind, payload)
+        except Exception as exc:  # noqa: BLE001 — 日志/看板故障不应中断牌局
+            self.log(f"[警告] 事件发布失败：{type(exc).__name__}: {exc}")
+
+    @staticmethod
+    def _cards_event(cards: CardsResult | None) -> dict:
+        if cards is None:
+            return {"reliable": False, "warnings": ["cards_unavailable"],
+                    "hero": [], "board": []}
+        return {
+            "reliable": bool(getattr(cards, "reliable", True)),
+            "warnings": list(getattr(cards, "warnings", ()) or ()),
+            "hero": list(getattr(cards, "hero_codes", ()) or ()),
+            "board": list(getattr(cards, "board_codes", ()) or ()),
+        }
+
+    def _current_hand(self, max_actions: int = 30) -> dict | None:
+        """当前这手牌的紧凑快照；只为看板/事件日志，不改变识别。"""
+        hand = getattr(self.hand_tracker, "hand", None) if self.hand_tracker else None
+        if hand is None:
+            return None
+        actions = list(getattr(hand, "actions", ()) or ())
+        rows = [{
+            "street": getattr(a, "street", None),
+            "seat_id": getattr(a, "seat_id", None),
+            "name": getattr(a, "name", None),
+            "position": getattr(a, "position", None),
+            "action": getattr(a, "action", None),
+            "amount": getattr(a, "amount", None),
+            "all_in": bool(getattr(a, "all_in", False)),
+            "is_hero": bool(getattr(a, "is_hero", False)),
+            "inferred": bool(getattr(a, "inferred", False)),
+        } for a in actions[-max_actions:]]
+        return {
+            "hand_id": getattr(hand, "hand_id", None),
+            "street": getattr(hand, "street", None),
+            "hero_cards": list(getattr(hand, "hero_cards", ()) or ()),
+            "board": list(getattr(hand, "board", ()) or ()),
+            "pot": getattr(hand, "pot", None),
+            "action_count": len(actions),
+            "actions": rows,
+        }
+
+    def _publish_frame(self, packet: FramePacket, t: float, frame_id: str,
+                       age: float, proc_ms: float, outcome, cards,
+                       body: dict | None) -> None:
+        """每一帧都发：看板据此显示「帧流」，state 只在有效记录时更新牌桌。"""
+        if self.events is None:
+            return
+        hand = self._current_hand()
+        payload = {
+            "seq": packet.seq,
+            "epoch": packet.epoch,
+            "frame_id": frame_id,
+            "ts": _iso_now(),
+            "t": round(t, 2),
+            "queue_ms": round(age * 1000, 1),
+            "proc_ms": round(proc_ms, 1),
+            "kind": outcome.kind,
+            "errors": list(getattr(outcome, "errors", ()) or ()),
+            "cards": self._cards_event(cards),
+            "hand_id": (hand or {}).get("hand_id"),
+            "street": (hand or {}).get("street"),
+            "hand": hand,
+            "state_index": (body or {}).get("index"),
+            "processed": self.processed,
+            "sampled": self.sampled,
+            "accepted": self.accepted,
+            "records": self.records,
+            "avg_proc_ms": round(self.avg_proc_ms, 1),
+            "advice_count": self.advice_count,
+            "advice_done": self.advice_done,
+        }
+        if body is not None:
+            payload["state"] = body
+        self._publish("frame", payload)
 
     # ── 质量闸丢帧的现场 ─────────────────────────────────
 
@@ -1373,7 +1505,16 @@ class LiveProcessor:
                           and not getattr(self.advice_runner, "busy", False)))
         if (point is None and outcome.state.hero_turn is True
                 and not cards_reliable):
-            self._log_cards_skip(outcome.state, cards_warnings)
+            if self._log_cards_skip(outcome.state, cards_warnings):
+                hand = self._current_hand() or {}
+                self._publish("advice_skip", {
+                    "hand_id": hand.get("hand_id"),
+                    "street": hand.get("street"),
+                    "reason": "cards_unreliable",
+                    "warnings": list(cards_warnings),
+                    "pot": outcome.state.pot,
+                    "captured_at": _iso_now(),
+                })
         # 换手是在 observe 内部判定的：紧接着再 drain 一次，把上一手的
         # 手牌记忆（行动线 + 建议）在换手这一帧就落库，不必等下一帧。
         # 这里是**唯一允许自动点击**的 drain：state 与 hand_id 都是当前帧的，
@@ -1449,6 +1590,31 @@ class LiveProcessor:
                     # 新决策点出现说明牌局已经往前走，上一次点击无需再重试。
                     self._pending_decision_key = situation.snap.decision_key
                     self._click_retry = None
+                    # 看板/事件日志：先告诉前端「开始生成」，结果回来再补
+                    # 完整提示词。决策点与 advice 用同一 hand_id/street 对齐。
+                    self._publish("decision", {
+                        "hand_id": situation.snap.hand_id,
+                        "street": situation.street,
+                        "hero_cards": list(situation.snap.hero_cards),
+                        "board": list(situation.snap.board),
+                        "pot": situation.snap.pot,
+                        "to_call": round(call_amount(point), 2),
+                        "action_index": situation.action_index,
+                        "options": [o.to_dict() for o in situation.options],
+                        "decision_key": list(situation.snap.decision_key),
+                        "hand_tier": situation.hand_tier,
+                        "hand_label": situation.hand_label,
+                        "hand_class": situation.hand_class,
+                        "equity_pct": (round(situation.equity_pct, 1)
+                                       if situation.equity_pct is not None
+                                       else None),
+                        "pot_type": situation.pot_type,
+                        "spr": situation.spr,
+                        "opponents_in_hand": situation.opponents_in_hand,
+                        "warnings": list(situation.warnings or ()),
+                        "prompt_version": PROMPT_VERSION,
+                        "captured_at": _iso_now(),
+                    })
                 if not self.quiet:
                     pot_tag = ""
                     if situation.explosive_pot:
@@ -1467,19 +1633,24 @@ class LiveProcessor:
                 self.log(f"  [建议] 轮到我：{point.street} 需跟 "
                          f"{call_amount(point)}BB（未开启 AI 建议）")
 
-    def _log_cards_skip(self, state, warnings: tuple[str, ...]) -> None:
-        """牌面不可靠导致跳过建议：按手牌/街节流打印一次，并计数。"""
+    def _log_cards_skip(self, state, warnings: tuple[str, ...]) -> bool:
+        """牌面不可靠导致跳过建议：按手牌/街节流打印一次，并计数。
+
+        返回 True 表示这次真的打印/计数了；调用方据此决定要不要发
+        `advice_skip` 事件，避免同一段不可靠牌面每帧都刷一条。
+        """
         hand = getattr(self.hand_tracker, "hand", None)
         key = (getattr(hand, "hand_id", None), round(state.pot or 0.0, 2))
         now = self.clock()
         if (self._last_cards_skip is not None
                 and self._last_cards_skip[0] == key
                 and now - self._last_cards_skip[1] < 5.0):
-            return
+            return False
         self._last_cards_skip = (key, now)
         self.cards_unreliable_skips += 1
         reason = "；".join(warnings[:3]) or "牌面未稳定"
         self.log(f"  [建议] 跳过：牌面不可靠（{reason}）")
+        return True
 
     @property
     def waiting_for_advice(self) -> bool:
@@ -1526,6 +1697,9 @@ class LiveProcessor:
                 self.advice_done += 1
                 self._last_advice = advice
                 self.writer.write({"type": "advice", "ts": _iso_now(), **data})
+                # 看板拿到的是**同一份** data（含 prompt_system/user、facts、
+                # raw_response），所以展示的提示词与模型实际收到的一字不差。
+                self._publish("advice", dict(data))
                 self._log_advice(advice)
                 if click is not None:
                     self._log_click(click)
@@ -1777,6 +1951,12 @@ class LiveProcessor:
             # 没有建议时连键都不出现，保持无 AI 模式下的输出与旧版一致
             record["advices"] = advices
         self.writer.write(record)
+        # 看板/事件日志不需要再带一份建议全文（prompt 可能十几 KB）；
+        # 建议本身已经在 advice 事件里，按 hand_id 能 join 回来。
+        hand_payload = {k: v for k, v in record.items()
+                        if k not in ("type", "advices")}
+        hand_payload["advice_count"] = len(advices)
+        self._publish("hand", hand_payload)
         if not partial and self.hand_outbox is not None:
             try:
                 self.hand_outbox.enqueue(record)
@@ -1811,16 +1991,27 @@ class LiveProcessor:
         # 实时日志里也打出来，用户能看出模型打算怎么打这手牌。
         plan = (getattr(advice, "plan", "") or "").strip()
         plan_tag = f"｜计划 {plan}" if plan else ""
+        source_tag = "模型" if advice.source == "model" else "兜底"
+        prompt_meta = ""
+        if advice.prompt_sha256:
+            chars = (len(advice.prompt_system or "")
+                     + len(advice.prompt_user or ""))
+            prompt_meta = f"｜提示词 {advice.prompt_sha256[:8]} {chars}字"
+        if advice.prompt_tokens is not None:
+            prompt_meta += (f"｜tokens {advice.prompt_tokens}"
+                            f"+{advice.completion_tokens or 0}")
         if not _use_ansi():
             reads_part = f"｜{read_tag}" if read_tag else ""
-            self.log(f"  [建议] {advice.street} ⇒ {option.label}{amount}"
-                     f"｜{elapsed}{reads_part}｜{advice.reason}{plan_tag}{tail}")
+            self.log(f"  [建议:{source_tag}] {advice.street} ⇒ "
+                     f"{option.label}{amount}"
+                     f"｜{elapsed}{reads_part}{prompt_meta}"
+                     f"｜{advice.reason}{plan_tag}{tail}")
             return
         # 模型结果只出现一次，别被滚动的识别日志淹没：
         # 留白 → 高亮横幅（街 + 动作 + 金额 + 耗时）→ 粗体理由 → 留白。
         bar = "═" * 60
-        headline = (f" ▶ 建议  {advice.street} ⇒ {option.label}{amount}"
-                    f"  ·  {elapsed} ")
+        headline = (f" ▶ 建议  [{source_tag}] {advice.street} ⇒ "
+                    f"{option.label}{amount}  ·  {elapsed} ")
         style = _advice_bar(option.kind)
         self.log("")
         self.log(f"{style}{bar}{_ANSI_RESET}")
@@ -1831,6 +2022,9 @@ class LiveProcessor:
         self.log(f"{_ANSI_ADVICE_TEXT} 理由：{advice.reason}{tail}{_ANSI_RESET}")
         if plan:
             self.log(f"{_ANSI_ADVICE_TEXT} 计划：{plan}{_ANSI_RESET}")
+        if prompt_meta:
+            self.log(f"{_ANSI_ADVICE_TEXT} {prompt_meta.lstrip('｜')}"
+                     f"{_ANSI_RESET}")
         self.log("")
 
     def _read_cards(self, img: np.ndarray) -> CardsResult | None:
@@ -1974,6 +2168,16 @@ class LiveProcessor:
                 json.dumps(meta, ensure_ascii=False, indent=2),
                 encoding="utf-8")
             self.log(f"[疑惑帧] {reason}；已保存 {len(frames)} 帧 → {folder}")
+            self._publish("incident", {
+                "reason": reason,
+                "anomalies": anomalies,
+                "folder": str(folder),
+                "hand_id": (self._current_hand() or {}).get("hand_id"),
+                "t": round(t, 2),
+                "frame_id": frame_id,
+                "frames": len(frames),
+                "cards": meta["cards"],
+            })
             # 逐帧写进日志，方便只翻日志就能定位是哪几帧出的问题。
             for i, item in enumerate(meta["frames"]):
                 self.log(f"[疑惑帧]   {i:02d} seq={item['seq']} "
@@ -2016,6 +2220,7 @@ class LiveProcessor:
         self.total_proc_ms += proc_ms
         self.last_proc_ms = proc_ms
 
+        body = None
         if outcome.record is not None:
             body = _state_body(outcome.record, cards, "full")
             self.writer.write({
@@ -2033,6 +2238,24 @@ class LiveProcessor:
                     t, body,
                     f"  桌型={result.table_size} "
                     f"庄位={result.dealer_seat_id}{carried}"))
+        payload = {
+            "seq": packet.seq, "epoch": packet.epoch, "frame_id": frame_id,
+            "ts": _iso_now(), "t": round(t, 2),
+            "queue_ms": round(age * 1000, 1),
+            "proc_ms": round(proc_ms, 1), "kind": outcome.kind,
+            "errors": list(getattr(outcome, "errors", ()) or ()),
+            "cards": self._cards_event(cards),
+            "hand_id": None, "street": None, "hand": None,
+            "state_index": (body or {}).get("index"),
+            "processed": self.processed, "sampled": self.sampled,
+            "accepted": self.accepted, "records": self.records,
+            "avg_proc_ms": round(self.avg_proc_ms, 1),
+            "advice_count": self.advice_count,
+            "advice_done": self.advice_done,
+        }
+        if body is not None:
+            payload["state"] = body
+        self._publish("frame", payload)
         # 与 roi 路线一致：丢弃 / 无变化的帧不进 JSONL，不逐帧打印日志
 
         return outcome.kind
@@ -2226,6 +2449,28 @@ def build_parser() -> argparse.ArgumentParser:
                     help="自动点击的最低置信度（0 = 关闭）；低于该值或模型没给"
                          "confidence 时只显示建议，不自动点击")
     ap.add_argument("--quiet", action="store_true", help="只打状态行和最终汇总")
+    # ── 日志 / Web 看板 ──
+    ap.add_argument("--web", action=argparse.BooleanOptionalAction, default=True,
+                    help="启动本地 Web 看板（默认开启，只绑定 127.0.0.1）。"
+                         "看板每帧同步牌桌、AI 建议/原因和完整提示词；"
+                         "--no-web 关闭")
+    ap.add_argument("--web-host", default="127.0.0.1",
+                    help="Web 看板监听地址（默认 127.0.0.1；改成 0.0.0.0 "
+                         "会让同局域网的人也能看到提示词/玩家名，慎用）")
+    ap.add_argument("--web-port", type=int, default=8020,
+                    help="Web 看板端口（默认 8020；被占用时只告警，识别继续）")
+    ap.add_argument("--web-open", action="store_true",
+                    help="启动后自动用默认浏览器打开看板")
+    ap.add_argument("--events-out", type=Path, default=None,
+                    help="结构化事件日志路径（默认由 --out 派生："
+                         "logs/live.states.jsonl → logs/live.events.jsonl）")
+    ap.add_argument("--no-events", action="store_true",
+                    help="不写结构化事件日志（看板仍可用）")
+    ap.add_argument("--log-file", type=Path, default=None,
+                    help="控制台文本落盘路径（默认由 --out 派生："
+                         "logs/live.states.jsonl → logs/live.log）")
+    ap.add_argument("--no-log-file", action="store_true",
+                    help="不把控制台文本写入文件")
     return ap
 
 
@@ -2275,6 +2520,16 @@ def _validate_args(ap: argparse.ArgumentParser, args) -> None:
         ap.error("--min-advice-confidence 应在 0–1 之间")
     if args.roi_threads < 1:
         ap.error("--roi-threads 至少为 1（1 = 串行）")
+    if not (1 <= args.web_port <= 65535):
+        ap.error("--web-port 应在 1–65535 之间")
+    if not str(args.web_host).strip():
+        ap.error("--web-host 不能为空")
+    if args.web_open and not args.web:
+        ap.error("--web-open 需要开启 --web")
+    if args.no_events and args.events_out is not None:
+        ap.error("--events-out 与 --no-events 不能同时使用")
+    if args.no_log_file and args.log_file is not None:
+        ap.error("--log-file 与 --no-log-file 不能同时使用")
 
 
 def _install_signals(stop: threading.Event) -> None:
@@ -2319,6 +2574,40 @@ def main(argv: list[str] | None = None) -> int:
         args.record_without_hero = False if env_flag is None else env_flag
     _validate_args(ap, args)
 
+    started_wall = _iso_now()
+    started_mono = time.monotonic()
+    session_id = (datetime.now().strftime("%Y%m%d-%H%M%S")
+                  + "-" + uuid.uuid4().hex[:6])
+
+    # 控制台文本落盘：先挂上，后面所有 [启动]/[警告] 都会进文件。
+    console_log = None
+    if not args.no_log_file:
+        console_path = args.log_file or derive_console_path(args.out)
+        try:
+            console_log = ConsoleLog(console_path, append=args.append)
+            set_console_sink(console_log)
+        except OSError as exc:
+            _log(f"[警告] 控制台日志文件打不开（只打终端）：{exc}")
+
+    # 结构化事件日志：识别排查的主索引，与 states 文件分开写。
+    events_path = None
+    event_log = None
+    if not args.no_events:
+        events_path = args.events_out or derive_event_path(args.out)
+        try:
+            event_log = LiveEventLog(events_path, session_id=session_id,
+                                     started_mono=started_mono,
+                                     append=args.append)
+        except OSError as exc:
+            _log(f"[警告] 事件日志打不开（只推看板）：{exc}")
+            events_path = None
+
+    _log(f"[启动] 会话 {session_id}")
+    if console_log is not None:
+        _log(f"[启动] 控制台日志 {console_log.path}")
+    if event_log is not None:
+        _log(f"[启动] 事件日志 {event_log.path}")
+
     if args.crop is None:
         args.crop = "auto"
     initial_blinds = None
@@ -2331,13 +2620,58 @@ def main(argv: list[str] | None = None) -> int:
     # 必须在创建 VideoCapture 之前设置
     os.environ.setdefault("OPENCV_FFMPEG_CAPTURE_OPTIONS", FFMPEG_OPTIONS)
 
-    started_wall = _iso_now()
-    started_mono = time.monotonic()
     stop = threading.Event()
     _install_signals(stop)
 
     profile = Profile.load(args.profile)      # 配置非法时内部 sys.exit
     _log(f"[启动] profile={profile.path.name} 座位={len(profile.seats)}")
+
+    # Web 看板：只读展示，不提供点击/改配置的入口。端口被占用时只告警，
+    # 识别主链路照常跑（日志里仍能查到 URL 启动失败的原因）。
+    web = None
+    session_meta = {
+        "session_id": session_id,
+        "started_at": started_wall,
+        "profile": profile.path.name,
+        "profile_path": str(profile.path),
+        "recognizer": args.recognizer,
+        "url": args.url,
+        "out": str(args.out),
+        "events_out": str(events_path) if events_path else None,
+        "log_file": str(console_log.path) if console_log is not None else None,
+        "prompt_version": PROMPT_VERSION if args.ai_advice else None,
+        "prompt_lang": PROMPT_LANGUAGE if args.ai_advice else None,
+        "pid": os.getpid(),
+    }
+    if args.web:
+        try:
+            web = LiveWebServer(session=session_meta,
+                                layout=build_layout(profile),
+                                host=args.web_host, port=args.web_port,
+                                log=_log)
+            web.start()
+            _log(f"[Web] 看板已启动：{web.url}"
+                 f"（只读；Ctrl-C 结束）")
+            if args.web_open:
+                webbrowser.open(web.url)
+        except OSError as exc:
+            _log(f"[Web] 看板启动失败（识别继续，可改 --web-port）：{exc}")
+            web = None
+
+    # 统一事件出口：同一份事件先落 JSONL，再推看板。任何一边失败都不能
+    # 反噬识别 —— 两个 sink 都包在 try 里。
+    def publish(kind: str, payload: dict) -> None:
+        if event_log is not None:
+            try:
+                event_log.write(kind, payload)
+            except Exception as exc:  # noqa: BLE001
+                _log(f"[警告] 事件日志写入失败：{type(exc).__name__}: {exc}")
+        if web is not None:
+            try:
+                web.publish(kind, payload)
+            except Exception as exc:  # noqa: BLE001
+                _log(f"[警告] 看板推送失败：{type(exc).__name__}: {exc}")
+
     _log("[启动] 加载 OCR 模型…")
     engine = OcrEngine()
     _log("[启动] OCR 就绪")
@@ -2550,8 +2884,9 @@ def main(argv: list[str] | None = None) -> int:
              f"{clicker_cfg.retry_count} 次）")
 
     writer = JsonlWriter(args.out, append=args.append)
-    writer.write({
+    session_start_record = {
         "type": "session_start",
+        "session_id": session_id,
         "started_at": started_wall,
         "url": args.url,
         "profile": profile.path.name,
@@ -2585,7 +2920,15 @@ def main(argv: list[str] | None = None) -> int:
            if ingest_worker is not None else {}),
         "hand_schema": "hand.v2",
         "table_view_mode": "current_hand",
-    })
+        # 日志/看板入口写进 session_start：翻旧日志时能立刻找到对应事件文件。
+        **({"events_out": str(events_path)} if events_path else {}),
+        **({"web_url": web.url} if web is not None else {}),
+        **({"log_file": str(console_log.path)}
+           if console_log is not None else {}),
+    }
+    writer.write(session_start_record)
+    publish("session_start",
+            {k: v for k, v in session_start_record.items() if k != "type"})
 
     mailbox = LatestFrame()
     reader = RtspReader(args.url, mailbox, stop)
@@ -2613,7 +2956,9 @@ def main(argv: list[str] | None = None) -> int:
         incident_frames=args.incident_frames,
         incident_max=args.incident_max,
         card_confirm_frames=args.card_confirm_frames,
-        card_doubt_window=args.card_doubt_window)
+        card_doubt_window=args.card_doubt_window,
+        events=(publish if (event_log is not None or web is not None)
+                else None))
 
     # 动作区静止闸只用于 roi 路线：它的区域来自固定槽位；full 路线没有布局。
     settle_gate = (SettleGate(profile, settle=args.settle,
@@ -2629,6 +2974,23 @@ def main(argv: list[str] | None = None) -> int:
     mode = "追加" if args.append else "覆盖"
     _log(f"[启动] 输出 {args.out}（{mode}）；{cadence}；Ctrl-C 结束")
     reader.start()
+
+    def publish_status() -> None:
+        """每 10s 把累计计数推给看板/事件日志（与终端 [状态] 行同源）。"""
+        publish("status", {
+            "elapsed_seconds": round(time.monotonic() - started_mono, 1),
+            "frames_read": reader.grabbed,
+            "processed": processor.processed,
+            "sampled": processor.sampled,
+            "accepted": processor.accepted,
+            "records": processor.records,
+            "avg_proc_ms": round(processor.avg_proc_ms, 1),
+            "reconnects": reader.reconnects,
+            "discarded_reasons": processor.discard_reasons,
+            "advice_count": processor.advice_count,
+            "advice_done": processor.advice_done,
+            "cards_unreliable_skips": processor.cards_unreliable_skips,
+        })
 
     last_seq = -1
     last_start = 0.0
@@ -2658,6 +3020,7 @@ def main(argv: list[str] | None = None) -> int:
                 if now - last_status >= 10.0:
                     status_base = _log_status(processor, reader, started_mono,
                                               status_base)
+                    publish_status()
                     last_status = now
                 continue
 
@@ -2762,6 +3125,7 @@ def main(argv: list[str] | None = None) -> int:
             if time.monotonic() - last_status >= 10.0:
                 status_base = _log_status(processor, reader, started_mono,
                                           status_base)
+                publish_status()
                 last_status = time.monotonic()
     finally:
         stop.set()
@@ -2789,9 +3153,12 @@ def main(argv: list[str] | None = None) -> int:
                if settle_gate is not None else {}),
             **processor.summary(),
         }
-        writer.write({"type": "session_end", "ended_at": _iso_now(),
-                      "summary": summary})
+        session_end_record = {"type": "session_end", "ended_at": _iso_now(),
+                              "summary": summary}
+        writer.write(session_end_record)
         writer.close()
+        publish("session_end", {k: v for k, v in session_end_record.items()
+                                if k != "type"})
         if state_stream is not None:
             state_stream.close()
         if profile_store is not None:
@@ -2813,6 +3180,16 @@ def main(argv: list[str] | None = None) -> int:
             _log(f"手牌：跳过 {summary['hands_skipped_no_hero']} 条没有自己手牌的"
                  f"空档记录（--record-without-hero 可保留）")
         _log(f"→ {args.out}")
+
+        # 先关看板（浏览器会收到 session_end 后断开），再关事件日志和控制台
+        # 文件，保证最后一条事件/最后一行文本都落盘。
+        if web is not None:
+            web.close()
+        if event_log is not None:
+            event_log.close()
+        set_console_sink(None)
+        if console_log is not None:
+            console_log.close()
 
     return 0
 

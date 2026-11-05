@@ -156,8 +156,12 @@ ROI 路线只裁固定槽位、只跑 rec，不跑全图检测，是实时链路
 - **桌型 / 在池人数**
 - **摊牌亮牌**：对手主动秀牌/摊牌时，从该座 `action_slot` 读两张手牌，
   写入 `state.shows` 和 `hand.shows`；亮牌帧即使整帧被质量闸丢弃也能记录
-- **3/8 防误判**：3 和 8 的字形 NCC 经常只差约 0.01；用闭合孔数量兜底
-  （3 = 0 孔，8 = 2 孔），识别证据里记录 `glyph_holes/topology_rank`
+- **3/8 防误判**：3 和 8 的字形 NCC 经常只差约 0.01；先看闭合孔
+  （3 = 0 孔，8 = 2 孔），但低分辨率/JPEG 会把 3 的两个开口糊出 1–2 个
+  **假孔**（实测 3s 降到 0.5x 就会翻成 8s）。现在再加「左开口」特征：
+  字形中段每行最左墨迹明显偏右 → 3；8 的左侧是闭合的。6 的凹口在右侧，
+  不能拿凸包缺陷当左开口，否则 6 会被误判成 3。证据里记录
+  `glyph_holes / glyph_major_holes / glyph_left_indent / topology_reason`
 - **全下 / 胜率 / 换手**：头像黄色 All-in 徽章 → `all_in`；全下摊牌时筹码
   或下注位显示实时胜率 → `equity`；徽章从 All-in 变成可读的其他状态 =
   这手结束，立即收手并等下一手
@@ -685,7 +689,8 @@ cd ~/codes/poker-ocr
 
 ## 6. 输出 JSONL
 
-每行一个完整 JSON，立即 flush。共 6 种记录：
+每行一个完整 JSON，立即 flush。states 文件共 6 种记录
+（帧级诊断见 §6.8 的 `live.events.jsonl`）：
 
 | `type` | 时机 |
 |---|---|
@@ -991,6 +996,63 @@ All-in 文本）会立即收掉当前手牌，不依赖牌面/庄位变化。
 
 ---
 
+### 6.8 结构化事件日志（排查索引）
+
+除 `live.states.jsonl` 外，默认还写 `logs/live.events.jsonl`（`--no-events`
+关闭）。它不是业务契约，而是**帧级排查索引**，一行一个 `live.event.v1`：
+
+```json
+{"schema":"live.event.v1","type":"event","event":"frame",
+ "event_seq":128,"session_id":"20261105-231500-a1b2c3",
+ "logged_at":"2026-11-05T23:15:01.123+08:00","t":12.34,
+ "data":{"seq":412,"kind":"discard","errors":["pot:遮挡","stack:a"],
+         "cards":{"reliable":false,"warnings":["board 回退"]},
+         "hand_id":"20261105-abcdef1234","street":"flop",
+         "state_index":17,"proc_ms":281.4,"queue_ms":8.2}}
+```
+
+`event` 有 `session_start / status / frame / decision / advice_skip /
+advice / hand / incident / session_end`。`frame` 每个处理过的帧都写（包括 `no_change` /
+`discard` / `stale`），并带 `hand_id`，所以能回答「这手牌哪几帧被丢了、
+丢在哪」。`advice` 只留 `prompt_sha256` / `prompt_chars` / `source` /
+`error`，不重复 prompt 原文；看原文去 states 或 Web 看板。
+
+控制台文本同时落盘到 `logs/live.log`（`--no-log-file` 关闭；默认由
+`--out` 派生）。`session_start` 追加 `session_id` / `events_out` /
+`web_url` / `log_file`，旧消费者忽略即可。
+
+### 6.9 Web 看板（`--web`，默认 `:8020`）
+
+启动 live 后浏览器打开 `http://127.0.0.1:8020`：
+
+- 每帧同步牌桌：座位/hero/公共牌/底池/盲注/庄位/动作/本街下注；
+  hero 只在底部大面板出现一次，环上不重复；本街下注同时汇总到底池下方；
+- AI 建议大字号展示，原因/计划/置信度/耗时/对手画像/兜底原因分块；
+- 「查看提示词」或按 `P`：System / User 事实块 / 事实快照 / 原始返回 /
+  采样参数整套可点开、可复制；提示词直接来自 `Advice` 快照，不是前端重拼；
+- 右栏底部把识别健康 / 建议历史 / 识别帧流收进同一个 tab 区，内部滚动；
+  切到帧流时自动滚到最新；
+- 识别帧流逐帧显示 `record/no_change/discard/stale` 与字段错误；
+- 识别健康显示接受率、当前牌面是否可靠、建议模型率、牌面/名字告警。
+
+看板只读、只绑 `127.0.0.1`，不提供点击/改配置入口。端口冲突只告警，
+识别继续；`--web-port` / `--web-host` / `--web-open` 可调。
+
+### 6.10 手牌识别倒查
+
+```bash
+.venv/bin/python tools/hand_recognition_audit.py --top 20 \
+    --html logs/audit.html --json logs/audit.json --csv logs/audit.csv
+.venv/bin/python tools/hand_recognition_audit.py --explain <hand_id>
+```
+
+它把 states 的 `hand` / `advice` 与 events 的 `frame` / `incident` 对齐到
+手牌粒度，按 `cards_warnings` / `cards_unreliable` / 推断动作 / 丢弃帧占比 /
+疑惑帧 / 建议兜底 / 手牌张数等信号打分排序。分数只用于分流，证据在
+`--explain` 的逐帧记录和 `logs/incidents/` 截图里。
+
+---
+
 ## 7. 参数表
 
 | 参数 | 默认 | 说明 |
@@ -1033,6 +1095,14 @@ All-in 文本）会立即收掉当前手牌，不依赖牌面/庄位变化。
 | `--clicker-config` | `config/clicker_local.json` | 自动点击按钮坐标 JSON |
 | `--clicker-dry-run` | 关 | 只打印将点击的随机坐标，不发送真实鼠标事件 |
 | `--quiet` | 关 | 只打状态行和最终汇总 |
+| `--web` / `--no-web` | 开 | 本地 Web 看板（只读，默认 `127.0.0.1:8020`） |
+| `--web-host` | `127.0.0.1` | 看板监听地址；`0.0.0.0` 会暴露提示词/玩家名 |
+| `--web-port` | `8020` | 看板端口；被占用只告警，识别继续 |
+| `--web-open` | 关 | 启动后自动打开浏览器 |
+| `--events-out` | 派生 | 事件 JSONL；`live.states.jsonl → live.events.jsonl` |
+| `--no-events` | 关 | 不写事件日志（看板仍可用） |
+| `--log-file` | 派生 | 控制台文本；`live.states.jsonl → live.log` |
+| `--no-log-file` | 关 | 不写控制台文本 |
 
 ---
 
@@ -1093,7 +1163,8 @@ worker 采用最新帧优先，处理不过来就丢中间帧，队列深度恒�
 - 断流重连会把下一帧当新基线；若断在牌局中段，可能把全下误判为离座。
 - 默认追加到同一个 JSONL（`--no-append` 覆盖）；同一时间只允许一个 worker 写同一个文件。
 - 严格质量闸意味着摊牌、弹窗、动画帧会被丢弃，输出比实际帧稀疏。
-- 不接后端/前端；当前只有文件和日志。
+- 看板是**本地只读**的（`:8020`），不做投稿/审核/多客户端同步；
+  历史排查仍以 `live.states.jsonl` / `live.events.jsonl` 为准。
 - **AI 建议只在 roi 路线可用**：全图路线没有每座的本街下注，也没有 `hero_turn`，
   算不出跟注额和选项金额。
 - **「轮到我」默认看 hero 头像槽的蓝色下注按钮**（`thresholds.hero_turn_method
