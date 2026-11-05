@@ -41,7 +41,7 @@ import os
 from dataclasses import dataclass
 from typing import Iterable, Sequence
 
-from . import board_range, ranges
+from . import board_range, ranges, strategy_tables
 from .coach import (
     FLUSH, FULL_HOUSE, HIGH_CARD, ONE_PAIR, QUADS, STRAIGHT, STRAIGHT_FLUSH,
     TRIPS, TWO_PAIR,
@@ -140,42 +140,31 @@ class Composition:
 #   2. 量级够用：空气在大注前的继续概率 ~8%，强听 ~85%，差 10 倍；
 #   3. 可手写：5 档成牌 × 动作，改动有据可查。
 
+# 数值本体在 `poker_ocr/tables/range_flow.json`（P0 抽出，每个数字带来源）。
+# 这里只加载；改数值不要改这个文件，改 JSON 或加一个变体再用 profile 切换。
+#
 # 面对下注：call / raise / fold。
-_FACING_PROBS: dict[str, tuple[float, float, float]] = {
-    "nut":    (0.22, 0.70, 0.08),
-    "strong": (0.36, 0.42, 0.22),
-    "medium": (0.45, 0.06, 0.49),
-    "weak":   (0.26, 0.015, 0.725),
-    "air":    (0.06, 0.003, 0.937),
-}
+_FACING_PROBS: dict[str, tuple[float, ...]] = strategy_tables.rows(
+    "range_flow", "facing_probs")
 
 # 无人下注：check / bet。
-_UNFACING_PROBS: dict[str, tuple[float, float]] = {
-    "nut":    (0.22, 0.78),
-    "strong": (0.40, 0.60),
-    "medium": (0.72, 0.28),
-    "weak":   (0.88, 0.12),
-    "air":    (0.96, 0.04),
-}
+_UNFACING_PROBS: dict[str, tuple[float, ...]] = strategy_tables.rows(
+    "range_flow", "unfacing_probs")
 
 # 听牌对四个动作的乘性调整（check / bet / call / raise / fold）。听牌不被
 # 成牌门槛砍掉，靠的就是这里把「跟注 / 下注」抬起来，同时把「弃牌」压掉：
 # 一个纯花听面对 2/3 池下注几乎不会弃，而同样被归进 air 的纯空气会弃。
-_DRAW_PROBS: dict[str, tuple[float, float, float, float, float]] = {
-    "combo":    (0.55, 3.20, 10.00, 4.20, 0.10),
-    "flush":    (0.55, 2.80, 10.00, 3.40, 0.08),
-    "oesd":     (0.65, 2.40, 10.00, 3.60, 0.10),
-    "gutshot":  (0.82, 1.50,  2.00, 1.25, 0.55),
-    "backdoor": (0.94, 1.15,  1.15, 1.02, 0.95),
-    "none":     (1.00, 1.00,  1.00, 1.00, 1.00),
-}
+_DRAW_PROBS: dict[str, tuple[float, ...]] = strategy_tables.rows(
+    "range_flow", "draw_probs")
 
 # 听牌权重的街因子：听牌的价值随「还能发几张牌」线性缩水，就是四二法则——
 # 翻牌 4 张（outs×4）、转牌 2 张（outs×2）、河牌 0 张。绝对倍数 4/2 会在
 # 每个动作的合法动作集归一化里约掉（call/raise/fold 同乘一个数，比例不变），
 # 所以这里存相对翻牌的比值：4/4、2/4、0/4。它作用在**类别权重**上，不作用
 # 在权益上；权益仍由 `hand_vs_ranges` 按剩余牌 runout 精确算。
-_DRAW_STREET_FACTOR: dict[int, float] = {3: 1.0, 4: 0.5, 5: 0.0}
+_DRAW_STREET_FACTOR: dict[int, float] = {
+    int(k): float(v) for k, v in
+    strategy_tables.rows("range_flow", "draw_street_factor").items()}
 
 
 def draw_street_factor(board_len: int) -> float:
@@ -191,51 +180,29 @@ def draw_street_factor(board_len: int) -> float:
 # 用一个 value×1.3 同时作用在两者上做不到。所以把 3 组拆成 5 档，
 # 组级语义仍由 `group_multiplier` 提供（value 取 strong 档）。
 # 列：nut / strong / medium / weak / air。
-_BUCKET_TIER: dict[str, tuple[float, float, float, float, float]] = {
-    #                         nut   strong  medium  weak   air
-    "donk_multiway":       (1.60, 1.35, 0.06, 0.10, 0.20),
-    "donk_hu":             (1.40, 1.20, 0.30, 0.45, 0.50),
-    "lead_multiway":       (1.20, 1.15, 0.90, 0.80, 0.70),
-    "lead_hu":             (1.00, 1.00, 1.00, 1.00, 1.00),
-    "stab":                (0.85, 0.90, 1.05, 1.15, 1.30),
-    "closing_check":       (1.00, 1.00, 1.00, 1.00, 1.00),
-    "facing_bet_closing":  (1.05, 1.00, 1.00, 1.10, 1.20),
-    "facing_bet_open":     (1.15, 1.10, 0.80, 0.90, 0.80),
-    "facing_bet_and_call": (1.35, 1.20, 0.30, 0.40, 0.35),
-    "facing_raise":        (1.50, 1.30, 0.15, 0.25, 0.25),
-}
+_BUCKET_TIER: dict[str, tuple[float, ...]] = strategy_tables.rows(
+    "range_flow", "bucket_tier")
 
 # SPR 只调「主动进攻」的倾向：短码时中等成牌也愿意打光（设计 §4.3）。
-_SPR_AGGRESSION: dict[str, dict[str, float]] = {
-    "<0.5": {"medium": 1.45, "weak": 1.20, "air": 1.10},
-    "0.5-1": {"medium": 1.30, "weak": 1.12, "air": 1.05},
-    "1-2": {"medium": 1.15, "weak": 1.05},
-    "2-4": {},
-    "4+": {"medium": 0.92},
-}
+_SPR_AGGRESSION: dict[str, dict[str, float]] = strategy_tables.rows(
+    "range_flow", "spr_aggression")
 
 # 画像只调两个旋钮（设计 §4.3）：诈唬系数、跟注宽度。
-_ARCH_BLUFF: dict[str, float] = {
-    "station": 0.50, "nit": 0.70, "tag": 0.90, "lag": 1.20,
-    "maniac": 1.80, "unknown": 1.00,
-}
-_ARCH_CALL: dict[str, float] = {
-    "station": 1.35, "nit": 0.80, "tag": 0.95, "lag": 1.05,
-    "maniac": 1.15, "unknown": 1.00,
-}
+_ARCH_BLUFF: dict[str, float] = strategy_tables.rows("range_flow", "arch_bluff")
+_ARCH_CALL: dict[str, float] = strategy_tables.rows("range_flow", "arch_call")
 
 # 似然下限：不把「必弃」写成 0，否则一个动作就能把整类手牌清零。
-_MIN_LIKELIHOOD = 1e-4
+_MIN_LIKELIHOOD = strategy_tables.value("range_flow", "min_likelihood")
 
 # 支撑集下限：连乘后权重低于「最大权重 × 这个比例」的 combo 不进范围。
 # 没有它，1326 个 combo 全非零，宽度永远是 100%，「范围 6%」这个事实就
 # 没法给模型；有它，被压到极低的空气才会真正退出支撑集。取值只影响
 # 渲染宽度与尾部质量（<1%），不影响权益的主排序。
-_SUPPORT_FLOOR = 1e-3
+_SUPPORT_FLOOR = strategy_tables.value("range_flow", "support_floor")
 _SUPPORT_FLOOR_ENV = "RANGE_EVENT_SUPPORT_FLOOR"
 # 温度 α：短线路（≤3 个动作）按精确更新，4 个以上才降温（见
 # `effective_alpha`）。设计稿默认 0.7，实测 3 个动作下会压掉信息，见 §12.4。
-_DEFAULT_ALPHA = 1.0
+_DEFAULT_ALPHA = strategy_tables.value("range_flow", "default_alpha")
 _ALPHA_ENV = "RANGE_EVENT_ALPHA"
 
 
@@ -285,13 +252,9 @@ def bucket_of(event: ActionEvent) -> str:
 # 绝对牌型（「两对」）在干燥面和成花面上不是同一回事：KK66 在 K9642 上
 # 是次坚果，在 K9696+成花面上只是抓诈唬。所以档位按**牌面百分位**定，
 # 牌型名只用于渲染。
-_TIER_PERCENTILE = (
-    (0.02, "nut"),
-    (0.10, "strong"),
-    (0.32, "medium"),
-    (0.68, "weak"),
-    (1.00, "air"),
-)
+_TIER_PERCENTILE = tuple(
+    (float(limit), str(tier))
+    for limit, tier in strategy_tables.items("range_flow", "tier_percentile"))
 
 
 def _tier_for_percentile(better: float) -> str:

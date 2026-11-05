@@ -55,7 +55,7 @@
             "bullets": [
               "计算顺序：牌面 ground truth → 对手范围 → 牌力解析 → 条件弃牌率",
               "缺数据 fail open，绝不阻塞主链路",
-              "字段覆盖几何 / 牌力 / 范围 / 画像 / 桌况 / GTO / board equity"
+              "字段覆盖几何 / 牌力 / 范围 / 画像 / 桌况"
             ],
             "note": "与 advice.py 同属 2026-11-03 第二次拆分。"
           }
@@ -102,7 +102,7 @@
               "hand_vs_ranges.py：对范围权益 / 成牌·听牌·空气分区",
               "opponent_profile.py：逐座位画像 / 桌况统计",
               "preflop_ranges.py：开池范围结论 / 面对加注继续范围",
-              "gto_lookup.py / board_range.py：可选覆盖，查不到就不写"
+              "board_range.py：可选覆盖，查不到就不写"
             ],
             "note": "这些模块不在 prompt/ 包内，但决定事实块的内容。"
           }

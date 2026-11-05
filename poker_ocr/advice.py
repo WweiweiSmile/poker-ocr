@@ -29,6 +29,7 @@ import http.client
 import io
 import json
 import os
+import re
 import threading
 import time
 import urllib.error
@@ -198,8 +199,31 @@ class AIError(RuntimeError):
 # 0.4–1.4s —— urllib 每次 urlopen 都新建连接，等于每给一次建议就多付一次
 # 握手钱。这里按 host 缓存一条 HTTP/1.1 长连接。只在没配代理时用：
 # http.client 不会读 HTTPS_PROXY，配了代理就退回 urllib（保持原有行为）。
-_conn_lock = threading.Lock()
-_conns: dict[tuple[str, str, int], http.client.HTTPConnection] = {}
+# 连接按**线程**缓存：HTTP/1.1 连接不是线程安全的，旧实现用一把全局锁把
+# 整个请求（含 read）锁住，replay 的 unit_workers 并行因此退化成串行。
+# 每个线程一条长连接既保住了握手复用，也让多 worker 真正并发。
+_CONNS = threading.local()
+
+
+def _thread_conns() -> dict:
+    conns = getattr(_CONNS, "conns", None)
+    if conns is None:
+        conns = {}
+        _CONNS.conns = conns
+    return conns
+
+
+def close_thread_connections() -> None:
+    """关闭当前线程缓存的连接（测试/退出用；不影响其它线程）。"""
+    conns = getattr(_CONNS, "conns", None)
+    if not conns:
+        return
+    for conn in conns.values():
+        try:
+            conn.close()
+        except Exception:                 # noqa: BLE001 — 收尾尽力而为
+            pass
+    conns.clear()
 _PROXY_ENV = ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy",
               "ALL_PROXY", "all_proxy")
 
@@ -216,25 +240,25 @@ def _post_keepalive(url: str, data: bytes, headers: dict,
            parts.port or (443 if https else 80))
     conn_cls = http.client.HTTPSConnection if https else http.client.HTTPConnection
     path = urllib.parse.urlunsplit(("", "", parts.path or "/", parts.query, ""))
-    with _conn_lock:
-        conn = _conns.get(key)
-        if conn is None:
-            conn = conn_cls(key[1], key[2], timeout=timeout)
-            _conns[key] = conn
-        elif conn.sock is not None:
-            conn.sock.settimeout(timeout)
-        try:
-            conn.request("POST", path, body=data, headers=headers)
-            resp = conn.getresponse()
-            body = resp.read()
-        except BaseException:
-            # 连接坏了不能留在缓存里，下一次还得付握手钱
-            conn.close()
-            _conns.pop(key, None)
-            raise
-        if resp.will_close:
-            conn.close()
-            _conns.pop(key, None)
+    conns = _thread_conns()
+    conn = conns.get(key)
+    if conn is None:
+        conn = conn_cls(key[1], key[2], timeout=timeout)
+        conns[key] = conn
+    elif conn.sock is not None:
+        conn.sock.settimeout(timeout)
+    try:
+        conn.request("POST", path, body=data, headers=headers)
+        resp = conn.getresponse()
+        body = resp.read()
+    except BaseException:
+        # 连接坏了不能留在缓存里，下一次还得付握手钱
+        conn.close()
+        conns.pop(key, None)
+        raise
+    if resp.will_close:
+        conn.close()
+        conns.pop(key, None)
     if resp.status >= 400:
         # 与 urllib 的口径一致：HTTP 错误带着 code 原样抛出，调用方决定
         # 401/403 脱敏、400 退回非 JSON 模式重试
@@ -523,7 +547,6 @@ class Advice:
     captured_at: str | None = None
     prompt_missing: bool = False
     prompt_missing_reason: str | None = None
-    attempt: int = 1
 
     def to_dict(self) -> dict:
         reads = [_read_snapshot(r) for r in self.opponent_reads]
@@ -580,8 +603,6 @@ class Advice:
             **({"prompt_missing": True} if self.prompt_missing else {}),
             **({"prompt_missing_reason": self.prompt_missing_reason}
                if self.prompt_missing_reason else {}),
-            **({"attempt": self.attempt} if self.attempt and self.attempt != 1
-               else {}),
         }
 
 
@@ -600,8 +621,59 @@ _OPTION_ALIASES = {
 }
 
 
+_AMOUNT_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(?:bb)?", re.IGNORECASE)
+
+
+def _action_hint(text: str) -> str | None:
+    """从自然语言里认出动作类别（用于金额匹配时消歧）。"""
+    key = (text or "").lower().replace(" ", "")
+    if any(word in key for word in ("全下", "allin", "all-in", "shove", "jam")):
+        return "allin"
+    if any(word in key for word in ("弃牌", "fold")):
+        return "fold"
+    if any(word in key for word in ("过牌", "check")):
+        return "check"
+    if any(word in key for word in ("跟注", "补齐", "平跟", "call", "limp")):
+        return "call"
+    if any(word in key for word in ("开池", "加注", "下注", "raise", "bet", "open")):
+        return "raise"
+    return None
+
+
+def _amount_choice(raw: str, by_id: dict) -> str | None:
+    """按「金额」匹配选项：模型常把 label 里的金额写成答案（`加注到 5.5BB`）。
+
+    只在**唯一**能对上时才认；金额重复（封顶后多个档位同一数）或没有动作
+    提示时返回 None，让调用方走兜底，避免猜错动作。
+    """
+    amounts = [float(m.group(1)) for m in _AMOUNT_RE.finditer(raw or "")]
+    if not amounts:
+        return None
+    amount = amounts[-1]
+    cands = [o for o in by_id.values()
+             if o.amount is not None and abs(o.amount - amount) <= 0.011]
+    if not cands:
+        return None
+    hint = _action_hint(raw)
+    if hint == "raise":
+        narrowed = [o for o in cands if o.kind in ("raise", "bet")]
+    elif hint == "allin":
+        narrowed = [o for o in cands if o.kind == "allin"]
+    elif hint is not None:
+        narrowed = [o for o in cands if o.kind == hint]
+    else:
+        narrowed = cands
+    cands = narrowed or cands
+    return cands[0].id if len(cands) == 1 else None
+
+
 def _canonical_choice(choice: str, by_id: dict) -> tuple[str, str | None]:
-    """把常见别名映射回合法 id；返回 (canonical, alias_from)。"""
+    """把常见别名映射回合法 id；返回 (canonical, alias_from)。
+
+    除固定别名外，还接受三类自然写法：``open-5.5``（按金额）、
+    完整 label（``加注到 5.5BB``）和裸金额（``5.5BB``）。这样模型按 label
+    回答案时不会因为 id 是「基础尺度」而直接兜底（翻前兜底 = 弃牌）。
+    """
     raw = (choice or "").strip()
     if raw in by_id:
         return raw, None
@@ -609,6 +681,16 @@ def _canonical_choice(choice: str, by_id: dict) -> tuple[str, str | None]:
     target = _OPTION_ALIASES.get(key)
     if target is None and key.startswith("bet-"):
         target = "raise-" + key[4:]
+    if target is None and (key.startswith("open-") or key.startswith("raise-")):
+        target = _amount_choice(raw, by_id)
+    if target is None:
+        # 完整 label（或 label 的关键片段）也能认：模型最常抄的就是它。
+        exact = [o.id for o in by_id.values()
+                 if raw and (o.label == raw or o.label.startswith(raw))]
+        if len(exact) == 1:
+            target = exact[0]
+    if target is None:
+        target = _amount_choice(raw, by_id)
     if target not in by_id:
         return raw, None
     if key == "check" and by_id[target].kind != "check":
@@ -681,13 +763,14 @@ def _prompt_digest(system: str, user: str) -> str:
         (system + "\n---\n" + user).encode("utf-8")).hexdigest()
 
 
-def _facts_snapshot(sit: Situation) -> dict:
+def _facts_snapshot(sit: Situation, options=None) -> dict:
     """只服务复盘/审计的轻量事实快照。
 
     不 import replay.decisions，避免 live 反向依赖控制台；字段与
     `DecisionPoint` 的 facts 保持同名/同义，方便前端并排看。
     """
     snap = sit.snap
+    option_space = list(sit.options) if options is None else list(options)
     facts = {
         "hand_tier": sit.hand_tier,
         # 这次注入的是哪套牌型规则（听牌/成牌/空气）；与 prompt_version 一起
@@ -713,8 +796,56 @@ def _facts_snapshot(sit: Situation) -> dict:
             + [f"board warning unmapped: {w}"
                for w in unmapped_gt_warnings(sit.ground_truth)]
         ),
-        "options": [option.to_dict() for option in sit.options],
+        "options": [option.to_dict() for option in option_space],
     }
+    # 事实漂移 vs 模型漂移：没有这几个数，A/B 里动作变了只能猜。范围/条件
+    # 弃牌率/牌面排名都是「当时模型看到的数」，一起留档。
+    hr = getattr(sit, "hand_ranges", None)
+    if hr is not None:
+        facts["hand_ranges"] = {
+            "equity": round(hr.equity, 4),
+            "behind_any": round(hr.behind_any, 4),
+            "tie_any": round(hr.tie_any, 4),
+            "samples": hr.samples,
+            "random_opponents": getattr(hr, "random_opponents", 0),
+            "opponents": [
+                {"seat": e.seat_id, "position": e.position,
+                 "range": e.range_id,
+                 "width": round(e.eff_width_pct or e.width_pct, 2),
+                 "behind": round(e.behind, 4), "tie": round(e.tie, 4)}
+                for e in hr.opponents
+            ],
+        }
+    fe = getattr(sit, "fold_eq", None)
+    if fe is not None:
+        facts["fold_eq"] = {
+            "fold_equity": round(fe.fold_equity, 4),
+            "observed": (round(fe.observed, 4)
+                         if fe.observed is not None else None),
+            "combos": fe.combos,
+            "opponents": fe.opponents,
+            "lines": [
+                {"label": line.label, "size": line.size,
+                 "fold_equity": round(line.fold_equity, 4),
+                 "breakeven": round(line.breakeven, 4),
+                 "ev": round(line.ev, 3)}
+                for line in fe.lines
+            ],
+        }
+    gt = getattr(sit, "ground_truth", None)
+    if gt is not None:
+        facts["ground_truth"] = {
+            "made": gt.made.name,
+            "detail": gt.made.detail,
+            "nuts": gt.hero_is_nuts,
+            "beat_pct": round(gt.rank.beat_pct, 4),
+            "beat_at_least_pct": round(gt.rank.beat_at_least_pct, 4),
+            "draws": {
+                "flush": gt.draws.flush_draw,
+                "straight": gt.draws.straight_draw,
+                "outs": gt.draws.total_outs,
+            },
+        }
     return {key: value for key, value in facts.items()
             if value not in (None, "", [], {})}
 
@@ -739,7 +870,8 @@ def _model_params(settings: AISettings | None) -> dict:
 
 def advise(sit: Situation, settings: AISettings | None,
            timeout: float = 20.0, complete=None,
-           prompt_override: tuple[str, str] | None = None) -> Advice:
+           prompt_override: tuple[str, str] | None = None,
+           option_space: list[Option] | None = None) -> Advice:
     """出一次建议。`complete` 可注入（单测用），默认走 complete_json。
 
     只有一套中文 lean：不注入 Math gate，不做弃牌重问，不加载技能库。
@@ -749,9 +881,20 @@ def advise(sit: Situation, settings: AISettings | None,
     `prompt_override=(system, user)` 用于 A/B 的 baseline：直接重放线上/历史
     prompt 原文，跳过 `build_messages()`；选项校验、reason 截断、fallback
     仍走同一套逻辑。
+
+    `option_space` 是 baseline 的**存储选项空间**：重放旧 prompt 时，当前代码
+    的选项 id/金额可能已经变了；用存储的那一套校验，模型按旧 prompt 回的旧
+    id 才不会被误判成「不在选项里」而兜底（否则 baseline 被系统性判差）。
     """
     started = time.monotonic()
-    by_id = {o.id: o for o in sit.options}
+    options = list(option_space) if option_space else list(sit.options)
+    by_id = {o.id: o for o in options}
+
+    def fallback() -> Option:
+        oid = fallback_option(sit)
+        if oid in by_id:
+            return by_id[oid]
+        return next((o for o in sit.options if o.id == oid), sit.options[0])
     prompt_holder: dict[str, str | None] = {}
     raw_holder: dict[str, str | None] = {}
 
@@ -793,7 +936,7 @@ def advise(sit: Situation, settings: AISettings | None,
             raw_response=raw,
             response_sha256=_sha256_text(raw),
             reason_full=reason_full or reason,
-            facts=_facts_snapshot(sit),
+            facts=_facts_snapshot(sit, options),
             model_params=_model_params(settings),
             captured_at=datetime.now().astimezone().isoformat(timespec="seconds"),
             prompt_missing=prompt_missing,
@@ -801,14 +944,14 @@ def advise(sit: Situation, settings: AISettings | None,
         )
 
     if settings is None:
-        return make(by_id[fallback_option(sit)],
+        return make(fallback(),
                     "未配置 AI_SERVER_*，按最保守的默认动作",
                     "fallback", "未配置模型凭据",
                     prompt_missing=True,
                     prompt_missing_reason="no_settings")
     if sit.abnormal_no_opponents:
         # 0 对手异常帧不调模型：任何牌力/赔率/筹码数字都是伪事实。
-        return make(by_id[fallback_option(sit)],
+        return make(fallback(),
                     "状态帧异常（在局对手为 0），按最保守动作",
                     "fallback", "状态帧异常：在局对手为 0",
                     prompt_missing=True,
@@ -847,7 +990,7 @@ def advise(sit: Situation, settings: AISettings | None,
                     reason_full=raw_reason or None)
     except AIError as exc:
         # prompt 已经构建/发出去过，必须保留；raw 可能为空（连接失败）。
-        return make(by_id[fallback_option(sit)],
+        return make(fallback(),
                     "模型不可用，按最保守的默认动作",
                     "fallback", str(exc))
 

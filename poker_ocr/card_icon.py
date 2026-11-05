@@ -105,6 +105,84 @@ def _has_icon(roi: np.ndarray, slot_w: float, slot_h: float,
     return False
 
 
+# ── 空座「+」占位 ────────────────────────────────────────────
+#
+# 玩家中途离桌后，客户端把头像槽换成「虚线圆 + 浅灰十字」的占位（实测
+# table-8p.jpg 的 lowR）。这是**正向证据**：和「名字/筹码读不到」不同，
+# 读不到只说明这一帧被遮挡，不能据此判离桌。
+#
+# 只认一个**居中的细十字**：头像照片里的白字（等待中/弃牌）也会连成
+# 十字形，但它们不是「中心行 + 中心列都填满」的细十字（「中」的中心行
+# 只有竖笔，「弃」更不可能），用 center-line 填充率就能分开。
+PLUS_MIN_SLOT_H = 56             # 与 ICON_MIN_SLOT_H 同口径：太小不判
+PLUS_LIGHT_MIN_V = 140           # 浅灰十字：亮、低饱和
+PLUS_LIGHT_MAX_S = 100
+PLUS_SIZE_RANGE = (0.10, 0.55)   # bbox 边长 / 头像槽边长
+PLUS_ASPECT_RANGE = (0.70, 1.45)
+PLUS_FILL_RANGE = (0.12, 0.35)   # 细十字的 bbox 填充率；实心块/字都更胖
+PLUS_CENTER_TOL = 0.22           # 十字中心离槽中心的最大偏移（相对槽宽）
+PLUS_CENTER_LINE_MIN = 0.80      # 过中心的行/列必须基本填满（细十字的判据）
+
+
+def _is_plus_placeholder(slot: np.ndarray) -> bool:
+    """头像槽里是不是「虚线圆 + 居中细十字」的空座占位。"""
+    if slot.size == 0 or slot.shape[0] < 8 or slot.shape[1] < 8:
+        return False
+    hsv = cv2.cvtColor(slot, cv2.COLOR_BGR2HSV)
+    light = ((hsv[:, :, 2] >= PLUS_LIGHT_MIN_V)
+             & (hsv[:, :, 1] <= PLUS_LIGHT_MAX_S)).astype(np.uint8)
+    h, w = light.shape
+    count, labels, stats, centroids = cv2.connectedComponentsWithStats(light, 8)
+    lo_w, hi_w = PLUS_SIZE_RANGE
+    for i in range(1, count):
+        x, y, cw, ch, area = (int(v) for v in stats[i])
+        if not (w * lo_w <= cw <= w * hi_w and h * lo_w <= ch <= h * hi_w):
+            continue
+        if not (PLUS_ASPECT_RANGE[0] <= cw / float(ch) <= PLUS_ASPECT_RANGE[1]):
+            continue
+        fill = area / float(cw * ch)
+        if not (PLUS_FILL_RANGE[0] <= fill <= PLUS_FILL_RANGE[1]):
+            continue
+        cx, cy = centroids[i]
+        if (abs(cx - w / 2.0) > PLUS_CENTER_TOL * w
+                or abs(cy - h / 2.0) > PLUS_CENTER_TOL * h):
+            continue
+        sub = labels[y:y + ch, x:x + cw] == i
+        ry = min(max(int(round(cy - y)), 0), ch - 1)
+        rx = min(max(int(round(cx - x)), 0), cw - 1)
+        # 细十字：过中心的行和列都被自己填满；文字/照片做不到两条同时满足。
+        if sub[ry].mean() < PLUS_CENTER_LINE_MIN:
+            continue
+        if sub[:, rx].mean() < PLUS_CENTER_LINE_MIN:
+            continue
+        return True
+    return False
+
+
+def read_empty_seats(img: np.ndarray,
+                     profile: Profile) -> dict[str, bool]:
+    """逐座判断头像是不是空座「+」占位（hero 跳过）。
+
+    返回 `{seat_id: True}` 只包含**确认是空座**的座位；没出现的座位不要当
+    空座（缺键 = 不知道/不是）。纯 OpenCV，9 个小裁块 <2ms。
+    """
+    h, w = img.shape[:2]
+    out: dict[str, bool] = {}
+    for seat in profile.seats:
+        sid = seat.seat_id
+        if sid == profile.hero_seat_id:
+            continue                 # hero 的头像槽不会画空座占位
+        x1, y1, x2, y2 = profile.slot_to_px(seat.avatar_slot, (w, h))
+        if (y2 - y1) < PLUS_MIN_SLOT_H:
+            continue                 # 图太小（单测 4x4 桩）→ 不判
+        ix1, iy1 = max(0, x1), max(0, y1)
+        ix2, iy2 = min(w, x2), min(h, y2)
+        slot = img[iy1:iy2, ix1:ix2]
+        if _is_plus_placeholder(slot):
+            out[sid] = True
+    return out
+
+
 def read_card_icons(img: np.ndarray,
                     profile: Profile) -> dict[str, bool | None]:
     """逐座判断头像底角有没有「POKER」手牌图标（hero 跳过，返回 None）。

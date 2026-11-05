@@ -33,7 +33,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .card_icon import read_card_icons
+from .card_icon import read_card_icons, read_empty_seats
 from .dealer import DealerResult, build_detector
 from .frame_state import FrameState, NameTracker, build_state, signature
 from .name_lexicon import NameLexicon
@@ -61,6 +61,9 @@ NAME_PIN_MIN_SCORE = 0.8         # 低于这个分数不钉，等下帧重读到
 # 手牌图标消失要连续几帧才判弃牌：单帧漏检（压缩/动画/遮挡）不该把人判出局。
 # 6Hz 采样下 2 帧≈0.3s，弃牌动画结束后足够确认。
 CARD_ICON_ABSENT_FRAMES = 2
+# 头像「+」占位（空座/离桌）要连续几帧看到才生效：单帧渲染抖动不能把人
+# 判离桌。2 帧 ≈0.3s，离桌动画结束后足够确认。
+EMPTY_SEAT_CONFIRM_FRAMES = 2
 # 头像「在座未入局」文案（等待审核 / 等待中）要连续几帧读到才生效。
 # rec 对这两组字读得很飘（`等待中` → `练待中`/`#待中`），单帧误读会把一个
 # 真在局的人从**名单锁**里踢出去 —— 那一手他就再也不被识别了（不在 roster
@@ -170,6 +173,8 @@ class StateStream:
         self._icon_absent: dict[str, int] = {}
         # 头像「在座未入局」文案的连续帧计数：seat_id → (kind, 连续帧数)。
         self._wait_seen: dict[str, tuple[str, int]] = {}
+        # 头像「+」占位（空座/离桌）的连续帧计数。只有确认后才写 hand_left。
+        self._empty_seat_seen: dict[str, int] = {}
         # 名单锁已经为等待文案推迟了几帧（换手时清零）。
         self._roster_defer = 0
         self.prev_dealer: str | None = None
@@ -260,6 +265,10 @@ class StateStream:
             self.hand_left.difference_update(revived)
             for sid in revived:
                 self.vanish[sid] = 0
+        # 空座/离桌只认头像「+」占位（正向证据）。读不到任何槽位不算离桌：
+        # 那只是遮挡，build_state 会让质量闸把这一帧丢掉，状态保持不变。
+        if sticky:
+            self._track_empty_seats(read_empty_seats(img, self.profile))
         # 先钉这一帧读到的名字/盲注；如果下面查出庄位轮转（换手），
         # _restart_sticky() 会立刻把它们解钉，下一帧重新识别。
         if sticky:
@@ -591,26 +600,45 @@ class StateStream:
             # remember 自己会拒掉「像某个已知名字」的读数，见 NameLexicon.remember
             lexicon.remember(name)
 
+    def _track_empty_seats(self, empty: dict[str, bool]) -> None:
+        """头像「+」占位确认：连续 EMPTY_SEAT_CONFIRM_FRAMES 帧才判离桌。
+
+        只有名单锁定的座位需要跟踪：空座不在 roster 里，本来就不算这一手。
+        确认后写进 `hand_left`，`build_state` 会按「离桌 → 弃牌」处理并保留
+        名字/位置；这一手剩余时间不再要求他的筹码/下注。
+        """
+        if not self._roster_locked:
+            self._empty_seat_seen.clear()
+            return
+        for sid in list(self._empty_seat_seen):
+            if not empty.get(sid):
+                self._empty_seat_seen.pop(sid, None)
+        for sid, is_empty in empty.items():
+            if (not is_empty or sid == self.profile.hero_seat_id
+                    or sid not in self.hand_roster or sid in self.hand_left):
+                continue
+            n = self._empty_seat_seen.get(sid, 0) + 1
+            self._empty_seat_seen[sid] = n
+            if n >= EMPTY_SEAT_CONFIRM_FRAMES:
+                self.hand_left.add(sid)
+                self.vanish[sid] = 0
+
     def _track_vanished(self, state: FrameState) -> None:
-        """整座消失确认：连续 max_vanish 帧不见才算人走了。
+        """整座消失确认（只服务**没有名单锁**的离线/旧链路）。
+
+        live 锁定 roster 后不再用「读不到 = 人走了」推断离桌：名单里的座位
+        默认在局，离桌只认头像「+」占位（`_track_empty_seats`）。读不到只说明
+        这一帧被遮挡，由质量闸丢帧，状态不变。
 
         非 live / 没锁 roster 时保持旧行为：遍历上一帧在场的人，只报 vanished
-        错误、整帧丢弃。锁定 roster 后只跟踪**这一手开始时在桌的人**：
-        确认离开的座位标成 left/folded（离桌必然弃牌），保留名字/位置，
-        本手后续不再参与行动线，也不会再因缺筹码丢帧。
-
-        换手时 roster 已经重建：上一手有、这一手没坐下的人不在新 roster 里，
-        不能算「消失」，否则新一手开局会无谓地丢几帧。
+        错误、整帧丢弃。
         """
         if self.prev is None:
             return
         if self._roster_locked:
-            seats = [sid for sid in self.hand_roster
-                     if sid != state.hero_seat_id
-                     and sid not in self.hand_left]
-        else:
-            seats = [p.seat_id for p in self.prev.players
-                     if p.in_hand and not p.left]
+            return
+        seats = [p.seat_id for p in self.prev.players
+                 if p.in_hand and not p.left]
         for sid in seats:
             p_now = next((p for p in state.players if p.seat_id == sid), None)
             if p_now is None:
@@ -619,38 +647,8 @@ class StateStream:
                 self.vanish[sid] = 0
                 continue
             self.vanish[sid] += 1
-            confirmed_left = (self._roster_locked
-                              and sid in self.hand_roster
-                              and sid != state.hero_seat_id
-                              and self.vanish[sid] > self.max_vanish)
-            if confirmed_left:
-                self._mark_left(state, p_now)
-                self.vanish[sid] = 0
-            elif self.vanish[sid] <= self.max_vanish:
+            if self.vanish[sid] <= self.max_vanish:
                 state.errors.append(f"vanished:{sid}")
-
-    def _mark_left(self, state: FrameState, p) -> None:
-        """确认中途离桌：按弃牌处理，但保留名字/位置到这一手结束。"""
-        sid = p.seat_id
-        name, position = self.hand_roster.get(sid, (p.name, p.position))
-        self.hand_left.add(sid)
-        p.name = name
-        p.position = position
-        p.in_hand = True
-        p.fold = True
-        p.status = "folded"
-        p.left = True
-        p.stack = None
-        p.bet = 0.0
-        p.action = None
-        p.all_in = False
-        p.equity = None
-        # 空座位的筹码/下注槽常被 rec 读成 `--`/`·`：这些 note 对离桌的人
-        # 没有意义，去掉避免污染状态和画像。
-        p.notes = [n for n in p.notes
-                   if not n.startswith(("chip:", "bet:", "equity:"))]
-        p.notes.append("本手中途离桌，按弃牌处理")
-        state.players_in_hand = sum(1 for q in state.players if q.in_hand)
 
     @staticmethod
     def _shown_seats(extra_signature: tuple | None) -> set[str]:
@@ -765,6 +763,7 @@ class StateStream:
         self._all_in_gone.clear()
         self._icon_absent.clear()
         self._wait_seen.clear()
+        self._empty_seat_seen.clear()
         self._roster_defer = 0
         # 换手：上一手的座位身份锁作废，下一帧按当前画面重新锁 roster。
         # 中途离桌/新入座只在一手内沿用旧信息，换手后必须重新识别。
@@ -820,6 +819,7 @@ class StateStream:
         self._all_in_gone.clear()
         self._icon_absent.clear()
         self._wait_seen.clear()
+        self._empty_seat_seen.clear()
         self._roster_defer = 0
         self.prev_dealer = None
         self.vanish.clear()

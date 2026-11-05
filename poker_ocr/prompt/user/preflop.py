@@ -9,7 +9,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from ...hand_track import PREFLOP, ActionRecord, HandSnapshot
+from ...hand_track import (
+    PREFLOP, ActionRecord, HandSnapshot, preflop_aggressive,
+)
 from ...opponent_profile import AGGRESSIVE_ARCHETYPES
 from ...positions import BB, POSITIONS_BY_TABLE_SIZE, SB
 from ...pot_math import (
@@ -125,9 +127,7 @@ def _facing_raise_zh(sit: Situation) -> list[str]:
     if not hero_pos:
         return []
     acts = list(snap.actions_of(PREFLOP))
-    raises = [a for a in acts
-              if a.action in ("raise", "bet")
-              or (a.action == "call" and a.all_in)]
+    raises = preflop_aggressive(acts)
     if not raises:
         return []          # 形状说有加注、动作线却没记到：不猜
 

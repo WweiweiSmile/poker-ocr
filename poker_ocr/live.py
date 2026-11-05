@@ -206,9 +206,23 @@ def _confirm_key_choice(key: str) -> bool | None:
     return None
 
 
-def _ask_confirm_line(log: Callable[[str], None]) -> bool:
+def _ask_confirm_line(log: Callable[[str], None],
+                      deadline: float | None = None) -> bool:
     """非 TTY（管道/重定向）下按行读确认：整行只有 y/n 才算有效。"""
     while True:
+        if deadline is not None:
+            remain = max(deadline - time.monotonic(), 0.0)
+            try:
+                import select
+                stream = sys.stdin
+                ready = (select.select([stream], [], [], remain)[0]
+                         if stream is not None and hasattr(stream, "fileno")
+                         else [stream])
+            except (ImportError, OSError, ValueError):
+                ready = [sys.stdin]
+            if not ready:
+                log("  [确认] 等待超时，按拒绝处理")
+                return False
         try:
             line = input()
         except (EOFError, OSError):
@@ -222,7 +236,8 @@ def _ask_confirm_line(log: Callable[[str], None]) -> bool:
         return choice
 
 
-def _ask_confirm(log: Callable[[str], None]) -> bool:
+def _ask_confirm(log: Callable[[str], None],
+                 timeout: float | None = None) -> bool:
     """读取确认键：只识别 y / n，其他键直接忽略。
 
     TTY 下用 cbreak 单键读取（不需要回车），并在读取前 `tcflush` 清空终端
@@ -233,8 +248,10 @@ def _ask_confirm(log: Callable[[str], None]) -> bool:
     if stream is None:
         log("  [确认] 标准输入不可用，按拒绝处理")
         return False
+    deadline = (time.monotonic() + float(timeout)
+                if timeout is not None and timeout > 0 else None)
     if not stream.isatty():
-        return _ask_confirm_line(log)
+        return _ask_confirm_line(log, deadline=deadline)
 
     try:
         import termios
@@ -256,6 +273,16 @@ def _ask_confirm(log: Callable[[str], None]) -> bool:
         except termios.error:
             pass
         while True:
+            if deadline is not None:
+                remain = max(deadline - time.monotonic(), 0.0)
+                try:
+                    import select
+                    ready, _, _ = select.select([fd], [], [], remain)
+                except (ImportError, OSError, ValueError):
+                    ready = [fd]
+                if not ready:
+                    log(f"  [确认] 等待超时（{timeout:g}s），按拒绝处理")
+                    return False
             try:
                 raw = os.read(fd, 1)
             except OSError:
@@ -992,6 +1019,7 @@ class LiveProcessor:
                  advice_runner: AdviceRunner | None = None,
                  clicker: Clicker | None = None,
                  confirm_click: bool = False,
+                 confirm_timeout: float = 6.0,
                  min_advice_confidence: float = 0.0,
                  table_dynamics_loader: Callable[[], TableDynamics] | None = None,
                  table_dynamics_text: str = "",
@@ -1048,6 +1076,9 @@ class LiveProcessor:
             raise ValueError("min_advice_confidence 应在 0–1 之间")
         # 0 = 不启用。>0 时，模型给了置信度且低于阈值的建议只显示不自动点。
         self.min_advice_confidence = confidence
+        # 终端确认最多等多久（秒）；0 = 一直等。默认 6s，避免把 OCR 主循环
+        # 无限期挂在一次按键上（客户端回合时限通常 10–15s）。
+        self.confirm_timeout = max(0.0, float(confirm_timeout))
         self._pending_decision_key: tuple | None = None
         self._clicked_keys: set[tuple] = set()
         self.click_count = 0
@@ -1067,11 +1098,16 @@ class LiveProcessor:
         # 已结束手牌的本地队列：手牌库通过 outbox 异步取，不阻塞打牌。
         self.hand_outbox = hand_outbox
         self.profile_updates = 0
+        # 决策点数（投递过几次）与真正拿到的建议数（模型/兜底都算）分开：
+        # 旧 summary 的 advice_count 实际是前者，排查「投了但没回来」时会误读。
         self.advice_count = 0
+        self.advice_done = 0
         # hand_id → 这一手已经给出的建议（按时间顺序）。换手 / 退出时并进
         # `hand` 记录，让「完整行动线 + 模型建议」落在同一个手牌记忆条目里，
         # 复盘时不用再按 hand_id 去 join 两条独立记录。
         self._hand_advice: dict[str, list[dict]] = {}
+        # 同一手上一街给出的建议（喂回提示词的「上一街我的建议」段）。
+        self._last_advice = None
         self.clock = clock
         self.log = log
 
@@ -1332,7 +1368,9 @@ class LiveProcessor:
         cards_warnings = tuple(getattr(cards, "warnings", ()) or ())
         point = self.hand_tracker.observe(
             outcome.state, hero_codes, board,
-            cards_reliable=cards_reliable, cards_warnings=cards_warnings)
+            cards_reliable=cards_reliable, cards_warnings=cards_warnings,
+            allow_advice=(self.advice_runner is not None
+                          and not getattr(self.advice_runner, "busy", False)))
         if (point is None and outcome.state.hero_turn is True
                 and not cards_reliable):
             self._log_cards_skip(outcome.state, cards_warnings)
@@ -1393,10 +1431,15 @@ class LiveProcessor:
                                  f"{type(exc).__name__}: {exc}")
                 # 一个坏快照不能把整条拉流链路带下去
                 try:
+                    previous = (self._last_advice
+                                if self._last_advice is not None
+                                and self._last_advice.hand_id == point.hand_id
+                                else None)
                     situation = build_situation(
                         point, table_dynamics=dynamics,
                         opponent_reads=reads.values(),
                         table_stats=table_stats,
+                        previous=previous,
                         include_strength=False)
                 except Exception as exc:      # noqa: BLE001
                     self.log(f"  [建议] 局面构建失败：{type(exc).__name__}: {exc}")
@@ -1480,6 +1523,8 @@ class LiveProcessor:
                 if click is not None:
                     data["click"] = click.to_dict()
                 self._hand_advice.setdefault(data["hand_id"], []).append(data)
+                self.advice_done += 1
+                self._last_advice = advice
                 self.writer.write({"type": "advice", "ts": _iso_now(), **data})
                 self._log_advice(advice)
                 if click is not None:
@@ -1540,7 +1585,7 @@ class LiveProcessor:
         prompt = (f"  [确认] {advice.street} 建议 {option.label}{amount}，"
                   f"是否执行？只识别 y / n（其他键忽略）：")
         self.log(prompt)
-        return _ask_confirm(self.log)
+        return _ask_confirm(self.log, timeout=self.confirm_timeout)
 
     def _maybe_click(self, advice, *, state, allow_click: bool):
         """执行自动点击；未启用点击器时返回 None（JSONL 不出现 click 键）。
@@ -1648,10 +1693,13 @@ class LiveProcessor:
             return "advice_error"
         if advice.source != "model" and not self.clicker.config.allow_fallback:
             return "fallback_advice"
-        if (self.min_advice_confidence > 0
-                and advice.confidence is not None
-                and advice.confidence < self.min_advice_confidence):
-            return "low_confidence"
+        if self.min_advice_confidence > 0:
+            # 没给 confidence = 无法验证，按不达标处理（fail closed）。提示词里
+            # confidence 是可选字段；旧口径把「没给」当成「不受限」，这个开关
+            # 对大多数回复等于没生效。
+            if (advice.confidence is None
+                    or advice.confidence < self.min_advice_confidence):
+                return "low_confidence"
         if not allow_click:
             return "frame_not_clickable"
         if state is None or not getattr(state, "ok", False):
@@ -2171,9 +2219,12 @@ def build_parser() -> argparse.ArgumentParser:
                     help="自动点击的按钮坐标 JSON（默认 config/clicker_local.json）")
     ap.add_argument("--clicker-dry-run", action="store_true",
                     help="只打印将要点到的随机坐标，不发送真实鼠标事件")
+    ap.add_argument("--confirm-timeout", type=float, default=6.0,
+                    help="终端确认最多等几秒（0 = 一直等）；超时按拒绝处理，"
+                         "避免把识别主循环挂在一次按键上")
     ap.add_argument("--min-advice-confidence", type=float, default=0.0,
-                    help="自动点击的最低置信度（0 = 关闭）；低于该值时只显示建议，"
-                         "不自动点击。模型没给 confidence 时不受此限")
+                    help="自动点击的最低置信度（0 = 关闭）；低于该值或模型没给"
+                         "confidence 时只显示建议，不自动点击")
     ap.add_argument("--quiet", action="store_true", help="只打状态行和最终汇总")
     return ap
 
@@ -2187,6 +2238,8 @@ def _validate_args(ap: argparse.ArgumentParser, args) -> None:
         ap.error("--settle-max 不能小于 --settle")
     if args.max_frame_age <= 0:
         ap.error("--max-frame-age 必须大于 0")
+    if args.confirm_timeout < 0:
+        ap.error("--confirm-timeout 不能为负数（0 = 一直等）")
     if args.stable_frames < 1:
         ap.error("--stable-frames 至少为 1")
     if args.card_confirm_frames < 1:
@@ -2341,6 +2394,12 @@ def main(argv: list[str] | None = None) -> int:
                  f"批量 {ingest_config.batch}）")
         else:
             _log(f"[手牌] outbox {hand_outbox.root}（自动入库已关闭）")
+    # 手牌跟踪不依赖模型：关掉 AI 也要沉淀手牌/画像/outbox。模型只是
+    # 「额外给一条建议」，不能让它决定有没有手牌库（P2-4）。
+    hand_tracker = LiveHandTracker(confirm_frames=args.ai_confirm)
+    _log("[手牌] 没读到自己手牌时："
+         + ("也记录（观察对手）" if args.record_without_hero
+            else "默认跳过换手空档（--record-without-hero 可开启）"))
     if args.ai_advice:
         if not env_load.found:
             _log("[建议] 没找到 .env（找过 "
@@ -2368,12 +2427,8 @@ def main(argv: list[str] | None = None) -> int:
                 "AI 建议永远不会触发。请把 thresholds.hero_turn_method 设为 "
                 "blue_button（用 hero 头像槽判蓝色下注按钮），或补上 hero_turn_probe")
         advice_runner = AdviceRunner(settings, timeout=args.ai_timeout, log=_log)
-        hand_tracker = LiveHandTracker(confirm_frames=args.ai_confirm)
-        _log("[手牌] 没读到自己手牌时："
-             + ("也记录（观察对手）" if args.record_without_hero
-                else "默认跳过换手空档（--record-without-hero 可开启）"))
         _log(f"[建议] 提示词=中文 lean {PROMPT_VERSION}"
-             f"（事实优先；无范围表/价值指令/GTO）")
+             f"（事实优先；无范围表/价值指令）")
         dynamics = load_table_dynamics()
         table_dynamics_text = dynamics.text
         if dynamics.found:
@@ -2547,6 +2602,7 @@ def main(argv: list[str] | None = None) -> int:
         hand_tracker=hand_tracker, advice_runner=advice_runner,
         record_without_hero=args.record_without_hero,
         clicker=clicker, confirm_click=not args.no_confirm,
+        confirm_timeout=args.confirm_timeout,
         min_advice_confidence=args.min_advice_confidence,
         table_dynamics_loader=load_table_dynamics if args.ai_advice else None,
         table_dynamics_text=table_dynamics_text,
@@ -2603,13 +2659,6 @@ def main(argv: list[str] | None = None) -> int:
                     status_base = _log_status(processor, reader, started_mono,
                                               status_base)
                     last_status = now
-                continue
-
-            # 模型生成建议期间不识别新帧：等待时画面只会越来越旧，继续 OCR
-            # 既浪费 CPU，也会让下一步决策基于过时画面。这里只把帧标记为已
-            # 消费，结果回来后直接处理邮箱里最新的一帧。
-            if processor.waiting_for_advice:
-                last_seq = packet.seq
                 continue
 
             if args.rotate:
@@ -2735,6 +2784,7 @@ def main(argv: list[str] | None = None) -> int:
             "eff_hz": round(processor.processed / elapsed, 2) if elapsed else 0,
             "reconnects": reader.reconnects,
             "advice_count": processor.advice_count,
+            "advice_done": processor.advice_done,
             **({"settle_blocks": settle_gate.blocks}
                if settle_gate is not None else {}),
             **processor.summary(),

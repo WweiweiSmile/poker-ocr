@@ -618,6 +618,20 @@ def test_tracker_decision_point_confirmed_and_deduped() -> None:
           f"转街后的新决策点应再给一次，实际 {p2}")
 
 
+def test_decision_point_deferred_while_advice_busy() -> None:
+    """生成建议期间继续识别，但不投新决策点；结束后同一回合能补投。"""
+    tr = LiveHandTracker(confirm_frames=1)
+    base = (player("hero", position="BTN"),
+            player("a", name="老王", position="BB"))
+    feed(tr, state(*base, pot=3.0, pbs=3.0), ["Ah", "Kd"], [])
+    turn = state(*base, pot=3.0, pbs=3.0, hero_turn=True)
+    check(tr.observe(turn, ["Ah", "Kd"], [], allow_advice=False) is None,
+          "生成期间不该投新决策点")
+    point = tr.observe(turn, ["Ah", "Kd"], [], allow_advice=True)
+    check(point is not None,
+          "生成结束后同一个决策点应能补投（不能被标成已建议）")
+
+
 def test_tracker_does_not_advise_closed_preflop_round() -> None:
     """跟完 3-bet 后按钮残留：to_call=0 的翻前残局不能再给 open 建议（h39）。
 
@@ -673,6 +687,54 @@ def test_snapshot_marks_limped_pot() -> None:
                  ["4s", "4h"], [])
     check(point is not None and point.preflop_shapes == ("limped",),
           f"一次溜入应判 limped，实际 {getattr(point, 'preflop_shapes', None)}")
+
+
+def test_snapshot_marks_limped_pot_when_call_badges_missed() -> None:
+    """call 徽章漏读、但两座下注额 = 1BB：仍判 limped，且 pot_type 同源。
+
+    旧实现形态只看动作徽章 → 判「无人入池」，而 count_limpers 用下注额
+    判出 2 个溜入者，同一份 prompt 同时写「无人入池」和「2 个溜入者」。
+    """
+    tr = LiveHandTracker(confirm_frames=1)
+    players = (player("hero", position="CO", stack=100.0),
+               player("a", position="UTG", bet=1.0, name="老王"),
+               player("b", position="HJ", bet=1.0, name="小李"),
+               player("c", position="BTN", stack=100.0, name="小张"))
+    feed(tr, state(*players, pot=3.5, pbs=1.5), ["4s", "4h"], [])
+    point = feed(tr, state(*players, pot=3.5, pbs=1.5, hero_turn=True),
+                 ["4s", "4h"], [])
+    check(point is not None and point.preflop_shapes == ("limped",),
+          f"下注额兜底应判 limped：{getattr(point, 'preflop_shapes', None)}")
+    sit = build_situation(point)
+    check(sit.pot_type == "limped pot",
+          f"底池类型应与形态同源：{sit.pot_type}")
+    user = render_facts_zh(sit)
+    check("前面溜入人数：2" in user, f"应写出 2 个溜入者：\n{user}")
+    check("底池类型：溜入池" in user, f"底池类型应为溜入池：\n{user}")
+
+
+def test_call_all_in_below_level_is_not_a_raise() -> None:
+    """短码「跟注全下」没抬高水位 → 不是加注，仍是单加注池。
+
+    旧实现把 `call + all_in` 无条件算加注，单加注池会被判成 3-bet 池，
+    形态/继续范围/选项全跟着错。
+    """
+    tr = LiveHandTracker(confirm_frames=1)
+    base = (player("hero", position="CO", stack=100.0),
+            player("a", position="UTG", bet=6.0, action="raise", name="老王"),
+            player("b", position="BB", bet=1.0, name="小张"))
+    feed(tr, state(*base, pot=7.5, pbs=1.5), ["4s", "4h"], [])
+    # 第二帧：BB 只有 3BB，跟注全下（低于当前 6BB 水位）。
+    short = (base[0], base[1],
+             player("b", position="BB", bet=3.0, action="call",
+                    all_in=True, name="小张"))
+    point = feed(tr, state(*short, pot=9.5, pbs=1.5, hero_turn=True),
+                 ["4s", "4h"], [])
+    check(point is not None and point.preflop_shapes == ("single-raise",),
+          f"跟注全下不应升级成 three-bet：{getattr(point, 'preflop_shapes', None)}")
+    sit = build_situation(point)
+    check(sit.pot_type == "single-raised pot",
+          f"底池类型仍是单加注池：{sit.pot_type}")
 
 
 def test_hand_record_includes_shown_cards() -> None:
@@ -1698,7 +1760,7 @@ def test_prompt_has_no_rule_layers() -> None:
     sit = build_situation(make_point(to_call=4.0, pot=10.0, hero_stack=90.0))
     system, user = build_messages(sit)
     for banned in ("Value directive", "Math gate", "Preflop ranges",
-                   "Coach Skill Catalog", "RFI by position", "GTO baseline"):
+                   "Coach Skill Catalog", "RFI by position"):
         check(banned not in system, f"system 不该含 {banned}")
         check(banned not in user, f"facts 不该含 {banned}")
     check("事实优先级" in system, "system 应说明事实优先级")
@@ -2152,13 +2214,23 @@ def test_pool_prior_fills_missing_seat_data() -> None:
     check("池子先验" not in single_user,
           "事实块已给逐尺寸 EV 时不该再给池子均值")
 
-    mw = build_situation(make_point(opponents=(
-        OpponentSnapshot("a", "老王", "BB", 97.0, 0.0, False),
-        OpponentSnapshot("b", "小李", "CO", 97.0, 0.0, False))))
+    mw_opps = (OpponentSnapshot("a", "老王", "BB", 97.0, 0.0, False),
+               OpponentSnapshot("b", "小李", "CO", 97.0, 0.0, False))
+    mw = build_situation(make_point(opponents=mw_opps))
     _, mw_user = build_messages(mw)
-    check("池子先验" in mw_user, "多人池缺逐尺寸 EV 时应给池子先验兜底")
-    check("1/3 池需要 25%" in mw_user, "要先给盈亏平衡对照再给结论")
-    check("不是这个座位" in mw_user, "必须写明这是池子均值，不是这个座位")
+    # 有条件弃牌率时，它已经是同一节点的结论来源，不再补池子均值。
+    check(mw.fold_eq is not None, "多人池应有条件弃牌率")
+    check("池子先验" not in mw_user,
+          "已有条件弃牌率时不该再给池子先验（两个口径会打架）")
+
+    # 范围不可用时（fold_eq 为 None）才退回池子先验。
+    with patch.dict("os.environ", {"HAND_VS_RANGES_ENABLED": "0"}):
+        blind = build_situation(make_point(opponents=mw_opps))
+    _, blind_user = build_messages(blind)
+    check(blind.fold_eq is None, "范围关闭时应没有条件弃牌率")
+    check("池子先验" in blind_user, "没有条件弃牌率时应给池子先验兜底")
+    check("1/3 池需要 25%" in blind_user, "要先给盈亏平衡对照再给结论")
+    check("不是这个座位" in blind_user, "必须写明这是池子均值，不是这个座位")
 
     facing = build_situation(make_point(to_call=4.0, pot=10.0))
     _, facing_user = build_messages(facing)
@@ -2545,13 +2617,14 @@ def test_facts_include_spot_spr_and_position() -> None:
                    OpponentSnapshot("b", "小李", "CO", 100.0, 0.0, True)))
     sit = build_situation(point)
     check(sit.pot_type == "single-raised pot", f"底池类型不对：{sit.pot_type}")
-    check(sit.spr == 9.0, f"SPR 应为 9：{sit.spr}")
+    # SPR 是街初口径：有效 90 / 街初底池 6 = 15（不是 90 / 当前底池 10）。
+    check(sit.spr == 15.0, f"SPR 应为 90 / 6 = 15：{sit.spr}")
     check(sit.in_position is True, f"BTN 应是有位置：{sit.in_position}")
     check(sit.players_left_to_act == 0,
           f"BTN 身后应为 0 人：{sit.players_left_to_act}")
     user = render_facts_zh(sit)
     check("底池类型：单加注池" in user, f"事实里应有底池类型：\n{user}")
-    check("SPR 9" in user, f"事实里应有 SPR：\n{user}")
+    check("SPR 15" in user, f"事实里应有 SPR：\n{user}")
     check("Hero 有位置" in user, f"事实里应写明位置：\n{user}")
     system, _ = build_messages(sit)
     check("不得依据桌型、盲注或行动顺序自行推测具体谁在 Hero 身后" in system,
@@ -2756,6 +2829,109 @@ def test_advise_rejects_unknown_option() -> None:
     check(advice.error and "选项" in advice.error, f"应记下原因：{advice.error}")
 
 
+def test_advise_accepts_label_and_amount_answers() -> None:
+    """模型按 label/金额回答案（`加注到 5.5BB` / `open-5.5` / `5.5BB`）要能认。"""
+    point = make_point(
+        street="preflop", board=(), hero_position="CO",
+        to_call=1.0, pot=1.5, pot_before_street=1.5,
+        preflop_shapes=("unopened",), hero_is_pfr=False,
+        streets=(), cbet_spot=False)
+    sit = build_situation(point)
+    labels = {o.label for o in sit.options}
+    check(any("5.5BB" in label for label in labels),
+          f"应有 5.5BB 的开池档：{sorted(labels)}")
+    for answer in ("加注到 5.5BB", "open-5.5", "5.5BB"):
+        adv = advise(sit, SETTINGS,
+                     complete=lambda *a, _ans=answer, **k: {
+                         "option": _ans, "reason": "x"})
+        check(adv.source == "model",
+              f"{answer!r} 应被接受，实际 {adv.source}/{adv.error}")
+        check(adv.option.id.startswith("open-"),
+              f"{answer!r} 应映射到开池档：{adv.option}")
+        check(adv.alias_from == answer,
+              f"应记下原词：{adv.alias_from!r}")
+
+
+def test_advice_facts_capture_range_and_fold_equity() -> None:
+    """facts 要留范围/条件弃牌率/牌面排名，A/B 才能分清事实漂移还是模型漂移。"""
+    sit = build_situation(make_point(to_call=2.0, pot=8.0))
+    check(sit.hand_ranges is not None and sit.fold_eq is not None,
+          "这个局面应有范围与条件弃牌率")
+    adv = advise(sit, SETTINGS,
+                 complete=lambda *a, **k: {"option": "call", "reason": "x"})
+    facts = adv.to_dict().get("facts") or {}
+    check("hand_ranges" in facts and "equity" in facts["hand_ranges"],
+          f"facts 应带范围权益：{sorted(facts)}")
+    check("fold_eq" in facts and "fold_equity" in facts["fold_eq"],
+          f"facts 应带条件弃牌率：{sorted(facts)}")
+    check("ground_truth" in facts and "made" in facts["ground_truth"],
+          f"facts 应带牌面事实：{sorted(facts)}")
+
+
+def test_system_prompt_worst_case_stays_bounded() -> None:
+    """短码+前注+多人池+3-bet+河牌叠加时，system 也要有上界。
+
+    默认局面只测 < 6000；场景段叠加的最坏情况才是延迟真正吃紧的地方。
+    """
+    from poker_ocr.hand_track import (
+        ActionRecord, OpponentSnapshot, StreetRecord,
+    )
+
+    opps = tuple(OpponentSnapshot(f"s{i}", f"V{i}", pos, 18.0, 0.0, False)
+                 for i, pos in enumerate(("UTG", "HJ", "CO", "BTN"), start=1))
+    point = make_point(
+        street="river", board=("Kh", "Qh", "2h", "9s", "3h"),
+        hero_cards=("Ah", "Jh"), hero_position="SB", hero_stack=10.0,
+        hero_bet=8.0, hero_invested=18.0, to_call=0.0, pot=114.0,
+        pot_before_street=114.0, table_size=9, players_dealt=9,
+        blinds=Blinds(0.5, 1.0, 0.5, "1/2(0.5)"),
+        opponents=opps, preflop_shapes=("three-bet",), hero_is_pfr=True,
+        streets=(
+            StreetRecord("preflop", 2.0, (
+                ActionRecord("preflop", "s1", "V1", "UTG", "raise", 5.5),
+                ActionRecord("preflop", "hero", None, "SB", "raise", 16.0,
+                             is_hero=True),
+                ActionRecord("preflop", "s2", "V2", "HJ", "call", 16.0),
+                ActionRecord("preflop", "s3", "V3", "CO", "call", 16.0),
+                ActionRecord("preflop", "s4", "V4", "BTN", "call", 16.0))),
+            StreetRecord("flop", 66.0, (
+                ActionRecord("flop", "hero", None, "SB", "bet", 12.0,
+                             is_hero=True),
+                ActionRecord("flop", "s2", "V2", "HJ", "call", 12.0),
+                ActionRecord("flop", "s3", "V3", "CO", "call", 12.0))),
+            StreetRecord("turn", 102.0, (
+                ActionRecord("turn", "hero", None, "SB", "bet", 6.0,
+                             all_in=True, is_hero=True),)),
+            StreetRecord("river", 114.0, ())))
+    system, user = build_messages(build_situation(point))
+    check(len(system) < 7000,
+          f"最坏局面 system 应 < 7000，实际 {len(system)}")
+    check(len(system) + len(user) < 10000,
+          f"最坏局面 system+user 应 < 10000，实际 {len(system) + len(user)}")
+
+
+def test_advise_baseline_uses_stored_option_space() -> None:
+    """baseline 重放旧 prompt 时用存储的选项空间校验 id（P1-6）。"""
+    from poker_ocr.options import Option
+
+    point = make_point(
+        street="preflop", board=(), hero_position="CO",
+        to_call=1.0, pot=1.5, pot_before_street=1.5,
+        preflop_shapes=("unopened",), hero_is_pfr=False,
+        streets=(), cbet_spot=False)
+    sit = build_situation(point)
+    stored = [Option("open-2.5", "开池到 5.5BB", "raise", 5.5),
+              Option("fold", "弃牌", "fold")]
+    answer = lambda *a, **k: {"option": "open-2.5", "reason": "x"}  # noqa: E731
+    adv = advise(sit, SETTINGS, complete=answer, option_space=stored)
+    check(adv.source == "model" and adv.option.id == "open-2.5",
+          f"存储选项空间里的旧 id 应被接受：{adv.source}/{adv.option.id}")
+    # 不传存储空间时，当前代码的选项里没有 open-2.5 → 兜底。
+    adv2 = advise(sit, SETTINGS, complete=answer)
+    check(adv2.source == "fallback",
+          f"当前选项空间里没有的 id 应兜底：{adv2.source}")
+
+
 def test_advise_fallback_without_settings() -> None:
     sit = build_situation(make_point(to_call=0.0))
     advice = advise(sit, None)
@@ -2808,10 +2984,62 @@ def test_post_json_reuses_connection() -> None:
     finally:
         srv.shutdown()
         srv.server_close()
-        with advice_mod._conn_lock:
-            for conn in advice_mod._conns.values():
-                conn.close()
-            advice_mod._conns.clear()
+        advice_mod.close_thread_connections()
+
+
+def test_post_json_keeps_one_connection_per_thread() -> None:
+    """不同线程各用各的长连接：全局锁会让 replay 的并行 worker 串行化。"""
+    import threading as th
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+        connections = 0
+
+        def setup(self) -> None:
+            type(self).connections += 1
+            super().setup()
+
+        def do_POST(self) -> None:
+            n = int(self.headers.get("Content-Length", 0))
+            self.rfile.read(n)
+            body = b'{"ok": true}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args) -> None:
+            pass
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    th.Thread(target=srv.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{srv.server_port}/v1"
+    headers = {"Content-Type": "application/json"}
+    errors: list[BaseException] = []
+
+    def worker() -> None:
+        try:
+            for _ in range(2):
+                advice_mod._post_json(url, {"i": 1}, headers, 5.0)
+        except BaseException as exc:      # noqa: BLE001
+            errors.append(exc)
+
+    try:
+        with patch.object(advice_mod, "_proxy_configured", lambda: False):
+            threads = [th.Thread(target=worker) for _ in range(2)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=5.0)
+        check(not errors, f"并发请求不应失败：{errors}")
+        check(Handler.connections == 2,
+              f"每个线程应各建一条连接，实际 {Handler.connections} 条")
+    finally:
+        srv.shutdown()
+        srv.server_close()
+        advice_mod.close_thread_connections()
 
 
 def test_ai_settings_reads_referer_and_title() -> None:
@@ -3570,8 +3798,8 @@ def test_complete_json_returns_usage_and_finish_reason() -> None:
 def test_effective_stack_includes_current_street_bet() -> None:
     """对手下注 27.5、后手 24：有效筹码是 51.5BB，不是 24BB。
 
-    a334：旧口径只取后手 → 有效筹码 24BB、SPR 0.5，模型因此全下；真实
-    能打到的是 51.5BB / 45 = 1.1。
+    a334：旧口径只取后手 → 有效筹码 24BB，模型因此全下；真实能打到的是
+    51.5BB。SPR 按街初底池算：51.5 / 7.5 = 6.9（不是 51.5 / 当前 45）。
     """
     from poker_ocr.hand_track import OpponentSnapshot
 
@@ -3582,7 +3810,7 @@ def test_effective_stack_includes_current_street_bet() -> None:
         opponents=(OpponentSnapshot("sb", "SB", "SB", 254.5, 5.0, False),
                    OpponentSnapshot("co", "CO", "CO", 24.0, 27.5, False)))
     sit = build_situation(point)
-    check(sit.spr == 1.1, f"SPR 应为 51.5 / 45 = 1.1：{sit.spr}")
+    check(sit.spr == 6.9, f"SPR 应为 51.5 / 7.5 = 6.9：{sit.spr}")
     by = {o.id: o for o in sit.options}
     check("all-in" in by, f"低 SPR 应仍给全下：{[o.id for o in sit.options]}")
     check(by["all-in"].amount == 51.5,
@@ -3985,6 +4213,59 @@ def test_exploit_block_shows_conditional_fold_equity() -> None:
 
 
 
+def test_prompt_renders_previous_street_advice() -> None:
+    """同一手更早街的建议要回灌，并标明不是新事实/沉没成本。"""
+    from types import SimpleNamespace
+
+    from poker_ocr.options import Option
+
+    prev = SimpleNamespace(
+        street="flop", reason="value bet",
+        option=Option("raise-1/2", "下注 3BB", "bet", 3.0))
+    sit = build_situation(
+        make_point(street="turn", board=("Ks", "7d", "2c", "9h")),
+        previous=prev)
+    user = render_facts_zh(sit)
+    check("## 上一街我的建议" in user, f"应回灌上一街建议：\n{user}")
+    check("翻牌：下注 3BB" in user, f"应写动作与金额：\n{user}")
+    check("沉没成本" in user, f"要提醒沉没成本：\n{user}")
+
+    same = build_situation(make_point(), previous=prev)
+    check("## 上一街我的建议" not in render_facts_zh(same),
+          "同一街的重复建议不该渲染成上一街")
+
+
+def test_pool_prior_not_rendered_with_conditional_fold_equity() -> None:
+    """多人池已有条件弃牌率时，不再补一条池子先验（两个口径会打架）。"""
+    from poker_ocr.hand_track import (
+        ActionRecord, OpponentSnapshot, StreetRecord,
+    )
+
+    opps = (OpponentSnapshot("a", "BB", "BB", 100.0, 0.0, False),
+            OpponentSnapshot("b", "UTG", "UTG", 100.0, 0.0, False),
+            OpponentSnapshot("c", "BTN", "BTN", 100.0, 0.0, False))
+    point = make_point(
+        street="flop", board=("Ks", "7d", "2c"), hero_cards=("Ah", "Kd"),
+        hero_position="CO", to_call=0.0, pot=12.0, pot_before_street=12.0,
+        hero_stack=97.0, hero_bet=0.0, hero_invested=3.0,
+        opponents=opps, preflop_shapes=("single-raise",), hero_is_pfr=True,
+        cbet_spot=True, players_dealt=4,
+        streets=(
+            StreetRecord("preflop", 1.5, (
+                ActionRecord("preflop", "hero", None, "CO", "raise", 3.0,
+                             is_hero=True),
+                ActionRecord("preflop", "a", "BB", "BB", "call", 3.0),
+                ActionRecord("preflop", "b", "UTG", "UTG", "call", 3.0),
+                ActionRecord("preflop", "c", "BTN", "BTN", "call", 3.0))),
+            StreetRecord("flop", 12.0, ())))
+    sit = build_situation(point)
+    check(sit.fold_eq is not None, "这个局面应有条件弃牌率报告")
+    text = render_facts_zh(sit)
+    check("## 范围弱点与弃牌率" in text, f"应有条件弃牌率：\n{text}")
+    check("池子先验" not in text,
+          f"已有条件弃牌率时不该再给池子先验：\n{text}")
+
+
 def test_attack_fact_checks_opponent_xc_xr() -> None:
     """对手跟 c-bet 多 / 过牌-加注频繁时，宽范围死钱也要跟着过牌。"""
     from poker_ocr.opponent_profile import OpponentRead, PooledStats
@@ -4030,7 +4311,7 @@ def test_attack_fact_checks_opponent_xc_xr() -> None:
     sticky_text = render_facts_zh(build_situation(point, table_stats=sticky))
     check("本桌对 c-bet 只弃" not in sticky_text,
           f"桌况层已删除，不该再有桌级 sticky：\n{sticky_text}")
-    check("没有该街弃牌率" in sticky_text,
+    check("没有任何对手有该街面对下注的记录" in sticky_text,
           f"没有画像时结论只能是「没有该街弃牌率」：\n{sticky_text}")
 
 

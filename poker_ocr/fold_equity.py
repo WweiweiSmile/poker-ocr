@@ -48,6 +48,7 @@ import zlib
 from functools import lru_cache
 from dataclasses import dataclass
 
+from . import strategy_tables
 from .coach import (
     AIR, BOARD_PLAY, FLUSH, KICKER_STRONG_MIN, MID_BOTTOM, ONE_PAIR, OVERPAIR,
     STRAIGHT, STRAIGHT_FLUSH, STRONG_DRAW, STRONG_MADE, TPTK, TP_WEAK,
@@ -55,30 +56,25 @@ from .coach import (
 )
 
 # ─────────────────────────── 先验 ───────────────────────────
+#
+# 数值本体在 `poker_ocr/tables/fold_equity.json`（P0 抽出，每个数字带来源）；
+# 改数值改 JSON 或加变体，不要改这个文件。
 
 # 手牌类别 → 面对「1/2 池下注」(price = 0.25) 时的弃牌概率。
 # 排序比绝对值重要：强成牌几乎不弃，空气大部分会弃。
-BASE_FOLD: dict[str, float] = {
-    STRONG_MADE: 0.03,
-    OVERPAIR: 0.10,
-    TPTK: 0.15,
-    TP_WEAK: 0.32,
-    MID_BOTTOM: 0.52,
-    STRONG_DRAW: 0.38,
-    WEAK_DRAW: 0.58,
-    BOARD_PLAY: 0.50,
-    AIR: 0.72,
-}
+BASE_FOLD: dict[str, float] = strategy_tables.rows("fold_equity", "base_fold")
 
 # 参考价格：1/2 池下注时他跟注的价格 = 0.5/(1+2×0.5) = 0.25
-_PRICE_REF = 0.25
+_PRICE_REF = strategy_tables.value("fold_equity", "price_ref")
 # 价格弹性：price 翻倍时弃牌倾向放大 2^GAMMA 倍
-SIZE_GAMMA = 1.0
+SIZE_GAMMA = strategy_tables.value("fold_equity", "size_gamma")
 # 钳制：不把「必弃/必跟」当成确定事件
-_FOLD_MIN, _FOLD_MAX = 0.01, 0.97
+_FOLD_MIN = strategy_tables.value("fold_equity", "fold_min")
+_FOLD_MAX = strategy_tables.value("fold_equity", "fold_max")
 
 # 没有真实选项时的默认考察尺寸（底池比例）
-DEFAULT_SIZES = (0.33, 0.5, 0.75, 1.0)
+DEFAULT_SIZES = tuple(
+    float(v) for v in strategy_tables.items("fold_equity", "default_sizes"))
 
 TIER_ZH = {
     STRONG_MADE: "强成牌", OVERPAIR: "超对", TPTK: "顶对强踢",
@@ -358,17 +354,16 @@ def equity_when_called(samples, price: float, scale: float = 1.0) -> float:
 # 这是先验，不是这个对手的实测曲线；口径和 BASE_FOLD 一样，只保证相对排序：
 # 成牌 > 听牌 > 打牌面 > 空气，IP > OOP，人越多越低。
 
-REALIZATION_BASE: dict[str, float] = {
-    "value": 0.90,
-    "draw": 0.82,
-    "board_play": 0.75,
-    "weak": 0.58,
-}
-REALIZATION_IP = 1.00
-REALIZATION_OOP = 0.86
-REALIZATION_UNKNOWN_POS = 0.93
-REALIZATION_PER_EXTRA_OPPONENT = 0.95
-_REAL_MIN, _REAL_MAX = 0.45, 1.0
+REALIZATION_BASE: dict[str, float] = strategy_tables.rows(
+    "fold_equity", "realization_base")
+REALIZATION_IP = strategy_tables.value("fold_equity", "realization_ip")
+REALIZATION_OOP = strategy_tables.value("fold_equity", "realization_oop")
+REALIZATION_UNKNOWN_POS = strategy_tables.value(
+    "fold_equity", "realization_unknown_pos")
+REALIZATION_PER_EXTRA_OPPONENT = strategy_tables.value(
+    "fold_equity", "realization_per_extra_opponent")
+_REAL_MIN = strategy_tables.value("fold_equity", "realization_min")
+_REAL_MAX = strategy_tables.value("fold_equity", "realization_max")
 
 
 def kind_of_tier(tier: str | None) -> str | None:
@@ -386,7 +381,7 @@ def kind_of_tier(tier: str | None) -> str | None:
 
 # 还剩几条下注街，决定折扣能打多深：河牌 call 完直接摊牌，权益全额兑现；
 # 转牌只剩一条街；翻牌还有两条。不区分街会把河牌的跟注 EV 系统性算低。
-_STREET_DISCOUNT = {"flop": 1.0, "turn": 0.5, "river": 0.0}
+_STREET_DISCOUNT = strategy_tables.rows("fold_equity", "street_discount")
 
 
 def realization_factor(*, tier: str | None, in_position: bool | None,

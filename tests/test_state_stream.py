@@ -66,6 +66,14 @@ def new_stream(**kwargs) -> ss.StateStream:
     return ss.StateStream(PROFILE, engine=object(), **kwargs)
 
 
+@contextmanager
+def plus_seats(*seat_ids: str):
+    """把 `read_empty_seats` 换成「这些座位是 + 占位」的桩。"""
+    with patch.object(ss, "read_empty_seats",
+                      lambda *a, **k: {sid: True for sid in seat_ids}):
+        yield
+
+
 def feed(stream: ss.StateStream, frame, t: float = 0.0,
          extra_signature: tuple | None = None) -> ss.FrameOutcome:
     stream.stream.frames.append(frame)
@@ -191,13 +199,10 @@ def test_exit_mid_hand_keeps_name_position_and_marks_fold() -> None:
               f"应锁定 9 个座位：{s.summary()['hand_roster']}")
         base_pos = {p.seat_id: p.position for p in first.state.players}
 
-        rows = {k: dict(v) for k, v in BASE.items()}
-        rows["midL"] = {"name": "", "chip": "", "bet": ""}
-        gone = make_frame(rows)
-        outs = [feed(s, gone, t=0.5 * (i + 1), extra_signature=sig)
-                for i in range(5)]
-        check([o.kind for o in outs[:3]] == ["discard"] * 3,
-              f"前 3 帧应因 vanished 丢弃：{[o.kind for o in outs]}")
+        # 离桌只认头像「+」占位（正向证据）：连续 2 帧确认后按弃牌处理。
+        with plus_seats("midL"):
+            outs = [feed(s, make_frame(), t=0.5 * (i + 1), extra_signature=sig)
+                    for i in range(3)]
         state = outs[-1].state
         mid = state.player("midL")
         check(mid.left and mid.in_hand and mid.fold is True
@@ -211,15 +216,18 @@ def test_exit_mid_hand_keeps_name_position_and_marks_fold() -> None:
               f"离桌后不该要求筹码/下注：{mid.to_debug()}")
         check(state.players_in_hand == 9,
               f"这一手仍是 9 人局（离桌按弃牌），实际 {state.players_in_hand}")
+        check(not state.errors, f"确认离桌后不该再丢帧：{state.errors}")
         check({p.seat_id: p.position for p in state.players} == base_pos,
               "有人退出不能让其他人的位置整体挪位："
               f"{ {p.seat_id: p.position for p in state.players} }")
-        check(not state.errors, f"确认离桌后不该再丢帧：{state.errors}")
         check(s.summary()["hand_left"] == ["midL"],
               f"离桌集合不对：{s.summary()['hand_left']}")
 
         # 下一手：roster 重建，空位不再算进这一手。
-        out = feed(s, gone, t=3.5, extra_signature=(("Qs", "Jd"), ()))
+        rows = {k: dict(v) for k, v in BASE.items()}
+        rows["midL"] = {"name": "", "chip": "", "bet": ""}
+        out = feed(s, make_frame(rows), t=3.5,
+                   extra_signature=(("Qs", "Jd"), ()))
         check(out.new_hand, "换手应被识别")
         seat = out.state.player("midL")
         check(not seat.in_hand and not seat.left and seat.name is None,
@@ -235,14 +243,14 @@ def test_new_player_mid_hand_kept_out_until_next_hand() -> None:
         sig = (("As", "Kd"), ())
         feed(s, make_frame(), extra_signature=sig)
 
-        # 原玩家 midL 离开，确认离桌。
-        rows = {k: dict(v) for k, v in BASE.items()}
-        rows["midL"] = {"name": "", "chip": "", "bet": ""}
-        for i in range(4):
-            feed(s, make_frame(rows), t=0.5 * (i + 1), extra_signature=sig)
+        # 原玩家 midL 离开：头像「+」占位连续 2 帧确认。
+        with plus_seats("midL"):
+            for i in range(2):
+                feed(s, make_frame(), t=0.5 * (i + 1), extra_signature=sig)
         check("midL" in s.hand_left, "midL 应先被确认离桌")
 
         # 新玩家坐进同一个座位：本手仍是上一位的信息。
+        rows = {k: dict(v) for k, v in BASE.items()}
         rows["midL"] = {"name": "新玩家", "chip": "150BB", "bet": ""}
         new_player = make_frame(rows)
         for i in range(3):
@@ -271,33 +279,56 @@ def test_new_player_mid_hand_kept_out_until_next_hand() -> None:
               f"新玩家的位置应正常排出，实际 {seat.position!r}")
 
 
-def test_occluded_player_recovers_when_card_icon_returns() -> None:
-    """整座被弹窗盖住误判离桌后，手牌图标回来要撤销 left，不能一路弃牌到底。"""
+def test_occluded_player_is_not_marked_left() -> None:
+    """整座被弹窗盖住（三块槽位全空、没有「+」占位）**不算离桌**。
+
+    名单锁定的座位默认在局；这一帧读不到只说明遮挡，质量闸按 stack/bet
+    缺失丢帧，状态和位置都不变。这样弹窗/动画不会把人误判成弃牌。
+    """
+    with stub_env():
+        s = new_stream(max_vanish=2, detect_fold=True)
+        sig = (("As", "Kd"), ())
+        feed(s, make_frame(), extra_signature=sig)
+
+        rows = {k: dict(v) for k, v in BASE.items()}
+        rows["midL"] = {"name": "", "chip": "", "bet": ""}
+        occluded = make_frame(rows)
+        outs = [feed(s, occluded, t=0.5 * (i + 1), extra_signature=sig)
+                for i in range(4)]
+        for out in outs:
+            check(out.kind == "discard" and "stack:midL" in out.errors,
+                  f"遮挡帧应因 stack 缺失丢弃：{out.kind} / {out.errors}")
+            mid = out.state.player("midL")
+            check(mid.in_hand and not mid.left and mid.fold is not True,
+                  f"遮挡不能判离桌/弃牌：{mid.to_debug()}")
+        check("midL" not in s.summary()["hand_left"],
+              f"离桌集合不该有他：{s.summary()['hand_left']}")
+
+        # 遮挡消失：正常帧恢复记录，位置/名字都不变。
+        out = feed(s, make_frame(), t=3.0, extra_signature=sig)
+        mid = out.state.player("midL")
+        check(mid.in_hand and not mid.left and mid.position == "HJ",
+              f"遮挡结束后应恢复：{mid.to_debug()}")
+
+
+def test_plus_placeholder_marks_left_and_icon_return_revives() -> None:
+    """「+」占位确认离桌后，手牌图标回来（占位是误判）要撤销 left。"""
     icon_on = {seat.seat_id: True for seat in PROFILE.seats}
     with stub_env():
         s = new_stream(max_vanish=2, detect_fold=True)
         sig = (("As", "Kd"), ())
         with patch.object(ss, "read_card_icons", lambda *a, **k: dict(icon_on)):
             feed(s, make_frame(), extra_signature=sig)
+        with plus_seats("midL"), patch.object(
+                ss, "read_card_icons", lambda *a, **k: dict(icon_on)):
+            for i in range(2):
+                feed(s, make_frame(), t=0.5 * (i + 1), extra_signature=sig)
+        check("midL" in s.hand_left, f"「+」占位应确认离桌：{s.summary()}")
 
-        # 弹窗盖住 midL：三块槽位全空 + 手牌图标连续消失。
-        rows = {k: dict(v) for k, v in BASE.items()}
-        rows["midL"] = {"name": "", "chip": "", "bet": ""}
-        occluded = make_frame(rows)
-        occluded_icons = {**icon_on, "midL": False}
-        with patch.object(ss, "read_card_icons",
-                          lambda *a, **k: dict(occluded_icons)):
-            outs = [feed(s, occluded, t=0.5 * (i + 1), extra_signature=sig)
-                    for i in range(4)]
-        check(outs[-1].state.player("midL").left,
-              f"遮挡超过 max_vanish 帧应暂标离桌：{outs[-1].state.player('midL')}")
-
-        # 弹窗消失：名字/筹码/手牌图标都回来了。
         with patch.object(ss, "read_card_icons", lambda *a, **k: dict(icon_on)):
             out = feed(s, make_frame(), t=3.0, extra_signature=sig)
         mid = out.state.player("midL")
-        check(not mid.left and mid.in_hand
-              and mid.fold is not True and mid.name == BASE["midL"]["name"],
+        check(not mid.left and mid.in_hand and mid.fold is not True,
               f"图标回来后应撤销离桌判定：{mid.to_debug()}")
         check("midL" not in s.summary()["hand_left"],
               f"离桌集合应清掉：{s.summary()['hand_left']}")
@@ -560,8 +591,11 @@ def test_show_after_fold_keeps_fold() -> None:
         s = new_stream(detect_fold=True)
         s.stream.frames.extend([make_frame(), make_frame(), make_frame()])
         img = np.zeros((4, 4, 3), np.uint8)
+        fold_avatar = {"lowL": ("弃牌", 0.95)}
         with patch.object(ss, "read_card_icons",
-                          lambda _img, _p: {"lowL": False}):
+                          lambda _img, _p: {"lowL": False}), \
+                patch.object(ss, "read_avatars",
+                             lambda *a, **k: dict(fold_avatar)):
             s.ingest(img, "f1", 0.0, extra_signature=((), ()))
             out2 = s.ingest(img, "f2", 0.2, extra_signature=((), ()))
         check(out2.state.player("lowL").fold is True,
@@ -812,7 +846,8 @@ def main() -> int:
         test_departed_seat_with_chip_garbage_recovers,
         test_exit_mid_hand_keeps_name_position_and_marks_fold,
         test_new_player_mid_hand_kept_out_until_next_hand,
-        test_occluded_player_recovers_when_card_icon_returns,
+        test_occluded_player_is_not_marked_left,
+        test_plus_placeholder_marks_left_and_icon_return_revives,
         test_lineup_change_between_hands_does_not_discard,
         test_dead_button_dealer_left_keeps_recording,
         test_initial_blinds_carried_when_banner_unreadable,

@@ -779,11 +779,69 @@ def test_bomb_banner_in_state_and_signature() -> None:
           "爆炸底池横幅出现应触发一条状态记录")
 
 
+def test_roster_seat_defaults_in_hand_when_unreadable() -> None:
+    """名单锁定的座位读不到任何槽位 = 遮挡，不是离桌：默认仍在局。"""
+    rows = {k: dict(v) for k, v in BASE.items()}
+    rows["lowR"] = {}
+    roster = {sid: ("x", "y") for sid in BASE}
+    s = build_state(make_frame(rows), PROFILE, hand_roster=roster)
+    lowr = s.player("lowR")
+    check(lowr.in_hand and lowr.status == "playing"
+          and lowr.seat_state == "in_hand",
+          f"roster 座位应默认在局：{lowr.to_debug()}")
+    check(lowr.position is not None, f"位置不能丢：{lowr.position}")
+    check(any(e.startswith("stack:lowR") for e in s.errors),
+          f"读不到筹码应让质量闸丢帧，而不是改状态：{s.errors}")
+
+
+def test_roster_zero_idle_is_not_waiting() -> None:
+    """「等待入局」只认头像文案：筹码 0 + 无下注/动作 不再判 sitting_out。"""
+    rows = {k: dict(v) for k, v in BASE.items()}
+    rows["lowR"] = {"name": "Dragon333", "chip": "0", "bet": ""}
+    roster = {sid: ("x", "y") for sid in BASE}
+    s = build_state(make_frame(rows), PROFILE, hand_roster=roster)
+    lowr = s.player("lowR")
+    check(lowr.in_hand and lowr.seat_state == "in_hand",
+          f"没有头像文案就该默认在局：{lowr.to_debug()}")
+
+
+def test_roster_waiting_badge_is_waiting() -> None:
+    """头像出现「等待审核」→ 等待入局；名单锁不把它默认成在局。"""
+    rows = {k: dict(v) for k, v in BASE.items()}
+    rows["lowR"] = {"name": "越call越幸", "chip": "200BB", "bet": ""}
+    roster = {sid: ("x", "y") for sid in BASE}
+    s = build_state(make_frame(rows), PROFILE, hand_roster=roster,
+                    avatar_reads={"lowR": ("等待审核", 0.95)})
+    lowr = s.player("lowR")
+    check(not lowr.in_hand and lowr.seat_state == "waiting",
+          f"头像文案命中应判等待入局：{lowr.to_debug()}")
+
+
+def test_roster_left_seat_keeps_position_and_folds() -> None:
+    """确认离桌（left_seats）：保留名字/位置，按弃牌处理，不再要求筹码。"""
+    rows = {k: dict(v) for k, v in BASE.items()}
+    rows["lowR"] = {}
+    roster = {sid: ("x", "y") for sid in BASE}
+    s = build_state(make_frame(rows), PROFILE, hand_roster=roster,
+                    left_seats={"lowR"})
+    lowr = s.player("lowR")
+    check(lowr.left and lowr.in_hand and lowr.fold is True
+          and lowr.seat_state == "folded",
+          f"离桌应保留位置并按弃牌：{lowr.to_debug()}")
+    check(lowr.position is not None, "离桌后位置仍要保留")
+    check(not any(e.startswith(("stack:lowR", "bet:lowR")) for e in s.errors),
+          f"离桌不该再要求筹码/下注：{s.errors}")
+
+
 def main() -> int:
     tests = [
         test_full_state,
         test_action_badge_keeps_sticky_name,
         test_idle_zero_player_is_not_in_hand,
+        test_roster_seat_defaults_in_hand_when_unreadable,
+        test_roster_zero_idle_is_not_waiting,
+        test_roster_waiting_badge_is_waiting,
+        test_roster_left_seat_keeps_position_and_folds,
         test_waiting_badge_keeps_player_out_of_hand,
         test_waiting_badge_variants,
         test_waiting_badge_yields_to_in_hand_evidence,

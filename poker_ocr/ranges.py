@@ -17,10 +17,8 @@
 from __future__ import annotations
 
 import itertools
-import json
 from dataclasses import dataclass, field
 from functools import lru_cache
-from pathlib import Path
 from types import MappingProxyType
 from typing import Iterable, Mapping
 
@@ -215,34 +213,50 @@ def uniform_range(id: str = "UNIFORM", *, note: str = "") -> Range:
 # ─────────────────────────── 规则先验 ───────────────────────────
 #
 # 没有具名表时用的「描述性池子先验」。宽度按设计文档的目标区间校准：
-#   · 冷跟 IP ~18–19%，OOP ~16%；
-#   · 溜入 EP ~28%、MP ~31%、LP ~41%（现场松弱池）；
+#   · 冷跟 IP ~20%，OOP ~14.5%；
+#   · 溜入 EP ~37%、MP ~41%、LP ~47%（现场松弱池）；
 #   · 3-bet ~5.6%，面对 3-bet 继续 ~3.8%。
-# 这些不是 GTO 频率，只是「他实际会拿什么」的粗模型。所有 token 都用
+# 这些不是均衡频率，只是「他实际会拿什么」的粗模型。所有 token 都用
 # preflop_ranges.expand 展开；测试会检查没有写错的空 token。
+#
+# 2026-11-05 加宽（依据 `docs/摊牌反核-2026-11-05.md`）：用 173 个摊牌亮牌样本
+# 反核，58 个未命中里 55 个是「先验根本没有这个组合」，集中在冷跟池（旧口径
+# 10–11% 是 TAG 假设，实测这些人冷跟 20% 级别）与 limp 池。加宽按**类别**做，
+# 不按单手做（否则就是拿 55 个样本过拟合）：
+#   · 对子放到 JJ（摊牌见过 JJ 冷跟）、同花 A 放到 AQs；
+#   · 同花加 K7s+/Q7s+/J7s+/T7s+ 与一/二隔张（97s/86s/75s/64s/53s）；
+#   · 非同花加 K9o+/Q9o+/J9o+/T9o/98o/87o（含 DEEP 池常见的 87o）。
 
 _RULE_TOKENS: dict[str, tuple[str, ...]] = {
+    # 对子必须逐个写：`expand` 不支持 "22-JJ" 这种区间（会静默展开成空集）。
     "COLD_CALL_IP": (
-        "22", "33", "44", "55", "66", "77", "88", "99",
-        "A2s-AJs", "KTs+", "QTs+", "JTs", "T9s", "98s", "87s", "76s",
-        "65s", "54s", "KQo",
+        "22", "33", "44", "55", "66", "77", "88", "99", "TT", "JJ",
+        "A2s-AQs", "K7s+", "Q7s+", "J7s+", "T7s+",
+        "T9s", "98s", "87s", "76s", "65s", "54s",
+        "97s", "86s", "75s",
+        "KQo", "KJo", "QJo", "JTo", "T9o",
     ),
     "COLD_CALL_OOP": (
-        "22", "33", "44", "55", "66", "77", "88", "99",
-        "A2s-ATs", "KTs+", "QTs+", "JTs", "T9s", "98s", "87s", "76s",
-        "KQo",
+        "22", "33", "44", "55", "66", "77", "88", "99", "TT",
+        "A2s-AQs", "K8s+", "Q8s+", "J8s+", "T8s+",
+        "98s", "87s", "76s", "65s", "54s",
+        "97s", "86s", "75s",
+        "KQo", "KJo", "QJo",
     ),
     "LIMP_EP": (
-        "22+", "A2s+", "K9s+", "Q9s+", "J9s+", "T8s+", "97s+", "86s+",
-        "75s+", "65s", "54s", "A2o+", "KTo+", "QJo", "JTo", "A9o+",
+        "22+", "A2s+", "K7s+", "Q8s+", "J8s+", "T8s+",
+        "97s+", "86s+", "75s+", "65s", "54s",
+        "A2o+", "K9o+", "Q9o+", "J9o+", "T9o", "98o",
     ),
     "LIMP_MP": (
-        "22+", "A2s+", "K6s+", "Q6s+", "J7s+", "T7s+", "96s+", "86s+",
-        "75s+", "65s", "54s", "A2o+", "K9o+", "Q9o+", "J9o+", "T9o",
+        "22+", "A2s+", "K5s+", "Q7s+", "J7s+", "T7s+",
+        "95s+", "85s+", "75s+", "65s", "54s",
+        "A2o+", "K9o+", "Q9o+", "J9o+", "T9o", "98o", "87o",
     ),
     "LIMP_LP": (
-        "22+", "A2s+", "K2s+", "Q6s+", "J7s+", "T7s+", "96s+", "86s+",
-        "75s+", "65s", "54s", "A2o+", "K8o+", "Q9o+", "J9o+", "T9o", "98o",
+        "22+", "A2s+", "K2s+", "Q4s+", "J5s+", "T6s+",
+        "95s+", "85s+", "75s+", "65s", "54s",
+        "A2o+", "K7o+", "Q8o+", "J8o+", "T8o", "98o", "87o",
     ),
     "THREE_BET": ("QQ+", "AKs", "AKo", "A5s+", "KQs", "KJs"),
     "THREE_BET_CALL": ("TT+", "AQs+", "AKs", "AKo"),
@@ -253,8 +267,8 @@ _RULE_TOKENS: dict[str, tuple[str, ...]] = {
     ),
 }
 
-# 具名 BB 防守表的兜底：和 gto/specs/spots.json 的 oop_range 同一张静态表。
-_BB_DEF_FALLBACK = (
+# 具名 BB 防守表用的静态 token。
+_BB_DEF_TOKENS = (
     "22+", "A2s+", "K2s+", "Q4s+", "J6s+", "T6s+", "96s+", "85s+", "75s+",
     "64s+", "54s", "A2o+", "K8o+", "Q9o+", "J9o+", "T9o", "98o", "87o",
 )
@@ -263,24 +277,10 @@ _BB_DEF_CACHE: tuple[str, ...] | None = None
 
 
 def _bb_defense_tokens() -> tuple[str, ...]:
-    """BB 防守 token。优先读现有 GTO spot 数据，缺失时用同一张静态兜底。"""
+    """BB 防守 token（静态表，不依赖外部数据文件）。"""
     global _BB_DEF_CACHE
-    if _BB_DEF_CACHE is not None:
-        return _BB_DEF_CACHE
-    path = Path(__file__).resolve().parents[1] / "gto" / "specs" / "spots.json"
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        spots = data.get("spots") or []
-        for spot in spots:
-            text = str(spot.get("oop_range") or "").strip()
-            if text:
-                tokens = tuple(t.strip() for t in text.split(",") if t.strip())
-                if tokens and all(expand(t) for t in tokens):
-                    _BB_DEF_CACHE = tokens
-                    return tokens
-    except (OSError, ValueError, TypeError):
-        pass
-    _BB_DEF_CACHE = _BB_DEF_FALLBACK
+    if _BB_DEF_CACHE is None:
+        _BB_DEF_CACHE = _BB_DEF_TOKENS
     return _BB_DEF_CACHE
 
 

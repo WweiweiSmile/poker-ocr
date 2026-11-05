@@ -26,7 +26,7 @@ from poker_ocr.table_dynamics import (  # noqa: E402
 # 2026-10-28.3：skills 提示词的 system 层注入实时牌力与桌面动态。
 # 2026-10-28.4：skills 提示词再注入逐座位对手画像（Current opponent reads）。
 # 2026-10-28.5：默认 lean 只注入状态/画像/实时牌力/桌风，移除范围表、翻后规则、
-#               价值指令、Math gate、plan 回灌与 GTO；旧版完整 lean 改为 lean-rules。
+#               价值指令、Math gate、plan 回灌；旧版完整 lean 改为 lean-rules。
 # 2026-10-29.1：只保留一套中文 lean；新增中文事实块（SPR/位置/赔率门槛/爆炸底池/
 #               转河变化/多人池实际人数）与 all-in 选项；skills/lean-rules 下线。
 # 2026-10-30.9：system 拆 core + 前注条件模块；五级事实优先级与指标口径；

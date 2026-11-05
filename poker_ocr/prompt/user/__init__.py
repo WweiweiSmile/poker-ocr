@@ -17,6 +17,7 @@ from .attack import attack_signals, render_attack_zh
 from .exploit import render_exploit_zh
 from .explosive import render_explosive_pot_zh
 from .geometry import render_geometry_zh, render_side_pot_zh
+from .history import render_previous_advice_zh
 from .notes import render_notes_zh
 from .options import render_options_zh
 from .position import render_position_zh
@@ -43,6 +44,12 @@ def render_facts_zh(sit) -> str:
     # ── 行动线提前：模型判断范围最需要的是「谁做了什么」 ──
     lines.append("")
     lines.extend(render_action_line_zh(sit))
+
+    # ── 上一街自己的建议：同一手内保持一致（不是新事实） ──
+    history = render_previous_advice_zh(sit)
+    if history:
+        lines.append("")
+        lines.extend(history)
 
     # ── 翻前信息 / 实时牌力 ──
     preflop = render_preflop_zh(sit)
@@ -77,10 +84,11 @@ def render_facts_zh(sit) -> str:
         lines.extend(profiles)
 
     # ── 池子先验：逐座位数据缺失时的兜底 ──
-    # 攻击块在场、或事实块已经给了逐尺寸 EV 时不渲染：那两处已经是同一节点的
-    # 结论来源，再补一条历史均值只会让模型比较两个不该比较的数。
-    has_sizes = bool(getattr(sit, "fold_eq", None) and sit.fold_eq.lines)
-    if not attack and not has_sizes:
+    # 攻击块在场、或已经有**条件弃牌率报告**（fold_eq）时不渲染：后者已经
+    # 按本手线路给了「全部弃牌」概率，再补一条历史均值会让同一节点出现
+    # 两个不同口径的弃牌率（例：条件 22% vs 池子 73%），模型只能二选一。
+    # 多人池的 fold_eq 没有逐尺寸 EV 行，但「全部弃牌」本身就是结论来源。
+    if not attack and getattr(sit, "fold_eq", None) is None:
         pool = render_pool_prior_zh(sit)
         if pool:
             lines.append("")

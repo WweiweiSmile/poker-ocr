@@ -24,6 +24,39 @@ from .versioning import build_settings
 log = logging.getLogger("replay.runner")
 
 
+_STREET_SEQ = {"preflop": 0, "flop": 1, "turn": 2, "river": 3}
+
+
+def _previous_stored_advice(rows, decision):
+    """同一手更早街的最后一条线上建议（轻量对象，只给提示词渲染用）。"""
+    from types import SimpleNamespace
+
+    from poker_ocr.options import Option
+
+    current = _STREET_SEQ.get(str(getattr(decision, "street", "") or ""), 0)
+    best = None
+    for row in rows or ():
+        street = str(row.get("street") or "")
+        seq = _STREET_SEQ.get(street, -1)
+        if seq < 0 or seq >= current:
+            continue
+        key = (seq, int(row.get("action_index") or 0))
+        if best is None or key > best[0]:
+            best = (key, row)
+    if best is None:
+        return None
+    row = best[1]
+    amount = row.get("option_amount")
+    return SimpleNamespace(
+        street=str(row.get("street") or ""),
+        reason=str(row.get("reason") or ""),
+        option=Option(id=str(row.get("option_id") or ""),
+                      label=str(row.get("option_label") or ""),
+                      kind=str(row.get("option_kind") or ""),
+                      amount=(float(amount) if amount is not None else None)),
+    )
+
+
 def _decision_from_row(row: dict) -> DecisionPoint:
     snap = snapshot_from_json(row.get("snapshot_json") or "{}")
     warnings = json_load(row.get("warnings"), []) or []
@@ -205,14 +238,18 @@ class Runner:
             # 版本 context_mode=snapshot 时 engine 会用它，保证线上/重跑同上下文。
             contexts = self.live_advice_repo.context_for_hand(hand_id)
             stored_prompts = self.live_advice_repo.baseline_prompts_for_hand(hand_id)
+            stored_advices = self.live_advice_repo.list_for_hand(hand_id)
             for db_row in decision_rows:
                 decision = _decision_from_row(db_row)
                 key = (decision.street, decision.action_index)
                 decision.context = contexts.get(key, {})
+                decision.previous_advice = _previous_stored_advice(
+                    stored_advices, decision)
                 prompt = stored_prompts.get(key)
                 if prompt:
                     decision.baseline_prompt = (prompt["system"], prompt["user"])
                     decision.baseline_prompt_sha = prompt.get("sha")
+                    decision.baseline_options = prompt.get("options")
                 for version in selected:
                     for repeat_index in range(repeat):
                         pending.append((decision, version, repeat_index,

@@ -10,7 +10,9 @@
 
 from __future__ import annotations
 
-from .hand_track import FLOP, PREFLOP, ActionRecord, HandSnapshot
+from .hand_track import (
+    FLOP, PREFLOP, ActionRecord, HandSnapshot, preflop_aggressive,
+)
 from .positions import POSITIONS_BY_TABLE_SIZE, BB, SB
 
 
@@ -54,11 +56,8 @@ def count_limpers(snap: HandSnapshot) -> int:
 
 
 def _preflop_raise_count(snap: HandSnapshot) -> int:
-    """翻前已经发生的加注次数（含「跟注全下」这种实际再加注）。"""
-    return sum(
-        1 for a in snap.actions_of(PREFLOP)
-        if a.action in ("raise", "bet")
-        or (a.action == "call" and a.all_in))
+    """翻前已经发生的加注次数（跟注全下只在真的抬高水位时才算）。"""
+    return len(preflop_aggressive(snap.actions_of(PREFLOP)))
 
 
 
@@ -332,10 +331,12 @@ def pot_type(snap: HandSnapshot) -> str | None:
 
 
 def spr(snap: HandSnapshot) -> float | None:
-    """SPR = 有效筹码 ÷ 跟注前的可争夺底池（翻后才有意义）。
+    """SPR = 有效筹码 ÷ **本街开始时的底池**（翻后才有意义）。
 
-    分母与赔率同口径：先扣掉对手无人能跟的超额下注（`winnable_pot - call`），
-    但不把「我的跟注」算进去 —— 与牌桌语言的 SPR 一致（94 / 10.5 = 9.0）。
+    SPR 是「街初」口径：分母用 `pot_before_street`，不含本街已经下注的钱。
+    旧口径用「当前底池 − 超额下注」，面对下注时会系统性低估 SPR（例：街初
+    25BB、对手下注 15BB、有效 85BB → 正确 3.4，旧口径 2.1），正好跨过
+    「SPR<3 顶对可套池」的阈值。读不到/读数不可信时退回旧公式。
 
     分子用「总筹码」而不是后手：对手下注 27.5BB、后手 24BB 时，这一手
     实际能打到的是 51.5BB（51.5 / 45 = 1.1），不是 24 / 45 = 0.5。
@@ -347,6 +348,10 @@ def spr(snap: HandSnapshot) -> float | None:
     if _unknown_stack_opponents(snap):
         return None
     pot_before_call = winnable_pot(snap) - call_amount(snap)
+    street_start = snap.pot_before_street
+    if (street_start is not None and street_start > 0
+            and street_start <= snap.pot + 1e-6):
+        pot_before_call = street_start
     if pot_before_call <= 0:
         pot_before_call = snap.pot
     hero = _hero_total_stack(snap)

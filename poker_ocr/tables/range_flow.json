@@ -1,0 +1,400 @@
+{
+  "schema": 1,
+  "kind": "range_flow",
+  "profiles": {
+    "hand-tuned": "v0",
+    "sourced": "v1"
+  },
+  "default_variant": "v0",
+  "tables": {
+    "facing_probs": {
+      "v0": {
+        "source": "hand-tuned",
+        "verified": false,
+        "note": "面对下注时各成牌档的 call/raise/fold 频率，按合法动作集归一化。模块注释自述：数值不追求精确，追求方向单调、量级够用、可手写。",
+        "needs": "外部频率表（书里的节点频率）或对手实测；tier 级只能靠先验，不可从观测识别",
+        "columns": [
+          "call",
+          "raise",
+          "fold"
+        ],
+        "rows": {
+          "nut": [
+            0.22,
+            0.7,
+            0.08
+          ],
+          "strong": [
+            0.36,
+            0.42,
+            0.22
+          ],
+          "medium": [
+            0.45,
+            0.06,
+            0.49
+          ],
+          "weak": [
+            0.26,
+            0.015,
+            0.725
+          ],
+          "air": [
+            0.06,
+            0.003,
+            0.937
+          ]
+        }
+      },
+      "v1": {
+        "source": "derived",
+        "verified": false,
+        "note": "call/raise/fold 三列，由 defend model 逐档算出",
+        "derivation": "defend model：continue = σ((e·R − p)/τ)，p=0.25（1/2 池），τ=0.06；加注占比 = σ((e − 0.65)/0.1)；R 取 REALIZATION_BASE × REALIZATION_UNKNOWN_POS（复用已有表）。e 与 R 是假设，未实测、也无外部参照（verified=false）。复现：python tools/derive_strategy_tables.py",
+        "needs": "按价格分桶的对手实测弃牌率（本地样本仅 ~74 次，需要全量库）；tier 形状无法从观测数据识别，v1 只用于敏感度实验，不作默认",
+        "columns": [
+          "call",
+          "raise",
+          "fold"
+        ],
+        "rows": {
+          "nut": [
+            0.0759,
+            0.9241,
+            0.0
+          ],
+          "strong": [
+            0.2687,
+            0.7304,
+            0.0008
+          ],
+          "medium": [
+            0.7015,
+            0.2581,
+            0.0404
+          ],
+          "weak": [
+            0.3489,
+            0.0286,
+            0.6225
+          ],
+          "air": [
+            0.051,
+            0.0003,
+            0.9487
+          ]
+        }
+      }
+    },
+    "unfacing_probs": {
+      "v0": {
+        "source": "hand-tuned",
+        "verified": false,
+        "note": "无人下注时各成牌档的 check/bet 频率。",
+        "needs": "同上",
+        "columns": [
+          "check",
+          "bet"
+        ],
+        "rows": {
+          "nut": [
+            0.22,
+            0.78
+          ],
+          "strong": [
+            0.4,
+            0.6
+          ],
+          "medium": [
+            0.72,
+            0.28
+          ],
+          "weak": [
+            0.88,
+            0.12
+          ],
+          "air": [
+            0.96,
+            0.04
+          ]
+        }
+      }
+    },
+    "draw_probs": {
+      "v0": {
+        "source": "hand-tuned",
+        "verified": false,
+        "note": "听牌对四动作的乘性调整。作用是把「跟注/下注」抬起来、把「弃牌」压下去，使纯花听面对 2/3 池几乎不弃，而同样归进空气的纯空气会弃。",
+        "needs": "各听牌类型的继续频率（书里的表或实测）",
+        "columns": [
+          "check",
+          "bet",
+          "call",
+          "raise",
+          "fold"
+        ],
+        "rows": {
+          "combo": [
+            0.55,
+            3.2,
+            10.0,
+            4.2,
+            0.1
+          ],
+          "flush": [
+            0.55,
+            2.8,
+            10.0,
+            3.4,
+            0.08
+          ],
+          "oesd": [
+            0.65,
+            2.4,
+            10.0,
+            3.6,
+            0.1
+          ],
+          "gutshot": [
+            0.82,
+            1.5,
+            2.0,
+            1.25,
+            0.55
+          ],
+          "backdoor": [
+            0.94,
+            1.15,
+            1.15,
+            1.02,
+            0.95
+          ],
+          "none": [
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0
+          ]
+        }
+      }
+    },
+    "bucket_tier": {
+      "v0": {
+        "source": "hand-tuned",
+        "verified": false,
+        "note": "10 个线路桶 × 5 个成牌档的乘数。只作用于非过牌动作；设计 §4.2 把 3 组拆成 5 档，是为了让价值组向坚果集中。",
+        "needs": "各线路的范围构成（例如 donk-jam 里坚果/两对的真实占比）",
+        "columns": [
+          "nut",
+          "strong",
+          "medium",
+          "weak",
+          "air"
+        ],
+        "rows": {
+          "donk_multiway": [
+            1.6,
+            1.35,
+            0.06,
+            0.1,
+            0.2
+          ],
+          "donk_hu": [
+            1.4,
+            1.2,
+            0.3,
+            0.45,
+            0.5
+          ],
+          "lead_multiway": [
+            1.2,
+            1.15,
+            0.9,
+            0.8,
+            0.7
+          ],
+          "lead_hu": [
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0
+          ],
+          "stab": [
+            0.85,
+            0.9,
+            1.05,
+            1.15,
+            1.3
+          ],
+          "closing_check": [
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0
+          ],
+          "facing_bet_closing": [
+            1.05,
+            1.0,
+            1.0,
+            1.1,
+            1.2
+          ],
+          "facing_bet_open": [
+            1.15,
+            1.1,
+            0.8,
+            0.9,
+            0.8
+          ],
+          "facing_bet_and_call": [
+            1.35,
+            1.2,
+            0.3,
+            0.4,
+            0.35
+          ],
+          "facing_raise": [
+            1.5,
+            1.3,
+            0.15,
+            0.25,
+            0.25
+          ]
+        }
+      }
+    },
+    "spr_aggression": {
+      "v0": {
+        "source": "hand-tuned",
+        "verified": false,
+        "note": "SPR 只调主动进攻倾向：短码时中等成牌也愿意打光（设计 §4.3）。",
+        "needs": "SPR 分档下的投入倾向实测",
+        "rows": {
+          "<0.5": {
+            "medium": 1.45,
+            "weak": 1.2,
+            "air": 1.1
+          },
+          "0.5-1": {
+            "medium": 1.3,
+            "weak": 1.12,
+            "air": 1.05
+          },
+          "1-2": {
+            "medium": 1.15,
+            "weak": 1.05
+          },
+          "2-4": {},
+          "4+": {
+            "medium": 0.92
+          }
+        }
+      }
+    },
+    "arch_bluff": {
+      "v0": {
+        "source": "hand-tuned",
+        "verified": false,
+        "note": "画像只调两个旋钮之一：诈唬系数。",
+        "needs": "分画像的诈唬成功率实测",
+        "rows": {
+          "station": 0.5,
+          "nit": 0.7,
+          "tag": 0.9,
+          "lag": 1.2,
+          "maniac": 1.8,
+          "unknown": 1.0
+        }
+      }
+    },
+    "arch_call": {
+      "v0": {
+        "source": "hand-tuned",
+        "verified": false,
+        "note": "画像只调两个旋钮之二：跟注宽度。",
+        "needs": "分画像的跟注宽度实测",
+        "rows": {
+          "station": 1.35,
+          "nit": 0.8,
+          "tag": 0.95,
+          "lag": 1.05,
+          "maniac": 1.15,
+          "unknown": 1.0
+        }
+      }
+    },
+    "tier_percentile": {
+      "v0": {
+        "source": "hand-tuned",
+        "verified": false,
+        "note": "成牌档的牌面百分位阈值。绝对牌型在不同牌面上不是一回事，所以档位按「这手牌在该牌面上比多少 combo 大」定。",
+        "needs": "无通用来源；这张表依赖牌面分布的定义，改动前先确认口径",
+        "columns": [
+          "percentile",
+          "tier"
+        ],
+        "items": [
+          [
+            0.02,
+            "nut"
+          ],
+          [
+            0.1,
+            "strong"
+          ],
+          [
+            0.32,
+            "medium"
+          ],
+          [
+            0.68,
+            "weak"
+          ],
+          [
+            1.0,
+            "air"
+          ]
+        ]
+      }
+    },
+    "draw_street_factor": {
+      "v0": {
+        "source": "derived",
+        "verified": true,
+        "note": "四二法则的相对比值（翻牌 4/4、转牌 2/4、河牌 0/4）。绝对倍数在按动作归一化时会约掉，所以只存比值。",
+        "rows": {
+          "3": 1.0,
+          "4": 0.5,
+          "5": 0.0
+        }
+      }
+    },
+    "min_likelihood": {
+      "v0": {
+        "source": "hand-tuned",
+        "verified": false,
+        "note": "似然下限：不把「必弃」写成 0，否则一个动作就能把整类手牌清零。",
+        "value": 0.0001
+      }
+    },
+    "support_floor": {
+      "v0": {
+        "source": "hand-tuned",
+        "verified": false,
+        "note": "相对支撑集下限：连乘后低于「最大权重 × 此值」的 combo 退出范围。只影响渲染宽度与尾部质量（<1%），不影响权益主排序。",
+        "value": 0.001
+      }
+    },
+    "default_alpha": {
+      "v0": {
+        "source": "empirical",
+        "verified": true,
+        "note": "事件温度 α。设计稿默认 0.7，实测 3 个动作下会压掉信息，改成 1.0 + 按动作数分段降温（见 §12.4）。",
+        "value": 1.0
+      }
+    }
+  }
+}

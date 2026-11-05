@@ -189,6 +189,7 @@ def execute_unit(
     fallback 写入结果并标记，但不计入模型一致率的分母。
     """
     from poker_ocr.advice import build_situation
+    from poker_ocr.options import Option
 
     # 旧 lean-rules / skills 版本只读，不再重跑（versioning.run_blockers 已拦）。
     # context_mode=snapshot：用线上那一刻的 table_stats/opponent_reads；
@@ -204,6 +205,7 @@ def execute_unit(
         table_dynamics=version.get("table_dynamics") or "",
         opponent_reads=reads,
         table_stats=table_stats,
+        previous=getattr(decision, "previous_advice", None),
     )
     facts = decision_facts(sit)
     facts["contextMode"] = context_mode
@@ -215,6 +217,19 @@ def execute_unit(
         ).hexdigest()
     actual_tags = sorted(audit(sit, decision.actual, decision.actual_amount))
     facts["actualViolationTags"] = actual_tags
+
+    option_space = None
+    if prompt_override and decision.baseline_options:
+        option_space = [
+            Option(id=str(item.get("id") or ""),
+                   label=str(item.get("label") or ""),
+                   kind=str(item.get("kind") or ""),
+                   amount=(float(item["amount_bb"])
+                           if item.get("amount_bb") is not None else None),
+                   note=str(item.get("note") or ""))
+            for item in decision.baseline_options
+            if isinstance(item, dict) and item.get("id")
+        ] or None
 
     captured: dict[str, Any] = {"system": None, "user": None, "raw": None}
     attempts = 0
@@ -243,7 +258,8 @@ def execute_unit(
     try:
         advice: Advice = advise(sit, settings, timeout=timeout,
                                 complete=complete,
-                                prompt_override=prompt_override)
+                                prompt_override=prompt_override,
+                                option_space=option_space)
         elapsed = int((time.monotonic() - started) * 1000)
         source = advice.source
         option = advice.option

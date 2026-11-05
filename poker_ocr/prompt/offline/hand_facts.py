@@ -350,12 +350,6 @@ def render_hand_facts(sit: Situation) -> str:
             # 牌力解析是「主答案」：behind/equity 三个正交数合成的一行结论。
             # 位置刻意放在 Hand vs ranges 之后、Board structure 之前。
             lines.append(f"Hand-strength read: {sit.hand_strength.summary_en()}")
-        if sit.board_eq is not None:
-            lines.append("")
-            lines.append(sit.board_eq.render())
-        if sit.gto is not None:
-            lines.append("")
-            lines.append(sit.gto.render())
     if snap.hero_invested is not None and snap.hero_stack:
         ratio = snap.hero_invested / max(snap.hero_stack + snap.hero_invested, 1e-6)
         lines.append(f"I have invested {round(snap.hero_invested, 2)}BB"

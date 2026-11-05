@@ -928,18 +928,21 @@ class LiveAdviceRepository:
         """(street, action_index) → 线上 prompt 原文，用于 stored baseline。"""
         rows = self.db.query(
             """SELECT street, action_index, prompt_system, prompt_user,
-                      prompt_sha256
+                      prompt_sha256, facts_json
                  FROM replay_live_advices
                 WHERE hand_id=%s AND prompt_system IS NOT NULL
                   AND prompt_user IS NOT NULL""",
             (int(hand_id),))
         out: dict[tuple[str, int], dict] = {}
         for row in rows:
+            facts = json_load(row.get("facts_json"), {}) or {}
+            options = facts.get("options") if isinstance(facts, dict) else None
             out[(str(row.get("street") or ""),
                  int(row.get("action_index") or 0))] = {
                 "system": row.get("prompt_system"),
                 "user": row.get("prompt_user"),
                 "sha": row.get("prompt_sha256"),
+                "options": options if isinstance(options, list) else None,
             }
         return out
 

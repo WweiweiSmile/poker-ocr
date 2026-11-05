@@ -75,9 +75,11 @@ ROI 识别座位、筹码、下注、动作、庄位、底池和盲注，输出�
 - `--auto-click` 默认开启；只要 AI 建议、不要自动点击时加 `--no-auto-click`。
 - 自动点击默认是**交互确认**模式：模型给出建议后终端问 `y` 确认 / `n` 拒绝。
   想回到「结果返回立刻点」的无人值守模式，加 `--no-confirm`。
-- 可选 `--min-advice-confidence 0.5`：模型给了置信度且低于该值时，建议照常显示
-  但**不自动点击**；0（默认）关闭。模型没给 `confidence` 时不受此限。
-- 关闭 AI 建议时（`--no-ai-advice`）自动点击会跟着关闭。
+- 可选 `--min-advice-confidence 0.5`：模型给了置信度且低于该值、或**没给
+  confidence**（无法验证）时，建议照常显示但**不自动点击**；0（默认）关闭。
+- `--confirm-timeout 6`：终端确认最多等几秒，超时按拒绝处理（0 = 一直等）。
+- 关闭 AI 建议时（`--no-ai-advice`）自动点击会跟着关闭；**手牌记录/画像/
+  outbox 不受影响**，仍然照常沉淀（模型只是额外的一条建议）。
 - 没有 `config/clicker_local.json` 时启动会明确报错，先跑第 0 步。
 - 真实点击需要 macOS「辅助功能」权限，见下方自动点击小节。
 
@@ -101,7 +103,7 @@ ROI 识别座位、筹码、下注、动作、庄位、底池和盲注，输出�
 ### AI 实时建议（默认开启）
 
 worker 在**轮到我**时把这一手的完整行动线交给模型（`--no-ai-advice` 可关闭）。
-现在只有一套**中文 lean** 提示词（`advice.PROMPT_VERSION = lean-zh-2026-11-03.3`）。
+现在只有一套**中文 lean** 提示词（`advice.PROMPT_VERSION = lean-zh-2026-11-05.1`）。
 提示词代码已按功能/场景拆到 `poker_ocr/prompt/`（system / user / shared / offline），
 几何与赔率纯计算在 `pot_math.py`，事实在 `situation.py`，选项在 `options.py`，
 `advice.py` 只负责模型调用与结果；
@@ -128,7 +130,7 @@ worker 在**轮到我**时把这一手的完整行动线交给模型（`--no-ai-
 - **0 对手异常帧硬闸**：翻后状态帧把对手全标弃牌、底池却有钱时，不再渲染有效筹码/SPR/
   短码/牌力落后，只给过牌/弃牌，且 `advise()` 不调模型直接走 fallback。
 - **不再注入** RFI/3-bet 范围表、翻后纹理/尺度、`Value directive`、`Math gate`、
-  上一街 plan、GTO、board equity、技能库。旧 `lean-rules` / `skills` 与
+  上一街 plan、board equity、技能库。旧 `lean-rules` / `skills` 与
   `--advice-style` 已从 live 链路删除。
 
 实时牌力仍由 `ground_truth.py` / `hand_vs_ranges.py` 计算，以中文事实呈现：
@@ -180,9 +182,10 @@ A 高面只在 `.table_dy` 的现场观察或弃牌率支持时才加权；观�
 5.5BB，并在 note 里标 `已抬到本桌最低加注 5.5BB`；点击器用的档位金额
 （`preset_targets()`）同样按 5.5BB 修正。换牌桌规则时只改这一个常量。
 
-模型调用在后台线程跑，**不阻塞采样**；
-结果写进 JSONL 的 `advice` 记录并高亮打印（含本次耗时）。等模型期间识别会暂停，
-终端每秒打一行 `[建议] 生成中… Ns` 心跳，日志不会静默几秒后突然成团出现。
+模型调用在后台线程跑，**不阻塞采样**：生成期间识别继续，只是不投递新的
+决策点（同一回合的决策点会在生成结束后补投）。结果写进 JSONL 的 `advice`
+记录并高亮打印（含本次耗时）；终端每秒打一行 `[建议] 生成中… Ns` 心跳，
+日志不会静默几秒后突然成团出现。
 
 ```bash
 cp .env.example .env      # 然后编辑 .env，填入 AI_SERVER_API_KEY

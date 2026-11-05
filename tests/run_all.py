@@ -12,9 +12,12 @@
     test_field_ranges 快照 → 每对手范围 ID + mode（纯逻辑）
     test_hand_vs_ranges 手牌 vs 范围：精确 behind + MC 权益（纯逻辑）
     test_range_flow  事件模型：动作序列/桶/似然/范围收窄（纯逻辑）
+    test_strategy_tables 策略表 JSON：来源完整/profile 回落/与推导可复现（纯逻辑）
+    test_fold_curve_probe 弃牌曲线探针的价格口径：半池/满池/加注/短码（纯逻辑）
+    test_showdown_range_check 摊牌反核：百分位语义/档位占比/快照重建（纯逻辑）
+    test_ab_diff     AB 段落级归因：切段/变化判定/缺段（纯逻辑）
     test_hand_strength 实时牌力解析：behind/equity 合成一行结论（纯逻辑）
     test_advice     实时 AI 建议：行动线/中文事实/选项/模型协议（纯逻辑）
-    test_gto_lookup GTO 近似表查询：同构映射/节点/插值/保守 None（纯逻辑）
     test_hand_id     手牌 ID：名单/位置/日期摘要 + 碰撞后缀（纯逻辑）
     test_hand_outbox 手牌 outbox：一手一文件/幂等/sent 迁移（纯逻辑）
     test_opponent_profile 对手画像：弃牌补全/统计/分类/pin/建议集成（纯逻辑）
@@ -50,13 +53,14 @@ HERE = Path(__file__).resolve().parent
 SUITES = ["test_positions.py", "test_env.py", "test_coach.py",
           "test_ranges.py", "test_board_range.py", "test_field_ranges.py",
           "test_hand_vs_ranges.py", "test_range_flow.py", "test_hand_strength.py",
+          "test_strategy_tables.py", "test_fold_curve_probe.py",
+          "test_showdown_range_check.py", "test_ab_diff.py",
           "test_advice.py",
-          "test_gto_lookup.py",
           "test_hand_id.py", "test_hand_outbox.py",
           "test_opponent_profile.py", "test_clicker.py",
           "test_ai_advice_replay.py", "test_dealer.py", "test_roi_reader.py",
           "test_roi_dedup.py", "test_parse.py", "test_name_lexicon.py",
-          "test_frame_state.py",
+          "test_frame_state.py", "test_empty_seats.py",
           "test_state_stream.py", "test_live.py", "test_full_table.py",
           "test_runtime_profile.py", "test_stable_cards.py",
           "test_doubt_window.py", "test_export_live_hands.py",

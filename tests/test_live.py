@@ -1551,6 +1551,23 @@ def test_confirm_only_recognizes_y_and_n() -> None:
               f"EOF 应打提示：{logs2}")
 
 
+def test_confirm_times_out_instead_of_blocking_forever() -> None:
+    """确认最多等 timeout 秒；超时按拒绝处理，不把主循环挂死。"""
+    class FakeStdin:
+        def isatty(self) -> bool:
+            return False
+
+        def fileno(self) -> int:
+            return 123
+
+    logs: list[str] = []
+    with patch.object(live.sys, "stdin", FakeStdin()), \
+            patch("select.select", return_value=([], [], [])):
+        check(live._ask_confirm(logs.append, timeout=0.01) is False,
+              "超时应按拒绝处理")
+    check(any("超时" in line for line in logs), f"应打超时提示：{logs}")
+
+
 def test_confirm_tty_flushes_typeahead_and_reads_single_keys() -> None:
     """TTY：读取前 tcflush 清缓存，单键读取，忽略 y/n 之外的键。"""
     try:
@@ -1635,7 +1652,7 @@ def test_auto_click_skips_fallback_and_error() -> None:
 
 
 def test_auto_click_skips_low_confidence() -> None:
-    """配置阈值后，低置信度只显示不点；没给 confidence 不拦。"""
+    """配置阈值后，低置信度只显示不点；没给 confidence 也按不达标（fail closed）。"""
     clicker = FakeClicker()
     proc, rows = _drain_click(
         _click_advice(confidence=0.2), clicker=clicker, min_confidence=0.5)
@@ -1646,7 +1663,9 @@ def test_auto_click_skips_low_confidence() -> None:
     clicker2 = FakeClicker()
     proc2, rows2 = _drain_click(
         _click_advice(confidence=None), clicker=clicker2, min_confidence=0.5)
-    check(len(clicker2.calls) == 1, "没给 confidence 时不应因阈值被拦")
+    check(clicker2.calls == [], "没给 confidence 时阈值应生效（无法验证=不点）")
+    check(rows2[0]["click"]["reason"] == "low_confidence",
+          f"应记录 low_confidence：{rows2[0]}")
 
     clicker3 = FakeClicker()
     proc3, rows3 = _drain_click(
@@ -1798,8 +1817,8 @@ def test_auto_click_retry_respects_count_and_dry_run() -> None:
     check(proc3._click_retry is None, "retry_count=0 不应挂重试")
 
 
-def test_processor_pauses_while_advice_is_generating() -> None:
-    """模型返回前 waiting_for_advice=True，主循环据此跳过识别。"""
+def test_processor_reports_advice_generation() -> None:
+    """模型生成期间 waiting_for_advice=True（心跳/状态用），但主循环不再暂停。"""
     class BusyRunner:
         busy = True
 
@@ -2278,6 +2297,7 @@ def main() -> int:
         test_auto_click_n_rejects,
         test_confirm_only_recognizes_y_and_n,
         test_confirm_tty_flushes_typeahead_and_reads_single_keys,
+        test_confirm_times_out_instead_of_blocking_forever,
         test_no_confirm_flag_defaults_to_asking,
         test_auto_click_skips_when_not_hero_turn,
         test_auto_click_skips_stale_decision,
@@ -2290,7 +2310,7 @@ def main() -> int:
         test_auto_click_retries_after_half_second_if_unchanged,
         test_auto_click_retry_cancelled_when_page_changes,
         test_auto_click_retry_respects_count_and_dry_run,
-        test_processor_pauses_while_advice_is_generating,
+        test_processor_reports_advice_generation,
         test_advice_wait_logs_heartbeat_each_second,
         test_advice_bar_colors_by_action,
         test_complete_hand_logs_yellow_banner,

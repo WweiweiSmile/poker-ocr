@@ -261,7 +261,23 @@ def main(argv: list[str] | None = None) -> int:
                     help="牌桌动态文件；默认读项目根目录 .table_dy")
     ap.add_argument("--no-table-dynamics", action="store_true",
                     help="不注入 .table_dy（默认注入，和实时链路一致）")
+    ap.add_argument("--no-profiles", action="store_true",
+                    help="不注入对手画像（旧行为；默认注入，和实时链路一致）")
+    ap.add_argument("--profile-db", default=None,
+                    help="画像库路径（默认 OPPONENT_DB 或 data/opponents/profiles.json）")
+    ap.add_argument("--pool-key", default=None,
+                    help="画像池子键（默认跟随画像库自身记录）")
     args = ap.parse_args(argv)
+
+    store = None
+    if not args.no_profiles:
+        from poker_ocr.opponent_profile import load_profile_store
+        try:
+            store = load_profile_store(args.profile_db, args.pool_key)
+        except Exception as exc:                       # noqa: BLE001
+            print(f"画像库加载失败（按无画像继续）：{type(exc).__name__}: {exc}",
+                  file=sys.stderr)
+            store = None
 
     dynamics_text = ""
     if not args.no_table_dynamics:
@@ -299,6 +315,7 @@ def main(argv: list[str] | None = None) -> int:
 
     rows = []
     stale = 0
+    profiled = 0
     since = ""
     for adv in advices:
         st = find_state(adv, states, since)
@@ -318,7 +335,26 @@ def main(argv: list[str] | None = None) -> int:
                      or (snap.pot or 0) > 12 * bb)):
             stale += 1
             continue
-        sit = build_situation(snap, table_dynamics=dynamics_text)
+        # 和 live.py 同口径：只取「本手还在局」的对手；画像+桌统计一起注入。
+        reads = {}
+        table_stats = None
+        if store is not None:
+            active = [o for o in snap.opponents if not o.folded]
+            try:
+                reads = store.read_for(active)
+            except Exception as exc:                   # noqa: BLE001
+                print(f"画像读取失败 {snap.hand_id}: "
+                      f"{type(exc).__name__}: {exc}", file=sys.stderr)
+                reads = {}
+            try:
+                current = store.stats_for_opponents(active)
+                table_stats = store.pooled_for_stats(
+                    current, total_players=len(active) + 1)
+            except Exception:                          # noqa: BLE001
+                table_stats = None
+        sit = build_situation(snap, table_dynamics=dynamics_text,
+                              opponent_reads=reads.values() if reads else None,
+                              table_stats=table_stats)
         hs = sit.hand_strength
         row = {
             "hand": snap.hand_id, "street": adv["street"],
@@ -390,6 +426,11 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  旧: {r['old']}  — {r['old_reason']}")
             print(f"  新: {r['new']}  — {r['new_reason']}")
 
+    if not args.no_profiles:
+        # 用事实块自己判定：有些 hand 的座位名匹配不上画像库，读到空也要算「无画像」。
+        profiled = sum(1 for r in rows if "## 对手画像" in (r.get("facts") or ""))
+        print(f"注入画像：{profiled}/{len(rows)} 个决策点的提示词里带对手画像"
+              f"（库：{getattr(store, 'path', None) or args.profile_db or '默认'}）")
     if args.json:
         dump = []
         for r in rows:

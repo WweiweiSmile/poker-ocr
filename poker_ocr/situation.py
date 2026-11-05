@@ -20,7 +20,7 @@ from .coach import (
     read_hand,
 )
 from .ground_truth import GroundTruth, compute_ground_truth
-from .hand_track import PREFLOP, HandSnapshot
+from .hand_track import PREFLOP, HandSnapshot, preflop_aggressive
 from .options import (
     LOOSE_OPEN_BONUS, _abnormal_options, build_options, options_mode,
 )
@@ -85,8 +85,9 @@ class Situation:
     table_dynamics: str | None = None
     # 当前桌/全场先验统计。`scope` 决定提示词标题和口径。
     table_stats: "PooledStats | None" = None
-    # 本手第几个 hero 决策点（0 起）。写进 advice 后可与 replay 的
-    # DecisionPoint.action_index 对齐，解决「同一街多个决策点」无法配对。
+    # 决策点之前**整手牌**的动作总数（0 起，不是「第几个 hero 决策点」）。
+    # 写进 advice 后与 replay 的 DecisionPoint.action_index 同口径，解决
+    # 「同一街多个决策点」无法配对；工具侧也用它截断行动线。
     action_index: int = 0
     # 爆炸底池：上一街底池 ÷ 实际参与人数（BB/人）及其是否刚好 5BB。
     # 见 previous_street_pot() / is_explosive_pot()。
@@ -122,10 +123,6 @@ class Situation:
     players_left_to_act: int | None = None
     # 上一街自己的决定（同手）。空 = 本手第一个决策点，或跨手重放。
     previous: "Advice | None" = None
-    # GTO 近似表查询结果（单挑/单加注池/翻牌或转牌才有）。None = 不覆盖或查不到。
-    gto: "object | None" = None
-    # 牌面范围权益（Monte Carlo，多人池也能用）。None = 没表/翻前/位置不明。
-    board_eq: "object | None" = None
     # 手牌 vs 对手范围（实时牌面范围 + 精确 behind + MC equity）。
     # None = 翻前/牌面不足/没有可确认的对手范围。
     hand_ranges: "object | None" = None
@@ -201,10 +198,7 @@ def _conflict_warnings(snap: HandSnapshot) -> tuple[str, ...]:
 
     # 翻前形态 vs 实际加注次数。动作线为空时不判：形态可能是水位兜底。
     if pre:
-        raises = sum(
-            1 for a in pre
-            if a.action in ("raise", "bet")
-            or (a.action == "call" and a.all_in))
+        raises = len(preflop_aggressive(pre))
         shapes = set(snap.preflop_shapes or ())
         bad = False
         if "three-bet" in shapes:
@@ -313,13 +307,11 @@ def build_situation(snap: HandSnapshot,
                     opponent_reads: Iterable[OpponentRead] | None = None,
                     table_stats: "PooledStats | None" = None,
                     previous: "Advice | None" = None,
-                    include_advanced: bool = False,
                     include_strength: bool = True
                     ) -> Situation:
     """把快照整理成一次决策的事实。
 
-    `include_advanced=True` 才计算 GTO 近似表与 board equity（离线审计/实验
-    用）。`include_strength=False` 时跳过 hand_strength：实时链路不再需要
+    `include_strength=False` 时跳过 hand_strength：实时链路不再需要
     第 4 套牌力口径，离线审计在需要时自己懒计算。
     `table_dynamics` 是根目录 `.table_dy` 的解析文本（见 table_dynamics.py）。
     由调用方显式传入，而不是在这里读文件：单测和离线重放不会因为仓库里恰好
@@ -453,14 +445,6 @@ def build_situation(snap: HandSnapshot,
         previous=previous,
         abnormal_no_opponents=anomaly,
     )
-    # GTO 表/board equity 是旧实验事实层，不再进入中文 lean 提示词。
-    # 只有离线工具显式要 include_advanced=True 时才计算，且失败静默跳过。
-    if include_advanced:
-        try:
-            from . import gto_lookup
-            sit = replace(sit, gto=gto_lookup.lookup(sit))
-        except Exception:  # noqa: BLE001
-            pass
     # 手牌 vs 对手范围：答案在 ground truth 之后、board structure 之前。
     # 任何一步缺数据都 fail open，绝不影响主链路。
     try:
@@ -482,12 +466,6 @@ def build_situation(snap: HandSnapshot,
                     [*sit.warnings, *gaps])))
     except Exception:  # noqa: BLE001
         pass
-    if include_advanced:
-        try:
-            from . import board_equity
-            sit = replace(sit, board_eq=board_equity.lookup(sit))
-        except Exception:  # noqa: BLE001
-            pass
     # 牌力解析：在 hand_ranges 之上再加一层纯判定，输出一行 Hand-strength read。
     # 依赖 hand_ranges；缺失时静默跳过，绝不猜。任何异常 fail open。
     # live 传 include_strength=False：这个结论只服务离线审计，不进 prompt。

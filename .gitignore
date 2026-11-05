@@ -37,11 +37,5 @@ data/opponents/
 # 已结束手牌的 outbox（等手牌库异步取走）
 data/hand_outbox/
 
-# GTO 跑批：本地工具链 / 编译产物 / 原始数据 / 任务清单
-.toolchain/
-gto/runner/target/
-gto/data/
-gto/jobs/
-
 # codegraph 索引缓存（本地工具产物，11MB 级，不入库）
 .codegraph/

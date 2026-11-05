@@ -17,6 +17,7 @@ from typing import Any
 
 from poker_ocr.hand_track import (
     ActionRecord, HandSnapshot, OpponentSnapshot, StreetRecord,
+    preflop_aggressive,
 )
 from poker_ocr.parse import Blinds
 
@@ -63,6 +64,12 @@ class DecisionPoint:
     # variant 仍用当前代码重渲染；只有 baseline 版本会用这个 override。
     baseline_prompt: tuple[str, str] | None = None
     baseline_prompt_sha: str | None = None
+    # 线上那次建议实际看到的选项空间（facts.options）。baseline 重放旧 prompt
+    # 时必须用它校验 id，否则当前代码改过选项后旧 id 会被判成非法。
+    baseline_options: list[dict] | None = None
+    # 同一手更早街的线上建议（「上一街我的建议」段）。baseline/variant 用同一份，
+    # 保证 A/B 的 prompt 只差版本本身。
+    previous_advice: object | None = None
 
     @property
     def identity(self) -> tuple[str, str, int]:
@@ -247,10 +254,12 @@ def _base_warnings(h: dict, *, players: int, bb: float, hero_cards: tuple[str, .
     villains = [v for v in (h.get("villains") or []) if isinstance(v, dict)]
     if not villains:
         warnings.append("缺对手位置/筹码，决策点按聚合对手重建")
-    elif any(v.get("stackBb") is None for v in villains):
-        warnings.append("部分对手筹码缺失")
+    # 对手筹码缺失不再单独报：build_situation 会按「N 名对手筹码未读出」
+    # 统一报一次，线上/复盘同词表（硬/软缺口分类才不会一边硬一边软）。
     if hero_start is None:
-        warnings.append("缺 hero 起始筹码")
+        # 与线上 `_snapshot` 的英文告警经 `_gap_zh` 映射后的中文完全一致：
+        # 复盘 prompt 的「数据质量」段与线上同文本、同分类（P1-5）。
+        warnings.append("开池后手未读出，套池比例未知")
     # 设计口径：首街是 preflop 且行动线完整时，底池可以从盲注 + 行动精确重建，
     # 没有 potStartBb 不算 approx。只有「手牌从翻后开始」或行动金额缺失才需要提示。
     first = next((r.get("street") for r in streets if r.get("street")), None)
@@ -395,23 +404,37 @@ def build_decisions(h: dict) -> tuple[list[DecisionPoint], bool, list[str], int]
                     StreetRecord(street, pot_start, tuple(cur)),)
                 pre_acts = [x for r in streets if r.street == "preflop"
                             for x in r.actions]
-                raises = sum(1 for x in pre_acts
-                             if x.action in ("raise", "bet")
-                             or (x.action == "call" and x.all_in))
+                aggressive = preflop_aggressive(pre_acts)
+                raises = len(aggressive)
                 if raises == 0:
                     limped = any(x.action == "call" and not x.is_hero
                                  for x in pre_acts)
+                    if not limped:
+                        # 与 live 的 hand_track 同源：动作线漏掉 call 徽章时，
+                        # 用「非盲位、本街下注 == 1BB」兜底，避免把溜入池判成
+                        # 未开池（底池类型/攻击块/范围结论会全错）。
+                        bb_now = bb or 1.0
+                        limped = any(
+                            pos not in ("SB", "BB")
+                            and abs(float(commit.get(pos, 0.0) or 0.0)
+                                    - bb_now) < 0.01
+                            for pos in villains)
                     shapes = ("limped",) if limped else ("unopened",)
                 elif raises == 1:
                     shapes = ("single-raise",)
                 else:
                     shapes = ("three-bet",)
-                hero_pfr = any(x.is_hero and x.action in ("raise", "bet")
-                               for x in pre_acts)
+                hero_pfr = bool(aggressive) and aggressive[-1].is_hero
 
                 remaining = (max(hero_start - hero_invested, 0.0)
                              if hero_start is not None else None)
                 to_call = round(max(level - float(commit.get("hero", 0.0) or 0.0), 0.0), 2)
+                # 第二高下注：最小加注额 = 最高注 + max(最高注 − 第二高注, bb)。
+                # 旧实现恒为 None，复盘算出的最小加注会比线上更大，选项金额
+                # 和 A/B 结论都会偏（P1-4）。
+                positive = sorted((float(v or 0.0) for v in commit.values()
+                                   if float(v or 0.0) > 0), reverse=True)
+                second_bet = positive[1] if len(positive) > 1 else None
                 board = cards_of(h.get("board"))[:BOARD_LEN[street]]
                 # 与 live 的 Advice.action_index 对齐：它是「决策点之前整手牌
                 # 的动作总数」，不是本街第几个动作。旧实现用本街 enumerate，
@@ -424,7 +447,7 @@ def build_decisions(h: dict) -> tuple[list[DecisionPoint], bool, list[str], int]
                     hero_stack=round(remaining, 2) if remaining is not None else None,
                     hero_bet=float(commit.get("hero", 0.0) or 0.0),
                     hero_invested=round(hero_invested, 2),
-                    to_call=to_call, second_bet=None,
+                    to_call=to_call, second_bet=second_bet,
                     pot=round(pot, 2), pot_before_street=round(pot_start, 2),
                     table_size=players,
                     blinds=Blinds(sb, bb, ante or None, f"{sb}/{bb}({ante})"),
@@ -436,8 +459,6 @@ def build_decisions(h: dict) -> tuple[list[DecisionPoint], bool, list[str], int]
                     players_dealt=players, bomb_pot=bomb,
                 )
                 decision_warnings = list(warnings)
-                if remaining is None and "缺 hero 起始筹码" not in decision_warnings:
-                    decision_warnings.append("hero 剩余筹码未知")
                 # 把重建警告放进快照：build_situation 会把它带进模型事实和
                 # replay_decisions.snapshot_json，任务详情才能解释「为什么可疑」。
                 if decision_warnings:

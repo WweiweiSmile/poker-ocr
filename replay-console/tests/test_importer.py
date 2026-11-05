@@ -217,7 +217,7 @@ def test_live_hand_start_stacks_feed_replay_constraints():
     assert "UTG+1" not in stacks
 
     analysis = analyze_hand(row)
-    assert not any("缺 hero 起始筹码" in w for w in analysis.warnings)
+    assert not any("开池后手未读出" in w for w in analysis.warnings)
     first = analysis.decisions[0].snap
     assert first.hero_stack is not None
     assert first.hero_invested is not None

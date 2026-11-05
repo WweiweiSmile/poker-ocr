@@ -1,0 +1,176 @@
+{
+  "schema": 1,
+  "kind": "fold_equity",
+  "profiles": {
+    "hand-tuned": "v0",
+    "sourced": "v1"
+  },
+  "default_variant": "v0",
+  "tables": {
+    "base_fold": {
+      "v0": {
+        "source": "hand-tuned",
+        "verified": false,
+        "note": "各手牌类别面对 1/2 池（price=0.25）时的弃牌概率。`_calibration_scale` 的 docstring 明写：BASE_FOLD 是先验表，绝对水平没有依据 —— 只靠 scale 校准水平，形状无人校准。",
+        "needs": "按价格分桶的实测弃牌率（tier 形状不可识别，只能当先验）",
+        "rows": {
+          "强成牌": 0.03,
+          "超对": 0.1,
+          "顶对强踢": 0.15,
+          "顶对弱踢": 0.32,
+          "中底对": 0.52,
+          "强听": 0.38,
+          "弱听": 0.58,
+          "打牌面": 0.5,
+          "空气": 0.72
+        }
+      },
+      "v1": {
+        "source": "derived",
+        "verified": false,
+        "note": "参考价格 0.25 下的弃牌概率，由 defend model 逐档算出",
+        "derivation": "defend model：continue = σ((e·R − p)/τ)，p=0.25（1/2 池），τ=0.06；加注占比 = σ((e − 0.65)/0.1)；R 取 REALIZATION_BASE × REALIZATION_UNKNOWN_POS（复用已有表）。e 与 R 是假设，未实测、也无外部参照（verified=false）。复现：python tools/derive_strategy_tables.py",
+        "needs": "按价格分桶的对手实测弃牌率（本地样本仅 ~74 次，需要全量库）；tier 形状无法从观测数据识别，v1 只用于敏感度实验，不作默认",
+        "rows": {
+          "强成牌": 0.01,
+          "超对": 0.01,
+          "顶对强踢": 0.0112,
+          "顶对弱踢": 0.0738,
+          "中底对": 0.3598,
+          "强听": 0.1747,
+          "弱听": 0.5875,
+          "打牌面": 0.3815,
+          "空气": 0.9436
+        }
+      }
+    },
+    "price_ref": {
+      "v0": {
+        "source": "derived",
+        "verified": true,
+        "note": "参考价格：1/2 池下注时他跟注的价格 = 0.5/(1+2×0.5) = 0.25。",
+        "value": 0.25
+      }
+    },
+    "size_gamma": {
+      "v0": {
+        "source": "hand-tuned",
+        "verified": false,
+        "note": "价格弹性：price 翻倍时弃牌倾向放大 2^γ 倍。γ=1.0 是线性外推，真人不是线性弃牌的 —— 这张表直接决定「该用多大尺寸诈唬」。",
+        "needs": "同一对手在不同尺寸下的弃牌率（尺寸弹性），对手库能直接量",
+        "value": 1.0
+      },
+      "v1": {
+        "source": "derived",
+        "verified": false,
+        "note": "参考价格上的范围加权价格弹性 γ = (p/f̄)·(df̄/dp)",
+        "derivation": "defend model：continue = σ((e·R − p)/τ)，p=0.25（1/2 池），τ=0.06；加注占比 = σ((e − 0.65)/0.1)；R 取 REALIZATION_BASE × REALIZATION_UNKNOWN_POS（复用已有表）。e 与 R 是假设，未实测、也无外部参照（verified=false）。复现：python tools/derive_strategy_tables.py",
+        "needs": "按价格分桶的对手实测弃牌率（本地样本仅 ~74 次，需要全量库）；tier 形状无法从观测数据识别，v1 只用于敏感度实验，不作默认",
+        "value": 0.939
+      }
+    },
+    "fold_min": {
+      "v0": {
+        "source": "hand-tuned",
+        "verified": false,
+        "note": "钳制下限：不把「必跟」当成确定事件。",
+        "value": 0.01
+      }
+    },
+    "fold_max": {
+      "v0": {
+        "source": "hand-tuned",
+        "verified": false,
+        "note": "钳制上限：不把「必弃」当成确定事件。",
+        "value": 0.97
+      }
+    },
+    "default_sizes": {
+      "v0": {
+        "source": "hand-tuned",
+        "verified": false,
+        "note": "没有真实选项时的默认考察尺寸（底池比例）。",
+        "items": [
+          0.33,
+          0.5,
+          0.75,
+          1.0
+        ]
+      }
+    },
+    "realization_base": {
+      "v0": {
+        "source": "hand-tuned",
+        "verified": false,
+        "note": "四类手牌的权益实现率。经验值：IP 强成牌接近全额，OOP 空气只有一半多。不乘它，跟注 EV 会系统性高估。",
+        "needs": "分档实现率实测（按街/位置拆）",
+        "rows": {
+          "value": 0.9,
+          "draw": 0.82,
+          "board_play": 0.75,
+          "weak": 0.58
+        }
+      }
+    },
+    "realization_ip": {
+      "v0": {
+        "source": "hand-tuned",
+        "verified": false,
+        "note": "有位置的实现率乘数。",
+        "value": 1.0
+      }
+    },
+    "realization_oop": {
+      "v0": {
+        "source": "hand-tuned",
+        "verified": false,
+        "note": "无位置的实现率乘数。",
+        "value": 0.86
+      }
+    },
+    "realization_unknown_pos": {
+      "v0": {
+        "source": "hand-tuned",
+        "verified": false,
+        "note": "位置未知时的实现率乘数。",
+        "value": 0.93
+      }
+    },
+    "realization_per_extra_opponent": {
+      "v0": {
+        "source": "hand-tuned",
+        "verified": false,
+        "note": "每多一个对手的实现率乘数。",
+        "value": 0.95
+      }
+    },
+    "realization_min": {
+      "v0": {
+        "source": "hand-tuned",
+        "verified": false,
+        "note": "实现率钳制下限。",
+        "value": 0.45
+      }
+    },
+    "realization_max": {
+      "v0": {
+        "source": "hand-tuned",
+        "verified": false,
+        "note": "实现率钳制上限。",
+        "value": 1.0
+      }
+    },
+    "street_discount": {
+      "v0": {
+        "source": "derived",
+        "verified": true,
+        "note": "还剩几条下注街决定折扣深度：河牌 0、转牌 0.5、翻牌 1.0（只削减折扣量）。",
+        "rows": {
+          "flop": 1.0,
+          "turn": 0.5,
+          "river": 0.0
+        }
+      }
+    }
+  }
+}

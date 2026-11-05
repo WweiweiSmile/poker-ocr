@@ -36,13 +36,19 @@ def test_combo_key_roundtrip() -> None:
 
 
 def test_all_rule_tokens_expand() -> None:
+    """每个 token 都必须能展开。
+
+    用 `assert` 而不是 `check`：`check` 只把失败记进 FAILS，pytest 会当成通过。
+    这个坑踩过一次 —— `"22-JJ"` 这种对子区间 `expand` 会**静默返回空集**，
+    整个对子段就从范围里消失了，而 pytest 全绿。
+    """
     bad = []
     for name, tokens in {**ranges._RULE_TOKENS,
-                         "BB_DEF_FALLBACK": ranges._BB_DEF_FALLBACK}.items():
+                         "BB_DEF": ranges._BB_DEF_TOKENS}.items():
         for token in tokens:
             if not expand(token):
                 bad.append(f"{name}:{token}")
-    check(not bad, f"规则表有无法展开的 token：{bad}")
+    assert not bad, f"规则表有无法展开的 token：{bad}"
 
 
 def test_named_ranges_and_widths() -> None:
@@ -60,11 +66,13 @@ def test_named_ranges_and_widths() -> None:
 
 def test_rule_prior_widths_follow_design_targets() -> None:
     cases = {
-        "COLD_CALL_IP_vs_LP": (10.5, 12.5),
-        "COLD_CALL_OOP_vs_EP": (9.5, 11.5),
-        "LIMP_EP": (29.5, 31.5),
-        "LIMP_MP": (37.0, 39.5),
-        "LIMP_LP": (39.0, 43.0),
+        # 2026-11-05 按摊牌反核加宽（见 docs/摊牌反核-2026-11-05.md）：
+        # 冷跟 IP 11→20%、OOP 10→14.5%；limp 31→37 / 38→41 / 41→47。
+        "COLD_CALL_IP_vs_LP": (19.0, 21.0),
+        "COLD_CALL_OOP_vs_EP": (15.5, 17.5),
+        "LIMP_EP": (36.0, 39.0),
+        "LIMP_MP": (39.5, 42.0),
+        "LIMP_LP": (45.0, 49.0),
         "3BET_vs_EP": (5.0, 7.0),
         "3BET_CALL_vs_LP": (3.0, 5.0),
     }

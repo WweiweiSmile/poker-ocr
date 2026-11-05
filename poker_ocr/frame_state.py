@@ -67,6 +67,26 @@ class PlayerState:
     # 后修复 roster。
     name_tracked: str | None = None
 
+    @property
+    def seat_state(self) -> str:
+        """三态玩家状态：``in_hand`` / ``waiting`` / ``folded``；``empty`` = 空座。
+
+        业务语义的唯一口径（`status` 继续保留给 JSONL/旧消费者）：
+
+          · **在局**是默认值：只要这一手有他（名单锁定的座位），没有明确的
+            弃牌/等待证据就一直在局；
+          · **等待入局**只由头像文案（等待审核 / 等待中 / 正在带入）触发；
+          · **弃牌**只由「头像出现弃牌 + 手牌图标消失」两条同时满足触发；
+          · **空座**不是玩家状态（虚线「+」占位 / 牌桌没坐满）。
+        """
+        if self.status == "away" and not self.in_hand:
+            return "empty"
+        if self.status in ("buying_in", "sitting_out"):
+            return "waiting"
+        if self.fold is True or self.status == "folded":
+            return "folded"
+        return "in_hand"
+
     def to_debug(self) -> dict:
         return {
             "seat_id": self.seat_id,
@@ -428,6 +448,12 @@ def build_state(frame: RoiFrame, profile: Profile,
         buying_in = (wait_kind == "buying_in"
                      or ("带入" in avatar_text and stack == 0.0))
         waiting = wait_kind == "waiting"
+        # 一手牌内的名单锁：锁定的座位**默认在局**。这一帧名字/筹码/下注
+        # 都读不到只说明被遮挡（质量闸会按 stack/bet 缺失丢帧），不能据此
+        # 把人移出这一手 —— 移出会改人数/位置/行动顺序，还会被 vanish 逻辑
+        # 误判成「离桌 → 弃牌」。空座/离桌只认头像「+」占位（正向证据，
+        # state_stream 确认后写进 left_seats）。
+        rostered = bool(roster and sid in roster)
         # 全下玩家在**下注结算后**会变成「筹码 0、pill 已收走」，看起来和离桌一样。
         # 用上一帧的全下集合区分：他全下过、筹码还是 0，就还是全下。
         was_all_in = sid in prev_all_in
@@ -452,22 +478,33 @@ def build_state(frame: RoiFrame, profile: Profile,
         #    有名字的是「坐出/带入中」，连名字都没有就是空位。
         empty_zero = (no_cards and stack == 0.0 and (bet or 0) == 0
                       and sid != frame.hero_seat_id)
-        no_player = empty_slot or (empty_zero and name is None)
-        # 在座未入局：筹码 0 的空转态（zero_idle / empty_zero）**或** 头像文案
-        # 直接说明在等（等待审核 / 等待中）。后者筹码可以不为 0，所以单独一项。
-        sitting_out = (zero_idle or waiting or (empty_zero and not no_player)) \
-            and not buying_in
+        if rostered:
+            # 名单锁定的座位只有三种玩家状态：在局（默认）/ 等待入局 / 弃牌。
+            # 「等待入局」只由头像文案（等待审核 / 等待中 / 正在带入）触发，
+            # 不再用「筹码 0 + 没下注」这种结构性证据去猜。
+            no_player = False
+            sitting_out = waiting and not buying_in
+        else:
+            no_player = empty_slot or (empty_zero and name is None)
+            # 在座未入局：筹码 0 的空转态（zero_idle / empty_zero）**或** 头像文案
+            # 直接说明在等（等待审核 / 等待中）。后者筹码可以不为 0，所以单独一项。
+            sitting_out = (zero_idle or waiting
+                           or (empty_zero and not no_player)) and not buying_in
 
         # 空座位（牌桌没坐满时那个虚线「+」）三块槽位都是空文本：名字 None、
         # 筹码 None、bet 空文本被记成 0.0。**bet=0 不能当在场证据** —— 否则空座
         # 会以「有下注字段、但没有筹码」进入质量闸，报 stack:<空座>，整场 100%
         # 丢帧。只有 bet>0 才说明这座真的往池里放过钱；动作/弃牌徽章同理是
         # 在场证据（名字和筹码都被挡住时仍要能报出 stack 错误，而不是悄悄少人）。
-        in_hand = ((name is not None or stack is not None or (bet or 0) > 0
-                    or action is not None or fold is True
-                    or icon is True or shown_here
-                    or all_in_badge is True or equity is not None)
-                   and not buying_in and not sitting_out and not no_player)
+        in_hand = (
+            # 名单锁定的座位默认在局；只有头像文案（等待入局）能把他移出去。
+            (rostered and not buying_in and not waiting)
+            or ((name is not None or stack is not None or (bet or 0) > 0
+                 or action is not None or fold is True
+                 or icon is True or shown_here
+                 or all_in_badge is True or equity is not None)
+                and not buying_in and not sitting_out and not no_player)
+        )
         # 头像黄色 All-in 徽章是最直接的证据；胜率显示也只在全下后出现。
         # 旧的结构化判据（筹码 0 + 有下注/曾经全下）保留给徽章读不到时兜底。
         all_in = bool(in_hand and (

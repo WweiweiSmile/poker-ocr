@@ -64,6 +64,59 @@ def test_preflop_start_without_pot_start_is_exact():
     assert analysis.decisions[1].snap.pot == 12.0
 
 
+def test_second_bet_is_reconstructed_from_prior_bets():
+    """复盘重建第二高下注：最小加注额才和线上一致（P1-4）。"""
+    analysis = analyze_hand(hand())
+    # 翻前 hero 面对 CO 的 2.5BB：第二高注是 BB 的 1BB 盲注。
+    assert analysis.decisions[0].snap.second_bet == 1.0
+
+    data = hand(streets=[
+        {"street": "preflop", "actions": [
+            {"actor": "CO", "action": "raise", "amountBb": 2.5},
+            {"actor": "hero", "action": "call"},
+            {"actor": "BB", "action": "call"},
+        ]},
+        {"street": "flop", "actions": [
+            {"actor": "BB", "action": "bet", "amountBb": 4.0},
+            {"actor": "CO", "action": "raise", "amountBb": 12.0},
+            {"actor": "hero", "action": "call"},
+        ]},
+    ])
+    analysis = analyze_hand(data)
+    flop = [d for d in analysis.decisions if d.street == "flop"][0]
+    assert flop.snap.second_bet == 4.0
+
+
+def test_hero_stack_warning_uses_live_vocabulary():
+    """缺 hero 起始筹码的告警与线上同词表，才能被归成硬缺口（P1-5）。"""
+    from poker_ocr.prompt.user.quality import _is_hard_gap
+
+    analysis = analyze_hand(hand(heroStackBb=None))
+    text = " ".join(analysis.warnings)
+    assert "开池后手未读出，套池比例未知" in text, analysis.warnings
+    assert _is_hard_gap("开池后手未读出，套池比例未知")
+
+
+def test_previous_stored_advice_picks_earlier_street():
+    """上一街建议：取更早街的最后一条（同街不取）。"""
+    from replay.runner import _previous_stored_advice
+    from types import SimpleNamespace
+
+    rows = [
+        {"street": "flop", "action_index": 4, "option_id": "raise-1/2",
+         "option_label": "下注 3BB", "option_kind": "bet",
+         "option_amount": 3.0, "reason": "value"},
+        {"street": "turn", "action_index": 6, "option_id": "call",
+         "option_label": "过牌", "option_kind": "check",
+         "option_amount": None, "reason": "pot control"},
+    ]
+    decision = SimpleNamespace(street="river")
+    prev = _previous_stored_advice(rows, decision)
+    assert prev is not None and prev.street == "turn"
+    assert prev.option.id == "call" and prev.reason == "pot control"
+    assert _previous_stored_advice(rows, SimpleNamespace(street="flop")) is None
+
+
 def test_bb_zero_is_invalid():
     analysis = analyze_hand(hand(bigBlindBb=0.0))
     assert analysis.quality == INVALID

@@ -73,6 +73,32 @@ ACTION_TYPES = ("check", "call", "bet", "raise", "fold")
 
 AGGRESSIVE = ("bet", "raise")
 
+
+def preflop_aggressive(actions) -> list[ActionRecord]:
+    """翻前真正的加注动作（按时间顺序）。
+
+    规则：``bet`` / ``raise`` 一定算加注；``call`` 只有**全下且金额超过当前
+    水位**时才算「短码再加注」。短码「跟注全下」如果没有超过当前注，就只是
+    跟注 —— 它不重开行动，也不能把单加注池改判成 3-bet 池（旧口径把
+    `call + all_in` 无条件算加注，会把这种池的形态、范围和选项全带偏）。
+
+    金额读不到（None）的 all-in call 按「跟注」处理：宁可少算一次加注，
+    也不要凭一个猜出来的金额把池型升级。
+    """
+    level = 0.0
+    out: list[ActionRecord] = []
+    for a in actions:
+        amount = None if a.amount is None else float(a.amount)
+        if a.action in ("raise", "bet"):
+            out.append(a)
+            if amount is not None:
+                level = max(level, amount)
+        elif (a.action == "call" and a.all_in and amount is not None
+              and amount > level + 1e-9):
+            out.append(a)
+            level = amount
+    return out
+
 # 换手时「在局人数骤变」的阈值。注意这不是桌型座位数（那个用 state.table_seats）
 IN_HAND_JUMP = 2
 
@@ -362,7 +388,8 @@ class LiveHandTracker:
                 hero_cards: list[str] | tuple[str, ...],
                 board: list[str] | tuple[str, ...], *,
                 cards_reliable: bool = True,
-                cards_warnings: tuple[str, ...] = ()
+                cards_warnings: tuple[str, ...] = (),
+                allow_advice: bool = True,
                 ) -> HandSnapshot | None:
         """喂一帧被接受的状态；返回决策点快照或 None。
 
@@ -495,7 +522,9 @@ class LiveHandTracker:
         self._prev_hero_cards = cards or self._prev_hero_cards
         self._prev_in_hand = state.players_in_hand
 
-        return self._maybe_decision(state, hand, cards_reliable=cards_reliable)
+        return self._maybe_decision(state, hand,
+                                    cards_reliable=cards_reliable,
+                                    allow_advice=allow_advice)
 
     def record_shows(self, shows: dict[str, list[str]] | None) -> None:
         """把本帧读到的亮牌挂到当前（或刚结束的）这手牌上。
@@ -1326,7 +1355,8 @@ class LiveHandTracker:
 
     def _maybe_decision(self, state: FrameState,
                         hand: _LiveHand, *,
-                        cards_reliable: bool = True) -> HandSnapshot | None:
+                        cards_reliable: bool = True,
+                        allow_advice: bool = True) -> HandSnapshot | None:
         """轮到我时给一个决策点。去重靠 decision_key，不靠上升沿。
 
         为什么不是「只在 hero_turn 由假变真的那一帧」：多人池里 hero 过牌后
@@ -1337,6 +1367,11 @@ class LiveHandTracker:
         """
         if state.hero_turn is not True:
             self.turn_frames = 0
+            return None
+        # 后台还在生成上一条建议：继续累积行动线，但**不投递新决策点**。
+        # 队列只有一个位置，投了也会被下一条覆盖；而把 key 标成已建议会让
+        # 这个回合永远不再补投。等这次生成结束、下一帧 hero_turn 仍为真时再投。
+        if not allow_advice:
             return None
 
         # 炸弹池翻前只有每人 5BB 强制前注，没有下注轮，不产生决策点。
@@ -1418,7 +1453,8 @@ class LiveHandTracker:
         if hand.start_stack is not None and hero is not None and hero.stack is not None:
             invested = max(hand.start_stack - hero.stack, 0.0)
 
-        shapes = self._preflop_shapes(hand, max_bet, hero_seat)
+        shapes = self._preflop_shapes(hand, max_bet, hero_seat,
+                                       players=state.players)
         pfr = self._hero_is_pfr(hand, hero_seat)
         # 持续下注点：我是翻前加注者、翻牌轮到我、且没有人下注
         cbet = (hand.street == FLOP and pfr and to_call == 0
@@ -1468,7 +1504,7 @@ class LiveHandTracker:
         )
 
     def _preflop_shapes(self, hand: _LiveHand, max_bet: float,
-                        hero_seat: str) -> tuple[str, ...]:
+                        hero_seat: str, players=None) -> tuple[str, ...]:
         """到我这一动为止，翻前已经出现过几次加注。
 
         快照是在**轮到我**时取的，所以已记录的行动全都发生在我这一动之前 ——
@@ -1479,34 +1515,38 @@ class LiveHandTracker:
         preflop-open 的「第一个入池必须加注」；溜入池里平跟（over-limp）是
         正常线路，尤其是小对子抽 set。
 
+        **溜入判定与 `pot_math.count_limpers` 同源**：动作线漏掉 call 徽章时，
+        用「非盲位、未弃牌、本街下注 == 1BB」兜底。否则会出现
+        「底池类型：无人入池」+「前面溜入人数：2」这种同一份 prompt 里
+        自相矛盾的事实，攻击块也会因为 pot_type 不是 limped 而不触发。
+
         一次翻前行动都没记到（中途接管链路）时用盲注水位兜底：有人投到 1BB
         以上说明已经有人加注。宁可把一个 3bet 局面判成 single-raise，
         也不要因为「没记录」把有人加注的局面判成无人加注。
         """
-        raises = sum(
-            1 for a in hand.actions
-            if a.street == PREFLOP
-            and (a.action in ("raise", "bet") or (a.action == "call" and a.all_in))
-        )
+        bb = hand.blinds.bb if hand.blinds else 1.0
+        raises = len(preflop_aggressive(hand.street_actions(PREFLOP)))
         if raises == 0 and not hand.street_actions(PREFLOP):
-            bb = hand.blinds.bb if hand.blinds else 1.0
             if max_bet > bb + 1e-9:
                 raises = 1
 
         if raises == 0:
             limped = any(a.street == PREFLOP and a.action == "call"
                          and not a.is_hero for a in hand.actions)
+            if not limped and players:
+                limped = any(
+                    p.position not in ("SB", "BB") and not p.fold
+                    and p.bet is not None and abs(float(p.bet) - bb) < 0.01
+                    for p in players)
             return ("limped",) if limped else ("unopened",)
         if raises == 1:
             return ("single-raise",)
         return ("three-bet",)
 
     def _hero_is_pfr(self, hand: _LiveHand, hero_seat: str) -> bool:
-        last: str | None = None
-        for a in hand.actions:
-            if a.street == PREFLOP and (a.action in ("raise", "bet")
-                                        or (a.action == "call" and a.all_in)):
-                last = a.seat_id
+        last = None
+        for a in preflop_aggressive(hand.street_actions(PREFLOP)):
+            last = a.seat_id
         return last is not None and last == hero_seat
 
     # ─────────────────────────── 小工具 ───────────────────────────
