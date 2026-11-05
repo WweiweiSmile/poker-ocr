@@ -1,0 +1,349 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "poker-ocr 代码全景",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "output": "docs/archify/poker-ocr-panorama.html",
+    "viewBox": [
+      1180,
+      680
+    ],
+    "views": [
+      {
+        "id": "online",
+        "label": "在线链路",
+        "focus": [
+          "table",
+          "recognize",
+          "frame",
+          "hand",
+          "advice",
+          "llm"
+        ],
+        "note": "每帧约 0.5s：采集、识别、状态机、手牌追踪、建议。"
+      },
+      {
+        "id": "settle",
+        "label": "沉淀",
+        "focus": [
+          "frame",
+          "hand",
+          "jsonl",
+          "outbox",
+          "handlib"
+        ],
+        "note": "状态与手牌先落本地，再异步进手牌库。"
+      },
+      {
+        "id": "review",
+        "label": "复盘与工具",
+        "focus": [
+          "jsonl",
+          "handlib",
+          "tools"
+        ],
+        "note": "本地 JSONL 与手牌库各自派生报表和复盘页面。"
+      }
+    ]
+  },
+  "components": [
+    {
+      "id": "table",
+      "type": "external",
+      "label": "牌桌 App 画面",
+      "sublabel": "OBS 虚拟摄像头 / RTSP",
+      "tag": "1920×1080",
+      "pos": [
+        60,
+        190
+      ],
+      "size": [
+        140,
+        100
+      ]
+    },
+    {
+      "id": "recognize",
+      "type": "backend",
+      "label": "采集与识别",
+      "sublabel": "capture · roi_reader · cards",
+      "tag": "12 文件 · 5.9k 行",
+      "pos": [
+        260,
+        190
+      ],
+      "size": [
+        150,
+        100
+      ]
+    },
+    {
+      "id": "frame",
+      "type": "backend",
+      "label": "帧状态机",
+      "sublabel": "build_state + StateStream",
+      "tag": "4 文件 · 2.0k 行",
+      "pos": [
+        500,
+        190
+      ],
+      "size": [
+        150,
+        100
+      ]
+    },
+    {
+      "id": "hand",
+      "type": "backend",
+      "label": "手牌与牌力",
+      "sublabel": "hand_track · opponent_profile",
+      "tag": "16 文件 · 11.1k 行",
+      "pos": [
+        740,
+        190
+      ],
+      "size": [
+        150,
+        100
+      ]
+    },
+    {
+      "id": "advice",
+      "type": "backend",
+      "label": "决策与提示词",
+      "sublabel": "advice · coach · prompt 40 段",
+      "tag": "44 文件 · 8.2k 行",
+      "pos": [
+        980,
+        190
+      ],
+      "size": [
+        150,
+        100
+      ]
+    },
+    {
+      "id": "llm",
+      "type": "external",
+      "label": "LLM API",
+      "sublabel": "OpenAI 兼容接口",
+      "tag": "单次补全",
+      "pos": [
+        980,
+        372
+      ],
+      "size": [
+        150,
+        84
+      ]
+    },
+    {
+      "id": "tools",
+      "type": "backend",
+      "label": "离线分析 tools/",
+      "sublabel": "漏损 · 画像 · SFT",
+      "tag": "10.9k 行",
+      "pos": [
+        60,
+        520
+      ],
+      "size": [
+        150,
+        90
+      ]
+    },
+    {
+      "id": "jsonl",
+      "type": "database",
+      "label": "live.states.jsonl",
+      "sublabel": "每帧状态 + 手牌记录",
+      "tag": "append-only",
+      "pos": [
+        500,
+        520
+      ],
+      "size": [
+        150,
+        90
+      ]
+    },
+    {
+      "id": "outbox",
+      "type": "database",
+      "label": "手牌 outbox",
+      "sublabel": "pending → sent / failed",
+      "tag": "一手一文件",
+      "pos": [
+        740,
+        520
+      ],
+      "size": [
+        150,
+        90
+      ]
+    },
+    {
+      "id": "handlib",
+      "type": "frontend",
+      "label": "手牌库 + 复盘控制台",
+      "sublabel": "FastAPI :8010 · MySQL · React",
+      "tag": "9.3k py · 7.7k web",
+      "pos": [
+        980,
+        520
+      ],
+      "size": [
+        160,
+        90
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "本机 live 进程 · 每帧约 0.5s",
+      "wraps": [
+        "recognize",
+        "frame",
+        "hand",
+        "advice"
+      ]
+    },
+    {
+      "kind": "region",
+      "label": "本地事实源与复盘 · 每手 / 离线",
+      "wraps": [
+        "tools",
+        "jsonl",
+        "outbox",
+        "handlib"
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "id": "frame-in",
+      "from": "table",
+      "to": "recognize",
+      "label": "视频帧"
+    },
+    {
+      "id": "roi-text",
+      "from": "recognize",
+      "to": "frame",
+      "label": "ROI 文本"
+    },
+    {
+      "id": "accepted",
+      "from": "frame",
+      "to": "hand",
+      "label": "有效帧"
+    },
+    {
+      "id": "decision",
+      "from": "hand",
+      "to": "advice",
+      "label": "决策点"
+    },
+    {
+      "id": "prompt",
+      "from": "advice",
+      "to": "llm",
+      "label": "prompt",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelAt": [
+        1055,
+        338
+      ]
+    },
+    {
+      "id": "auto-click",
+      "from": "advice",
+      "to": "table",
+      "label": "自动点击",
+      "variant": "dashed",
+      "fromSide": "top",
+      "toSide": "top",
+      "via": [
+        [
+          1055,
+          70
+        ],
+        [
+          130,
+          70
+        ]
+      ]
+    },
+    {
+      "id": "state-jsonl",
+      "from": "frame",
+      "to": "jsonl",
+      "label": "状态/手牌 JSONL",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelAt": [
+        575,
+        352
+      ]
+    },
+    {
+      "id": "hand-outbox",
+      "from": "hand",
+      "to": "outbox",
+      "label": "手牌记录",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelAt": [
+        815,
+        352
+      ]
+    },
+    {
+      "id": "push",
+      "from": "outbox",
+      "to": "handlib",
+      "label": "推送"
+    },
+    {
+      "id": "report",
+      "from": "jsonl",
+      "to": "tools",
+      "label": "报表",
+      "fromSide": "left",
+      "toSide": "right"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "在线链路",
+      "items": [
+        "固定 ROI + 像素去重，约 0.5s/帧；坏帧整帧丢弃",
+        "帧状态机是全仓最重的一段：build_state 447 行、CC 206",
+        "LLM 故障只影响建议，不阻塞识别与手牌记录"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "沉淀",
+      "items": [
+        "一手一文件先落 outbox，再异步进手牌库；live 不直接写 MySQL",
+        "JSONL 是本地事实源，只追加、不改写",
+        "replay-console 只读 review_hands，重跑结果写 replay_* 表"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "代码重量",
+      "items": [
+        "节点标签是各层 Python 行数（不含 tests）",
+        "手牌与牌力 11.1k 行、复盘与工具 28k 行是两端最重的",
+        "复杂度集中在 build_state / observations_from_hand / live.main"
+      ]
+    }
+  ]
+}

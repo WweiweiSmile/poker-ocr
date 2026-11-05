@@ -39,3 +39,7 @@ data/hand_outbox/
 
 # codegraph 索引缓存（本地工具产物，11MB 级，不入库）
 .codegraph/
+
+# Archify 的浏览器证据（截图 + 回执；deliver 出来的 html/json 照常入库）
+docs/archify/*.visual-check.*
+docs/archify/*.png

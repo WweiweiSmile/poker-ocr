@@ -5,6 +5,16 @@
 - 打开：`docs/archify/poker-ocr-overview.html`（双击即可，无需起服务）
 - 规格：`docs/archify/poker-ocr-overview.json`（改图只改这个文件）
 
+## 两张图
+
+| 文件 | 看什么 | 生成于 |
+|---|---|---|
+| `poker-ocr-overview.html` | 运行时链路：一帧怎么走完、建议怎么回到牌桌 | 2026-11-03 |
+| `poker-ocr-panorama.html` | 代码全景：同样的两条带，但每个节点标了这一层的文件数 / Python 行数，回答「这仓库有多重」 | 2026-11-05 |
+
+代码全景那张的节点数字默认是隐藏的（Archify 的 `fine` 细节层），**鼠标悬停节点**才能在节点底部看到「12 文件 · 5.9k 行」。
+数字口径：剔除 tests 的 `.py` 行数，按职责分到六层，见 [代码体检-2026-11-05.md](../代码体检-2026-11-05.md)。
+
 ## 图怎么读
 
 **上带 · 实时链路（每帧 ~0.5s）**
@@ -51,7 +61,14 @@ node ~/.agents/skills/archify/bin/archify.mjs deliver architecture \
   --quality showcase --repo-root . --json
 
 # 可选：浏览器证据（截图 + 四档视口收纳检查）
-ARCHIFY_CHROME="/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge" \
+# 沙箱里 Edge 起不来（它的 seatbelt 初始化被拦），要用带 --no-sandbox 的壳：
+cat > /tmp/chrome-nosandbox.sh <<'EOF'
+#!/bin/sh
+export HOME=/tmp/edgehome
+exec "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge" \
+  --no-sandbox --disable-gpu --user-data-dir=/tmp/edgehome/profile "$@"
+EOF
+ARCHIFY_CHROME=/tmp/chrome-nosandbox.sh \
   node ~/.agents/skills/archify/bin/archify.mjs visual-check \
   docs/archify/poker-ocr-overview.html --json
 ```
