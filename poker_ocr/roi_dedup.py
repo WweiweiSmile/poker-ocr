@@ -9,6 +9,10 @@ M2.1 实测：单帧 30 块 ROI 全量要 376ms，而 0.5s 抽帧间隔里绝大
 （反过来「变了但 hash 说变了」只是多跑一次 rec，纯粹是慢一点。）
 所以本层的偏向是**宁可漏杀不可错杀**：默认 `max_distance = 0`（逐 bit 全同才复用）。
 
+**还有一条按读数内容分层的闸**（见 `min_cache_score`）：低分读数只认严格命中，不吃
+MAD 兜底 —— 像素真动了就必须重读，否则一个可能是错的读数会被宽松判据一直挂着。
+空读数和「像照片碎片」的低分读数不在此列，它们重读也是同一个结果。
+
 **11 张样张两两相邻配对（150 对）的实测 + 一个合成反例**，这是全部默认值的依据：
 
 | 判据 | 「文本变了」的最近一对 | 「文本没变」的命中(距离0) | 结论 |
@@ -87,6 +91,22 @@ DEFAULT_MAX_DISTANCE = 0
 # 而这段视频里最小的真变化（盲注秒数）是 0.26，仍有 1.3 倍余量。
 # 注意这是**压缩视频**的取值；线上 screencapture 是无损的，精确匹配本来就够。
 DEFAULT_MAD_EPS = 0.2
+
+# 低于这个分数的**非空**读数，缓存只认严格命中（dhash 逐 bit 全同），不吃 MAD 兜底。
+#
+# 理由：MAD 是宽松判据，它的安全余量只有 1.3 倍（见上）。一块本来就「读得不太确定」
+# 的 ROI 再叠一层宽松判据，等于让一个可能是错的值一直挂在那儿 —— 而下游看到的是
+# 一个和「读对了」长得一模一样的读数。所以这类 key 一旦像素真动了就必须重读。
+#
+# 空读数（没识别出文字）不在此列：重读一次还是读不出，纯浪费。
+# 0 = 关闭（所有 key 一视同仁，回到旧行为）。
+DEFAULT_MIN_CACHE_SCORE = 0.7
+
+# 上面的下限。分数低到 0.35 以下的「文本」多半压根不是字 —— 头像是照片，rec 会吐
+# `舞` `展` `A` `G` 这种碎片（实测一帧 9 个座位的分数全在 0.10–0.32）。这种读重重读
+# 一次还是碎片，而头像 det+rec 是最贵的一块。真正「可能是字但读岔了」的那种落在
+# 0.45–0.66（`TOBD` / `ZCERR` / `1485PB`），才是值得每帧重读的。
+STRICT_MIN_SCORE = 0.35
 
 
 def to_gray(roi: np.ndarray) -> np.ndarray:
@@ -185,15 +205,21 @@ class RoiDedupCache:
 
     def __init__(self, max_distance: int = DEFAULT_MAX_DISTANCE,
                  mad_eps: float = DEFAULT_MAD_EPS, tiles: int = TILES,
-                 hash_w: int = HASH_W, hash_h: int = HASH_H) -> None:
+                 hash_w: int = HASH_W, hash_h: int = HASH_H,
+                 min_cache_score: float = DEFAULT_MIN_CACHE_SCORE) -> None:
         self.max_distance = int(max_distance)
         self.mad_eps = float(mad_eps)
         self.tiles = int(tiles)
         self.hash_w = int(hash_w)
         self.hash_h = int(hash_h)
+        if not 0.0 <= float(min_cache_score) <= 1.0:
+            raise ValueError(f"min_cache_score 必须在 0–1 之间：{min_cache_score!r}")
+        self.min_cache_score = float(min_cache_score)
         self._hash: dict[str, tuple[int, ...]] = {}
         self._read: dict[str, RoiRead] = {}
         self._gray: dict[str, np.ndarray] = {}       # 只在 mad_eps > 0 时填
+        # 低分读数的 key：这些 key 不吃 MAD 兜底（见 min_cache_score 的注释）。
+        self._strict: set[str] = set()
         # 语义上「一手牌内不会变」的块（名字、盲注横幅）。钉住后不跑 hash /
         # rec，直接复用上一次读数；换手时由调用方 unpin_all()。盲注横幅里的
         # 房间号和倒计时每秒都在动，按像素判据每帧都会 miss —— 但它解析出来
@@ -204,6 +230,9 @@ class RoiDedupCache:
         self.hits_mad = 0
         self.hits_pinned = 0
         self.misses = 0
+        # 低分 key「dhash 没中、MAD 本会中」被拦下来去重读的次数。
+        # > 0 说明这层确实在干活；一直 0 说明门槛根本没触发。
+        self.blocked_by_strict = 0
         self.max_hit_distance: int | None = None     # 命中里距离最大的那次（看门槛余量）
         self.max_hit_mad: float | None = None
 
@@ -241,8 +270,14 @@ class RoiDedupCache:
             if self.mad_eps > 0 and prev_gray is not None and gray is not None:
                 d = pixel_mad(prev_gray, gray)
                 if d <= self.mad_eps:
-                    self._record_hit(dist, d)
-                    return cached, ms
+                    if key in self._strict:
+                        # 这块上次读得不确定：MAD 这层宽松兜底不认，交给 rec 重读。
+                        # dhash 全同时仍会命中（见上面的 dist 分支）——
+                        # 逐 bit 全等的帧重读也是同一个结果，没必要花这次 rec。
+                        self.blocked_by_strict += 1
+                    else:
+                        self._record_hit(dist, d)
+                        return cached, ms
 
         self.misses += 1
         return None, ms
@@ -260,6 +295,13 @@ class RoiDedupCache:
 
     def store(self, key: str, read: RoiRead) -> None:
         self._read[key] = read
+        # 「可能是字、但读得不确定」→ 只认严格命中。两头都排除：
+        # 空读数（本来就没字）和分数低到像照片碎片的，重读都是白花一次 rec。
+        if (self.min_cache_score > 0 and read.text
+                and STRICT_MIN_SCORE <= read.score < self.min_cache_score):
+            self._strict.add(key)
+        else:
+            self._strict.discard(key)
 
     # —— 语义钉住（一手牌内的慢变量）——
 
@@ -268,8 +310,12 @@ class RoiDedupCache:
 
         只给「一手牌内不会变」的字段用（名字、盲注）。换手时调用方必须
         `unpin_all()`，否则下一手的新名字/新盲注永远读不到。
+
+        **低分读数一律不许钉**：钉住 = 这一手不再重读，错读就没有任何纠正
+        机会了（名字那边靠 NAME_PIN_MIN_SCORE + confirmed 挡了一层，盲注没有
+        分数门，所以这道闸放在这里）。
         """
-        if key not in self._read:
+        if key not in self._read or key in self._strict:
             return False
         self._pinned.add(key)
         return True
@@ -292,10 +338,12 @@ class RoiDedupCache:
         self._read.clear()
         self._gray.clear()
         self._pinned.clear()
+        self._strict.clear()
 
     def reset_stats(self) -> None:
         self.hits = self.hits_dhash = self.hits_mad = self.hits_pinned = 0
         self.misses = 0
+        self.blocked_by_strict = 0
         self.max_hit_distance = None
         self.max_hit_mad = None
 
@@ -318,6 +366,12 @@ class RoiDedupCache:
         if self.mad_eps > 0:
             d["mad_eps"] = self.mad_eps
             d["by_mad"] = self.hits_mad
+        if self.min_cache_score > 0:
+            d["min_cache_score"] = self.min_cache_score
+            d["strict_floor"] = STRICT_MIN_SCORE
+            d["strict_keys"] = len(self._strict)
+            if self.blocked_by_strict:
+                d["blocked_by_strict"] = self.blocked_by_strict
         if self.max_hit_distance is not None:
             d["max_hit_distance"] = self.max_hit_distance
         if self.max_hit_mad is not None:
@@ -360,6 +414,7 @@ class RoiStream:
                  dealer_detector: DealerDetector | None = None, *,
                  max_distance: int = DEFAULT_MAX_DISTANCE, mad_eps: float = DEFAULT_MAD_EPS,
                  tiles: int = TILES, hash_w: int = HASH_W, hash_h: int = HASH_H,
+                 min_cache_score: float = DEFAULT_MIN_CACHE_SCORE,
                  seat_fields: tuple[str, ...] = SEAT_FIELDS,
                  global_fields: tuple[str, ...] = GLOBAL_FIELDS,
                  mode: str = "raw", upscale: float = 1.0,
@@ -379,7 +434,8 @@ class RoiStream:
         self.with_dealer = with_dealer
         # dedup=False 时走 read_frame(cache=None) 的无去重路径。
         # 调用方仍按原来的方式访问 self.cache，所以这里保留属性、值为 None。
-        self.cache = (RoiDedupCache(max_distance, mad_eps, tiles, hash_w, hash_h)
+        self.cache = (RoiDedupCache(max_distance, mad_eps, tiles, hash_w, hash_h,
+                                    min_cache_score=min_cache_score)
                       if dedup else None)
         self.stats = StreamStats()
         self._signature: tuple | None = None
@@ -391,7 +447,8 @@ class RoiStream:
         裁剪区就不是原来那块了，可 hash 照样可能撞上 → 复用一份错位的读数。
         """
         cache_sig = ((self.cache.max_distance, self.cache.mad_eps, self.cache.tiles,
-                      self.cache.hash_w, self.cache.hash_h)
+                      self.cache.hash_w, self.cache.hash_h,
+                      self.cache.min_cache_score)
                      if self.cache is not None else None)
         return (str(self.profile.path), img.shape[0], img.shape[1], self.mode,
                 self.upscale, self.pad, self.seat_fields, self.global_fields,

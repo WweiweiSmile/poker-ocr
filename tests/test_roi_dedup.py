@@ -191,6 +191,91 @@ def test_reused_read_is_a_copy() -> None:
           "第二帧的复用把第一帧那份读数也改了 —— 说明没复制（dc_replace 漏了）")
 
 
+def test_low_score_read_ignores_mad_fallback() -> None:
+    """低分读数只认严格命中：像素真动了一点（MAD 本会放过）时必须重读。
+
+    这是「前几帧读错了还能纠正回来」的唯一机会 —— MAD 是宽松判据，低分读数
+    再叠一层宽松判据，一个可能是错的值就会一直挂在那儿，而下游看到它和
+    「读对了」一模一样。
+    """
+    x = np.tile(np.arange(40, dtype=np.uint8) * 4, (40, 1))
+    roi = np.dstack([x] * 3)
+
+    def arm(cache: RoiDedupCache, read: RoiRead) -> None:
+        # 先喂一帧建立 prev hash/gray，再伪造一个不同的 hash：
+        # 这样 check 一定走「dhash 没中」，只有 MAD 那道闸能救 —— 正是要考的路径
+        cache.check("hero.chip", roi)
+        cache.store("hero.chip", read)
+        cache._hash["hero.chip"] = (12345,)      # 分块数不同 → 距离 inf
+
+    low = RoiRead("chip", (0, 0, 40, 40), [("271O", 0.42)])
+    cache = RoiDedupCache()
+    arm(cache, low)
+    hit, _ = cache.check("hero.chip", roi)
+    check(hit is None, f"低分读数的 key 不该吃 MAD 兜底，却命中了 {hit}")
+    check(cache.blocked_by_strict == 1,
+          f"被拦下的次数应记 1，实际 {cache.blocked_by_strict}")
+
+    # 对照：同一个场景，换成可信读数 —— MAD 兜底照旧生效
+    confident = RoiRead("chip", (0, 0, 40, 40), [("2710BB", 0.93)])
+    cache2 = RoiDedupCache()
+    arm(cache2, confident)
+    hit, _ = cache2.check("hero.chip", roi)
+    check(hit is not None and hit.text == "2710BB",
+          f"高分读数应继续吃 MAD 兜底，实际 {hit}")
+    check(cache2.hits_mad == 1, f"应记一次 MAD 命中，实际 {cache2.hits_mad}")
+    check(cache2.blocked_by_strict == 0, "高分读数不该被 strict 拦")
+
+
+def test_empty_read_stays_cheap() -> None:
+    """空读数（这块没字）不标 strict：重读一次还是读不出，纯浪费。
+
+    实测一帧 32 块里有 15 块是空读数（空下注位、没有横幅），全标 strict 等于
+    每帧多跑 15 次 rec。
+    """
+    x = np.tile(np.arange(40, dtype=np.uint8) * 4, (40, 1))
+    roi = np.dstack([x] * 3)
+    cache = RoiDedupCache()
+    cache.check("@bomb_cn", roi)
+    cache.store("@bomb_cn", RoiRead("bomb_cn", (0, 0, 40, 40), []))
+    cache._hash["@bomb_cn"] = (12345,)
+    hit, _ = cache.check("@bomb_cn", roi)
+    check(hit is not None, "空读数应继续吃 MAD 兜底（复用），不该重读")
+    check(cache.blocked_by_strict == 0, "空读数不该进 strict")
+
+
+def test_photo_noise_is_not_treated_as_uncertain_text() -> None:
+    """头像照片读出来的碎片（0.1–0.3）不标 strict：重读还是碎片，而 det+rec 最贵。
+
+    实测一帧 9 个座位的头像分数全在 0.10–0.32（`舞` `展` `A` `G`），把这块也拉去
+    每帧重读等于白花 9 次 det。
+    """
+    x = np.tile(np.arange(40, dtype=np.uint8) * 4, (40, 1))
+    roi = np.dstack([x] * 3)
+    cache = RoiDedupCache()
+    cache.check("hero.@avatar", roi)
+    cache.store("hero.@avatar", RoiRead("avatar", (0, 0, 40, 40), [("舞", 0.10)]))
+    cache._hash["hero.@avatar"] = (12345,)
+    hit, _ = cache.check("hero.@avatar", roi)
+    check(hit is not None and hit.text == "舞",
+          "分数低到像照片碎片的读数应继续复用（MAD 兜底），不该每次重读")
+    check(cache.blocked_by_strict == 0, "照片碎片不该进 strict")
+
+
+def test_low_score_read_cannot_be_pinned() -> None:
+    """低分读数不许钉住：钉住 = 这一手不再重读，错读就没机会纠正了。"""
+    cache = RoiDedupCache()
+    cache.check("@blinds", np.zeros((40, 40, 3), np.uint8))
+    cache.store("@blinds", RoiRead("@blinds", (0, 0, 40, 40), [("1/2", 0.55)]))
+    check(not cache.pin("@blinds"), "低分读数不该允许 pin")
+    check(not cache.is_pinned("@blinds"), "pin 失败了却进了 pinned 集合")
+
+    # 同一块后来读到可信值 → 允许钉住
+    cache.store("@blinds", RoiRead("@blinds", (0, 0, 40, 40), [("1/2", 0.96)]))
+    check(cache.pin("@blinds"), "读到可信值后应能钉住")
+    check("strict_keys" in cache.to_debug(), "to_debug 应暴露 strict 统计")
+
+
 def test_pinned_key_ignores_pixel_changes_until_unpinned() -> None:
     """钉住的名字/盲注：画面变了也复用，换手 unpin_all 后重新按像素判断。"""
     cache = RoiDedupCache()
@@ -298,6 +383,10 @@ def main() -> int:
         test_unchanged_frame_runs_no_rec_at_all,
         test_changed_roi_reruns_and_neighbours_reuse,
         test_reused_read_is_a_copy,
+        test_low_score_read_ignores_mad_fallback,
+        test_empty_read_stays_cheap,
+        test_photo_noise_is_not_treated_as_uncertain_text,
+        test_low_score_read_cannot_be_pinned,
         test_pinned_key_ignores_pixel_changes_until_unpinned,
         test_mad_eps_defaults_to_0_2,
         test_resolution_change_invalidates_the_cache,
