@@ -213,6 +213,9 @@ offline/  旧英文提示词与策略层（只服务复盘，不进 live）
 每条立即 flush，硬杀最多丢最后半行。`state` 字段顺序固定：
 **个人手牌 → 位置 → 筹码 → 公共牌 → 全局 → 其他对手**（`opponents` 永远最后）。
 
+`--test`（按实战视频演练）写的是 `logs/live.test.jsonl`，并强制不写手牌
+outbox：测试手牌不会进手牌库。`session_start` 里会带 `"test_mode": true`。
+
 ### 5.1.1 `logs/live.events.jsonl`（排查索引，不是业务契约）
 
 一行一个 `live.event.v1` 事件：`session_start / status / frame / decision / advice_skip /
@@ -301,6 +304,10 @@ advice / hand / incident / session_end`。`frame` 每帧一条，带 `hand_id` /
 #   只看建议不点击：--no-auto-click    完全自动：--no-confirm
 #   不看板/不写事件日志：--no-web --no-events --no-log-file
 #   看板端口冲突：--web-port 8021
+
+# 测试模式（按实战视频演练，不是实战）：日志写 logs/live.test.jsonl，手牌不进手牌库
+.venv/bin/python -m poker_ocr.live --test \
+    --profile config/table_wpk_live.json --initial-blinds 1/2
 
 # 手牌识别倒查（读 states + events）
 .venv/bin/python tools/hand_recognition_audit.py --top 20 \

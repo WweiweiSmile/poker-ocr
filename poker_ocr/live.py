@@ -95,6 +95,9 @@ DEFAULT_PROFILE = PROJECT_ROOT / "config" / "table_wpk_1080x2400.json"
 # `--url rtsp://127.0.0.1:8554/live`。
 DEFAULT_URL = "cam:auto"
 DEFAULT_OUT = Path("logs/live.states.jsonl")
+# 测试模式（--test）的默认日志：按实战视频演练时用，和实战记录彻底分开，
+# 手牌也不进手牌库（见 apply_test_mode）。
+TEST_OUT = Path("logs/live.test.jsonl")
 DEFAULT_INCIDENT_DIR = Path("logs/incidents")
 DEFAULT_HAND_OUTBOX = PROJECT_ROOT / "data" / "hand_outbox"
 # 异常要持续这么久才落盘：发牌/翻牌动画里的单帧误读（1 张公共牌、hero 只读到
@@ -2338,12 +2341,17 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--settle-max", type=float, default=DEFAULT_SETTLE_MAX,
                     help="连续动作合并的最长等待秒数：动作一直不停时最多攒这么久"
                          f"就先识别一帧（默认 {DEFAULT_SETTLE_MAX}）")
-    ap.add_argument("--out", type=Path, default=DEFAULT_OUT,
-                    help=f"JSONL 输出（默认 {DEFAULT_OUT}）")
+    ap.add_argument("--out", type=Path, default=None,
+                    help=f"JSONL 输出（默认 {DEFAULT_OUT}；--test 时默认 "
+                         f"{TEST_OUT}）")
     ap.add_argument("--append", action=argparse.BooleanOptionalAction,
                     default=True,
                     help="追加到 --out，保留历次启动的手牌记录（默认）；"
                          "--no-append 每次启动清空")
+    ap.add_argument("--test", action="store_true",
+                    help="测试模式：按实战视频演练、不是实战。日志默认写 "
+                         f"{TEST_OUT}（显式 --out 仍优先），手牌只留在日志里、"
+                         "不写手牌 outbox（因此不会进手牌库）")
     ap.add_argument("--stable-frames", type=int, default=2,
                     help="新状态连续出现几帧才记录（默认 2：动画中间态/"
                          "单帧抖动不落库）")
@@ -2419,10 +2427,11 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--ai-confirm", type=int, default=1,
                     help="轮到我需要连续几帧确认（默认 1 = 第一帧就触发，"
                          "配合蓝色下注按钮；按钮会闪断的旧 UI 可调回 2）")
-    ap.add_argument("--hand-outbox", type=Path, default=DEFAULT_HAND_OUTBOX,
+    ap.add_argument("--hand-outbox", type=Path, default=None,
                     help="已结束手牌的本地 outbox 目录（默认 "
                          f"{DEFAULT_HAND_OUTBOX}）。手牌库通过 "
-                         "tools/sync_hand_outbox.py 异步取走")
+                         "tools/sync_hand_outbox.py 异步取走。"
+                         "--test 下不写 outbox，本参数不能与 --test 同时使用")
     ap.add_argument("--no-hand-outbox", action="store_true",
                     help="不写手牌 outbox（只保留 logs/live.states.jsonl）")
     ap.add_argument("--record-without-hero",
@@ -2472,6 +2481,24 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--no-log-file", action="store_true",
                     help="不把控制台文本写入文件")
     return ap
+
+
+def apply_test_mode(args) -> None:
+    """把 `--test` 落成具体行为：独立日志 + 手牌不进手牌库。
+
+    测试模式用于「按实战视频演练」，牌局本身不是实战事实：
+
+      · 日志默认写 `logs/live.test.jsonl`（显式 `--out` 优先），事件/控制台
+        日志按同一规则派生成 `live.test.events.jsonl` / `live.test.log`，
+        实战的 `live.states.jsonl` 不会被测试帧污染；
+      · 关掉手牌 outbox：`LiveProcessor` 不再 enqueue，进程内嵌的
+        `HandIngestWorker` 也不会启动，因此这些手牌既不会自动入库，也不会
+        被 `tools/sync_hand_outbox.py` 收走。测试手牌仍完整留在测试日志里，
+        需要复盘时显式读 `logs/live.test.jsonl`。
+    """
+    args.out = args.out or (TEST_OUT if args.test else DEFAULT_OUT)
+    if args.test:
+        args.no_hand_outbox = True
 
 
 def _validate_args(ap: argparse.ArgumentParser, args) -> None:
@@ -2530,6 +2557,9 @@ def _validate_args(ap: argparse.ArgumentParser, args) -> None:
         ap.error("--events-out 与 --no-events 不能同时使用")
     if args.no_log_file and args.log_file is not None:
         ap.error("--log-file 与 --no-log-file 不能同时使用")
+    if args.test and args.hand_outbox is not None:
+        ap.error("--test 不写手牌 outbox（测试手牌不进手牌库），"
+                 "不能同时指定 --hand-outbox")
 
 
 def _install_signals(stop: threading.Event) -> None:
@@ -2572,6 +2602,9 @@ def main(argv: list[str] | None = None) -> int:
         except ValueError as exc:
             ap.error(str(exc))
         args.record_without_hero = False if env_flag is None else env_flag
+    # --test 必须在 _validate_args / 派生日志路径之前落定：它决定 --out 默认值
+    # 和是否写手牌 outbox（见 apply_test_mode）。
+    apply_test_mode(args)
     _validate_args(ap, args)
 
     started_wall = _iso_now()
@@ -2607,6 +2640,9 @@ def main(argv: list[str] | None = None) -> int:
         _log(f"[启动] 控制台日志 {console_log.path}")
     if event_log is not None:
         _log(f"[启动] 事件日志 {event_log.path}")
+    if args.test:
+        _log(f"[测试] 测试模式：日志写 {args.out}；"
+             "手牌只留在测试日志，不进手牌库")
 
     if args.crop is None:
         args.crop = "auto"
@@ -2635,6 +2671,7 @@ def main(argv: list[str] | None = None) -> int:
         "profile": profile.path.name,
         "profile_path": str(profile.path),
         "recognizer": args.recognizer,
+        "test_mode": bool(args.test),
         "url": args.url,
         "out": str(args.out),
         "events_out": str(events_path) if events_path else None,
@@ -2716,7 +2753,7 @@ def main(argv: list[str] | None = None) -> int:
     # outbox 与 AI 建议解耦：即使这局没开 AI，手牌记录也应该能进手牌库。
     # 没有 hand_tracker 时不会产生手牌，这里建 outbox 只影响配置/日志。
     if not args.no_hand_outbox:
-        hand_outbox = HandOutbox(args.hand_outbox)
+        hand_outbox = HandOutbox(args.hand_outbox or DEFAULT_HAND_OUTBOX)
         ingest_config = IngestConfig.from_env()
         if ingest_config.mode != "off":
             ingest_worker = HandIngestWorker(hand_outbox, ingest_config,
@@ -2891,6 +2928,8 @@ def main(argv: list[str] | None = None) -> int:
         "url": args.url,
         "profile": profile.path.name,
         "recognizer": args.recognizer,
+        # 只有测试模式才写：复盘时一眼看出这批手牌不是实战、没有进手牌库。
+        **({"test_mode": True} if args.test else {}),
         "full_config": str(args.full_config) if args.full_config else None,
         "every": args.every,
         # 日志防抖口径：复盘时能知道这批 state 记录是按几帧确认出来的。

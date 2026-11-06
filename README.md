@@ -69,6 +69,15 @@ ROI 识别座位、筹码、下注、动作、庄位、底池和盲注，输出�
 # 完全自动、不再询问：追加 --no-confirm
 ```
 
+**按实战视频演练（测试模式）**：不是实战、只是拿实战视频做测试时加 `--test`。
+日志默认写 `logs/live.test.jsonl`（不碰 `live.states.jsonl`），手牌只留在测试
+日志里、不写 outbox，因此**不会进手牌库**：
+
+```bash
+.venv/bin/python -m poker_ocr.live --test \
+  --profile config/table_wpk_live.json --initial-blinds 1/2
+```
+
 - `--url` 默认 `cam:auto`（自动选择 OBS 虚拟摄像头，索引用 `tools/list_cameras.py` 查）；
   走 MediaMTX 时加 `--url rtsp://127.0.0.1:8554/live`，并先
   `mediamtx config/mediamtx.yml`。

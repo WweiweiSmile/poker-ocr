@@ -131,6 +131,47 @@ def test_record_without_hero_defaults_off_and_env_flag() -> None:
             FAILS.append("无法识别的布尔值应报错，而不是静默当成关")
 
 
+def test_test_mode_uses_separate_log_and_skips_hand_library() -> None:
+    """--test：日志写 live.test.jsonl，手牌不进 outbox（= 不进手牌库）。"""
+    ap = live.build_parser()
+    args = ap.parse_args(["--test"])
+    check(args.test is True, "--test 应打开测试模式")
+    check(args.out is None, "没写 --out 时应留给 apply_test_mode 决定")
+    live.apply_test_mode(args)
+    check(args.out == live.TEST_OUT == Path("logs/live.test.jsonl"),
+          f"测试模式默认日志错：{args.out}")
+    check(args.no_hand_outbox is True, "测试模式必须关掉手牌 outbox")
+    check(live.derive_event_path(args.out) == Path("logs/live.test.events.jsonl"),
+          f"测试模式事件日志派生错：{live.derive_event_path(args.out)}")
+    check(live.derive_console_path(args.out) == Path("logs/live.test.log"),
+          f"测试模式控制台日志派生错：{live.derive_console_path(args.out)}")
+
+    # 显式 --out 优先：换路径不代表可以入库，手牌照样不进 outbox。
+    args = ap.parse_args(["--test", "--out", "/tmp/hand_test.jsonl"])
+    live.apply_test_mode(args)
+    check(args.out == Path("/tmp/hand_test.jsonl"),
+          f"--out 应优先于测试模式默认值：{args.out}")
+    check(args.no_hand_outbox is True, "显式 --out 不应重新打开手牌库")
+
+    # 非测试模式：默认日志与实际库路径都不变。
+    args = ap.parse_args([])
+    live.apply_test_mode(args)
+    check(args.out == live.DEFAULT_OUT, f"默认日志错：{args.out}")
+    check(args.no_hand_outbox is False, "正常模式不应静默关掉手牌库")
+    check(live.derive_event_path(args.out) == Path("logs/live.events.jsonl"),
+          "正常模式事件日志派生应保持不变")
+
+    # 测试模式与 --hand-outbox 互斥：静默忽略会让人以为测试手牌进了指定目录。
+    conflict = ap.parse_args(["--test", "--hand-outbox", "/tmp/outbox"])
+    conflict.ai_timeout = 20.0
+    live.apply_test_mode(conflict)
+    try:
+        live._validate_args(ap, conflict)
+    except SystemExit:
+        return
+    FAILS.append("--test 搭配 --hand-outbox 应拒绝启动")
+
+
 def test_auto_click_defaults_on_and_follows_advice() -> None:
     ap = live.build_parser()
     args = ap.parse_args([])
@@ -2246,6 +2287,7 @@ def main() -> int:
     tests = [
         test_defaults_are_no_throttle_and_instant_turn,
         test_record_without_hero_defaults_off_and_env_flag,
+        test_test_mode_uses_separate_log_and_skips_hand_library,
         test_auto_click_defaults_on_and_follows_advice,
         test_mailbox_keeps_only_latest,
         test_wait_newer_wakes_up,

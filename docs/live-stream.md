@@ -1051,6 +1051,29 @@ advice / hand / incident / session_end`。`frame` 每个处理过的帧都写（
 疑惑帧 / 建议兜底 / 手牌张数等信号打分排序。分数只用于分流，证据在
 `--explain` 的逐帧记录和 `logs/incidents/` 截图里。
 
+### 6.11 测试模式（`--test`）：按实战视频演练
+
+不是实战、只是拿实战视频做测试时加 `--test`：
+
+```bash
+.venv/bin/python -m poker_ocr.live --test \
+  --profile config/table_wpk_live.json --initial-blinds 1/2
+```
+
+它做两件事，避免测试帧污染实战数据：
+
+1. **日志隔离**：`--out` 默认变成 `logs/live.test.jsonl`，事件/控制台日志按同一
+   规则派生成 `logs/live.test.events.jsonl` / `logs/live.test.log`。显式
+   `--out` 仍然优先。实战的 `live.states.jsonl` 不会被测试帧写入。
+2. **手牌不进手牌库**：强制关掉手牌 outbox，`LiveProcessor` 不再 enqueue，
+   进程内嵌的 `HandIngestWorker` 也不会启动，因此这些手牌既不会自动入库，
+   也不会被 `tools/sync_hand_outbox.py` 收走。手牌本身仍完整留在
+   `logs/live.test.jsonl` 里，需要复盘时显式读这个文件。
+
+`--test` 与 `--hand-outbox` 互斥（同时写会 `ap.error` 拒绝启动），因为静默
+忽略会让人误以为测试手牌进了指定目录。`session_start` 记录里会带
+`"test_mode": true`（正常模式不写这个键），翻日志时一眼能认出这批不是实战。
+
 ---
 
 ## 7. 参数表
@@ -1066,8 +1089,9 @@ advice / hand / incident / session_end`。`frame` 每个处理过的帧都写（
 | `--every` | `0` | 采样间隔（秒）；`0` = 不节流，处理完当前帧立即取最新帧，中间帧丢弃 |
 | `--settle` | `0.25` | 连续动作合并：动作区静止多少秒后才识别（`0` = 关闭，逐帧识别；仅 roi 路线） |
 | `--settle-max` | `1.5` | 动作合并的最长等待秒数；动作一直不停时到点先识别一帧 |
-| `--out` | `logs/live.states.jsonl` | JSONL 输出（默认追加） |
+| `--out` | `logs/live.states.jsonl`（`--test` 时 `logs/live.test.jsonl`） | JSONL 输出（默认追加） |
 | `--append` | 开 | 追加到 `--out`，保留历次启动的手牌记录；`--no-append` 每次启动清空 |
+| `--test` | 关 | 测试模式：按实战视频演练，不是实战。日志默认写 `logs/live.test.jsonl`（显式 `--out` 优先），手牌只留在日志里、不写 outbox（因此不进手牌库）；不能与 `--hand-outbox` 同时用 |
 | `--stable-frames` | `2` | 新状态连续出现几帧才记录（2 = 动画中间态/单帧抖动不落库；`1` = 关闭多帧确认） |
 | `--stable-seconds` | `0` | 新状态还要稳定多少秒才记录（帧率变化大时可设 `0.6` 固定时间窗） |
 | `--stable-reset-on-discard` / `--no-stable-reset-on-discard` | 开 | 质量闸丢弃的帧是否打断连续计数（开 = 必须连续 N 个**可识别**帧） |
@@ -1090,6 +1114,8 @@ advice / hand / incident / session_end`。`frame` 每个处理过的帧都写（
 | `--ai-timeout` | `20` | 单次 AI 建议超时（秒）；后台线程，不阻塞采样 |
 | `--ai-confirm` | `1` | `hero_turn` 连续几帧才认定轮到我（蓝色下注按钮下第一帧即可） |
 | `--record-without-hero` | 关 | 没读到自己手牌时也写入手牌记录（默认跳过换手空档；观察对手用） |
+| `--hand-outbox` | `data/hand_outbox` | 已结束手牌的本地 outbox；`tools/sync_hand_outbox.py` 异步进手牌库。`--test` 下不可用 |
+| `--no-hand-outbox` | 关 | 不写手牌 outbox（只保留 states 日志，手牌不进手牌库） |
 | `--auto-click` / `--no-auto-click` | 开 | AI 建议返回后自动点击桌面客户端（需先标定；仅 macOS） |
 | `--no-confirm` | 关 | 自动点击不再询问；默认每次执行前单键读 `y` 确认 / `n` 拒绝（其他键忽略） |
 | `--clicker-config` | `config/clicker_local.json` | 自动点击按钮坐标 JSON |
