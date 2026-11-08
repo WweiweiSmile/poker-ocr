@@ -320,6 +320,14 @@ class RoiDedupCache:
         self._pinned.add(key)
         return True
 
+    def unpin(self, key: str) -> None:
+        """解钉一块，下一帧重新 hash（像素没变时仍命中缓存，不跑 rec）。
+
+        给「钉住但需要定期复查」的字段用：动作徽章和名字共用同一个槽，
+        钉死整手就再也读不到让牌/下注（见 state_stream.NAME_PIN_REFRESH_FRAMES）。
+        """
+        self._pinned.discard(key)
+
     def unpin_all(self) -> None:
         self._pinned.clear()
 

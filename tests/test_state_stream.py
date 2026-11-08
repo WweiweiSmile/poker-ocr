@@ -477,6 +477,9 @@ class FakeCache:
         self.pinned.add(key)
         return True
 
+    def unpin(self, key: str) -> None:
+        self.pinned.discard(key)
+
     def unpin_all(self) -> None:
         self.pinned.clear()
 
@@ -543,6 +546,46 @@ def test_slow_fields_pinned_until_hand_switch() -> None:
         s.stream.cache.pinned.add("hero.name")
         s._restart_sticky()
         check(not s.stream.cache.pinned, "换手应解钉全部慢变量")
+
+
+def test_name_pin_expires_so_action_badges_can_be_read() -> None:
+    """名字钉住必须有期限：动作徽章（让牌/下注）就画在名字槽上。
+
+    钉死整手 = 这一手所有徽章都读不到，行动线只能靠街末底池对账补
+    inferred（2026-11-08 实盘 18 条动作 14 条 inferred；video1 上开钉住
+    120 帧读到 0 个徽章，关钉住读到 69 个）。
+    """
+    from poker_ocr.roi_reader import RoiFrame, RoiRead, SeatRoi
+
+    with stub_env():
+        s = new_stream(name_confirm=1)
+        s.stream.cache = FakeCache()
+        frame = RoiFrame(
+            frame_id="f", size=(100, 100), hero_seat_id="hero",
+            seats=[SeatRoi("hero", 0,
+                           {"name": RoiRead("name", (0, 0, 1, 1),
+                                            [("Alice", 0.95)])})],
+            globals={})
+        s.names.resolve("hero", "Alice")
+        s.sampled = 1
+        s._pin_slow_fields(frame)
+        check("hero.name" in s.stream.cache.pinned, "可信名字应钉住")
+
+        s.sampled = 2
+        s._age_name_pins()
+        check("hero.name" in s.stream.cache.pinned, "刚钉住不该下一帧就解钉")
+
+        s.sampled = 3
+        s._age_name_pins()
+        check("hero.name" not in s.stream.cache.pinned,
+              f"钉住到期应解钉，实际 {s.stream.cache.pinned}")
+        check(not s._name_pinned_at, "解钉后不该留时间戳")
+
+        # 盲注不进这套到期逻辑：它整手钉住，没有徽章会盖在上面
+        s.stream.cache.pinned.add("@blinds")
+        s.sampled = 9
+        s._age_name_pins()
+        check("@blinds" in s.stream.cache.pinned, "盲注不该被名字到期一起解钉")
 
 
 def test_bomb_banner_latches_across_frames() -> None:
@@ -858,6 +901,7 @@ def main() -> int:
         test_all_in_badge_end_waits_for_river,
         test_hand_boundaries_from_cards_and_board,
         test_slow_fields_pinned_until_hand_switch,
+        test_name_pin_expires_so_action_badges_can_be_read,
         test_bomb_banner_latches_across_frames,
         test_card_icon_fold_needs_two_absent_frames,
         test_waiting_badge_needs_two_frames,

@@ -58,6 +58,12 @@ DEFAULT_ROI_THREADS = max(1, min(4, (os.cpu_count() or 2) // 2))
 DEALER_RECHECK_SECONDS = 2.0     # 定期复核庄位，兜住漏掉的换手信号
 DEALER_CONFIRM_FRAMES = 2        # 换手后多detect几帧，等轮转动画落位
 NAME_PIN_MIN_SCORE = 0.8         # 低于这个分数不钉，等下帧重读到可信名字
+# 名字钉住只维持几帧，到期必须解钉复查：动作徽章（让牌/下注/跟注/加注）
+# 就画在名字槽上，钉死整手 = 这一手的徽章一个都读不到，行动线全靠街末底池
+# 对账补 inferred（2026-11-08 实盘 18 条动作 14 条 inferred；video1 上
+# 钉住 120 帧 0 个徽章，不钉 69 个）。2 帧 ≈0.5s，徽章实际停留 2–4s，
+# 足够抓到。解钉后像素没变仍走 hash/MAD 命中，不会每帧白跑 rec。
+NAME_PIN_REFRESH_FRAMES = 2
 # 手牌图标消失要连续几帧才判弃牌：单帧漏检（压缩/动画/遮挡）不该把人判出局。
 # 6Hz 采样下 2 帧≈0.3s，弃牌动画结束后足够确认。
 CARD_ICON_ABSENT_FRAMES = 2
@@ -206,6 +212,9 @@ class StateStream:
         self._board_len: int | None = None
         self._board_drop = 0
         self._hero_cards: tuple[str, ...] = ()
+        # 名字钉住的时间戳（按 sampled 计）：到期解钉复查动作徽章。
+        # 只记名字，盲注整手钉住（见 _age_name_pins）。
+        self._name_pinned_at: dict[str, int] = {}
 
         self.last_sig: tuple | None = None
         self.cand_sig: tuple | None = None
@@ -242,6 +251,10 @@ class StateStream:
         new_hand = self._hand_changed(extra_signature)
         if new_hand:
             self._restart_sticky()
+        # 名字钉住到期 → 在读帧**之前**解钉，这一帧才会重读名字槽。
+        # 动作徽章和名字共用这个槽，钉住期间读不到让牌/下注（见常量注释）。
+        if sticky:
+            self._age_name_pins()
 
         # 庄位一手牌里只挪一次：没换手时直接复用上一帧结果，省掉整帧 blob 扫描。
         # 每 DEALER_RECHECK_SECONDS 兜底复核一次，防止换手信号漏掉。
@@ -757,6 +770,7 @@ class StateStream:
         cache = self.stream.cache
         if cache is not None:
             cache.unpin_all()
+        self._name_pinned_at.clear()
         self._dealer_result = None
         self.prev_all_in = set()
         self.prev_all_in_badges = set()
@@ -777,11 +791,27 @@ class StateStream:
         if self.sampled - self._bomb_seen_sample > BOMB_BANNER_GRACE_SAMPLES:
             self.bomb_pot_seen = False
 
+    def _age_name_pins(self) -> None:
+        """名字钉住到期就解钉，让下一帧重读名字槽（抓动作徽章）。
+
+        只解名字，`@blinds` 继续钉整手：盲注横幅里不会出现动作徽章，而且
+        房间号/倒计时每秒都在变，解钉等于每帧白跑一次 rec。
+        """
+        cache = self.stream.cache
+        if cache is None or not self._name_pinned_at:
+            return
+        for sid, at in list(self._name_pinned_at.items()):
+            if self.sampled - at < NAME_PIN_REFRESH_FRAMES:
+                continue
+            cache.unpin(f"{sid}.name")
+            self._name_pinned_at.pop(sid, None)
+
     def _pin_slow_fields(self, frame) -> None:
         """把这一帧读到的可信名字 / 盲注钉住，之后同手内不再 OCR。
 
         名字槽在部分布局里会被动作徽章盖住；看起来像动作的读数不钉，
         免得把「弃牌/跟注」冻成名字。分数太低的也留到下帧重读。
+        钉住只维持 `NAME_PIN_REFRESH_FRAMES` 帧，到期由 `_age_name_pins()` 解钉。
         """
         cache = self.stream.cache
         if cache is None:
@@ -794,11 +824,12 @@ class StateStream:
             if (read is not None and read.text
                     and read.score >= NAME_PIN_MIN_SCORE
                     and parse_action(read.text) is None
-                    # 名字还没被稳定器确认就先别钉：钉住 = 这一手不再重读，
+                    # 名字还没被稳定器确认就先别钉：钉住 = 这一帧不再重读，
                     # 错读就没有任何纠正机会了（2026-11-01 那次整手牌都错）。
                     # 代价是每个座位每手多读 ≤ confirm 帧（≈12ms/块）。
                     and self.names.confirmed(seat_roi.seat_id)):
-                cache.pin(key)
+                if cache.pin(key):
+                    self._name_pinned_at[seat_roi.seat_id] = self.sampled
         if not cache.is_pinned("@blinds"):
             read = frame.globals.get("blinds")
             if read is not None and parse_blinds(read.text) is not None:
@@ -820,6 +851,7 @@ class StateStream:
         self._icon_absent.clear()
         self._wait_seen.clear()
         self._empty_seat_seen.clear()
+        self._name_pinned_at.clear()
         self._roster_defer = 0
         self.prev_dealer = None
         self.vanish.clear()

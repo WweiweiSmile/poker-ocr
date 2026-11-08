@@ -304,6 +304,33 @@ def test_pinned_key_ignores_pixel_changes_until_unpinned() -> None:
     check(not cache2.pin("nobody"), "没有读数时 pin 应返回 False")
 
 
+def test_unpin_single_key_restores_reread() -> None:
+    """unpin(key) 只解一块：名字到期复查动作徽章，盲注仍整手钉住。
+
+    动作徽章画在名字槽上，名字钉死整手就再也读不到让牌/下注 —— 到期解钉
+    是 live 行动线唯一的实时来源（见 state_stream.NAME_PIN_REFRESH_FRAMES）。
+    """
+    cache = RoiDedupCache()
+    x = np.tile(np.arange(40, dtype=np.uint8) * 5, (40, 1))
+    roi = np.dstack([x] * 3)
+    y = np.tile((np.arange(40, dtype=np.uint8) * 5)[:, None], (1, 40))
+    changed = np.dstack([y] * 3)
+    for key in ("hero.name", "@blinds"):
+        cache.check(key, roi)
+        cache.store(key, RoiRead(key, (0, 0, 40, 40), [("Alice", 0.95)]))
+        check(cache.pin(key), f"{key} 有读数时应能钉住")
+
+    cache.unpin("hero.name")
+    check(not cache.is_pinned("hero.name"), "名字应已解钉")
+    check(cache.is_pinned("@blinds"), "只该解名字，盲注要继续钉")
+
+    hit, _ = cache.check("hero.name", changed)
+    check(hit is None, "解钉后画面变了应重读（返回 None）")
+    hit, _ = cache.check("@blinds", changed)
+    check(hit is not None and hit.text == "Alice",
+          f"没解钉的盲注仍应复用，实际 {hit}")
+
+
 def test_mad_eps_defaults_to_0_2() -> None:
     """默认开 0.2：真机视频上精确 hash 只有 0.5% 命中，不开等于没去重。
     传 0.0 可以退回纯 dhash；统计里要能区分两条命中路径。"""
@@ -388,6 +415,7 @@ def main() -> int:
         test_photo_noise_is_not_treated_as_uncertain_text,
         test_low_score_read_cannot_be_pinned,
         test_pinned_key_ignores_pixel_changes_until_unpinned,
+        test_unpin_single_key_restores_reread,
         test_mad_eps_defaults_to_0_2,
         test_resolution_change_invalidates_the_cache,
         test_threshold_change_invalidates_the_cache,
