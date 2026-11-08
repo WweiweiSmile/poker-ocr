@@ -692,6 +692,42 @@ def test_pbs_equal_pot_with_bets_is_an_error() -> None:
     check("pbs_inconsistent" in s.errors, f"应报 pbs_inconsistent，实际 {s.errors}")
 
 
+def test_impossible_bet_is_downgraded_not_discarded() -> None:
+    """下注读到大于底池：只把这一位降级成未知，不丢整帧。
+
+    2026-11-08 实盘：bet 槽左侧的筹码图标被 rec 读成前导数字（`6.5BB` →
+    `26.5BB`，见 logs/incidents/20261106_003352_339805_gate_bet），topL 一位
+    读坏就让整帧连续丢 52/95 帧，下手牌 8.8s / 22s 才开始识别。
+    这一位明确不可用，但别人的筹码/底池/动作仍然有效。
+    """
+    rows = {k: dict(v) for k, v in BASE.items()}
+    rows["lowL"]["bet"] = "6BB"
+    rows["topR"]["bet"] = "6BB"
+    rows["topL"]["bet"] = "26.5BB"        # 底池 16.5 → 不可能
+    rows["lowR"] = {"name": "Dragon333", "chip": "20BB", "bet": "6BB"}
+    s = state(rows, pot="16.5BB", pbs="4.5BB")
+    check(s.ok, f"单座下注读坏不该丢整帧，实际 errors={s.errors}")
+    top = s.player("topL")
+    check(top.bet is None and top.bet_unknown,
+          f"topL 的下注应降级成未知：{top.to_debug()}")
+    check(any("26.5" in note for note in top.notes),
+          f"应在 notes 里留下原始读数：{top.notes}")
+    check(s.player("lowL").bet == 6.0 and s.player("topR").bet == 6.0,
+          "其他座位的下注必须保留")
+    check(s.bet_warnings == ["topL"], f"bet_warnings 应只含 topL：{s.bet_warnings}")
+    dbg = s.to_debug()
+    check(any(p.get("bet_unknown") for p in dbg["players"]
+              if p["seat_id"] == "topL"),
+          f"to_debug 应带 bet_unknown：{dbg['players']}")
+    check(dbg.get("bet_warnings") == ["topL"], f"to_debug 应带 bet_warnings：{dbg}")
+
+    # 底池自己也不可信（0 / 比前注总额还小）时，照旧整帧丢弃：
+    s2 = state(rows, pot="0BB", pbs="0BB")
+    check(not s2.ok and "bet_gt_pot:topL" in s2.errors,
+          f"底池不可信时仍应丢帧，实际 {s2.errors}")
+    check(s2.player("topL").bet == 26.5, "丢帧时不该改写原读数")
+
+
 # ─────────────────────────── 变化指纹 ───────────────────────────
 
 def test_signature_ignores_advisory_fields() -> None:
@@ -874,6 +910,7 @@ def main() -> int:
         test_ante_fallback_when_banner_loses_it,
         test_ante_inherited_when_parenthesis_lost,
         test_pbs_gt_pot_is_an_error,
+        test_impossible_bet_is_downgraded_not_discarded,
         test_pbs_equal_pot_with_bets_is_an_error,
         test_bomb_banner_detection,
         test_bomb_banner_in_state_and_signature,

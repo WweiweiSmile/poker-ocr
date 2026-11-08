@@ -12,6 +12,9 @@
   · **后手筹码**是筹码胶囊上的值（玩家下注后会减少），不是「带入」。
   · **本街下注**取每个座位的下注 pill；没有 pill = 0。注意它和
     `pot − pot_before_street` 是同一个量，后者用于交叉校验。
+    **下注读到大于底池 = 不可能**（底池就是全场投入之和）：这一位降级成
+    `bet=None` / `bet_unknown=True` 并记进 `bet_warnings`，**不丢整帧** ——
+    单座一个坏字段不该把别人的筹码/底池/动作一起作废（见下面的质量闸）。
   · **盲注**解析失败时可以继承上一帧（`blinds.source = "carried"`）—— 盲注只在
     升级时变，而那条横幅经常被「All-in 全场禁言中…」盖住；继承比丢帧合理。
     但**底池不能继承**（每手/每街都在变）。
@@ -43,6 +46,10 @@ class PlayerState:
     position: str | None = None
     stack: float | None = None       # 后手筹码（BB）
     bet: float | None = None         # 本街已下注（BB）；None = 读到了但没读懂
+    # `bet` 读到的是**不可能**的值（本街下注 > 底池），已按未知处理。
+    # 和「没读懂」不同：这是明确知道这个读数不能用，不是没读到。
+    # 见 build_state 的质量闸与 hand_track 的基线/水位处理。
+    bet_unknown: bool = False
     action: str | None = None        # check/call/bet/raise/fold（名字槽徽章）
     fold: bool | None = None         # 头像徽章 best-effort
     in_hand: bool = False
@@ -94,6 +101,7 @@ class PlayerState:
             "name": self.name,
             "stack": self.stack,
             "bet": self.bet,
+            **({"bet_unknown": True} if self.bet_unknown else {}),
             "action": self.action,
             "fold": self.fold,
             "in_hand": self.in_hand,
@@ -133,6 +141,11 @@ class FrameState:
     # 名字相关的诊断（改口/抖动/词表存疑）。**不进 errors**：名字读不准不该
     # 让整帧被质量闸丢掉，那会把牌面和底池一起扔了。
     name_warnings: list[str] = dc_field(default_factory=list)
+    # 本帧「本街下注读到不可能的值（> 底池）」的座位。**不进 errors**：那个
+    # 座位这一帧的下注按未知处理（`bet=None` + `bet_unknown=True`），帧里
+    # 其余字段（别人的筹码/底池/动作）仍然可用。调用方据此**不给 AI 建议**：
+    # to_call/水位依赖最大下注，静默少算一位会点错金额。
+    bet_warnings: list[str] = dc_field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -162,6 +175,8 @@ class FrameState:
             **({"errors": self.errors} if self.errors else {}),
             **({"name_warnings": self.name_warnings}
                if self.name_warnings else {}),
+            **({"bet_warnings": self.bet_warnings}
+               if self.bet_warnings else {}),
         }
 
 
@@ -632,6 +647,14 @@ def build_state(frame: RoiFrame, profile: Profile,
             and pbs >= pot - 1e-6):
         errors.append("pbs_inconsistent")
 
+    # 底池自己也得先站得住，才能拿它当「bet 读坏」的证据：翻前开局底池至少
+    # 是前注总额，读到 0/极小值说明底池槽还没渲染或读坏了 —— 那时宁可照旧
+    # 丢帧，也不能拿一个坏底池去判别人的下注。
+    _ante = (blinds.ante or 0.0) if blinds is not None else 0.0
+    pot_trusted = (pot is not None and pot > 1e-9
+                   and (_ante <= 0 or pot >= _ante * max(len(in_hand), 2) - 1e-6))
+    bet_warnings: list[str] = []
+
     for p in in_hand:
         # 离桌的人筹码/下注位已经不存在，读不到是正常的：不能因此整帧丢弃。
         if p.left:
@@ -640,10 +663,25 @@ def build_state(frame: RoiFrame, profile: Profile,
         # 其他玩家仍然要求这两个字段精准，否则整帧丢弃。
         if p.stack is None and not p.all_in:
             errors.append(f"stack:{p.seat_id}")
-        if p.bet is None and not p.all_in:
-            errors.append(f"bet:{p.seat_id}")
+        # **本街下注不可能大于底池**（底池 = 全场投入之和），读到就是串位：
+        # bet 槽左侧的筹码图标会被 rec 读成前导数字（实测 6.5BB → 26.5BB，
+        # logs/incidents/20261106_003352_339805_gate_bet），凑巧也读成过
+        # 20.5 / 5.0 这类能过闸的值。这一个字段明确不可用，但**别人的筹码、
+        # 底池、动作徽章仍然是有效的** —— 只把它降级成未知，不能整帧丢掉。
+        # 2026-11-08 实盘：topL 一位读坏，连续丢 52 / 95 帧，下手牌
+        # 8.8s / 22s 才开始识别（换手识别「慢」的真正原因）。
         if p.bet is not None and pot is not None and p.bet > pot + 1e-6:
-            errors.append(f"bet_gt_pot:{p.seat_id}")
+            if pot_trusted:
+                p.notes.append(f"bet {p.bet:g} > pot {pot:g}，按未知处理")
+                p.bet = None
+                p.bet_unknown = True
+                bet_warnings.append(p.seat_id)
+            else:
+                # 底池自己就可疑（0/比前注总额还小）：这时分不清是 bet 还是
+                # pot 读坏，照旧整帧丢弃。
+                errors.append(f"bet_gt_pot:{p.seat_id}")
+        if p.bet is None and not p.all_in and not p.bet_unknown:
+            errors.append(f"bet:{p.seat_id}")
 
     return FrameState(
         frame_id=frame.frame_id,
@@ -661,6 +699,7 @@ def build_state(frame: RoiFrame, profile: Profile,
         bomb_pot=_bomb_banner(frame),
         errors=errors,
         name_warnings=name_warnings,
+        bet_warnings=bet_warnings,
     )
 
 

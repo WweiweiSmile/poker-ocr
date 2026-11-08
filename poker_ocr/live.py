@@ -1167,6 +1167,8 @@ class LiveProcessor:
         self._incident_active: set[str] = set()
         self._incident_capped_logged = False
         self._last_cards_skip: tuple[tuple, float] | None = None
+        # 不同原因的「跳过建议」节流：reason → (key, 时间)
+        self._skip_logged: dict[str, tuple[tuple, float]] = {}
         self._board_anomaly_hinted = False
         self.cards_unreliable_skips = 0
 
@@ -1536,11 +1538,16 @@ class LiveProcessor:
         # 「已建议」，等牌面恢复可靠、同一个决策点还会补投一次。
         cards_reliable = bool(getattr(cards, "reliable", True))
         cards_warnings = tuple(getattr(cards, "warnings", ()) or ())
+        # 有座位的下注读到不可能的值（> 底池）时，这一帧的下注水位不可信：
+        # 手牌追踪照常吃（别的字段都是好的），但**不给 AI 建议** ——
+        # to_call 依赖最大下注，静默少算一位就会点错金额。
+        bet_warnings = tuple(getattr(outcome.state, "bet_warnings", ()) or ())
         point = self.hand_tracker.observe(
             outcome.state, hero_codes, board,
             cards_reliable=cards_reliable, cards_warnings=cards_warnings,
             allow_advice=(self.advice_runner is not None
-                          and not getattr(self.advice_runner, "busy", False)))
+                          and not getattr(self.advice_runner, "busy", False)
+                          and not bet_warnings))
         if (point is None and outcome.state.hero_turn is True
                 and not cards_reliable):
             if self._log_cards_skip(outcome.state, cards_warnings):
@@ -1553,11 +1560,41 @@ class LiveProcessor:
                     "pot": outcome.state.pot,
                     "captured_at": _iso_now(),
                 })
+        elif (point is None and outcome.state.hero_turn is True
+                and bet_warnings):
+            if self._log_bet_skip(outcome.state, bet_warnings):
+                hand = self._current_hand() or {}
+                self._publish("advice_skip", {
+                    "hand_id": hand.get("hand_id"),
+                    "street": hand.get("street"),
+                    "reason": "bet_unreadable",
+                    "warnings": list(bet_warnings),
+                    "pot": outcome.state.pot,
+                    "captured_at": _iso_now(),
+                })
+        elif (point is None and outcome.state.hero_turn is True
+                and self.hand_tracker.skip_reason):
+            # 本街底池账单对不上（有人下注读小了 / 漏抓了行动）：to_call 会算小，
+            # 宁可这一帧不给建议，也不推一条「只需跟 1BB」。
+            reason = self.hand_tracker.skip_reason
+            hand = self._current_hand() or {}
+            key = (hand.get("hand_id"), hand.get("street"))
+            if self._note_skip(reason, self.hand_tracker.skip_detail, key):
+                self._publish("advice_skip", {
+                    "hand_id": hand.get("hand_id"),
+                    "street": hand.get("street"),
+                    "reason": reason,
+                    "detail": self.hand_tracker.skip_detail,
+                    "pot": outcome.state.pot,
+                    "captured_at": _iso_now(),
+                })
         # 换手是在 observe 内部判定的：紧接着再 drain 一次，把上一手的
         # 手牌记忆（行动线 + 建议）在换手这一帧就落库，不必等下一帧。
         # 这里是**唯一允许自动点击**的 drain：state 与 hand_id 都是当前帧的，
-        # 牌面不可靠时也不点（allow_click=False），避免错误手牌上的建议被执行。
-        self.drain_advice(state=outcome.state, allow_click=cards_reliable)
+        # 牌面不可靠 / 下注水位不可信时也不点（allow_click=False），
+        # 避免错误手牌或错金额上的建议被执行。
+        self.drain_advice(state=outcome.state,
+                          allow_click=cards_reliable and not bet_warnings)
         if point is not None:
             self.advice_count += 1
             if self.advice_runner is not None:
@@ -1688,6 +1725,28 @@ class LiveProcessor:
         self.cards_unreliable_skips += 1
         reason = "；".join(warnings[:3]) or "牌面未稳定"
         self.log(f"  [建议] 跳过：牌面不可靠（{reason}）")
+        return True
+
+    def _log_bet_skip(self, state, seats: tuple[str, ...]) -> bool:
+        """有座位下注读到不可能的值 → 跳过建议：按手牌/街节流打印一次。
+
+        这一帧本身是有效的（别的字段都可用），跳过的是**建议/自动点击**：
+        to_call 依赖最大下注，读数不可信时宁可不给，也不拿错金额去点。
+        """
+        hand = getattr(self.hand_tracker, "hand", None)
+        key = (getattr(hand, "hand_id", None), getattr(hand, "street", None))
+        who = "/".join(seats[:4]) or "未知座位"
+        return self._note_skip("bet_unreadable",
+                               f"下注读数不可信（{who} 的下注 > 底池）", key)
+
+    def _note_skip(self, reason: str, detail: str, key: tuple) -> bool:
+        """同一手同一街同一原因的「跳过建议」只打一行、只发一条事件。"""
+        now = self.clock()
+        last = self._skip_logged.get(reason)
+        if last is not None and last[0] == key and now - last[1] < 5.0:
+            return False
+        self._skip_logged[reason] = (key, now)
+        self.log(f"  [建议] 跳过：{detail}")
         return True
 
     @property
@@ -1971,9 +2030,11 @@ class LiveProcessor:
             1 for street in record.get("streets") or []
             for action in street.get("actions") or []
             if action.get("inferred"))
-        warnings = list(record.get("cards_warnings") or [])
+        warnings = (list(record.get("data_warnings") or [])
+                    + list(record.get("cards_warnings") or []))
         status = ("partial" if partial else
-                  "approx" if record.get("cards_unreliable") else "exact")
+                  "approx" if (record.get("cards_unreliable")
+                               or record.get("data_warnings")) else "exact")
         record.setdefault("data_quality", {
             "status": status,
             "warnings": warnings,

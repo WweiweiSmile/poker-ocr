@@ -158,7 +158,7 @@ range_flow.py / fold_equity.py  ──读表──►  范围似然 · 条件弃
 
 | 模块 | 职责 |
 |---|---|
-| `frame_state.py` | 一帧完整桌面状态；`errors` 非空 ⇒ 调用方应整帧丢弃；盲注可继承，底池不可 |
+| `frame_state.py` | 一帧完整桌面状态；`errors` 非空 ⇒ 调用方应整帧丢弃（单座 `bet > pot` 例外：降级成 `bet_unknown`）；盲注可继承，底池不可 |
 | `state_stream.py` | 防抖状态机：`record` / `no_change` / `drop`；一手内锁定座位身份；只做状态不做 I/O |
 | `hand_track.py` | `LiveHandTracker`：逐帧累积行动线，同座同街同动作去重，街末用底池对账补漏 |
 | `hand_id.py` | 手牌 ID：名单/位置/日期摘要 + 碰撞后缀 |
@@ -260,7 +260,7 @@ advice / hand / incident / session_end`。`frame` 每帧一条，带 `hand_id` /
 4. **`position` ≠ `is_dealer`。** 单挑时按钮位下小盲，庄家的 `position` 是 `SB`。
 5. **`seats_ring_from_hero` 是座位环序，不是行动顺序。**
 6. **庄位找不到就报找不到。** 检出两个报 `ambiguous`，绝不取最大响应蒙混。
-7. **`errors` 非空 ⇒ 丢帧。** 遮挡/动画/误读的帧不进入手牌记录（用户明确要求）。
+7. **`errors` 非空 ⇒ 丢帧。** 遮挡/动画/误读的帧不进入手牌记录（用户明确要求）。唯一例外是**单座下注读到不可能的值**（`bet > pot`，底池就是全场投入之和）：这一位降级成「本帧下注未知」（`bet_unknown`），帧可以用，但这一帧不给建议、不自动点击（见 `docs/live-stream.md` §6.9）。
 8. **金额一律用「本街加到总额」**（hand_track / call-back / coach 同口径）。
 9. **fail open，不阻塞主链路。** 牌力/范围/画像任何一步缺数据都退化为「没这条事实」，不抛异常。
 10. **模型只能引用事实，不能自己断言。** 牌力由 `ground_truth` 给；尺度由 `options` 给；模型只选 id。

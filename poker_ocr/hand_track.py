@@ -127,6 +127,15 @@ ACTION_ORDER = ("SB", "BB", "UTG", "UTG+1", "UTG+2", "LJ", "HJ", "CO", "BTN")
 # 街末对账的金额容差：底池/下注都是 0.01BB 精度的文本
 RECONCILE_TOLERANCE = 0.02
 
+# 本街「底池账单」校验的容差。`street_bet_total = pot − pot_before_street`
+# 是本街所有人投进去的钱，必须等于各座「本街加到总额」之和。金额都是 0.01BB
+# 精度，正常完全对得上；差出这个量级说明有人下注读小了（24.5 → 4.5）或漏抓
+# 了一条行动 —— 这时最大下注不可信，`to_call` 会算小。
+# 2026-11-08 实盘 `20261108-171b48f66f`：对手 flop 下注 24.5BB 被读成 4.5，
+# 建议「只需跟 1BB」（底池 42 自己就证明了差额 20BB）。
+STREET_ACCOUNT_TOLERANCE = 2.0          # BB
+STREET_ACCOUNT_TOLERANCE_RATIO = 0.1    # 或本街投入的 10%，取大者
+
 # 爆炸底池强制前注：每人 5BB。横幅没抓到时，用「ante≥5 且翻前无动作」
 # 兜底识别，不能把这条强制前注当成一次翻前行动机会。
 BOMB_ANTE_BB = 5.0
@@ -310,6 +319,16 @@ class _LiveHand:
     street_seen: dict[str, set[str]] = field(default_factory=dict)
     # 已经做过补全的街，避免 finish_current/take_finished 重复补
     finalized_streets: set[str] = field(default_factory=set)
+    # (street, seat_id)：这一街这座的**基线还没建立**（开街那一帧它的下注
+    # 读到不可能的值，> 底池，见 frame_state.build_state）。基线不能在未知上
+    # 猜：第一次可靠读数直接当基线（那一帧不推行动）。
+    baseline_unknown: set[tuple[str, str]] = field(default_factory=set)
+    # 水位不可信的街：有座位下注未知时置位，全场读数都可靠后清除。置位期间
+    # 不按下注额反推 call/raise —— 分不清，宁可漏一次也不凭空造一个。
+    level_unknown: set[str] = field(default_factory=set)
+    # 手末核对底池账单发现的异常（某街「各座投入之和」对不上 pot − pbs）。
+    # 落进 hand 记录的 data_quality.warnings，复盘时先看这手能不能信。
+    data_warnings: list[str] = field(default_factory=list)
 
     def street_actions(self, street: str) -> list[ActionRecord]:
         return [a for a in self.actions if a.street == street]
@@ -381,6 +400,10 @@ class LiveHandTracker:
         self._hand_started_at: datetime | None = None
         # seat_id → 连续读到 all_in 的帧数。够 ALL_IN_CONFIRM_FRAMES 才写记录。
         self._all_in_streak: dict[str, int] = {}
+        # 上一次 observe 不给建议的原因（只给 live 打日志 / 发 advice_skip 事件）。
+        # 只记录**本该给建议却被拦下**的原因；hero 没轮到等正常情况保持 None。
+        self.skip_reason: str | None = None
+        self.skip_detail: str = ""
 
     # ─────────────────────────── 主流程 ───────────────────────────
 
@@ -403,6 +426,10 @@ class LiveHandTracker:
         """
         if not state.ok:
             return None
+
+        # 每次都重置：上一帧的拦截原因不能带到这一帧（live 用它发事件）
+        self.skip_reason = None
+        self.skip_detail = ""
 
         for p in state.players:
             if p.seat_id != state.hero_seat_id:
@@ -435,6 +462,8 @@ class LiveHandTracker:
                 # 弃牌徽章漏读时，最后几帧的 active 差集就是全部证据。
                 self._finalize_street(self.hand, self.hand.street, None,
                                       at_hand_end=True)
+                # 最后一街没有「下一街 pbs」可对账，手末自己核一遍底池账单
+                self._audit_street_account(self.hand)
                 self.last_finished = copy.deepcopy(self.hand)
                 # **这一帧只收手，不当成新手开局**：换手帧还挂着上一手的公共牌
                 # （牌面比底池晚清）、手牌往往也还是旧读数。直接开新手会把
@@ -634,6 +663,8 @@ class LiveHandTracker:
         # 手末再补一次：河牌打完/全下摊牌时没有「下一街」可以触发街末补全。
         self._finalize_street(self.hand, self.hand.street, None,
                               at_hand_end=True)
+        # 最后一街的底池账单（没有下一街 pbs 可用，这里自己核）
+        self._audit_street_account(self.hand)
         hand = copy.deepcopy(self.hand)
         self.last_finished = hand
         self._await_hand = hand
@@ -847,10 +878,20 @@ class LiveHandTracker:
             street_seen={street: self._active_seats(state)},
         )
         hand.pot_start[street] = state.pot_before_street
-        # 基线：接管链路时桌上可能已经有下注/加注，先把它当当前水位
-        hand.level[street] = max((p.bet or 0.0) for p in state.players)
+        # 基线：接管链路时桌上可能已经有下注/加注，先把它当当前水位。
+        # 下注读数不可信（> 底池）的座位不进水位/基线：那个数字明确是错的，
+        # 拿它当基线会让后面的正常读数被当成一次「行动」。
+        reliable = [p for p in state.players
+                    if not getattr(p, "bet_unknown", False)]
+        hand.level[street] = (max((p.bet or 0.0) for p in reliable)
+                              if reliable else 0.0)
         for p in state.players:
-            hand.baseline[(street, p.seat_id)] = p.bet or 0.0
+            if getattr(p, "bet_unknown", False):
+                hand.baseline_unknown.add((street, p.seat_id))
+            else:
+                hand.baseline[(street, p.seat_id)] = p.bet or 0.0
+        if hand.baseline_unknown:
+            hand.level_unknown.add(street)
         self.hand = hand
         self.turn_frames = 0
 
@@ -871,9 +912,14 @@ class LiveHandTracker:
         hero = self._hero(state)
         # hero 只在「这一手确实在局」时才取：换手空档里 hero 可能还没被发牌，
         # 那几帧的后手属于上一手，不能当新手的起始筹码。
-        if hero is not None and hero.in_hand and hand.start_stack is None:
+        if (hero is not None and hero.in_hand and hand.start_stack is None
+                and not getattr(hero, "bet_unknown", False)):
             hand.start_stack = self._opening_stack(state, hand, hero)
         for p in state.players:
+            if getattr(p, "bet_unknown", False):
+                # 这一帧的下注不可信（> 底池），「后手 + 已投入」会少算这笔，
+                # 起始筹码就偏小。等读数恢复的帧再补（start_stacks 只写一次）。
+                continue
             entry = hand.start_stacks.get(p.seat_id)
             if entry is not None:
                 # 起始筹码抓到的那一帧名字/位置可能还空着（发牌动画），补上
@@ -944,6 +990,14 @@ class LiveHandTracker:
         """
         hero = self._hero(state)
         hero_seat = hero.seat_id if hero else state.hero_seat_id
+
+        # 本帧哪些座位的下注读到不可能的值（> 底池，见 frame_state 的质量闸）。
+        # 这些座位这一帧只认徽章；基线/水位都不能据此更新。
+        unknown_now = {p.seat_id for p in state.players
+                       if getattr(p, "bet_unknown", False)}
+        # 上一街的「基线未知」已经由换街对账用过，清掉避免越积越多
+        hand.baseline_unknown = {(s, sid) for (s, sid) in hand.baseline_unknown
+                                 if s == hand.street}
         level = hand.level.get(hand.street, 0.0)
 
         # 按本街下注额升序处理：同一帧里读到的多个行动，下注额小的多半先发生
@@ -966,6 +1020,22 @@ class LiveHandTracker:
             bet = p.bet or 0.0
             prev_amount = (prev.amount or 0.0) if prev is not None else 0.0
 
+            # 这一帧这座的下注不可信：金额留空，动作只认徽章。徽章会在槽里
+            # 停留几秒，等读数恢复的帧再把 amount 补回同一条记录（下面
+            # 「同一个徽章的重复帧」分支）；基线/水位这里一律不动。
+            if getattr(p, "bet_unknown", False):
+                if p.action is None:
+                    continue
+                if (prev is not None and prev.action == p.action
+                        and prev.amount is None):
+                    continue                 # 同一条徽章的重复帧
+                hand.actions.append(ActionRecord(
+                    street=hand.street, seat_id=p.seat_id, name=p.name,
+                    position=p.position, action=p.action, amount=None,
+                    all_in=p.all_in, is_hero=p.seat_id == hero_seat))
+                hand.last_index[key] = len(hand.actions) - 1
+                continue
+
             # 已经弃牌的人，本街残留的下注 pill 不能再推成一次新行动。
             # 2026-11-06 实盘：SB 已 fold，bet 槽却读到 20.5；这里从下注额
             # 反推成「SB 3-bet」，整手牌被误判成 3-bet 底池。
@@ -982,6 +1052,17 @@ class LiveHandTracker:
             action = p.action
             if action is None:
                 # 徽章漏读时从下注额变化反推。没变化 = 没有行动
+                if key in hand.baseline_unknown:
+                    # 开街那一帧这座的下注读坏了：第一次可靠读数直接当基线，
+                    # **不当成一次行动** —— 宁可漏一次，也不能把盲注/补注
+                    # 凭空写成 call/raise。
+                    hand.baseline[key] = bet
+                    hand.baseline_unknown.discard(key)
+                    continue
+                if hand.street in hand.level_unknown:
+                    # 水位不可信：分不清这一笔是 call 还是 raise，等全场读数
+                    # 都可靠、水位重算之后再反推。
+                    continue
                 known = hand.baseline.get(key, 0.0)
                 if bet <= known + 1e-9:
                     continue
@@ -1007,6 +1088,7 @@ class LiveHandTracker:
                         amount=p.bet, all_in=prev.all_in or p.all_in,
                         is_hero=prev.is_hero)
                     hand.baseline[key] = bet
+                    hand.baseline_unknown.discard(key)
                     continue
 
             record = ActionRecord(
@@ -1022,10 +1104,21 @@ class LiveHandTracker:
             hand.actions.append(record)
             hand.last_index[key] = len(hand.actions) - 1
             hand.baseline[key] = bet
+            hand.baseline_unknown.discard(key)
             if action in AGGRESSIVE and bet > level:
                 level = bet
 
         hand.level[hand.street] = level
+        if not unknown_now and hand.street in hand.level_unknown:
+            # 全场读数都可靠了：用**按座基线**重算水位（不用当前帧的下注 ——
+            # 那里面可能就有这一帧刚推出来的一次加注，会把水位抬到自己头上，
+            # 让 raise 被归类成 call）。这一帧仍然不反推金额，下一帧才恢复。
+            recovered = max((hand.baseline.get((hand.street, p.seat_id), 0.0)
+                             for p in state.players if p.in_hand),
+                            default=0.0)
+            hand.level[hand.street] = max(
+                hand.level.get(hand.street, 0.0), recovered)
+            hand.level_unknown.discard(hand.street)
 
     def _record_left_folds(self, state: FrameState, hand: _LiveHand) -> None:
         """中途离桌 = 已经弃牌：补一条 inferred fold，保留名字/位置。
@@ -1068,6 +1161,78 @@ class LiveHandTracker:
 
     # ─────────────────────────── 街末对账 ───────────────────────────
 
+    @staticmethod
+    def _street_known(hand: _LiveHand, street: str,
+                      state: FrameState | None = None) -> dict[str, float]:
+        """这一街「能对上账」的每座投入：盲注基线 + 已记录动作 + 当前下注。"""
+        known: dict[str, float] = {}
+        for (s, seat), amount in hand.baseline.items():
+            if s == street:
+                known[seat] = max(known.get(seat, 0.0), amount or 0.0)
+        for a in hand.street_actions(street):
+            known[a.seat_id] = max(known.get(a.seat_id, 0.0), a.amount or 0.0)
+        if state is not None:
+            for p in state.players:
+                if p.bet is not None:
+                    known[p.seat_id] = max(known.get(p.seat_id, 0.0), p.bet)
+        return known
+
+    @staticmethod
+    def _street_account(hand: _LiveHand, street: str,
+                        end_pot: float | None,
+                        state: FrameState | None = None) -> tuple[float, float] | None:
+        """(本街实际投入, 各座投入之和)。对不上说明有下注读小或漏抓了行动。"""
+        start = hand.pot_start.get(street)
+        if start is None and state is not None and hand.street == street:
+            # 换街那一帧 pbs 没读到 → pot_start 空着；这一帧读到了就用它补
+            start = state.pot_before_street
+        if start is None or end_pot is None:
+            return None
+        actual = round(end_pot - start, 2)
+        if actual <= 1e-9:
+            return None
+        known = LiveHandTracker._street_known(hand, street, state)
+        return actual, round(sum(known.values()), 2)
+
+    @staticmethod
+    def _account_suspicious(actual: float, known_sum: float) -> bool:
+        """底池里有钱没对上账（实际投入 > 各座之和）时，最大下注不可信。
+
+        只认**正差**：底池横幅可能比下注 pill 晚一帧刷新，那一帧「各座之和」
+        反而大于底池（负差），并不说明读数错。正差没有这种解释 —— 池子里的
+        钱必然来自某个座位，对不上就是有人下注读小了或漏抓了行动。
+        """
+        limit = max(STREET_ACCOUNT_TOLERANCE,
+                    actual * STREET_ACCOUNT_TOLERANCE_RATIO)
+        return actual - known_sum > limit
+
+    @staticmethod
+    def _account_warning(street: str, actual: float, known_sum: float) -> str:
+        return (f"{street}: 本街投入 {actual:.2f}BB，各座加起来只有 "
+                f"{known_sum:.2f}BB（差 {actual - known_sum:+.2f}）—— "
+                "有下注金额读小或漏抓了行动，to_call/行动金额不可信")
+
+    @staticmethod
+    def _note_data_warning(hand: _LiveHand, warning: str) -> None:
+        if warning not in hand.data_warnings:
+            hand.data_warnings.append(warning)
+
+    def _audit_street_account(self, hand: _LiveHand) -> None:
+        """手末核对最后一街的底池账单，对不上就记进 data_warnings。
+
+        前面各街换街时已经由 `_reconcile_street` 用底池补过动作；只有最后一街
+        没有「下一街 pbs」可用，之前没人管 —— 2026-11-08 实盘
+        `20261108-171b48f66f` 就是这么把对手 24.5BB 的下注记成 4.5BB 落库的。
+        """
+        account = self._street_account(hand, hand.street, hand.pot)
+        if account is None:
+            return
+        actual, known_sum = account
+        if not self._account_suspicious(actual, known_sum):
+            return
+        self._note_data_warning(
+            hand, self._account_warning(hand.street, actual, known_sum))
+
     def _reconcile_street(self, hand: _LiveHand, new_street: str,
                           state: FrameState) -> None:
         """换街时用底池账单补齐上一街漏抓的动作。
@@ -1100,21 +1265,19 @@ class LiveHandTracker:
             return
 
         # 已经记进账的投入：盲注基线 + 每条动作的「本街加到总额」
-        known: dict[str, float] = {}
-        for (s, seat), amount in hand.baseline.items():
-            if s == street:
-                known[seat] = max(known.get(seat, 0.0), amount or 0.0)
-        for a in hand.street_actions(street):
-            known[a.seat_id] = max(known.get(a.seat_id, 0.0), a.amount or 0.0)
+        known = self._street_known(hand, street)
         missing = round(actual - sum(known.values()), 2)
         if missing <= 1e-9:
             return
 
         # 还在池里的人，理论上街末都应该补齐到最终水位。弃牌/离桌的人不用补；
-        # 全下的人可能只跟到更少的钱，不当作漏抓（否则金额会猜错）
+        # 全下的人可能只跟到更少的钱，不当作漏抓（否则金额会猜错）。
+        # 下注读数不可信的座位也不补：它的投入不知道，硬补会把差额算到别人头上。
+        unknown = {sid for (s, sid) in hand.baseline_unknown if s == street}
         remaining = [p for p in state.players
                      if p.in_hand and p.fold is not True
-                     and p.status != "folded" and not p.all_in]
+                     and p.status != "folded" and not p.all_in
+                     and p.seat_id not in unknown]
         if not remaining:
             return
 
@@ -1411,6 +1574,19 @@ class LiveHandTracker:
             hand.cards_unreliable = True
             return None
 
+        # 本街「底池账单」对不上：有人下注读小了（24.5 → 4.5）或漏抓了行动，
+        # 最大下注/to_call 就会算小 —— 建议「只需跟 1BB」比不给建议危险得多。
+        # 这一帧不给建议，也不占用 advised 名额：读数恢复后同一个决策点还能补投。
+        account = self._street_account(hand, hand.street, state.pot, state)
+        if account is not None and self._account_suspicious(*account):
+            actual, known_sum = account
+            self._note_data_warning(
+                hand, self._account_warning(hand.street, actual, known_sum))
+            self.skip_reason = "street_account_mismatch"
+            self.skip_detail = (f"本街投入 {actual:.2f}BB 只对上 {known_sum:.2f}BB，"
+                                "下注金额没读全")
+            return None
+
         snap = self._snapshot(state, hand)
         # 这一街自己已经行动过、又没有人把下注抬高：这一轮其实已经结束，
         # 按钮还在只是客户端还没收走。此时再投一次就是同一条街的重复请求 ——
@@ -1629,6 +1805,9 @@ class LiveHandTracker:
                 for rec in hand.snapshot()
             ],
         }
+        # 只在真有问题时写这个键，正常手牌的落库内容保持原样
+        if hand.data_warnings:
+            out["data_warnings"] = list(hand.data_warnings)
         if hand.hero_seat_id:
             out["hero_seat_id"] = hand.hero_seat_id
         # 每街开始时的在局座位。对手画像的「机会」分母从这里来；旧记录没有

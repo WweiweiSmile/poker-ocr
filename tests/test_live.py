@@ -423,7 +423,7 @@ class _FlopStream:
                             bet=2.0, in_hand=True),
             ],
             blinds=live.parse_blinds("1/2"), dealer="hero",
-            hero_seat_id="hero", hero_turn=True, pot=7.5,
+            hero_seat_id="hero", hero_turn=True, pot=3.5,
             pot_before_street=1.5)
         return FrameOutcome("no_change", st, [], None, 0, 0)
 
@@ -2191,7 +2191,7 @@ def test_start_stack_backfilled_with_posted_chips() -> None:
 
     # 翻牌：后手不变，已投入仍是 3.5（套池比例要用它）
     flop = tr.observe(_start_stack_state(96.5, 0.0, hero_turn=True,
-                                         pot=7.5, pbs=4.0),
+                                         pot=4.0, pbs=4.0),
                       ["Ah", "Kd"], ["Ks", "7d", "2c"])
     check(flop is not None and flop.hero_invested == 3.5,
           f"翻牌仍应记得翻前投入的 3.5：{getattr(flop, 'hero_invested', None)}")

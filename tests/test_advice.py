@@ -55,10 +55,12 @@ def player(seat_id: str, *, name: str | None = None, position: str | None = None
            stack: float | None = 100.0, bet: float | None = 0.0,
            action: str | None = None, fold: bool | None = None,
            in_hand: bool = True, all_in: bool = False,
-           status: str = "playing", left: bool = False) -> PlayerState:
+           status: str = "playing", left: bool = False,
+           bet_unknown: bool = False) -> PlayerState:
     return PlayerState(seat_id=seat_id, name=name, position=position, stack=stack,
                        bet=bet, action=action, fold=fold, in_hand=in_hand,
-                       all_in=all_in, status=status, left=left)
+                       all_in=all_in, status=status, left=left,
+                       bet_unknown=bet_unknown)
 
 
 def state(*players: PlayerState, pot: float = 3.0, pbs: float = 3.0,
@@ -881,6 +883,117 @@ def test_finish_current_recovers_after_timeout() -> None:
     feed(tr, st, ["Ah", "Kd"], [])
     check(tr.hand is not None and tr.hand.hand_id != first_id,
           f"超时后应强制开新手：{tr.hand}")
+
+
+def test_unknown_bet_does_not_stall_hand_or_invent_actions() -> None:
+    """开手那一帧某座下注读坏（> 底池）时：照样开手，读数恢复后不许造行动。
+
+    2026-11-08 实盘：topL 的 bet 槽把筹码图标读成前导数字（0.5/1 → 20.5），
+    质量闸以前整帧丢弃 → 新手牌 8.8s / 22s 才开始识别。现在这一位按未知
+    处理：基线不写、水位标记为不可信，等全场读数都可靠再重算。
+    """
+    tr = LiveHandTracker(confirm_frames=1)
+    st = state(player("hero", position="BTN"),
+               player("a", name="老王", position="SB", bet=0.5),
+               player("b", name="小李", position="BB",
+                      bet=None, bet_unknown=True),
+               pot=4.5, pbs=4.0, dealer="hero")
+    feed(tr, st, ["Ah", "Qd"], [])
+    check(tr.hand is not None, "下注读坏不该妨碍开手")
+    check(("preflop", "b") not in tr.hand.baseline,
+          f"未知下注不能写进基线：{tr.hand.baseline}")
+    check("preflop" in tr.hand.level_unknown,
+          f"水位应标记为不可信：{tr.hand.level_unknown}")
+    check(not tr.hand.street_actions("preflop"),
+          f"开手帧不该凭空造行动：{tr.hand.street_actions('preflop')}")
+
+    # 下一帧读数恢复：BB 的 1BB 是盲注，不是一次 raise / call
+    st2 = state(player("hero", position="BTN"),
+                player("a", name="老王", position="SB", bet=0.5),
+                player("b", name="小李", position="BB", bet=1.0),
+                pot=6.0, pbs=4.5, dealer="hero")
+    feed(tr, st2, ["Ah", "Qd"], [])
+    acts = [a for a in tr.hand.street_actions("preflop") if a.seat_id == "b"]
+    check(not acts, f"盲注读数恢复不能写成一次行动：{acts}")
+    check("preflop" not in tr.hand.level_unknown,
+          f"全场读数可靠后水位应恢复：{tr.hand.level_unknown}")
+    check(tr.hand.level["preflop"] == 1.0,
+          f"水位应按 BB 重算成 1.0，实际 {tr.hand.level['preflop']}")
+
+
+def test_unknown_bet_keeps_badge_action_and_backfills_amount() -> None:
+    """下注读坏但徽章可读：先记一条金额未知的行动，读数恢复后补上金额。"""
+    tr = LiveHandTracker(confirm_frames=1)
+    st = state(player("hero", position="BTN"),
+               player("a", name="老王", position="SB", bet=0.5),
+               player("b", name="小李", position="BB", bet=None,
+                      bet_unknown=True, action="raise"),
+               pot=4.5, pbs=4.0, dealer="hero")
+    feed(tr, st, ["Ah", "Qd"], [])
+    acts = [a for a in tr.hand.street_actions("preflop") if a.seat_id == "b"]
+    check(len(acts) == 1 and acts[0].action == "raise" and acts[0].amount is None,
+          f"徽章行动应记下但金额未知：{acts}")
+
+    # 同一枚徽章还在，金额恢复成 8BB → 补回同一条记录，不新增第二条
+    st2 = state(player("hero", position="BTN"),
+                player("a", name="老王", position="SB", bet=0.5),
+                player("b", name="小李", position="BB", bet=8.0,
+                       action="raise"),
+                pot=12.5, pbs=4.5, dealer="hero")
+    feed(tr, st2, ["Ah", "Qd"], [])
+    acts = [a for a in tr.hand.street_actions("preflop") if a.seat_id == "b"]
+    check(len(acts) == 1, f"同一枚徽章不能新增行动：{acts}")
+    check(acts[0].amount == 8.0,
+          f"读数恢复后应补上金额：{acts[0].amount}")
+
+
+def test_unbalanced_street_blocks_advice_until_bet_recovers() -> None:
+    """对手下注 24.5 被读成 4.5：底池账单对不上 → 不给建议，读数恢复后才给。
+
+    2026-11-08 实盘 `20261108-171b48f66f`：flop 底池 42、pot_before_street 10.5，
+    BTN 实际下注 24.5BB 被读成 4.5BB → to_call 1.0 → 建议「跟注 1BB」。
+    """
+    tr = LiveHandTracker(confirm_frames=1)
+    # 翻牌第一帧：hero 下 3.5、CO 跟 3.5、BTN 的 24.5 被读成 4.5
+    st = state(player("hero", position="BB", bet=3.5),
+               player("a", name="老王", position="CO", bet=3.5),
+               player("b", name="小李", position="BTN", bet=4.5),
+               pot=42.0, pbs=10.5, dealer="a", hero_turn=True)
+    point = feed(tr, st, ["7c", "Qh"], ["9s", "Qs", "9h"])
+    check(point is None, "底池账单对不上时不该给建议")
+    check(tr.skip_reason == "street_account_mismatch",
+          f"应标记跳过原因，实际 {tr.skip_reason}")
+    check(tr.hand.data_warnings,
+          f"手牌应记数据告警：{tr.hand.data_warnings}")
+    check(not [a for a in tr.hand.street_actions("flop") if a.seat_id == "b"],
+          "读小的下注不能当成一次行动落库")
+
+    # 读数恢复：BTN 的 4.5 变成 24.5 → 账单对上，to_call 21.0
+    st2 = state(player("hero", position="BB", bet=3.5),
+                player("a", name="老王", position="CO", bet=3.5),
+                player("b", name="小李", position="BTN", bet=24.5),
+                pot=42.0, pbs=10.5, dealer="a", hero_turn=True)
+    point = feed(tr, st2, ["7c", "Qh"], ["9s", "Qs", "9h"])
+    check(point is not None, "读数恢复后应重新给建议")
+    check(abs(point.to_call - 21.0) < 1e-9,
+          f"to_call 应为 21.0，实际 {point.to_call}")
+    check(tr.skip_reason is None, "读数恢复后不该再标跳过原因")
+
+
+def test_hand_end_audit_flags_unbalanced_last_street() -> None:
+    """读数一直没恢复：手末把最后一街的账单差额写进落库告警。"""
+    tr = LiveHandTracker(confirm_frames=1)
+    st = state(player("hero", position="BB", bet=3.5),
+               player("a", name="老王", position="CO", bet=3.5),
+               player("b", name="小李", position="BTN", bet=4.5),
+               pot=42.0, pbs=10.5, dealer="a", hero_turn=False)
+    feed(tr, st, ["7c", "Qh"], ["9s", "Qs", "9h"])
+    tr.finish_current()
+    finished = tr.take_finished()
+    check(finished is not None, "手末应产出记录")
+    warnings = finished.get("data_warnings") or []
+    check(any("42" in w or "31.5" in w for w in warnings),
+          f"落库应带账单告警：{warnings}")
 
 
 def test_table_size_uses_seats_not_players_in_hand() -> None:
