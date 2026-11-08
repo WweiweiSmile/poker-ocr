@@ -104,6 +104,31 @@ def test_store_tracks_frames_advice_hands() -> None:
     check(store.snapshot()["hands"][0]["hand_id"] == "h1", "手牌历史")
 
 
+def test_cards_event_updates_table_without_a_state_record() -> None:
+    """质量闸丢帧时看板只收到 `cards`：牌要马上换，底池等下一份有效状态。
+
+    2026-11-08 实盘：换手后连续 112 帧因 bet_gt_pot 被丢，看板 40s 一直
+    挂着上一手的手牌。牌是另一道闸确认过的，不该被底池的一票否决连坐。
+    """
+    store = LiveWebStore(session={"session_id": "s-1"}, layout={})
+    store.publish("frame", {
+        "seq": 1, "kind": "record",
+        "state": {"pot": 12, "hero_cards": ["Ah", "Kd"], "board": [],
+                  "opponents": []},
+    })
+    store.publish("cards", {"hero_cards": ["Qc", "Qh"], "board": []})
+    snap = store.snapshot()
+    state = snap["table"]["state"]
+    check(state["hero_cards"] == ["Qc", "Qh"],
+          f"牌面应立刻换成新读数：{state}")
+    check(state["pot"] == 12,
+          f"底池仍是上一份有效记录的值：{state}")
+    check(state["cards_reliable"] is True, f"牌面应标记为可信：{state}")
+    check(snap["cards"]["hero_cards"] == ["Qc", "Qh"],
+          f"快照应带最近牌面：{snap['cards']}")
+    check(snap["events"][-1]["type"] == "cards", "事件流应追加 cards")
+
+
 def test_http_snapshot_static_and_sse() -> None:
     server = LiveWebServer(session={"session_id": "s-1", "profile": "p.json"},
                            layout=build_layout(fake_profile()), port=0)
@@ -149,6 +174,7 @@ def test_http_snapshot_static_and_sse() -> None:
 def main() -> int:
     tests = [test_cli_defaults, test_layout_uses_name_slot_centers,
              test_store_tracks_frames_advice_hands,
+        test_cards_event_updates_table_without_a_state_record,
              test_http_snapshot_static_and_sse]
     print("── 实时 Web 看板 ──────────────────────────────")
     for t in tests:

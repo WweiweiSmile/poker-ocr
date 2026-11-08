@@ -768,6 +768,99 @@ def test_gate_discard_reasons_are_visible_and_dumped() -> None:
                   f"meta 应记录原因与计数：{meta}")
 
 
+def test_discarded_frames_still_publish_cards() -> None:
+    """质量闸丢帧时，牌面照样推给看板；同一组牌不重复推。
+
+    2026-11-08 实盘：换手后 164 帧里 112 帧被 `bet_gt_pot` 丢掉，看板
+    40s 一直挂着上一手的手牌 —— 牌是另一道闸（cards.reliable + 稳定帧）
+    确认过的，不该被底池/筹码的一票否决连坐。
+    """
+    class DiscardStream:
+        def __init__(self) -> None:
+            self.sampled = self.accepted = self.records = 0
+            self.discarded: dict[str, int] = {}
+
+        def ingest(self, img, frame_id: str, t: float, *,
+                   extra_signature: tuple | None = None) -> FrameOutcome:
+            self.sampled += 1
+            st = FrameState(frame_id=frame_id, table_seats=9,
+                            players_in_hand=2, players=[],
+                            errors=["bet_gt_pot:topL"])
+            return FrameOutcome("discard", st, ["bet_gt_pot:topL"],
+                                None, 0, 0)
+
+        def reset(self) -> None:      # pragma: no cover
+            pass
+
+    class FakeCards:
+        warnings: tuple = ()
+        shows: dict = {}
+
+        def __init__(self, hero, board=(), reliable=True) -> None:
+            self.hero_codes = tuple(hero)
+            self.board_codes = tuple(board)
+            self.reliable = reliable
+
+    hands = [FakeCards(("Ah", "Kd")), FakeCards(("Qc", "Qh")),
+             FakeCards(("Qc", "Qh"))]
+    feed = {"i": 0}
+
+    def fake_cards(self, img):
+        i = min(feed["i"], len(hands) - 1)
+        feed["i"] += 1
+        return hands[i]
+
+    events: list[tuple[str, dict]] = []
+    proc = LiveProcessor(DiscardStream(), StubWriter(), quiet=True,
+                         events=lambda kind, payload: events.append((kind, payload)))
+    with patch.object(live.LiveProcessor, "_read_cards", fake_cards):
+        for i in range(3):
+            proc.handle(packet(i))
+
+    cards = [p for k, p in events if k == "cards"]
+    check([c["hero_cards"] for c in cards] == [["Ah", "Kd"], ["Qc", "Qh"]],
+          f"丢帧时换牌也该推一条 cards：{cards}")
+    check(all(c["board"] == [] for c in cards), f"公共牌应一起带上：{cards}")
+    check(len([p for k, p in events if k == "frame"]) == 3,
+          "帧事件不受影响")
+
+
+def test_unreliable_cards_are_not_published() -> None:
+    """牌自己不可信时不推 —— 否则会把错牌实时刷到看板上。"""
+    class DiscardStream:
+        def __init__(self) -> None:
+            self.sampled = self.accepted = self.records = 0
+
+        def ingest(self, img, frame_id: str, t: float, *,
+                   extra_signature: tuple | None = None) -> FrameOutcome:
+            self.sampled += 1
+            st = FrameState(frame_id=frame_id, table_seats=9,
+                            players_in_hand=2, players=[],
+                            errors=["bet_gt_pot:topL"])
+            return FrameOutcome("discard", st, ["bet_gt_pot:topL"],
+                                None, 0, 0)
+
+        def reset(self) -> None:      # pragma: no cover
+            pass
+
+    class BadCards:
+        hero_codes = ("2c", "3d")
+        board_codes: tuple = ()
+        reliable = False
+        warnings = ("hero_cards: 低置信度",)
+        shows: dict = {}
+
+    events: list[tuple[str, dict]] = []
+    proc = LiveProcessor(DiscardStream(), StubWriter(), quiet=True,
+                         events=lambda kind, payload: events.append((kind, payload)))
+    with patch.object(live.LiveProcessor, "_read_cards",
+                      lambda self, img: BadCards()):
+        for i in range(2):
+            proc.handle(packet(i))
+    check(not [p for k, p in events if k == "cards"],
+          "牌不可信时不该推 cards 事件")
+
+
 def test_full_recognizer_writes_state() -> None:
     res = FullTableResult(
         size=(1280, 720), table_center=(0.5, 0.45),
@@ -2312,6 +2405,8 @@ def main() -> int:
         test_aspect_fit_restores_reference_ratio,
         test_aspect_fit_handles_landscape_capture,
         test_gate_discard_reasons_are_visible_and_dumped,
+        test_discarded_frames_still_publish_cards,
+        test_unreliable_cards_are_not_published,
         test_full_recognizer_writes_state,
         test_state_payload_orders_hero_board_opponents,
         test_jsonl_is_one_complete_object_per_line,

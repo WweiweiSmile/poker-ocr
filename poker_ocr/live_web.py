@@ -108,6 +108,11 @@ def _feed_item(event_id: int, kind: str, payload: dict) -> dict:
         cards = payload.get("cards") or {}
         if cards.get("warnings"):
             keep["cards_warnings"] = list(cards["warnings"])[:3]
+    elif kind == "cards":
+        keep.update({
+            "hero_cards": list(payload.get("hero_cards") or ()),
+            "board": list(payload.get("board") or ()),
+        })
     elif kind == "decision":
         for key in ("hand_id", "street", "pot", "to_call", "action_index"):
             if key in payload:
@@ -174,6 +179,9 @@ class LiveWebStore:
         }
         self.latest_frame: dict | None = None
         self.table: dict | None = None
+        # 最近一次可信牌面（hero/board）：质量闸丢帧时由 `cards` 事件更新，
+        # 断线重连的快照要带上，否则页面会退回上一手的牌。
+        self.cards: dict | None = None
         self.pending: dict | None = None
         self.current_advice: dict | None = None
         self.advices: deque[dict] = deque(maxlen=MAX_ADVICES)
@@ -236,6 +244,16 @@ class LiveWebStore:
                     "frame": {k: v for k, v in data.items()
                               if k not in ("state",)},
                 }
+        elif kind == "cards":
+            # 牌面/手牌单独更新：这帧可能因为底池/筹码读不出被质量闸丢了，
+            # 但牌是另一道闸（cards.reliable）确认过的，页面要立刻跟着换。
+            self.cards = dict(data)
+            if self.table and self.table.get("state"):
+                state = dict(self.table["state"])
+                state["hero_cards"] = list(data.get("hero_cards") or ())
+                state["board"] = list(data.get("board") or ())
+                state["cards_reliable"] = True
+                self.table = {**self.table, "state": state}
         elif kind == "decision":
             self.pending = data
         elif kind == "advice":
@@ -287,6 +305,7 @@ class LiveWebStore:
                 "stats": dict(self.stats),
                 "frame": self.latest_frame,
                 "table": self.table,
+                "cards": self.cards,
                 "pending": self.pending,
                 "advice": self.current_advice,
                 "advices": list(self.advices),

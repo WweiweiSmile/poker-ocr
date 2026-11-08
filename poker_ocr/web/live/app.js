@@ -1073,6 +1073,32 @@ function handleEvent(msg) {
       } });
       break;
     }
+    case "cards": {
+      // 质量闸丢帧时牌面单独推：牌是另一道闸确认过的，页面要立刻换牌。
+      // 底池/筹码仍是上一份有效记录的值，等这帧恢复成有效状态再补。
+      const heroCards = Array.isArray(data.hero_cards) ? data.hero_cards : [];
+      const board = Array.isArray(data.board) ? data.board : [];
+      if (state.table && state.table.state) {
+        state.table = {
+          ...state.table,
+          state: {
+            ...state.table.state,
+            hero_cards: heroCards,
+            board,
+            cards_reliable: true,
+          },
+        };
+      }
+      if (state.frame && state.frame.hand) {
+        state.frame = {
+          ...state.frame,
+          hand: { ...state.frame.hand, hero_cards: heroCards, board },
+        };
+      }
+      renderTable();
+      renderHand();
+      break;
+    }
     case "decision":
       state.pending = data;
       state.pendingSince = Date.now();

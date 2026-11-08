@@ -1150,6 +1150,9 @@ class LiveProcessor:
         # 牌区 ROI 去重：board/hero 像素没变时复用上一次的识别结果，只重读亮牌。
         self._card_roi_sig: tuple | None = None
         self._card_roi_reads: CardsResult | None = None
+        # 看板最近一次收到的牌面 (hero, board)。质量闸丢帧时牌仍然可信，
+        # 单独推一条 `cards` 事件，避免看板挂着上一手的牌（见 _publish_cards）。
+        self._cards_published: tuple[tuple[str, ...], tuple[str, ...]] | None = None
         # 疑惑帧环形缓冲：只存引用，不做逐帧编码；异常时才落盘。
         self.incident_dir = Path(incident_dir) if incident_dir is not None else None
         self._frame_ring: deque | None = (
@@ -1310,6 +1313,15 @@ class LiveProcessor:
         # AI 建议：吃**每一帧被接受的状态**（不只被记录的）。签名里没有 action /
         # hero_turn，只吃 record 会漏掉大部分行动线。
         self._track_hand(outcome, cards)
+        if body is None:
+            # 这帧没产生记录（丢帧/无变化），但牌可能已经换了一组：
+            # 牌有自己的闸（cards.reliable + 稳定帧），不该被底池/筹码的
+            # 一票否决连坐（2026-11-08 实盘：换手后 164 帧里 112 帧被
+            # `bet_gt_pot` 丢掉，看板 40s 都挂着上一手的牌）。
+            self._publish_cards(cards)
+        elif cards is not None:
+            self._cards_published = (tuple(cards.hero_codes or ()),
+                                     tuple(cards.board_codes or ()))
         self._publish_frame(packet, t, frame_id, age, proc_ms, outcome,
                             cards, body)
         return outcome.kind
@@ -1324,6 +1336,29 @@ class LiveProcessor:
             self.events(kind, payload)
         except Exception as exc:  # noqa: BLE001 — 日志/看板故障不应中断牌局
             self.log(f"[警告] 事件发布失败：{type(exc).__name__}: {exc}")
+
+    def _publish_cards(self, cards: CardsResult | None) -> None:
+        """牌面/手牌单独推一条 `cards` 事件给看板。
+
+        质量闸丢帧说的是「这帧的底池/筹码读不出来，牌局事实不能落库」，
+        不等于牌读错了：牌有自己的一道闸（`cards.reliable` + 稳定帧确认）。
+        不单独推的话，换手那几秒看板会一直挂着上一手的牌。
+
+        只在牌真的变了才推；记录（body）已经带牌时由调用方同步
+        `_cards_published`，不重复发。
+        """
+        if cards is None or not getattr(cards, "reliable", False):
+            return
+        sig = (tuple(cards.hero_codes or ()), tuple(cards.board_codes or ()))
+        if sig == self._cards_published:
+            return
+        self._cards_published = sig
+        # 不带 hand_id：丢帧时手牌追踪还停在上一手，带上反而是错的。
+        self._publish("cards", {
+            "hero_cards": list(sig[0]),
+            "board": list(sig[1]),
+            "captured_at": _iso_now(),
+        })
 
     @staticmethod
     def _cards_event(cards: CardsResult | None) -> dict:
@@ -2259,6 +2294,11 @@ class LiveProcessor:
         if body is not None:
             payload["state"] = body
         self._publish("frame", payload)
+        if body is None:
+            self._publish_cards(cards)
+        elif cards is not None:
+            self._cards_published = (tuple(cards.hero_codes or ()),
+                                     tuple(cards.board_codes or ()))
         # 与 roi 路线一致：丢弃 / 无变化的帧不进 JSONL，不逐帧打印日志
 
         return outcome.kind
