@@ -1712,17 +1712,26 @@ class LiveHandTracker:
         一次翻前行动都没记到（中途接管链路）时用盲注水位兜底：有人投到 1BB
         以上说明已经有人加注。宁可把一个 3bet 局面判成 single-raise，
         也不要因为「没记录」把有人加注的局面判成无人加注。
+
+        **兜底只在翻前、且不是炸弹池时成立**：`max_bet` / `players[].bet` 都是
+        **本街**的下注额，拿它推翻前事实只在「本街就是翻前」时才对。炸弹池
+        结构上没有翻前动作，河牌谁下一个注就会被读成 single-raise →
+        `field_ranges.resolve` 交叉校验判「形状说有加注、动作线没有」→ 全部
+        对手范围置 unknown、权益归零（2026-11-08 h·3f9d253c3e：河牌 CO 下注
+        21BB 那一帧权益从 5% 变 None，模型只剩「两对 + 25% 赔率」于是跟了
+        一个应弃的注）。翻后接管时同样不能用本街下注冒充翻前加注。
         """
         bb = hand.blinds.bb if hand.blinds else 1.0
+        preflop_leads = hand.street == PREFLOP and not hand.bomb_pot
         raises = len(preflop_aggressive(hand.street_actions(PREFLOP)))
-        if raises == 0 and not hand.street_actions(PREFLOP):
+        if raises == 0 and not hand.street_actions(PREFLOP) and preflop_leads:
             if max_bet > bb + 1e-9:
                 raises = 1
 
         if raises == 0:
             limped = any(a.street == PREFLOP and a.action == "call"
                          and not a.is_hero for a in hand.actions)
-            if not limped and players:
+            if not limped and players and preflop_leads:
                 limped = any(
                     p.position not in ("SB", "BB") and not p.fold
                     and p.bet is not None and abs(float(p.bet) - bb) < 0.01

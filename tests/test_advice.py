@@ -664,6 +664,59 @@ def test_tracker_does_not_advise_closed_preflop_round() -> None:
     check(point is None, f"翻前已结束不应再给决策点：{point}")
 
 
+def test_bomb_pot_river_bet_does_not_fake_a_preflop_raise() -> None:
+    """炸弹池没有翻前动作；河牌的下注额不能被当成「翻前加注」。
+
+    2026-11-08 实盘 h·3f9d253c3e（Ks5s / 10cQc6c5d6d，7 人炸弹池）：
+    CO 河牌下注 21BB 的那一帧，`_preflop_shapes` 用「本街最大下注 > 1BB
+    ⇒ 有人加注」的兜底，把形态从 unopened 翻成 single-raise；
+    `field_ranges.resolve` 交叉校验判「形状说有加注、动作线没有」→ 4 家
+    范围全 unknown、权益从 5% 变 None，模型只剩「两对 + 25% 赔率」，
+    于是跟了一个应弃的注（对手 6s4c，三条 6）。
+    """
+    from poker_ocr import field_ranges
+
+    tr = LiveHandTracker(confirm_frames=1)
+    hero = player("hero", position="LJ", stack=300.0)
+    utg = player("a", name="老王", position="HJ", stack=300.0)
+    co = player("b", name="小李", position="CO", stack=300.0)
+    btn = player("c", name="小张", position="BTN", stack=300.0)
+    flop = ["10c", "Qc", "6c"]
+    turn = flop + ["5d"]
+    river = turn + ["6d"]
+
+    def table(*players, **kw):
+        return state(*players, bomb_pot=True, **kw)
+
+    feed(tr, table(hero, utg, co, btn, pot=20.0, pbs=0.0), ["Ks", "5s"], [])
+    feed(tr, table(hero, utg, co, btn, pot=20.0, pbs=20.0),
+         ["Ks", "5s"], flop)
+    feed(tr, table(hero, utg, co, btn, pot=20.0, pbs=20.0),
+         ["Ks", "5s"], turn)
+    point = feed(tr, table(hero, utg, co, btn, pot=20.0, pbs=20.0,
+                           hero_turn=True), ["Ks", "5s"], river)
+    check(point is not None and point.preflop_shapes == ("unopened",),
+          f"炸弹池河牌过牌帧应是 unopened："
+          f"{getattr(point, 'preflop_shapes', None)}")
+
+    bettor = player("b", name="小李", position="CO", stack=279.0,
+                    bet=21.0, action="bet")
+    point = feed(tr, table(hero, utg, bettor, btn, pot=41.0, pbs=20.0,
+                           hero_turn=True), ["Ks", "5s"], river)
+    check(point is not None and point.to_call == 21.0,
+          f"河牌面对 21BB 应有决策点：{getattr(point, 'to_call', None)}")
+    check(point.preflop_shapes == ("unopened",),
+          f"本街下注不能改翻前形态：{point.preflop_shapes}")
+
+    field = field_ranges.resolve(point)
+    check(not any("single-raise" in w for w in field.warnings),
+          f"不应再出现 single-raise 矛盾告警：{field.warnings}")
+    check(all(spec.prior_id for spec in field.specs),
+          f"对手范围应仍可用：{[(s.seat_id, s.prior_id) for s in field.specs]}")
+    check(build_situation(point).hand_ranges is not None,
+          "范围可用时权益必须算出来（None = 模型只能靠牌型名裸猜）")
+
+
 def test_snapshot_to_call_and_preflop_shape() -> None:
     tr = LiveHandTracker(confirm_frames=1)
     players = (player("hero", position="BTN", stack=100.0, bet=0.0),
@@ -2277,6 +2330,8 @@ def test_lean_prompt_targets_aggression_frequency() -> None:
     for phrase in ("频率目标", "≥40%", "翻前加注优先", "14–16%",
                    "5.5BB + 1BB", "接近 100% 隔离", "半池只在"):
         check(phrase in system, f"system 缺少攻击频率目标：{phrase}")
+    check("总概率" in system and "按本手实际人数连乘" in system,
+          "system 应说明多人池弃牌率是所有对手都弃的总概率，按实际人数连乘")
 
     # 河牌成牌：两对+ 默认下注，不许过牌收摊。
     river = build_situation(make_point(
@@ -2352,6 +2407,46 @@ def test_pool_prior_fills_missing_seat_data() -> None:
     pre = build_situation(make_point(street="preflop", board=()))
     _, pre_user = build_messages(pre)
     check("池子先验" not in pre_user, "翻前不给池子先验")
+
+
+def test_pool_prior_multiplies_by_actual_opponent_count() -> None:
+    """9 人池 8 个对手：按 8 家连乘，不能只给 4 家 26% 让模型以为“仍够”。
+
+    2026-11-08 h·7e7022c1d3：9 人炸弹池，Hero 翻牌 K 高卡顺，8 个对手。
+    旧文只列 2/3/4 家，4 家 ≈26% 刚好高于 1/3 门槛 25%，模型据此写
+    “多人池弃牌率连乘仍够”并下注；实际 0.71^8 ≈6%。这里锁住三件事：
+    本手人数必须单独出现、低于门槛必须写不能开火、空气/弱听默认过牌。
+    """
+    from poker_ocr.hand_track import OpponentSnapshot
+    from poker_ocr.opponent_profile import PooledStats
+
+    stats = PooledStats(
+        hands=194, players=8, total_players=9, scope="current_table",
+        fold_to_bet_flop=71.0, opportunities={"flop": 150.0})
+    opponents = tuple(
+        OpponentSnapshot(f"o{i}", f"V{i}", None, 97.0, 0.0, False)
+        for i in range(8))
+    with patch.dict("os.environ", {"HAND_VS_RANGES_ENABLED": "0"}):
+        sit = build_situation(
+            make_point(hero_cards=("Td", "3d"),
+                       board=("Kd", "9c", "Js"),
+                       hero_position="CO", hero_stack=304.5,
+                       pot=45.0, pot_before_street=45.0,
+                       table_size=9, players_dealt=9,
+                       preflop_shapes=("unopened",), hero_is_pfr=False,
+                       cbet_spot=False,
+                       opponents=opponents),
+            table_stats=stats)
+    text = render_facts_zh(sit)
+    check("池子先验" in text, f"应有池子先验：\n{text}")
+    check("本手 8 名对手全弃 ≈6%" in text,
+          f"8 家 71% 连乘应约 6%，不能只显示 4 家：\n{text}")
+    check("2 家 ≈50%" in text and "4 家 ≈25%" in text,
+          f"小人数对照可以保留，但不能代替本手人数：\n{text}")
+    check("低于 1/3 门槛" in text and "不能当开火依据" in text,
+          f"低于门槛必须明确禁止开火：\n{text}")
+    check("本手是空气/弱听" in text and "默认过牌" in text,
+          f"空气/弱听多人池应默认过牌：\n{text}")
 
 
 # ─────────────────────────── 模型调用 ───────────────────────────

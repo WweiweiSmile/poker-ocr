@@ -273,7 +273,7 @@ advice / hand / incident / session_end`。`frame` 每帧一条，带 `hand_id` /
 
 ## 7. 提示词系统
 
-- 当前版本：`PROMPT_VERSION = "lean-zh-2026-11-05.1"`（[poker_ocr/prompt/version.py](poker_ocr/prompt/version.py)）。
+- 当前版本：`PROMPT_VERSION = "lean-zh-2026-11-08.2"`（[poker_ocr/prompt/version.py](poker_ocr/prompt/version.py)）。
 - 只有**一套中文 lean**：不注入 Math gate、不做弃牌重问、不加载技能库。
 - 版本号写进 `session_start` / advice JSONL；`replay/versioning.py` 的 `CURRENT_ADVICE_VERSION` 由它派生，**不要手工同步**。
 - 改动 system、事实块或模块顺序 ⇒ 必须 bump，并在 `version.py` 顶部写清「为什么改、依据哪次复盘」。

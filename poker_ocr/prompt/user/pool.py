@@ -10,6 +10,12 @@
 至少一名在局对手没有该街的实测。攻击块已经给裁决、或已经有条件弃牌率
 报告（fold_eq）的节点不渲染 —— 后者已经按本手线路给出「全部弃牌」，
 再补一条历史均值会让同一节点出现两个口径的弃牌率。
+
+2026-11-08.2：连乘按**本手实际还能弃牌的对手数**，不再只列 2/3/4 家。
+h·7e7022c1d3 的 9 人炸弹池：8 个对手、池子均值 71%，全弃只有 ≈6%；
+旧文案只列到「4 家 ≈26%」，模型拿它当「25% 门槛仍够」，用 K 高卡顺
+在翻牌对 8 家下注 1/3。现在直接给出本手人数的全弃概率，低于 1/3 门槛
+就写明「不能当开火依据」；空气/弱听在 3 家以上明确默认过牌。
 """
 
 from __future__ import annotations
@@ -20,6 +26,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from ...coach import WEAK_DRAW
 from ...hand_track import PREFLOP
 from ...opponent_profile import DEFAULT_PRIORS
 from ...pot_math import _can_act
@@ -94,6 +101,15 @@ def _pool_rate(sit: "Situation", street: str):
     return (pct, None, "默认先验（样本不足）") if pct is not None else (None, None, "")
 
 
+def _live_opponents(sit: "Situation") -> int:
+    """还能弃牌的对手数：已弃牌/已全下的不算。
+
+    弃牌率只对「还能行动的人」有意义；全下的人不能弃，不能算进连乘。
+    """
+    return sum(1 for opponent in sit.snap.opponents
+               if not opponent.folded and _can_act(opponent))
+
+
 def _has_gap(sit: "Situation", street: str) -> bool:
     """至少一名在局、还能行动的对手缺该街实测（含被先验收缩的估计）。"""
     reads = {r.seat_id: r for r in sit.opponent_reads}
@@ -126,19 +142,43 @@ def render_pool_prior_zh(sit: "Situation") -> list[str]:
     pct, opps, source = _pool_rate(sit, street)
     if pct is None:
         return []
+    n_live = _live_opponents(sit)
+    if n_live <= 0:
+        return []          # 没人还能弃牌：这条先验没有决策意义
     cn = _STREET_CN.get(street, street)
     n = f"（{opps:.0f} 次机会）" if opps else ""
-    # 池子均值是「每个对手」的弃牌率；多人池要连乘，不能直接当开火许可。
+    # 池子均值是「每个对手」的弃牌率；多人池要按本手实际人数连乘。
+    # 只列到 4 家会让 9 人池误以为「4 家 26% > 25%，仍够开火」。
     fold = pct / 100.0
-    chain = "、".join(
-        f"{k} 家 ≈{fold ** k * 100:.0f}%" for k in (2, 3, 4))
-    return [
+    all_fold = fold ** n_live
+    if n_live == 1:
+        lead = f"- 本手 1 名对手弃牌 ≈{pct:.0f}%"
+        compare = ""
+    else:
+        small = [f"{k} 家 ≈{fold ** k * 100:.0f}%" for k in (2, 3, 4)
+                 if k < n_live]
+        lead = (f"- 多人池按连乘打折（独立粗算）："
+                f"本手 {n_live} 名对手全弃 ≈{all_fold * 100:.0f}%")
+        compare = f"；对照 {'、'.join(small)}" if small else ""
+    if all_fold < 0.25:
+        verdict = "低于 1/3 门槛，不能当开火依据（纯诈唬/弱听；价值另看更差的牌会不会跟）"
+    else:
+        verdict = "高于 1/3 门槛，但仍是无条件历史均值"
+    weak_hand = sit.hand_tier == WEAK_DRAW or (
+        sit.hand_tier is not None and sit.hand_class == "air")
+    lines = [
         "## 池子先验（逐座位数据缺失时的兜底，不是这个座位）",
         f"- 面对{cn}下注弃 {pct:.0f}%{n}；口径：{source}",
         "- 对照：" + "、".join(f"{label} 池需要 {bep}%" for label, bep in _BREAKEVEN)
         + " 弃牌率才 +EV（单街，不算被跟后的权益）",
-        f"- 多人池按连乘打折（独立粗算）：{chain}；"
-        "3 家以上只用来支撑价值/强听小注，空气不要拿这条开火",
-        "- 用法：某个座位没有该街实测时按这条估计，"
-        "不要因为「没有这个人的数据」就默认过牌；大注仍要 L2–L3 与实测",
+        f"{lead}，{verdict}{compare}",
     ]
+    if weak_hand and n_live >= 3:
+        lines.append(
+            "- 本手是空气/弱听：3 家以上这条先验只支撑价值/强听小注，"
+            "不要拿它开火；默认过牌。")
+    lines.append(
+        "- 用法：某个座位没有该街实测时按这条估计，"
+        "不要因为「没有这个人的数据」就默认过牌；人数按本手实际对手数连乘；"
+        "对手已经跟过注/加注时范围更窄，第二枪/第三枪按收窄后的范围重估。")
+    return lines

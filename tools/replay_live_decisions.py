@@ -201,7 +201,11 @@ def build_snap(advice: dict, state: dict, hand: dict | None) -> HandSnapshot:
     raises = sum(1 for a in pre
                  if a.action in ("raise", "bet")
                  or (a.action == "call" and a.all_in))
-    if raises == 0 and max(top, float(hero.get("bet") or 0.0)) > bb + 1e-9:
+    # 本街下注额只能在**翻前**冒充翻前加注；炸弹池没有翻前动作，
+    # 拿河牌的下注额兜底会伪造一个 single-raise（见 hand_track._preflop_shapes）。
+    preflop_leads = street == "preflop" and not state.get("bomb_pot")
+    if (raises == 0 and preflop_leads
+            and max(top, float(hero.get("bet") or 0.0)) > bb + 1e-9):
         raises = 1
     if raises == 0:
         limped = any(a.action == "call" and not a.is_hero for a in pre)
