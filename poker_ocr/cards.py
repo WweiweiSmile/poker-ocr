@@ -114,6 +114,19 @@ _MIN_RANK_SCORE = 0.70
 _MIN_RANK_MARGIN = 0.03
 _MIN_SUIT_INK = 200
 
+# 3/6/8/9 的拓扑仲裁门槛。9 的字形只有**上半一个闭合孔**，下面只是右侧竖笔；
+# 降采样/模糊后 NCC 会把它翻成 8，再被「3 左开口」规则改判成 3（线上
+# 20261108-32abfc5ad6 的 9s→3s）。这里用孔的位置 + 上半段的左侧轮廓单独认 9。
+_TOP_HOLE_CY = 0.42          # 孔质心在这个高度以上 = 上半孔（9 的闭环）
+_BOTTOM_HOLE_CY = 0.56       # 孔质心在这个高度以下 = 下半孔（6/8）
+_TOP_HOLE_MIN_FRAC = 0.01    # 上半孔至少占字形墨迹的 1%（排除 1–2px 的假孔）
+_TOP_HOLE_DOMINANCE = 1.8    # 上半孔面积 ≥ 下半孔的 1.8 倍，才认定下半孔是降采样假孔
+# 上半段（字形高度 20%–50%）左侧是否闭合：9 的闭环贴着左边（≈0），
+# 3 的上半开口让最左墨迹明显右移（实测 0.13–0.47）。用中段（28%–72%）
+# 会被 9 的下半竖笔带偏，分不开 3 和 9。
+_UPPER_LEFT_BAND = (0.20, 0.50)
+_UPPER_CLOSED_INDENT = 0.08
+
 # 稳定闸用的「这张牌本身可不可信」门槛。标注样本里最低 confidence/rank_score
 # 都是 0.795，0.65 留足余量；真正的牌背实测 confidence≈0.50、rank_score≈0.64。
 _MIN_STABLE_CONFIDENCE = 0.65
@@ -524,47 +537,62 @@ def _ncc(a: np.ndarray, b: np.ndarray) -> float:
 
 
 def _glyph_topology(glyph: np.ndarray | None) -> dict[str, Any]:
-    """点数字形的拓扑 + 左侧轮廓特征，服务 3/8/6 的仲裁。
+    """点数字形的拓扑 + 左侧轮廓特征，服务 3/6/8/9 的仲裁。
 
     只靠闭合孔数量不够：真实画面把牌区缩到 0.7–0.5 倍时，3 的两个开口会被
     抗锯齿/JPEG 糊出 **1–2 个假孔**，而 8 的孔反而可能被糊掉一个。此时
-    `holes` 会把 3 判成 8（线上 3s→8s 的根因）。拓扑之外再加两个对低分辨率
+    `holes` 会把 3 判成 8（线上 3s→8s 的根因）。拓扑之外再加三个对低分辨率
     更稳的特征：
 
       · `left_indent`：字形中段（28%–72% 高度）每行最左墨迹的平均 x / 宽度。
         3 的开口朝左，中段最左墨迹明显偏右；8 的左侧是闭合的，接近 0。
+      · `left_indent_upper`：同样口径，但只取上半段（20%–50%）。9 的闭环把
+        左边封住（≈0），3 的上半开口仍然偏右 —— 这是 3 与 9 的分水岭，
+        中段会被 9 下半的右侧竖笔带偏，分不开两者。
+      · `top_hole_area` / `bottom_hole_area`：按孔质心在字形高度的位置分上/下。
+        9 只有上半一个闭环、下面是右侧竖笔；8 上下各一个；6 只有下半一个。
+        降采样给 9 糊出的下半假孔通常远小于真孔，用面积比可以排除。
       · `defect_ratio`：外轮廓最大凸包缺陷深度 / 宽度，仅作证据/调试。
         不能单独用它判「左开口」：6 的上半段凹口在右侧，也会产生深缺陷。
 
-    这两个特征不参与其他点数判断；只在模板赢家/第二是 3、8、6 时使用。
+    这些特征不参与其他点数判断；只在模板赢家/第二名落在 3/6/8/9 时使用。
     """
+    empty = {"holes": None, "hole_areas": [], "major_holes": None,
+             "ink": 0, "left_indent": None, "left_indent_upper": None,
+             "top_hole_area": 0.0, "bottom_hole_area": 0.0,
+             "upper_closed": None, "defect_ratio": None, "open_left": None}
     if glyph is None:
-        return {"holes": None, "hole_areas": [], "major_holes": None,
-                "ink": 0, "left_indent": None, "defect_ratio": None,
-                "open_left": None}
+        return empty
     b = (glyph > 0).astype(np.uint8)
     ys, xs = np.where(b)
     if len(xs) == 0:
-        return {"holes": 0, "hole_areas": [], "major_holes": 0,
-                "ink": 0, "left_indent": None, "defect_ratio": None,
-                "open_left": None}
+        return {**empty, "holes": 0, "major_holes": 0}
     b = b[ys.min():ys.max() + 1, xs.min():xs.max() + 1]
     h, w = b.shape
 
     contours, hierarchy = cv2.findContours(
         b, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
-    hole_areas: list[float] = []
+    # (面积, 质心相对高度)。孔的位置比孔的数量稳：3 的假孔在下半、9 的真孔在上半。
+    holes: list[tuple[float, float]] = []
     if hierarchy is not None:
         # RETR_CCOMP 的层级里 parent != -1 的轮廓是孔（外层背景的 parent 为 -1）
         for i, item in enumerate(hierarchy[0]):
-            if item[3] != -1:
-                hole_areas.append(float(cv2.contourArea(contours[i])))
-    hole_areas.sort(reverse=True)
+            if item[3] == -1:
+                continue
+            area = float(cv2.contourArea(contours[i]))
+            moments = cv2.moments(contours[i])
+            cy = (moments["m01"] / moments["m00"]) if moments["m00"] else 0.0
+            holes.append((area, cy / max(1, h)))
+    holes.sort(key=lambda item: item[0], reverse=True)
+    hole_areas = [area for area, _cy in holes]
     ink = int(b.sum())
     # 「真孔」阈值：8 的两个孔在正常分辨率下约 30–80 px；低分辨率/JPEG 造出
     # 的假孔通常只有几 px。阈值同时按 ink 缩放，避免小牌/大牌口径漂移。
     major_threshold = max(8.0, 0.02 * ink)
     major_holes = sum(1 for area in hole_areas if area >= major_threshold)
+    top_hole_area = max((a for a, cy in holes if cy <= _TOP_HOLE_CY), default=0.0)
+    bottom_hole_area = max((a for a, cy in holes if cy >= _BOTTOM_HOLE_CY),
+                           default=0.0)
 
     rows = np.where(b.sum(axis=1) > 0)[0]
     left_x = np.array([
@@ -573,6 +601,10 @@ def _glyph_topology(glyph: np.ndarray | None) -> dict[str, Any]:
     mid = [r for r in rows if h * 0.28 <= r <= h * 0.72]
     left_indent = (float(left_x[mid].mean()) if mid
                    else float(left_x[rows].mean() if len(rows) else 0.0))
+    upper = [r for r in rows
+             if h * _UPPER_LEFT_BAND[0] <= r <= h * _UPPER_LEFT_BAND[1]]
+    left_indent_upper = (float(left_x[upper].mean()) if upper
+                         else float(left_x[rows].mean() if len(rows) else 0.0))
 
     defect_ratio = 0.0
     outer, _ = cv2.findContours(b, cv2.RETR_EXTERNAL,
@@ -594,9 +626,14 @@ def _glyph_topology(glyph: np.ndarray | None) -> dict[str, Any]:
     return {
         "holes": len(hole_areas),
         "hole_areas": [round(a, 1) for a in hole_areas],
+        "hole_centroids_y": [round(cy, 3) for _a, cy in holes],
         "major_holes": major_holes,
         "ink": ink,
         "left_indent": round(left_indent, 4),
+        "left_indent_upper": round(left_indent_upper, 4),
+        "top_hole_area": round(top_hole_area, 1),
+        "bottom_hole_area": round(bottom_hole_area, 1),
+        "upper_closed": bool(left_indent_upper < _UPPER_CLOSED_INDENT),
         "defect_ratio": round(defect_ratio, 4),
         "open_left": open_left,
     }
@@ -609,11 +646,16 @@ def _glyph_holes(glyph: np.ndarray | None) -> int | None:
 
 def _resolve_rank_by_topology(rank: str, second_rank: str,
                               topo: dict[str, Any]) -> tuple[str | None, str]:
-    """3/8/6 的拓扑仲裁，返回 (选中的 rank, 原因)；None = 不动 NCC 结果。
+    """3/6/8/9 的拓扑仲裁，返回 (选中的 rank, 原因)；None = 不动 NCC 结果。
 
-    规则刻意保守：只在模板前两名落在 3/8/6 时介入，避免把其他点数误改。
+    规则刻意保守：只在模板赢家落在 3/6/8/9 时介入，避免把其他点数误改。
     `open_left` 是低分辨率下区分 3 与 8 的主特征；`major_holes` 只作辅助，
     因为 3 缩到 0.5 倍时可能糊出两个假孔。
+
+    9 必须排在 3 的规则**前面**：9 降采样后 NCC 首选会翻成 8，而 9 下半是
+    右侧竖笔、中段最左墨迹同样偏右，会被「左开口」规则改判成 3。9 的判据是
+    「上半段左边闭合 + 上半有一个明显压过下半的真孔」——3 的上半开口没闭合，
+    8 的下半孔与上半孔同量级，都不会命中。
     """
     holes = topo.get("holes")
     if holes is None:
@@ -621,6 +663,16 @@ def _resolve_rank_by_topology(rank: str, second_rank: str,
     major = int(topo.get("major_holes") or 0)
     open_left = bool(topo.get("open_left"))
     pair = {rank, second_rank}
+
+    # 9：上半段左边闭合（闭环），且上半孔明显大于下半孔（下半孔是降采样假孔）。
+    # 不用「前两名含 9」限制：0.4 倍时 9 会掉到第三、第二变成 K。
+    top_hole = float(topo.get("top_hole_area") or 0.0)
+    bottom_hole = float(topo.get("bottom_hole_area") or 0.0)
+    ink = int(topo.get("ink") or 0)
+    if (rank in ("3", "6", "8", "9") and topo.get("upper_closed")
+            and top_hole >= max(6.0, _TOP_HOLE_MIN_FRAC * ink)
+            and top_hole >= _TOP_HOLE_DOMINANCE * max(bottom_hole, 1.0)):
+        return "9", "top_hole"
 
     # 低分辨率下 3 的模板分可能掉到第三、第四（第二变成 K/2），不能只靠
     # 「前两名里有 3」才介入。左开口深 + 没有两个真孔，就是 3 的形状。
@@ -688,8 +740,13 @@ def _classify_rank(
     extra = {
         "glyph_holes": holes,
         "glyph_hole_areas": topo.get("hole_areas"),
+        "glyph_hole_centroids_y": topo.get("hole_centroids_y"),
         "glyph_major_holes": topo.get("major_holes"),
         "glyph_left_indent": topo.get("left_indent"),
+        "glyph_left_indent_upper": topo.get("left_indent_upper"),
+        "glyph_top_hole_area": topo.get("top_hole_area"),
+        "glyph_bottom_hole_area": topo.get("bottom_hole_area"),
+        "glyph_upper_closed": topo.get("upper_closed"),
         "glyph_defect_ratio": topo.get("defect_ratio"),
         "topology_rank": topology_rank,
         "topology_reason": topology_reason or None,

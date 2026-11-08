@@ -325,6 +325,47 @@ def test_three_eight_survives_low_resolution() -> None:
               f"8s 不应被当成左开口：{evidence8}")
 
 
+def test_nine_survives_low_resolution() -> None:
+    """9 降采样后 NCC 首选会翻成 8，再被「3 左开口」规则改判成 3。
+
+    线上事故口径：20261108-32abfc5ad6 的 hero 5h9s 有 37 帧读成 5h3s，
+    稳定闸把单张跳字当成「换了一组手牌」，反复清空牌面/跳过建议。
+    9 的上半是闭环、下半只有右侧竖笔，中段左开口规则会误伤；必须先用
+    「上半段左侧闭合 + 上半孔明显压过下半孔」判回 9。
+    """
+    nine = _glyph_from_sample("150", "hero_cards", "9s")
+    check(nine is not None, "取不到 9s 字形")
+    if nine is None:
+        return
+    for scale in (1.0, 0.95, 0.9, 0.85, 0.8, 0.7, 0.6, 0.5):
+        glyph = nine if scale == 1.0 else _degrade(nine, scale)
+        rank, _score, _margin, scores, evidence = cards_mod._classify_rank(glyph)
+        check(rank == "9",
+              f"9s 降到 {scale:.2f}x 仍应是 9，实际 {rank}（{scores} / {evidence}）")
+        check(evidence.get("topology_reason") == "top_hole",
+              f"9s {scale:.2f}x 应由上半孔判出：{evidence}")
+
+
+def test_six_and_eight_are_not_pulled_to_nine() -> None:
+    """9 的规则只认「上半孔压过下半孔」，6/8 不能被拉成 9。
+
+    6 的孔在下半（质心≈0.64），8 上下各一个且同量级；这条底线防止修 9→3
+    时把 6/8 的新误判引进来。
+    """
+    six = _glyph_from_sample("140", "board", "6h")
+    eight = _glyph_from_sample("140", "hero_cards", "8s")
+    check(six is not None and eight is not None, "取不到 6h/8s 字形")
+    if six is None or eight is None:
+        return
+    for scale in (1.0, 0.85, 0.7, 0.5):
+        glyph = six if scale == 1.0 else _degrade(six, scale)
+        rank, _score, _margin, _scores, evidence = cards_mod._classify_rank(glyph)
+        check(rank != "9", f"6h {scale:.2f}x 不能被判成 9：{evidence}")
+        glyph = eight if scale == 1.0 else _degrade(eight, scale)
+        rank, _score, _margin, _scores, evidence = cards_mod._classify_rank(glyph)
+        check(rank != "9", f"8s {scale:.2f}x 不能被判成 9：{evidence}")
+
+
 def test_all_ranks_have_templates() -> None:
     from poker_ocr.cards import _load_templates
     templates = _load_templates()
@@ -340,6 +381,8 @@ def main() -> int:
         test_card_back_is_classified_explicitly,
         test_three_eight_use_hole_topology,
         test_three_eight_survives_low_resolution,
+        test_nine_survives_low_resolution,
+        test_six_and_eight_are_not_pulled_to_nine,
         test_all_labeled_samples,
         test_color_and_shape_agree,
         test_suit_shape_thresholds,
