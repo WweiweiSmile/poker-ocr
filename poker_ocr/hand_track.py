@@ -39,7 +39,9 @@
   · **轮到我用「连续帧确认 + 决策点指纹」去重**，不用单帧上升沿。真机上预设按钮
     会在一次回合内消失又出现（见 frame_state 的注释），上升沿会重复触发；
     而多人池里 hero 过牌后对手下注、又轮回 hero 时，按钮可能全程都在、
-    根本没有上升沿。指纹里含行动条数与最高下注，正好同时解决这两种情况。
+    根本没有上升沿。指纹（decision_key）用动作条数保证「真新回合」能触发，
+    再用「自己的行动次数 + 要跟的注额」挡住**晚读到的对手动作**——
+    否则同一条街、同一个局面会被连问两次模型（见 `_maybe_decision`）。
   · **换手空档也会开一手**：上一手收牌后、下一手发牌前有一段没有 hero 手牌的帧，
     这里会先把空壳记下来。落库层默认按「没有 hero 手牌」跳过，避免每手牌后面
     多一条空记录；旁观/观察对手时用 `--record-without-hero` 保留
@@ -101,6 +103,11 @@ def preflop_aggressive(actions) -> list[ActionRecord]:
 
 # 换手时「在局人数骤变」的阈值。注意这不是桌型座位数（那个用 state.table_seats）
 IN_HAND_JUMP = 2
+
+# 「还是同一个决策点」判据里 to_call 的容差。0.25BB 低于任何真实下注增量
+# （翻后最小 1BB，翻前 SB 补齐 0.5BB），只吸收 OCR 抖动；超过它一定是
+# 对手真的下了注/加了注，必须重新问模型。
+DECISION_TO_CALL_TOLERANCE = 0.25
 
 # 全下要连续几帧确认才写进 all_ins。摊牌亮牌/牌背会让 OCR 单帧误判成
 # All-in；单帧就记会把「只秀一张 K」的玩家写成全下。
@@ -375,6 +382,8 @@ class LiveHandTracker:
         self.turn_frames = 0
         # 已经建议过的决策点。同一个回合里按钮闪断会重复给出同一个 key
         self.advised: set[tuple] = set()
+        # 最近一次投出去的决策点的「局面」：见 _same_decision_spot
+        self._advised_spot: tuple | None = None
         # 上一帧的 hero 手牌 / 在局人数，用来判换手（后者不是桌型座位数）
         self._prev_hero_cards: tuple[str, ...] = ()
         self._prev_in_hand = 0
@@ -715,6 +724,7 @@ class LiveHandTracker:
         self._await_hand = None
         self._hand_started_at = None
         self._all_in_streak.clear()
+        self._advised_spot = None
 
     # ─────────────────────────── 换手 ───────────────────────────
 
@@ -1607,8 +1617,40 @@ class LiveHandTracker:
                 return None
         if snap.decision_key in self.advised:
             return None
+        # decision_key 含**全手**动作条数，晚读到的徽章也会让它 +1：对手在我
+        # 这一动之前的过牌/弃牌只要晚录一帧，人还没动、画面也没变，就被当成
+        # 新决策点再问一遍模型。实测 2026-11-09 22:26 QhKc 翻牌：SB 的过牌
+        # 晚到一个模型周期，同一条街、同一个 to_call 连问两次（看板上建议区
+        # 连闪两次）。这里再比一次「局面本身」：自己的行动次数 + 要跟的注额。
+        #   · 自己行动次数变了 → 自己过牌/下注后按钮残留，或真的轮回来；
+        #   · to_call 变了 → 对手真的下了注/加了注，是新局面。
+        # 底池不进这个判据（同 decision_key 的理由：读数是抖的）。
+        spot = (hand.hand_id, snap.street, self._hero_action_count(hand),
+                snap.to_call)
+        if self._same_decision_spot(spot):
+            # 也把这个新 key 记进 advised：否则后面每帧都要再走一遍判断
+            self.advised.add(snap.decision_key)
+            return None
+        self._advised_spot = spot
         self.advised.add(snap.decision_key)
         return snap
+
+    def _hero_action_count(self, hand: _LiveHand) -> int:
+        """这一街 hero 自己已经记过几次行动（过牌/跟注/下注…）。"""
+        return sum(1 for a in hand.street_actions(hand.street) if a.is_hero)
+
+    def _same_decision_spot(self, spot: tuple) -> bool:
+        """新快照是不是「刚建议过的同一个局面」。
+
+        to_call 用容差比较：下注读数是 OCR 值，抖 0.1–0.5BB 不该再问一次；
+        但真实下注一定比容差大，新局面的建议不会被吞掉。
+        """
+        prev = self._advised_spot
+        if prev is None:
+            return False
+        return (prev[0] == spot[0] and prev[1] == spot[1]
+                and prev[2] == spot[2]
+                and abs(prev[3] - spot[3]) <= DECISION_TO_CALL_TOLERANCE)
 
     def _snapshot(self, state: FrameState, hand: _LiveHand) -> HandSnapshot:
         hero = self._hero(state)

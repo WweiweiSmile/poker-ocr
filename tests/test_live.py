@@ -1118,6 +1118,55 @@ def test_decision_key_ignores_pot_jitter() -> None:
           f"决策点 key 应保留手牌/街：{key}")
 
 
+def test_late_opponent_check_is_not_a_new_decision() -> None:
+    """对手的过牌徽章晚读一帧：同一条街、同一个 to_call 不能再问一次模型。
+
+    实测 2026-11-09 22:26 QhKc 翻牌：SB 先过牌、hero 还没动，第一帧没读到
+    SB 的徽章，先投了一次；模型生成期间徽章才被读出来，`len(actions)` +1
+    让 decision_key 变了，模型刚回来就又被问了一遍。看板上的表现就是
+    建议区连闪两次、接口被连着请求两次。
+    """
+    tracker = LiveHandTracker(confirm_frames=1)
+    board = ["Js", "Ks", "6h"]
+
+    def state(*, up_action=None, up_bet=0.0, hero_action=None,
+              pot=6.0) -> FrameState:
+        return FrameState(
+            frame_id="f", table_seats=3, players_in_hand=3,
+            players=[
+                PlayerState("hero", name="me", position="SB", stack=100.0,
+                            bet=0.0, action=hero_action, in_hand=True),
+                PlayerState("upL", name="up", position="BB", stack=99.0,
+                            bet=up_bet, action=up_action, in_hand=True),
+                PlayerState("p1", name="p1", position="BTN", stack=100.0,
+                            bet=0.0, in_hand=True),
+            ],
+            blinds=live.parse_blinds("1/2"), dealer="p1", hero_seat_id="hero",
+            hero_turn=True, pot=pot, pot_before_street=6.0)
+
+    first = tracker.observe(state(), ["Qh", "Kc"], board)
+    check(first is not None and first.to_call == 0.0,
+          f"hero 没行动前应是一个决策点：{first}")
+    late = tracker.observe(state(up_action="check"), ["Qh", "Kc"], board)
+    check(late is None,
+          f"晚读到的对手过牌不应再触发一次建议：{late}")
+
+    # 真正的下一个决策点：hero 过牌 → 对手下注，要跟的注额变了
+    nxt = tracker.observe(
+        state(hero_action="check", up_action="bet", up_bet=3.0, pot=9.0),
+        ["Qh", "Kc"], board)
+    check(nxt is not None and abs(nxt.to_call - 3.0) < 1e-9,
+          f"对手下注后应给新决策点：{nxt}")
+
+    # 对手的下注晚读到（hero 还没动）：to_call 变了就是新局面，必须重新问
+    late_bet = LiveHandTracker(confirm_frames=1)
+    late_bet.observe(state(), ["Qh", "Kc"], board)
+    point = late_bet.observe(state(up_action="bet", up_bet=3.0, pot=9.0),
+                             ["Qh", "Kc"], board)
+    check(point is not None and abs(point.to_call - 3.0) < 1e-9,
+          f"晚读到的对手下注应重新给决策点：{point}")
+
+
 def test_no_second_advice_after_hero_acted_and_nothing_to_call() -> None:
     """自己已经行动、又没人加注：按钮残留不能再触发一次建议。
 
@@ -2414,6 +2463,7 @@ def main() -> int:
         test_jsonl_append_repairs_partial_last_line,
         test_ai_advice_submits_on_hero_turn_once,
         test_decision_key_ignores_pot_jitter,
+        test_late_opponent_check_is_not_a_new_decision,
         test_no_second_advice_after_hero_acted_and_nothing_to_call,
         test_no_second_advice_after_hero_bet_and_was_called,
         test_auto_click_after_observe_on_next_frame,
