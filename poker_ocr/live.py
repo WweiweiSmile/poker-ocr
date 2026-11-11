@@ -1,6 +1,6 @@
 """实时拉流 → 状态 JSONL（M3.1）。
 
-    .venv/bin/python -m poker_ocr.live \
+    nv -m poker_ocr.live \
         --profile config/table_wpk_live.json \
         --initial-blinds 1/2 \
         --out logs/live.states.jsonl
@@ -63,6 +63,8 @@ from .advice import (AISettings, AdviceRunner, PROMPT_LANGUAGE, PROMPT_VERSION,
                      build_situation, call_amount)
 from .cards import (DEFAULT_CARD_SLOTS, DEFAULT_DOUBT_WINDOW, CardsResult,
                     StableCards, recognize_cards, recognize_shown_cards)
+from .bet_slider import (BetSliderController, SliderSettings, WindowCapture,
+                         WindowMapper, clicker_config_from_profile)
 from .clicker import (DEFAULT_CONFIG_PATH as DEFAULT_CLICKER_CONFIG,
                       CGEventBackend, Clicker, ClickerConfig,
                       ClickerConfigError, ClickerUnavailable, ClickResult,
@@ -100,6 +102,7 @@ DEFAULT_OUT = Path("logs/live.states.jsonl")
 TEST_OUT = Path("logs/live.test.jsonl")
 DEFAULT_INCIDENT_DIR = Path("logs/incidents")
 DEFAULT_HAND_OUTBOX = PROJECT_ROOT / "data" / "hand_outbox"
+DEFAULT_BET_SLIDER_CONFIG = PROJECT_ROOT / "config" / "bet_slider_mac.json"
 # 异常要持续这么久才落盘：发牌/翻牌动画里的单帧误读（1 张公共牌、hero 只读到
 # 1 张）属于正常现象，稳定闸会吸收掉，不值得为每一帧存 10 张图。
 INCIDENT_MIN_SECONDS = 1.0
@@ -910,7 +913,10 @@ class RtspReader(threading.Thread):
 
             if not self.stop_event.is_set():
                 self.reconnects += 1
-                self.log(f"[重连] 流中断，{self.reconnect_delay:.0f}s 后重试")
+                reason = getattr(cap, "last_error", None)
+                detail = f"：{reason}" if reason else ""
+                self.log(f"[重连] 流中断{detail}，"
+                         f"{self.reconnect_delay:.0f}s 后重试")
                 self.stop_event.wait(self.reconnect_delay)
 
 
@@ -984,10 +990,33 @@ def _open_capture(url: str):
       · `cam:auto` —— 自动选摄像头：名称带 OBS / Virtual 的优先，其次 0..9。
         这是默认值。
       · `cam:0` / `cam:1` —— 手动指定索引，用 `tools/list_cameras.py` 查。
+      · `window:title:WePoker` / `window:index:1` / `window:x,y,w,h` ——
+        直接截浏览器窗口，不经过 OBS，分辨率/构图和 profile 一致。
 
     `cam:` 优先 AVFoundation（macOS 虚拟摄像头只在这个后端暴露）；失败再让
     OpenCV 自选后端。
     """
+    if url.startswith(("window:", "screen:")):
+        _, _, raw = url.partition(":")
+        try:
+            cap = WindowCapture(raw)
+        except (ValueError, RuntimeError) as exc:
+            _log(f"[启动] 窗口源打不开：{exc}")
+            return None
+        # 先真截一帧：screencapture 失败（最常见是没给「屏幕录制」权限）时
+        # 只会在 read() 里返回 False，上层看到的永远是「流中断」重连，
+        # 根本不知道去系统设置里开权限。
+        try:
+            probe = cap.capture()
+        except Exception as exc:        # noqa: BLE001 — 启动期给出明确原因
+            _log(f"[启动] 窗口截图失败：{type(exc).__name__}: {exc}"
+                 "（系统设置 → 隐私与安全性 → 屏幕录制，"
+                 "勾上运行 Python 的终端，然后完全退出并重开它）")
+            return None
+        _log(f"[启动] 窗口源 {raw} → {cap.rect.to_dict()}"
+             f"（{probe.shape[1]}x{probe.shape[0]}，screencapture 约 5-8fps）")
+        return cap
+
     if url.startswith(("cam:", "camera:")):
         _, _, raw = url.partition(":")
         if raw.strip().lower() in ("", "auto"):
@@ -1105,6 +1134,12 @@ class LiveProcessor:
         # 无限期挂在一次按键上（客户端回合时限通常 10–15s）。
         self.confirm_timeout = max(0.0, float(confirm_timeout))
         self._pending_decision_key: tuple | None = None
+        # 一次「轮到我」只问一次模型：投递建议时上锁，直到 hero 真正行动
+        # （hero_turn=False）、换街或换手才解开。拖动滑杆要好几秒，期间
+        # 画面不变但回合还在；不锁就会反复投递、给出互相矛盾的建议
+        # （实测 2026-11-10 22:17 同一 turn 连问「过牌」和「下注 1.33」，
+        # 前一条建议还 stale，操作完全对不上）。
+        self._advice_lock: tuple[str | None, str | None, int] | None = None
         self._clicked_keys: set[tuple] = set()
         self.click_count = 0
         self.click_skip_count = 0
@@ -1542,11 +1577,42 @@ class LiveProcessor:
         # 手牌追踪照常吃（别的字段都是好的），但**不给 AI 建议** ——
         # to_call 依赖最大下注，静默少算一位就会点错金额。
         bet_warnings = tuple(getattr(outcome.state, "bet_warnings", ()) or ())
+        # 这一次「轮到我」是否已经投过建议：只有 hero 真的行动（这一街多出
+        # 一条 is_hero 动作）、换街或换手才解锁。**hero_turn 单帧闪断不解锁**
+        # ——拖动滑杆要好几秒，期间按钮/预设行被遮住，hero_turn 会抖；
+        # 一抖就重新投递，就是 2026-11-10 22:17 那种「过牌/下注」来回改口。
+        if self._advice_lock is not None:
+            hand_now = self.hand_tracker.hand
+            locked_hand, locked_street, locked_actions = self._advice_lock
+            if hand_now is None or hand_now.hand_id != locked_hand \
+                    or hand_now.street != locked_street:
+                self._advice_lock = None
+            else:
+                try:
+                    actions = hand_now.street_actions(locked_street)
+                except Exception:        # noqa: BLE001 — 查不到就保持锁
+                    actions = []
+                hero_actions = sum(1 for a in actions if getattr(a, "is_hero", False))
+                if hero_actions > locked_actions:
+                    # hero 已经行动过：同一条街里只有在**面对下注**时才需要
+                    # 再问一次（过牌后对手下注）。to_call=0 的「再过一次牌」
+                    # 是发牌/按钮残留造成的假决策，不能重新投递。
+                    hero_now = next(
+                        (p for p in outcome.state.players
+                         if p.seat_id == outcome.state.hero_seat_id), None)
+                    max_other = max(
+                        (p.bet or 0.0 for p in outcome.state.players
+                         if p.seat_id != outcome.state.hero_seat_id),
+                        default=0.0)
+                    hero_bet = (hero_now.bet or 0.0) if hero_now else 0.0
+                    if max_other - hero_bet > 0.01:
+                        self._advice_lock = None
         point = self.hand_tracker.observe(
             outcome.state, hero_codes, board,
             cards_reliable=cards_reliable, cards_warnings=cards_warnings,
             allow_advice=(self.advice_runner is not None
                           and not getattr(self.advice_runner, "busy", False)
+                          and self._advice_lock is None
                           and not bet_warnings))
         if (point is None and outcome.state.hero_turn is True
                 and not cards_reliable):
@@ -1661,6 +1727,15 @@ class LiveProcessor:
                     self.log(f"  [建议] 局面构建失败：{type(exc).__name__}: {exc}")
                     return
                 if self.advice_runner.submit(situation):
+                    # 这一回合已经问过：上锁，直到 hero 真的行动/换街/换手。
+                    try:
+                        _acts = self.hand_tracker.hand.street_actions(
+                            situation.street) if self.hand_tracker.hand else []
+                    except Exception:        # noqa: BLE001
+                        _acts = []
+                    self._advice_lock = (
+                        situation.snap.hand_id, situation.street,
+                        sum(1 for a in _acts if getattr(a, "is_hero", False)))
                     # 只认最新投递的决策点；旧结果晚到会被 stale_decision 挡掉。
                     # 新决策点出现说明牌局已经往前走，上一次点击无需再重试。
                     self._pending_decision_key = situation.snap.decision_key
@@ -1884,7 +1959,11 @@ class LiveProcessor:
             if advice.decision_key:
                 self._clicked_keys.add(advice.decision_key)
             if result.status == "clicked":
-                self._arm_click_retry(advice, state)
+                if result.mapping == "bet_slider":
+                    self.log("  [点击] 滑杆落注已确认关闭，不挂自动重试"
+                             "（避免重复长按改额）")
+                else:
+                    self._arm_click_retry(advice, state)
         elif result.status == "error":
             self.click_error_count += 1
         else:
@@ -1986,6 +2065,12 @@ class LiveProcessor:
         current_hand_id = getattr(hand, "hand_id", None)
         if current_hand_id is not None and advice.hand_id != current_hand_id:
             return "stale_hand"
+        # 街已经推进：preflop 的建议绝不能落到 flop 上执行。
+        # 实测 2026-11-10 22:35：preflop 的建议在翻牌发出后才返回，hand_id
+        # 相同、hero_turn=True，旧口径只比 decision_key，直接在 flop 点了「过牌」。
+        current_street = getattr(hand, "street", None)
+        if current_street and advice.street and advice.street != current_street:
+            return "stale_street"
         if advice.decision_key in self._clicked_keys:
             return "already_clicked"
         return None
@@ -1994,18 +2079,40 @@ class LiveProcessor:
         if result.status == "skipped":
             reason = {"user_rejected": "用户拒绝",
                       "low_confidence": "置信度低于阈值",
-                      "fallback_advice": "兜底建议"}.get(
+                      "fallback_advice": "兜底建议",
+                      "stale_street": "街已推进（旧街建议作废）"}.get(
                 result.reason, result.reason)
             self.log(f"  [点击] 跳过：{reason}")
             return
         if result.status == "error":
             self.log(f"  [点击] 失败：{result.error}")
             return
+        prefix = "dry-run" if result.status == "dry_run" else "已点击"
+        if result.mapping == "bet_slider":
+            detail = (result.detail or {}).get("slider", {})
+            ev = detail.get("evidence") or {}
+            if ev.get("all_in_text"):
+                self.log(
+                    f"  [点击] {prefix} {result.action} [bet_slider]："
+                    f"顶部读到「{ev.get('allin_text') or 'ALL IN'}」，"
+                    f"最后读数 {detail.get('final_bb')}BB")
+                return
+            changed = (f"拖动 {detail.get('drags')} 次"
+                       if detail.get("control") == "drag"
+                       else f"滚动 {detail.get('scrolls')} 格")
+            if ev.get("requested_bb") is not None:
+                changed += (f"（AI {ev['requested_bb']:g}BB → 按客户端粒度取 "
+                            f"{ev.get('snapped_to_bb', result.target_bb):g}BB）")
+            self.log(
+                f"  [点击] {prefix} {result.action} [bet_slider]："
+                f"目标 {result.target_bb}BB，实际 {detail.get('final_bb')}BB，"
+                f"{changed}")
+            return
         points = " → ".join(
             f"{s.button}({s.x:.1f},{s.y:.1f})" for s in result.steps)
-        prefix = "dry-run" if result.status == "dry_run" else "已点击"
-        mapping = f" [{result.mapping}]" if result.mapping in ("direct",
-                                                               "nearest") else ""
+        mapping = (f" [{result.mapping}]"
+                   if result.mapping in ("direct", "nearest", "within_5pct")
+                   else "")
         self.log(f"  [点击] {prefix} {result.action}{mapping}：{points}")
 
     def _write_hand(self, hand: dict, *, partial: bool) -> None:
@@ -2550,6 +2657,18 @@ def build_parser() -> argparse.ArgumentParser:
                          "（默认会在终端问 y 确认 / n 拒绝）")
     ap.add_argument("--clicker-config", type=Path, default=None,
                     help="自动点击的按钮坐标 JSON（默认 config/clicker_local.json）")
+    ap.add_argument("--bet-slider", action="store_true",
+                    help="下注/加注走「长按主按钮 → 滚动 → 确定」滑杆，"
+                         "用 AI 的精确额度；需要 --auto-click 和窗口坐标")
+    ap.add_argument("--bet-slider-window",
+                    help="游戏画面窗口：index:N / title:... / owner:... / "
+                         "x,y,w,h；先跑 tools/bet_slider.py --list-windows")
+    ap.add_argument("--bet-slider-only", action="store_true",
+                    help="下注/加注只走长按滑杆，不用任何快捷档位；"
+                         "跳过 5%% 判定和置灰检测（需 --bet-slider）")
+    ap.add_argument("--bet-slider-config", type=Path,
+                    default=DEFAULT_BET_SLIDER_CONFIG,
+                    help="滑杆操作参数 JSON（默认 config/bet_slider_mac.json）")
     ap.add_argument("--clicker-dry-run", action="store_true",
                     help="只打印将要点到的随机坐标，不发送真实鼠标事件")
     ap.add_argument("--confirm-timeout", type=float, default=6.0,
@@ -2644,6 +2763,10 @@ def _validate_args(ap: argparse.ArgumentParser, args) -> None:
         ap.error("--clicker-dry-run 需要配合 --auto-click 使用")
     if args.clicker_config is not None and not args.auto_click:
         ap.error("--clicker-config 需要配合 --auto-click 使用")
+    if args.bet_slider and not args.auto_click:
+        ap.error("--bet-slider 需要配合 --auto-click 使用")
+    if args.bet_slider_only and not args.bet_slider:
+        ap.error("--bet-slider-only 需要配合 --bet-slider 使用")
     if not 0.0 <= args.min_advice_confidence <= 1.0:
         ap.error("--min-advice-confidence 应在 0–1 之间")
     if args.roi_threads < 1:
@@ -2983,17 +3106,23 @@ def main(argv: list[str] | None = None) -> int:
         cfg_path = args.clicker_config or DEFAULT_CLICKER_CONFIG
         try:
             clicker_cfg = ClickerConfig.load(cfg_path)
-            clicker_cfg.validate()
         except ClickerConfigError as exc:
-            ap.error(str(exc))
-        displays = list_displays()
-        outside = [name for name, rect in clicker_cfg.buttons.items()
-                   if not rect_inside_displays(rect, displays)]
-        if outside:
-            ap.error("点击配置里这些按钮不在当前显示器内："
-                     + "、".join(outside)
-                     + "。移动窗口 / 改分辨率或显示器排列后请重新运行 "
-                       "tools/calibrate_clicker.py")
+            if args.bet_slider and not cfg_path.exists():
+                # 滑杆模式不依赖 clicker_local：只用它的标量默认值，
+                # buttons 稍后由 profile+window 生成。
+                clicker_cfg = ClickerConfig(buttons={})
+            else:
+                ap.error(str(exc))
+        if not args.bet_slider:
+            clicker_cfg.validate()
+            displays = list_displays()
+            outside = [name for name, rect in clicker_cfg.buttons.items()
+                       if not rect_inside_displays(rect, displays)]
+            if outside:
+                ap.error("点击配置里这些按钮不在当前显示器内："
+                         + "、".join(outside)
+                         + "。移动窗口 / 改分辨率或显示器排列后请重新运行 "
+                           "tools/calibrate_clicker.py")
         if args.clicker_dry_run:
             backend = DryRunBackend()
         else:
@@ -3010,16 +3139,80 @@ def main(argv: list[str] | None = None) -> int:
                     "去 系统设置 → 隐私与安全性 → 辅助功能，勾上运行 Python 的"
                     "终端 / iTerm / IDE，然后完全退出并重开它。\n"
                     "只想先验证坐标可加 --clicker-dry-run")
+        slider = None
+        if args.bet_slider:
+            try:
+                raw_slider = (json.loads(args.bet_slider_config.read_text(
+                    encoding="utf-8"))
+                    if args.bet_slider_config.is_file() else {})
+            except (OSError, json.JSONDecodeError) as exc:
+                ap.error(f"读不了滑杆配置 {args.bet_slider_config}：{exc}")
+            window_text = args.bet_slider_window or raw_slider.get("window")
+            if not window_text:
+                ap.error(
+                    "启用了 --bet-slider 但没给窗口坐标：先跑 "
+                    "tools/bet_slider.py --list-windows，再填 "
+                    "--bet-slider-window index:N / title:... / owner:... / "
+                    f"x,y,w,h，或在 {args.bet_slider_config} 里填 window")
+            capture_command = str(raw_slider.get(
+                "capture_command",
+                "screencapture -x -R {x},{y},{w},{h} {out}"))
+            window_command = str(raw_slider.get(
+                "window_capture_command",
+                "screencapture -x -o -l {id} {out}"))
+            try:
+                capture = WindowCapture(window_text, capture_command,
+                                        window_command=window_command)
+            except (ValueError, RuntimeError) as exc:
+                ap.error(f"滑杆窗口坐标不合法：{exc}")
+            window = capture.rect
+            # 启用了滑杆就说明是 web 桌面：按钮坐标直接用 profile 槽位 +
+            # window 计算，不再依赖 clicker_local 的手工绝对坐标。
+            try:
+                clicker_cfg = clicker_config_from_profile(
+                    profile, window, base=clicker_cfg)
+                clicker_cfg.validate()
+            except (ValueError, ClickerConfigError) as exc:
+                ap.error(f"从 profile 生成点击按钮失败：{exc}")
+            displays = list_displays()
+            outside = [name for name, rect in clicker_cfg.buttons.items()
+                       if not rect_inside_displays(rect, displays)]
+            if outside:
+                ap.error("profile 计算出的按钮不在当前显示器内："
+                         + "、".join(outside))
+            try:
+                slider_settings = SliderSettings.from_config(
+                    raw_slider, source=args.bet_slider_config)
+            except ValueError as exc:
+                ap.error(f"滑杆配置有误：{exc}")
+            slider = BetSliderController(
+                profile, backend, capture,
+                WindowMapper(profile, window), slider_settings,
+                engine=engine, dry_run=args.clicker_dry_run, log=_log)
         clicker = Clicker(clicker_cfg, backend,
-                          dry_run=args.clicker_dry_run, log=_log)
+                          dry_run=args.clicker_dry_run, log=_log,
+                          bet_slider=slider,
+                          force_slider=args.bet_slider_only)
         confirm_mode = ("直接执行（--no-confirm）" if args.no_confirm
                         else "执行前在终端询问 y/n")
-        _log(f"[点击] 已启用自动点击：{cfg_path}"
+        source_label = ("profile+window" if args.bet_slider else str(cfg_path))
+        _log(f"[点击] 已启用自动点击：{source_label}"
              f"（{len(clicker_cfg.buttons)} 个按钮，"
              + ("dry-run，不发送真实事件" if args.clicker_dry_run else "真实点击")
              + f"；{confirm_mode}；"
              f"{clicker_cfg.retry_delay_ms / 1000:.1f}s 未变化重试 "
              f"{clicker_cfg.retry_count} 次）")
+        if slider is not None:
+            how = ("按住橙色手柄上下拖" if slider.settings.control == "drag"
+                   else "松手后上下滚动")
+            _log(f"[点击] 下注/加注走长按滑杆：window={window.to_dict()}，"
+                 f"长按 {slider.settings.hold_ms}ms，{how}，"
+                 f"确认前必须读到目标额")
+            _log("[点击] 按钮坐标由 profile+window 计算："
+                 + "、".join(sorted(clicker_cfg.buttons)))
+            if args.bet_slider_only:
+                _log("[点击] --bet-slider-only：下注/加注只用长按滑杆，"
+                     "跳过快捷档位")
 
     writer = JsonlWriter(args.out, append=args.append)
     session_start_record = {

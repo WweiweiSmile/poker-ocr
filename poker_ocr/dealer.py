@@ -172,34 +172,45 @@ class BlobDealerDetector:
                 (hsv[:, :, 1] < self.cfg["s_max"])).astype(np.uint8) * 255
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
 
+        def collect(contours) -> list:
+            out = []
+            for c in contours:
+                area = cv2.contourArea(c)
+                if not (area_min <= area <= area_max):
+                    continue
+                perim = cv2.arcLength(c, True)
+                if perim <= 0:
+                    continue
+                # 先平滑轮廓再量圆度。**视频输入必须这么做**：H.264 会把白圆片的
+                # 边缘磨出锯齿，周长被抬高 → 圆度从 0.895 掉到 0.724–0.835，
+                # 被门槛 0.85 误杀（真机视频实测 171 帧里只有 1 帧过闸）。
+                # 2% 周长的多边形逼近把锯齿抹掉，同一条真 D 的圆度回到 0.890–0.949，
+                # 而其它小圆候选仍在 0.85 附近徘徊（实测 282 个里只有 18 个过，
+                # 且还要过「读出 D」那一关）。
+                smooth = cv2.approxPolyDP(c, 0.02 * perim, True)
+                sp = cv2.arcLength(smooth, True)
+                sa = cv2.contourArea(smooth)
+                circularity = 4 * np.pi * sa / (sp * sp) if sp > 0 else 0.0
+                if circularity < self.cfg["circularity_min"]:
+                    continue
+                x, y, w, h = cv2.boundingRect(c)
+                if h == 0 or abs(w / h - 1) > self.cfg["aspect_tol"]:
+                    continue
+                cx, cy = x + w / 2, y + h / 2
+                if not profile.in_region_gate((cx / size[0], cy / size[1]), size):
+                    continue
+                out.append(((cx, cy), circularity, (x, y, w, h)))
+            return out
+
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        out = []
-        for c in contours:
-            area = cv2.contourArea(c)
-            if not (area_min <= area <= area_max):
-                continue
-            perim = cv2.arcLength(c, True)
-            if perim <= 0:
-                continue
-            # 先平滑轮廓再量圆度。**视频输入必须这么做**：H.264 会把白圆片的
-            # 边缘磨出锯齿，周长被抬高 → 圆度从 0.895 掉到 0.724–0.835，
-            # 被门槛 0.85 误杀（真机视频实测 171 帧里只有 1 帧过闸）。
-            # 2% 周长的多边形逼近把锯齿抹掉，同一条真 D 的圆度回到 0.890–0.949，
-            # 而其它小圆候选仍在 0.85 附近徘徊（实测 282 个里只有 18 个过，
-            # 且还要过「读出 D」那一关）。
-            smooth = cv2.approxPolyDP(c, 0.02 * perim, True)
-            sp = cv2.arcLength(smooth, True)
-            sa = cv2.contourArea(smooth)
-            circularity = 4 * np.pi * sa / (sp * sp) if sp > 0 else 0.0
-            if circularity < self.cfg["circularity_min"]:
-                continue
-            x, y, w, h = cv2.boundingRect(c)
-            if h == 0 or abs(w / h - 1) > self.cfg["aspect_tol"]:
-                continue
-            cx, cy = x + w / 2, y + h / 2
-            if not profile.in_region_gate((cx / size[0], cy / size[1]), size):
-                continue
-            out.append(((cx, cy), circularity, (x, y, w, h)))
+        out = collect(contours)
+        if not out:
+            # 浏览器/窗口录屏会把整块游戏画面包进一条白色窗口边框：RETR_EXTERNAL
+            # 只返回这条外轮廓，真正的 D 在被它围住的内部，一个候选都找不到
+            # （实测 Chrome 录屏 5/5 帧 not_found）。外轮廓层没结果时退回 RETR_LIST，
+            # 把内部白色圆片也纳入；移动端全屏截图在第一层就能命中，不会走这条。
+            contours, _ = cv2.findContours(mask, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+            out = collect(contours)
         return out
 
     # ── 识别 ──

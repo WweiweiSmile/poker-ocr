@@ -5,7 +5,7 @@
 因为位置推导会跟着整体错位，而且看起来还挺像那么回事。
 
 不依赖 pytest，直接跑：
-    .venv/bin/python tests/test_dealer.py
+    nv tests/test_dealer.py
 """
 
 from __future__ import annotations
@@ -101,6 +101,37 @@ def test_correct_size_is_found_and_goes_to_nearest_seat() -> None:
           f"没认出 D 时应降权（x0.6），实际 confidence={r.confidence}")
 
 
+def test_window_frame_does_not_hide_dealer() -> None:
+    """浏览器/窗口录屏：白色窗口边框把整块画面包成一条外轮廓，
+    RETR_EXTERNAL 只返回这条边框，真正的 D 在被它围住的内部。必须退回
+    RETR_LIST 再找一遍，否则 Chrome 录屏会 100% not_found。"""
+    profile = Profile.load()
+    img, size = make_felt(profile)
+    w, h = size
+    cv2.rectangle(img, (2, 2), (w - 3, h - 3), (245, 245, 245), 6)
+    target = "midR"
+    cx, cy = seat_avatar_center(profile, target, size)
+    draw_disc(img, cx - 220, cy + 60, 50)
+    r = detect(img, profile, size)
+    check(r.status == FOUND and r.seat_id == target,
+          f"窗口边框里的 D 应当归给 {target}，实际 {r.status}/{r.seat_id}")
+
+
+def test_window_frame_without_disc_finds_nothing() -> None:
+    """窗口白边 + 场上没有 D：退回 RETR_LIST 也不能凭空造一个庄位。
+
+    白边框本身面积过大被过滤，但回退检索会把内部所有白色块都当候选；
+    这里确认空桌 + 白边框仍然 not_found，而不是命中边框或毛毡噪声。
+    """
+    profile = Profile.load()
+    img, size = make_felt(profile)
+    w, h = size
+    cv2.rectangle(img, (2, 2), (w - 3, h - 3), (245, 245, 245), 6)
+    r = detect(img, profile, size)
+    check(r.status == NOT_FOUND,
+          f"没有 D 的窗口帧应当 not_found，实际 {r.status}/{r.seat_id}")
+
+
 def test_two_discs_is_ambiguous_not_a_guess() -> None:
     """两个候选必须报 ambiguous。'9 席恰有 1 个庄位' 是牌局事实，
     检测器没有资格在两个里挑一个。"""
@@ -193,6 +224,8 @@ def main() -> int:
         test_size_filter_rejects_bet_chips,
         test_size_filter_rejects_text_blobs,
         test_correct_size_is_found_and_goes_to_nearest_seat,
+        test_window_frame_does_not_hide_dealer,
+        test_window_frame_without_disc_finds_nothing,
         test_two_discs_is_ambiguous_not_a_guess,
         test_disc_far_from_every_seat_is_rejected,
         test_reads_d_stops_after_confident_first_variant,

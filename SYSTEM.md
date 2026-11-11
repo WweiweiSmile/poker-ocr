@@ -290,15 +290,15 @@ advice / hand / incident / session_end`。`frame` 每帧一条，带 `hand_id` /
 ## 8. 常用命令
 
 ```bash
-# 环境（Python 3.10+，venv 在 .venv/）
-.venv/bin/pip install -r requirements.txt
+# 环境（Python 3.10+，venv 在 .venv/；nv = .venv/bin/python，见仓库根 ./nv）
+nv pip install -r requirements.txt
 
 # 起单图识别服务
-.venv/bin/python -m uvicorn api:app --host 0.0.0.0 --port 8000
-#   生产：.venv/bin/gunicorn -c gunicorn.conf.py api:app
+nv -m uvicorn api:app --host 0.0.0.0 --port 8000
+#   生产：nv -m gunicorn -c gunicorn.conf.py api:app
 
 # 实时推流（默认 cam:auto，自动点击需确认；默认开 Web 看板 :8020）
-.venv/bin/python -m poker_ocr.live \
+nv -m poker_ocr.live \
     --profile config/table_wpk_live.json --initial-blinds 1/2 \
     --out logs/live.states.jsonl
 #   只看建议不点击：--no-auto-click    完全自动：--no-confirm
@@ -306,34 +306,34 @@ advice / hand / incident / session_end`。`frame` 每帧一条，带 `hand_id` /
 #   看板端口冲突：--web-port 8021
 
 # 测试模式（按实战视频演练，不是实战）：日志写 logs/live.test.jsonl，手牌不进手牌库
-.venv/bin/python -m poker_ocr.live --test \
+nv -m poker_ocr.live --test \
     --profile config/table_wpk_live.json --initial-blinds 1/2
 
 # 手牌识别倒查（读 states + events）
-.venv/bin/python tools/hand_recognition_audit.py --top 20 \
+nv tools/hand_recognition_audit.py --top 20 \
     --html logs/audit.html --json logs/audit.json
-.venv/bin/python tools/hand_recognition_audit.py --explain <hand_id>
+nv tools/hand_recognition_audit.py --explain <hand_id>
 #   走 MediaMTX：--url rtsp://127.0.0.1:8554/live   竖屏手机源：--rotate 90
 
 # 跑全部测试（分层，从不需要图到需要图）
-.venv/bin/python tests/run_all.py
+nv tests/run_all.py
 
 # 单图 CLI
-.venv/bin/python extract_table.py run --img images/... --out /tmp/rois.json
+nv extract_table.py run --img images/... --out /tmp/rois.json
 
 # 复盘控制台（后端 :8010，托管 replay_web/dist 构建产物）
 cd replay-console && ./start.sh
 #   前端开发态：cd replay-console/replay_web && pnpm dev
 
 # 手牌导出 / outbox 同步
-.venv/bin/python tools/export_live_hands.py
-.venv/bin/python tools/sync_hand_outbox.py
+nv tools/export_live_hands.py
+nv tools/sync_hand_outbox.py
 
 # 策略表（默认 hand-tuned；切换必须用真环境变量，写 .env 不生效）
-.venv/bin/python -m poker_ocr.strategy_tables --profile sourced   # 生效 profile + 每张表来源/是否回落
-.venv/bin/python tools/export_strategy_tables.py --check          # JSON v0 ↔ 模块常数逐值相等
-.venv/bin/python tools/strategy_table_diff.py --tables            # 表级 v0/v1 对比
-STRATEGY_TABLES_PROFILE=sourced .venv/bin/python -m poker_ocr.live ...
+nv -m poker_ocr.strategy_tables --profile sourced   # 生效 profile + 每张表来源/是否回落
+nv tools/export_strategy_tables.py --check          # JSON v0 ↔ 模块常数逐值相等
+nv tools/strategy_table_diff.py --tables            # 表级 v0/v1 对比
+STRATEGY_TABLES_PROFILE=sourced nv -m poker_ocr.live ...
 
 ```
 
@@ -345,6 +345,7 @@ STRATEGY_TABLES_PROFILE=sourced .venv/bin/python -m poker_ocr.live ...
 - **`scan.clean_number()` 有静默错值路径**：单位丢失时返回错值且 `ok=True`。新管线绕开了，别在新代码里用它。
 - **`name_score` 不是「读对概率」**：形近字错读一样能到 0.9+。低于阈值只打 `name_review` 供人工看，不自动纠正。
 - **3/8 的闭合孔数不是硬保证**：低分辨率/JPEG 会把 3 的开口糊成 1–2 个假孔，也会把 8 的孔糊掉。现在用 `glyph_left_indent`（中段最左墨迹）判左开口兜底；6 的凹口在右侧，不能用凸包缺陷当左开口（会把 6 误判成 3）。
+- **6/8 在暗牌里会互相翻**：`6` 的上半缺口只有 1–2px，弃牌后 WPK 把 hero 手牌调暗（V 246 → ≈100），缺口被糊死、上半冒出一个几 px 的假孔，`holes=2` 且 NCC 略偏 `8` → 判成 `8`（实测 2026-11-08 22:51 的 `6s4d` 记成 `8s4d`；本地把 6 的字形降采样到 0.6–0.8x 可复现同一跳变）。6 与 8 的「上半孔/下半孔」面积比在降质后重叠（6 的 0.16–0.37 vs 8 的 0.2–0.7），单靠阈值分不干净。所以口径放在状态机：**弃牌后不再改写已确认的 hero 手牌**（`hand_track.observe`），差异只记 `cards_warnings` 供复盘。
 - **同名不同人不做身份识别**：名字只是字符串。
 - **`board_range.build`（旧）与 `range_flow`（新）语义不同**：旧路径按街一次过滤会丢掉上一街的收窄信息；新代码用 `range_flow`。
 - **`table_default` 的 `region_gate.y_max=0.855` 会切掉 WPK 竖屏 hero 的筹码胶囊**：所以 `table_wpk_live.json` 改成 `0.99`。

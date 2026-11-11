@@ -5,8 +5,10 @@
 
 ## 起服务
 
+所有 Python 命令都用仓库根的 `nv`（= `.venv/bin/python`，cwd 不变）：
+
 ```bash
-.venv/bin/python -m uvicorn api:app --host 0.0.0.0 --port 8000
+nv -m uvicorn api:app --host 0.0.0.0 --port 8000
 ```
 
 接口文档自动生成，可直接给对接方看：<http://localhost:8000/docs>
@@ -50,18 +52,18 @@ ROI 识别座位、筹码、下注、动作、庄位、底池和盲注，输出�
 
 ```bash
 # 0) 只做一次：标定桌面客户端的虚拟按钮（默认圆形，按 C 切换方形）
-.venv/bin/python tools/calibrate_clicker.py --list-displays
-.venv/bin/python tools/calibrate_clicker.py --out config/clicker_local.json
+nv tools/calibrate_clicker.py --list-displays
+nv tools/calibrate_clicker.py --out config/clicker_local.json
 
 # 1) 建议先 dry-run：只打印将点击的随机坐标，不发送真实鼠标事件
-.venv/bin/python -m poker_ocr.live \
+nv -m poker_ocr.live \
   --profile config/table_wpk_live.json \
   --initial-blinds 1/2 \
   --out logs/live.states.jsonl \
   --clicker-dry-run
 
 # 2) 真实运行（默认 cam:auto + 自动点击；每次点击前单键确认 y/n）
-.venv/bin/python -m poker_ocr.live \
+nv -m poker_ocr.live \
   --profile config/table_wpk_live.json \
   --initial-blinds 1/2 \
   --out logs/live.states.jsonl
@@ -74,7 +76,7 @@ ROI 识别座位、筹码、下注、动作、庄位、底池和盲注，输出�
 日志里、不写 outbox，因此**不会进手牌库**：
 
 ```bash
-.venv/bin/python -m poker_ocr.live --test \
+nv -m poker_ocr.live --test \
   --profile config/table_wpk_live.json --initial-blinds 1/2
 ```
 
@@ -96,12 +98,12 @@ ROI 识别座位、筹码、下注、动作、庄位、底池和盲注，输出�
 
 ```bash
 # 1) 确认选中的是 OBS，而不是内置/FaceTime 摄像头
-.venv/bin/python tools/list_cameras.py
+nv tools/list_cameras.py
 # 看 /tmp/poker_cameras/camN.jpg，必须是牌桌画面；不是就改 OBS 场景/来源
 
 # 2) OBS 虚拟摄像头固定输出 1920x1080。若手机源在 OBS 里旋转 90° 铺满，
 #    worker 必须加 --rotate 90；否则 ROI 会被横向压扁，OCR 读不出筹码/名字
-.venv/bin/python -m poker_ocr.live --rotate 90 ...
+nv -m poker_ocr.live --rotate 90 ...
 ```
 
 启动日志里的 `[比例]` 会打印实际 ROI 尺寸；出现
@@ -200,7 +202,7 @@ A 高面只在 `.table_dy` 的现场观察或弃牌率支持时才加权；观�
 cp .env.example .env      # 然后编辑 .env，填入 AI_SERVER_API_KEY
 
 # 默认 cam:auto；这里 --no-auto-click 表示只看建议、不自动点
-.venv/bin/python -m poker_ocr.live \
+nv -m poker_ocr.live \
   --profile config/table_wpk_1080x2400.json \
   --initial-blinds 1/2 --ai-advice --no-auto-click \
   --out logs/live.states.jsonl
@@ -235,11 +237,11 @@ LAG/maniac；样本不足的 `unknown` 不改变建议。画像存在
 
 ```bash
 # 默认开启；--no-opponent-profile 回退到 .table_dy
-.venv/bin/python -m poker_ocr.live --ai-advice \
+nv -m poker_ocr.live --ai-advice \
   --opponent-db data/opponents/profiles.json
 
 # 启动时清空本地画像（身份已全局合并，不再按池清）
-.venv/bin/python -m poker_ocr.live --ai-advice --reset-opponents
+nv -m poker_ocr.live --ai-advice --reset-opponents
 ```
 
 **身份与桌况口径**：玩家身份按名字全局合并，跨桌/跨 session 累积；`pool_key`
@@ -262,13 +264,13 @@ unknown 基线**。`n<8` 一律 unknown；8–14 只标 `tentative`，
 
 ```bash
 # 手牌记录 → 画像（JSONL 里有 state 帧会自动重放进 LiveHandTracker）
-.venv/bin/python tools/rebuild_opponent_profiles.py \
+nv tools/rebuild_opponent_profiles.py \
   --hands hands/1023.hands.json logs/live.states.jsonl \
   --out data/opponents/profiles.json
 
 # 人工修正 / 查看
-.venv/bin/python tools/rebuild_opponent_profiles.py --pin "芒果与西米=maniac"
-.venv/bin/python tools/rebuild_opponent_profiles.py --unpin "芒果与西米" --list
+nv tools/rebuild_opponent_profiles.py --pin "芒果与西米=maniac"
+nv tools/rebuild_opponent_profiles.py --unpin "芒果与西米" --list
 ```
 
 **爆炸底池识别**有两条线索，任一成立就写入 `Explosive pot: YES`：
@@ -278,10 +280,12 @@ unknown 基线**。`n<8` 一律 unknown；8–14 只标 `tentative`，
    `bomb_en`），英文读到 `BOMB POT` 或中文四字命中三个即确认；横幅只在开局
    出现约 2 秒，所以看到后就钉在**整手牌**上，换手才清空。人数或底池读数
    有偏差时（空座、OCR 误读）横幅仍然权威。
-2. **底池推算（兜底）**：翻后「上一街结束时的底池 ÷ 实际参与人数」人均
-   **刚好 5BB**。炸弹池前注固定 5BB/人，所以总额能被人数整除（8 人 40BB、
-   9 人 45BB）；普通大池人均可以更高但不会整除。用于横幅没抓到的手
-   （中途接管、动画被遮挡/丢弃）。
+2. **底池推算（兜底）**：翻前没有任何 call/raise/check 时，「底池 ÷ 实际
+   参与人数」人均**正好是客户端的前注水位（5BB 或 6BB）**，且**至少 4 人**，
+   并且**连续两帧都成立**（单帧底池读数抖动不算）。例如 8 人 40BB、9 人 54BB
+   （人均 6BB，2026-11-10 实测那一手）。口径故意收得很紧：普通底池的人均额
+   也常是整数（单挑 4BB/2 人 = 2、9 人 27BB = 3），宽口径会把普通牌局误判成
+   Explosive pot。用于横幅没抓到的手（中途接管、动画被遮挡/丢弃）。
 
 触发后提示词会写 `Explosive pot: YES` 并附上依据（横幅 / 算式），同时启用
 专门的系统提示：这种池子所有人都进了池，翻后会有大量歪中的两对/三条；**顶对/
@@ -363,8 +367,10 @@ OpenRouter 的 Activity 页看被拒原因，或换一个有 OpenAI 模型权限
 ### 桌面自动点击（默认开启）
 
 AI 建议返回后，可以在客户端的对应按钮上自动点一下。先把按钮位置标定成
-**虚拟区域**（屏幕逻辑点，默认圆形；按 `C` 可切换成方形），点击时在区域内缩
-一圈的范围里取随机坐标；圆形按钮的随机点取在内切椭圆里，不会落到四角空白：
+**虚拟区域**（屏幕逻辑点，默认圆形；按 `C` 可切换成方形），点击时在区域内取
+**随机坐标**：半径缩到原半径的 70%（`DEFAULT_INSET_RATIO=0.30`，点击范围
+≈ 49% 的按钮面积），圆形按钮的随机点取在内切椭圆/圆盘里，不会落到四角空白
+或压在按钮边缘的动画上：
 
 | 建议 | 点击 |
 |---|---|
@@ -384,16 +390,16 @@ AI 建议返回后，可以在客户端的对应按钮上自动点一下。先�
 ```bash
 # 1) 标定：客户端窗口摆好后，按提示依次拖出按钮外接框
 #    默认画圆形，按 C 切换圆形/方形；--shape rect 可让新按钮默认方形
-.venv/bin/python tools/calibrate_clicker.py --list-displays
-.venv/bin/python tools/calibrate_clicker.py --out config/clicker_local.json
+nv tools/calibrate_clicker.py --list-displays
+nv tools/calibrate_clicker.py --out config/clicker_local.json
 
 # 2) 先 dry-run：只打印随机坐标，不真的点；建议返回时仍需 y/n 确认
-.venv/bin/python -m poker_ocr.live \
+nv -m poker_ocr.live \
   --profile config/table_wpk_1080x2400.json \
   --initial-blinds 1/2 --clicker-dry-run
 
 # 3) 确认坐标无误后真实运行（--auto-click 默认开启，建议前会问 y/n）
-.venv/bin/python -m poker_ocr.live \
+nv -m poker_ocr.live \
   --profile config/table_wpk_1080x2400.json \
   --initial-blinds 1/2
 
@@ -436,21 +442,21 @@ Space。真实鼠标事件没有送达回执，请先在模拟桌/非真钱环�
 
 ```bash
 # 1) 按 0.5s 抓 200 张
-.venv/bin/python tools/capture_stream.py \
+nv tools/capture_stream.py \
   --every 0.5 --max-frames 200 --out logs/live_frames
 
 # 2) 裁黑边 + 按 profile 参考比例对齐
-.venv/bin/python tools/crop_frames.py logs/live_frames \
+nv tools/crop_frames.py logs/live_frames \
   --out logs/live_frames_cropped
 
 # 3) 用现有 profile 跑 ROI，输出叠加图和报告
-.venv/bin/python tools/validate_roi.py logs/live_frames_cropped \
+nv tools/validate_roi.py logs/live_frames_cropped \
   --profile config/table_wpk_1080x2400.json \
   --initial-blinds 1/2 \
   --out-dir logs/roi_validation
 
 # 4) 重新标注 ROI，生成当前布局的 profile
-.venv/bin/python tools/refit_profile.py logs/live_frames_cropped \
+nv tools/refit_profile.py logs/live_frames_cropped \
   --profile config/table_wpk_1080x2400.json \
   --out config/table_wpk_live.json --step 2
 ```
@@ -474,26 +480,26 @@ Space。真实鼠标事件没有送达回执，请先在模拟桌/非真钱环�
 
 ```bash
 # 浏览器 / 布局不固定：全图标定一次 → 运行时 ROI
-.venv/bin/python tools/calibrate_live.py --frames 5 --crop auto \
+nv tools/calibrate_live.py --frames 5 --crop auto \
   --out config/runtime_browser.json
 
-.venv/bin/python -m poker_ocr.live --recognizer roi \
+nv -m poker_ocr.live --recognizer roi \
   --profile config/runtime_browser.json --crop auto \
   --initial-blinds 1/2 --lenient-chips --out logs/live.states.jsonl
 
 # 直接走全图（慢，但不依赖固定槽位）
-.venv/bin/python -m poker_ocr.live --recognizer full \
+nv -m poker_ocr.live --recognizer full \
   --full-config config/full_browser.json --out logs/live.states.jsonl
 
 # 离线视频
-.venv/bin/python tools/video_to_states.py images/video/video1.mp4 \
+nv tools/video_to_states.py images/video/video1.mp4 \
   --every 0.5 --out /tmp/video1.states.json
 ```
 
 ## 命令行
 
 ```bash
-.venv/bin/python extract_table.py run table.jpg
+nv extract_table.py run table.jpg
 ```
 
 结果会打印出来，**同时写进 `rois.json`**（每次 run 都写，可用 `--out` 改路径）。
@@ -505,8 +511,17 @@ CLI 和 API 走的是同一条管线，输出字段略有不同（CLI 的 `seats
 ```bash
 cd ~/codes/poker-ocr-poc
 ~/.local/bin/python3.12 -m venv .venv
-.venv/bin/pip install -r requirements.txt
+nv pip install -r requirements.txt        # 等价 uv pip install --python .venv/bin/python -r ...
 ```
+
+`nv` 是仓库根的启动器脚本，装到 PATH 一次即可：
+
+```bash
+ln -sf "$PWD/nv" ~/.local/bin/nv         # ~/.local/bin 一般已在 PATH
+```
+
+它就是把参数原样交给 `.venv/bin/python`（cwd 不变），所以下面所有命令里的
+`nv …` 都能替换回 `.venv/bin/python …`。
 
 ---
 
@@ -540,7 +555,7 @@ OCR 没读错。
 ### 1. 核对坐标（改配置后先跑这个）
 
 ```bash
-.venv/bin/python extract_table.py slots table.jpg --out slots.png
+nv extract_table.py slots table.jpg --out slots.png
 ```
 
 只画槽位不跑 OCR，几秒钟。打开 `slots.png` 确认 9 组绿框（名字）、黄框（筹码）、
@@ -549,7 +564,7 @@ OCR 没读错。
 ### 2. 提取
 
 ```bash
-.venv/bin/python extract_table.py run table.jpg --dealer-seat upL
+nv extract_table.py run table.jpg --dealer-seat upL
 ```
 
 常用参数：
@@ -568,7 +583,7 @@ OCR 没读错。
 ### 3. 回归测试
 
 ```bash
-.venv/bin/python tests/run_all.py
+nv tests/run_all.py
 ```
 
 分三层，从不需要图到需要图：
@@ -869,8 +884,8 @@ hero 未必是第一个行动的。字段名带 `from_hero` 就是为了说清�
   `tools/name_alias.py` 处理：
 
 ```bash
-.venv/bin/python tools/name_alias.py --suspects        # 只读：列出可疑的名字对
-.venv/bin/python tools/name_alias.py --add 台风来吧多=台风来咯咯   # 合并样本 + 记别名
+nv tools/name_alias.py --suspects        # 只读：列出可疑的名字对
+nv tools/name_alias.py --add 台风来吧多=台风来咯咯   # 合并样本 + 记别名
 ```
 
 - 可观测性：`players[].name_score` / `name_raw` / `name_tracked` 和

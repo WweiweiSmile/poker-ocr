@@ -3,7 +3,7 @@
 
 不连 RTSP、不加载模型。真正的推流链路靠 OBS 手工验收。
 
-    .venv/bin/python tests/test_live.py
+    nv tests/test_live.py
 """
 
 from __future__ import annotations
@@ -1211,10 +1211,11 @@ def test_no_second_advice_after_hero_bet_and_was_called() -> None:
 
 
 def test_auto_click_after_observe_on_next_frame() -> None:
-    """完整链路：第一帧投递建议，第二帧拿到结果并在 observe 之后点击。
+    """完整链路：庄位确认后投递建议，下一帧拿到结果并在 observe 之后点击。
 
     这条用例专门覆盖 `_track_hand` 的 drain 时机：必须在 hand_tracker 更新后
-    才点，才能用当前 hand_id / 决策点判断建议是否过期。
+    才点，才能用当前 hand_id / 决策点判断建议是否过期。单挑开局第 1 帧
+    庄位（D 圆片）还没确认，建议会推迟到第 2 帧投递，所以这里喂 3 帧。
     """
     from poker_ocr.advice import Advice, Option, preset_amounts
 
@@ -1267,6 +1268,10 @@ def test_auto_click_after_observe_on_next_frame() -> None:
         proc.handle(packet(1))
         check(clicker.calls == [], "建议还没返回时不该点")
         proc.handle(packet(2))
+        check(clicker.calls == [],
+              "单挑开局第 1 帧庄位未确认、第 2 帧才投递，此时结果还没回来，"
+              f"不该点：{clicker.calls}")
+        proc.handle(packet(3))
 
     check(len(clicker.calls) == 1,
           f"建议返回后的正常帧应点击一次：{clicker.calls}")
@@ -1435,9 +1440,15 @@ def test_hand_memory_flushes_on_switch_frame() -> None:
 
     tracker = LiveHandTracker(confirm_frames=1)
     writer = StubWriter()
-    cards = SimpleNamespace(hero_codes=["Ah", "Kd"], board_codes=[],
-                            warnings=[])
-    with patch.object(live, "recognize_cards", lambda img, profile: cards):
+    first_cards = SimpleNamespace(hero_codes=["Ah", "Kd"], board_codes=[],
+                                  warnings=[])
+    # 新手发到另一组牌（真实换手的主信号）：同一组牌 + 仅庄位变化会被当成
+    # 发牌期的 D 读数纠正，不再算换手（见 2026-11-10 21:42 的单挑重复建议）。
+    next_cards = SimpleNamespace(hero_codes=["Qs", "Jd"], board_codes=[],
+                                 warnings=[])
+    cards = [first_cards, next_cards]
+    with patch.object(live, "recognize_cards",
+                      lambda img, profile: cards.pop(0) if cards else next_cards):
         proc = LiveProcessor(SwitchStream(), writer, quiet=True,
                              profile=SimpleNamespace(), hand_tracker=tracker,
                              log=lambda *_: None)
@@ -2463,6 +2474,10 @@ def main() -> int:
         test_jsonl_append_repairs_partial_last_line,
         test_ai_advice_submits_on_hero_turn_once,
         test_decision_key_ignores_pot_jitter,
+        test_dealer_flicker_at_hand_start_does_not_duplicate_advice,
+        test_one_advice_per_hero_turn_even_when_state_jitters,
+        test_stale_street_advice_is_not_clicked,
+        test_bomb_pot_by_per_person_ante_without_preflop_action,
         test_late_opponent_check_is_not_a_new_decision,
         test_no_second_advice_after_hero_acted_and_nothing_to_call,
         test_no_second_advice_after_hero_bet_and_was_called,
@@ -2519,6 +2534,316 @@ def main() -> int:
         return 1
     print("\n✅ 实时 worker 全部通过")
     return 0
+
+
+
+
+
+def _heads_up_state(*, dealer: str, hero_pos: str, hero_bet: float,
+                    opp_bet: float) -> FrameState:
+    return FrameState(
+        frame_id="f", table_seats=2, players_in_hand=2,
+        players=[
+            PlayerState("hero", name="me", position=hero_pos, stack=100.0,
+                        bet=hero_bet, in_hand=True),
+            PlayerState("upL", name="dududul",
+                        position="BB" if hero_pos == "SB" else "SB",
+                        stack=100.0, bet=opp_bet, in_hand=True),
+        ],
+        blinds=live.parse_blinds("1/2"), dealer=dealer,
+        hero_seat_id="hero", hero_turn=True, pot=1.5,
+        pot_before_street=1.5)
+
+
+def test_dealer_flicker_at_hand_start_does_not_duplicate_advice() -> None:
+    """开局庄位晚一帧才认对：不能劈成两条记录，也不能连问两次模型。
+
+    实测 2026-11-10 21:42 单挑：同一手 5s4c 先读成 hero BB，115ms 后 D 纠正成
+    hero SB。旧逻辑按 dealer 变化直接开新手 → 第一条建议 stale_hand，又按 SB
+    问第二次（看板连闪两条、接口两次请求）。现在：发牌期 D 变化当纠正，
+    并且 D 稳定 2 帧之前不给建议。
+    """
+    tracker = LiveHandTracker(confirm_frames=1)
+    first = tracker.observe(
+        _heads_up_state(dealer="upL", hero_pos="BB", hero_bet=1.0,
+                        opp_bet=0.5), ["5s", "4c"], [])
+    hand_id = tracker.hand.hand_id
+    second = tracker.observe(
+        _heads_up_state(dealer="hero", hero_pos="SB", hero_bet=0.5,
+                        opp_bet=1.0), ["5s", "4c"], [])
+    third = tracker.observe(
+        _heads_up_state(dealer="hero", hero_pos="SB", hero_bet=0.5,
+                        opp_bet=1.0), ["5s", "4c"], [])
+
+    check(first is None,
+          f"庄位没确认前不该先按 BB 问一次：{first}")
+    check(tracker.last_finished is None and tracker.hand is not None
+          and tracker.hand.hand_id == hand_id,
+          "发牌期 D 抖动不能当成换手（会把一手劈成两条记录）")
+    points = [p for p in (first, second, third) if p is not None]
+    check(len(points) == 1,
+          f"同一手同一决策点只能投一次，实际 {[bool(p) for p in (first, second, third)]}")
+    point = points[0]
+    check(point.hero_position == "SB",
+          f"应按纠正后的 SB 出建议，实际 {point.hero_position}")
+    check(point.opponents and point.opponents[0].position == "BB",
+          f"对手位置也要跟着纠正，实际 "
+          f"{[o.position for o in point.opponents]}")
+
+
+
+
+
+def test_one_advice_per_hero_turn_even_when_state_jitters() -> None:
+    """同一次「轮到我」只问一次模型：hero 真行动之前，画面抖动/对手动作
+
+    2026-11-10 22:17 实测：拖动滑杆要 5 秒，期间 hero_turn 闪断、对手动作晚读，
+    同一条街连问两次（先「过牌」再「下注 1.33」），前一条还 stale，操作对不上。
+    锁定条件不是 hero_turn 单帧值，而是「hero 在这一街真的多了一条动作」。
+    """
+    from poker_ocr.state_stream import FrameOutcome
+
+    def st(*, hero_turn: bool, pot: float, up_bet: float, hero_bet: float,
+           p1_bet: float) -> FrameState:
+        return FrameState(
+            frame_id="f", table_seats=3, players_in_hand=3,
+            players=[
+                PlayerState("hero", name="me", position="SB", stack=100.0,
+                            bet=hero_bet, in_hand=True),
+                PlayerState("upL", name="up", position="BB", stack=99.0,
+                            bet=up_bet, in_hand=True),
+                PlayerState("p1", name="p1", position="BTN", stack=100.0,
+                            bet=p1_bet, in_hand=True),
+            ],
+            blinds=live.parse_blinds("1/2"), dealer="p1",
+            hero_seat_id="hero", hero_turn=hero_turn, pot=pot,
+            pot_before_street=3.5)
+
+    frames = [
+        st(hero_turn=True, pot=3.0, up_bet=1.0, hero_bet=0.5, p1_bet=0.0),
+        st(hero_turn=False, pot=3.0, up_bet=1.0, hero_bet=0.5, p1_bet=0.0),
+        # 对手加注晚读到：没有锁的话 to_call 变了，会再问一次
+        st(hero_turn=True, pot=6.0, up_bet=3.0, hero_bet=0.5, p1_bet=0.0),
+        # hero 真的行动（补齐到 3BB）—— 这一条之后才允许解锁
+        st(hero_turn=False, pot=8.5, up_bet=3.0, hero_bet=3.0, p1_bet=0.0),
+        # 同街 to_call=0 的残留帧（按钮还没消失）：不能当成新回合
+        st(hero_turn=True, pot=8.5, up_bet=3.0, hero_bet=3.0, p1_bet=0.0),
+        st(hero_turn=True, pot=11.0, up_bet=5.0, hero_bet=3.0, p1_bet=0.0),
+    ]
+
+    class LockStream(StubStateStream):
+        def __init__(self) -> None:
+            super().__init__()
+            self.i = 0
+
+        def ingest(self, img, frame_id: str, t: float, *,
+                   extra_signature: tuple | None = None) -> FrameOutcome:
+            state = frames[min(self.i, len(frames) - 1)]
+            self.i += 1
+            return FrameOutcome("no_change", state, [], None, 0, 0)
+
+    class Runner:
+        busy = False
+
+        def __init__(self) -> None:
+            self.count = 0
+
+        def submit(self, sit) -> bool:
+            self.count += 1
+            return True
+
+        def poll(self):
+            return []
+
+    runner = Runner()
+    tracker = LiveHandTracker(confirm_frames=1)
+    cards = SimpleNamespace(hero_codes=["Ah", "Kd"], board_codes=[],
+                            warnings=[])
+    with patch.object(live, "recognize_cards", lambda img, profile: cards):
+        proc = LiveProcessor(LockStream(), StubWriter(), quiet=True,
+                             profile=SimpleNamespace(), hand_tracker=tracker,
+                             advice_runner=runner, log=lambda *_: None)
+        proc.handle(packet(1))
+        check(runner.count == 1, f"第一次轮到我应投一次，实际 {runner.count}")
+        proc.handle(packet(2))   # hero_turn 闪断，不算行动
+        proc.handle(packet(3))   # 对手加注晚读到，hero 还没动 → 锁住
+        check(runner.count == 1,
+              f"hero 未行动前不能重复投递，实际 {runner.count}")
+        proc.handle(packet(4))   # hero 真的补齐
+        proc.handle(packet(5))   # 同街 to_call=0 的残留帧：仍应锁住
+        check(runner.count == 1,
+              f"hero 行动后、面对 0BB 的残留帧不能重问，实际 {runner.count}")
+        proc.handle(packet(6))   # 对手加注（to_call>0），才是新回合
+    check(runner.count == 2,
+          f"hero 行动后的新回合应再投一次，实际 {runner.count}")
+
+
+
+
+
+def test_stale_street_advice_is_not_clicked() -> None:
+    """街已经推进：preflop 的建议返回时到了 flop，绝不能在 flop 上执行。"""
+    from poker_ocr.advice import Advice, Option, preset_amounts
+    from poker_ocr.state_stream import FrameOutcome
+
+    def st(*, board: list[str], hero_turn: bool) -> FrameState:
+        return FrameState(
+            frame_id="f", table_seats=3, players_in_hand=3,
+            players=[
+                PlayerState("hero", name="me", position="BB", stack=100.0,
+                            bet=1.0, in_hand=True),
+                PlayerState("upL", name="duu", position="SB", stack=99.0,
+                            bet=0.5, in_hand=True),
+                PlayerState("p1", name="p1", position="BTN", stack=99.0,
+                            bet=0.0, in_hand=True),
+            ],
+            blinds=live.parse_blinds("1/2"), dealer="p1",
+            hero_seat_id="hero", hero_turn=hero_turn, pot=2.0,
+            pot_before_street=1.5)
+
+    frames = [
+        st(board=[], hero_turn=True),                       # preflop，投建议
+        st(board=["10h", "Ks", "5h"], hero_turn=True),      # 翻牌已发出
+    ]
+
+    class StreetStream(StubStateStream):
+        def __init__(self) -> None:
+            super().__init__()
+            self.i = 0
+
+        def ingest(self, img, frame_id: str, t: float, *,
+                   extra_signature: tuple | None = None) -> FrameOutcome:
+            state = frames[min(self.i, len(frames) - 1)]
+            self.i += 1
+            return FrameOutcome("no_change", state, [], None, 0, 0)
+
+    class Runner:
+        def __init__(self) -> None:
+            self.busy = False
+            self.snap = None
+            self.ready = False
+
+        def submit(self, sit) -> bool:
+            self.snap = sit.snap
+            return True
+
+        def poll(self):
+            if not (self.ready and self.snap is not None):
+                return []
+            self.ready = False
+            snap = self.snap
+            return [Advice(
+                snap.hand_id, snap.street,
+                Option("call", "Call", "check"), "call it", "model",
+                decision_key=snap.decision_key,
+                preset_amounts=tuple(preset_amounts(snap).items()))]
+
+    runner = Runner()
+    clicker = FakeClicker()
+    tracker = LiveHandTracker(confirm_frames=1)
+    cards = [SimpleNamespace(hero_codes=["9s", "2c"], board_codes=[],
+                             warnings=[]),
+             SimpleNamespace(hero_codes=["9s", "2c"],
+                             board_codes=["10h", "Ks", "5h"], warnings=[])]
+    calls = [0]
+
+    def cards_for(img, profile):
+        idx = min(calls[0], len(cards) - 1)
+        calls[0] += 1
+        return cards[idx]
+
+    with patch.object(live, "recognize_cards", cards_for):
+        proc = LiveProcessor(StreetStream(), StubWriter(), quiet=True,
+                             profile=SimpleNamespace(), hand_tracker=tracker,
+                             advice_runner=runner, clicker=clicker,
+                             log=lambda *_: None)
+        proc.handle(packet(1))
+        # 模型在翻牌后才返回（保持 busy，防止这一帧投递新决策点抢先改掉
+        # pending key，正好复现 22:35 的时序）
+        runner.busy = True
+        runner.ready = True
+        proc.handle(packet(2))
+
+    check(clicker.calls == [],
+          f"preflop 的建议不能落到 flop 上执行，实际 {clicker.calls}")
+    advice_rows = [r for r in proc.writer.rows if r.get("type") == "advice"]
+    check(advice_rows and advice_rows[-1]["click"]["status"] == "skipped",
+          f"应记录一次被跳过的点击，实际 {advice_rows[-1:]}")
+    check(advice_rows[-1]["click"].get("reason") == "stale_street",
+          f"跳过原因应是 stale_street，实际 {advice_rows[-1]['click']}")
+
+
+
+
+
+def test_bomb_pot_by_per_person_ante_without_preflop_action() -> None:
+    """横幅没抓到时：翻前无动作 + 人均正好是前注水位（5BB/6BB）= 爆炸底池。
+
+    口径必须收紧（见 hand_track.BOMB_PER_PERSON_LEVELS）：普通底池的人均额
+    也常是整数 —— 单挑 4BB/2 人 = 2、9 人 27BB = 3，宽口径会误判成
+    Explosive pot，提示词和落库全跟着错。这里还要求连续两帧成立。
+    """
+    def state(*, pot: float, players: int = 6,
+              bets: tuple[float, ...] = ()) -> FrameState:
+        seats = [("hero", "me", "BB"), ("upL", "up", "SB"), ("p1", "p1", "BTN"),
+                 ("p2", "p2", "CO"), ("p3", "p3", "HJ"), ("p4", "p4", "UTG"),
+                 ("p5", "p5", "UTG1"), ("p6", "p6", "UTG2"),
+                 ("p7", "p7", "UTG3")][:players]
+        if len(seats) < players:
+            seats += [(f"x{i}", f"x{i}", "UTG") for i in range(players - len(seats))]
+        return FrameState(
+            frame_id="f", table_seats=max(players, 6), players_in_hand=players,
+            players=[
+                PlayerState(sid, name=name, position=pos, stack=100.0,
+                            bet=(bets[i] if i < len(bets) else 0.0),
+                            in_hand=True)
+                for i, (sid, name, pos) in enumerate(seats)
+            ],
+            blinds=live.parse_blinds("1/2"), dealer="p1",
+            hero_seat_id="hero", hero_turn=True, pot=pot,
+            pot_before_street=pot, street_bet_total=sum(bets))
+
+    # 6 人 × 5BB = 30BB；连续两帧 → 爆炸底池
+    tracker = LiveHandTracker(confirm_frames=1)
+    tracker.observe(state(pot=30.0), ["Qs", "Jd"], [])
+    tracker.observe(state(pot=30.0), ["Qs", "Jd"], [])
+    check(tracker.hand is not None and tracker.hand.bomb_pot is True,
+          "30BB/6=5 且翻前无动作、连续两帧应判爆炸底池")
+
+    # 9 人 × 6BB = 54BB（2026-11-10 实测那一手）
+    tracker = LiveHandTracker(confirm_frames=1)
+    for _ in range(2):
+        tracker.observe(state(pot=54.0, players=9), ["Qs", "Jd"], [])
+    check(tracker.hand is not None and tracker.hand.bomb_pot is True,
+          "54BB/9=6 应判爆炸底池")
+
+    # 只闪一帧（第二帧数字变了）→ 不钉
+    tracker = LiveHandTracker(confirm_frames=1)
+    tracker.observe(state(pot=30.0), ["Qs", "Jd"], [])
+    tracker.observe(state(pot=31.0), ["Qs", "Jd"], [])
+    check(tracker.hand is not None and tracker.hand.bomb_pot is False,
+          "单帧命中不能钉成爆炸底池")
+
+    # 同样的数字，但翻前有一条 hero 加注 → 不是爆炸底池
+    tracker = LiveHandTracker(confirm_frames=1)
+    tracker.observe(state(pot=4.0, bets=(1.0, 1.0, 1.0, 0.0, 0.0, 0.0)),
+                    ["Qs", "Jd"], [])
+    tracker.observe(state(pot=7.0, bets=(2.0, 2.0, 1.0, 0.0, 0.0, 0.0)),
+                    ["Qs", "Jd"], [])
+    for _ in range(2):
+        tracker.observe(state(pot=30.0, bets=(2.0, 2.0, 1.0, 0.0, 0.0, 0.0)),
+                        ["Qs", "Jd"], ["Ah", "Kd", "7c"])
+    check(tracker.hand is not None and tracker.hand.bomb_pot is False,
+          "翻前有行动就不能判爆炸底池")
+
+    # 普通底池恰好人均整数：单挑 4BB/2人 = 2BB、9 人 27BB = 3BB → 都不是
+    for pot, players in ((4.0, 2), (27.0, 9), (18.0, 3)):
+        tracker = LiveHandTracker(confirm_frames=1)
+        for _ in range(2):
+            tracker.observe(state(pot=pot, players=players), ["Qs", "Jd"], [])
+        check(tracker.hand is not None and tracker.hand.bomb_pot is False,
+              f"人均 {pot / players:g}BB（{pot:g}BB/{players} 人）不是前注水位，"
+              "不能判爆炸底池")
 
 
 if __name__ == "__main__":

@@ -12,8 +12,8 @@
 
 最后在汇总页按 Enter 保存到 `config/clicker_local.json`。
 
-    .venv/bin/python tools/calibrate_clicker.py --list-displays
-    .venv/bin/python tools/calibrate_clicker.py --out config/clicker_local.json
+    nv tools/calibrate_clicker.py --list-displays
+    nv tools/calibrate_clicker.py --out config/clicker_local.json
 
 坐标是 macOS **逻辑点**（全局 top-left 原点），不是截图物理像素；窗口移动、
 改分辨率/缩放、改显示器排列后都要重新标定。
@@ -31,8 +31,8 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from poker_ocr.clicker import (  # noqa: E402
-    BUTTON_IDS, BUTTON_LABELS, DEFAULT_CONFIG_PATH, CGEventBackend,
-    ClickerConfig, ClickerConfigError, Rect, list_displays,
+    BUTTON_IDS, BUTTON_LABELS, DEFAULT_CONFIG_PATH, DEFAULT_INSET_RATIO,
+    CGEventBackend, ClickerConfig, ClickerConfigError, Rect, list_displays,
 )
 
 MIN_SIZE = 8.0          # 小于这个宽/高的框没有意义
@@ -61,7 +61,7 @@ class Calibrator:
     def __init__(self, root, display, out: Path, *,
                  initial: dict[str, Rect] | None = None,
                  base: ClickerConfig | None = None,
-                 inset_ratio: float = 0.15,
+                 inset_ratio: float = DEFAULT_INSET_RATIO,
                  default_shape: str = "circle",
                  alpha: float = 0.35) -> None:
         import tkinter as tk
@@ -429,7 +429,7 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--display", type=int, default=0,
                     help="显示器索引（默认 0；用 --list-displays 查看）")
     ap.add_argument("--inset", type=float, default=None,
-                    help="随机点向内缩的比例（默认沿用已有配置，否则 0.15）")
+                    help="随机点向内缩的比例（默认沿用已有配置，否则 0.30，即半径 70%%）")
     ap.add_argument("--shape", choices=("circle", "rect"), default="circle",
                     help="新标定按钮的默认形状（默认 circle；标定时按 C 可逐个切换）")
     ap.add_argument("--alpha", type=float, default=0.35,
@@ -493,7 +493,8 @@ def main() -> int:
         initial = base.buttons
         print(f"已预载 {args.from_path} 的 {len(initial)} 个按钮")
     inset = (args.inset if args.inset is not None
-             else (base.inset_ratio if base is not None else 0.15))
+             else (base.inset_ratio if base is not None
+                else DEFAULT_INSET_RATIO))
 
     try:
         import tkinter as tk

@@ -4,6 +4,9 @@
 JSONL。本文是**当前方案的完整说明**：架构、功能、标定流程、启动命令、输出格式
 和排障。
 
+> **macOS 直接截浏览器窗口（不走 OBS）的启动命令、取窗口 `x,y,w,h` 的方法、滑杆验证：**
+> 见 [mac-启动命令.md](mac-启动命令.md)。
+
 > 2026-10-30.10 更新：提示词 system 已拆成 core + 前注条件模块；新增五级事实优先级、
 > 指标口径、all-in 几何门控、缺失底池/后手不伪造下注、数据质量中文摘要；范围内部
 > range id / combo 数不再进入 prompt。下文示例按当前 `lean-zh-2026-11-03.3` 更新。
@@ -279,10 +282,12 @@ ROI 路线只裁固定槽位、只跑 rec，不跑全图检测，是实时链路
 - **爆炸底池**：两条线索任一成立即判定（提示词写「爆炸底池：是」）：
   ① **屏幕横幅（权威）** —— 开局中央弹「幸运暴击」+「BOMB POT」，用
   `global_slots.bomb_cn` / `bomb_en` 两条紧 ROI 纯识别确认，看到后钉在整手牌上
-  （横幅只闪 ~2s，换手清空）；② **底池推算（兜底）** —— 翻后「上一街结束时的
-  底池 ÷ 实际参与人数」**刚好 5BB/人**。炸弹池前注固定 5BB/人，总额能被人数
-  整除（8 人 40BB、9 人 45BB）；分母用参与人数（含已弃牌，不含空座），不是
-  座位数。人数/底池读数有偏差时以横幅为准。
+  （横幅只闪 ~2s，换手清空）；② **底池推算（兜底）** —— 翻前没有任何
+  call/raise/check、且「底池 ÷ 实际参与人数」**正好是 5BB 或 6BB/人**、至少
+  4 人、**连续两帧都成立**（例如 8 人 40BB、9 人 54BB）。分母用参与人数
+  （含已弃牌，不含空座），不是座位数。口径收得很紧是因为普通底池人均也常是
+  整数（单挑 4BB/2 人 = 2、9 人 27BB = 3），宽口径会误判；单帧命中不钉标记。
+  人数/底池读数有偏差时以横幅为准。
   这种池子意味着全桌进池，翻后会有大量歪中的两对/三条；系统提示按**正常
   翻后规则**打，不再给炸弹池单独的一条街/被下注即弃/超强范围规则。事实块
   只保留结构（SPR/人数）和权益，不再把顶对自动升级成套池价值牌。
@@ -308,7 +313,9 @@ ROI 路线只裁固定槽位、只跑 rec，不跑全图检测，是实时链路
 - **自动点击（`--auto-click`，默认开启）**：先用
   `tools/calibrate_clicker.py` 在客户端上方拖出按钮外接框，标定
   `fold / call` 和五个快捷档位；默认按圆形采样（内切椭圆，按 `C`
-  可切换方形），建议返回后在区域内缩一圈的范围里取**随机坐标**点击。
+  可切换方形），建议返回后在区域内取**随机坐标**点击：半径缩到原半径的
+  70%（`DEFAULT_INSET_RATIO=0.30`，点击范围 ≈ 49% 按钮面积），
+  滑杆路径（长按主按钮 / 确定 / 点空白关闭）同一口径。
   弃牌点左侧、跟注/过牌/跟全下点右侧；加注直接点快捷档位（客户端点档位
   即完成下注，不再点蓝色确认按钮）。
   翻前 `open-* / raise-3x` 按金额选最近的底池档位。
@@ -321,6 +328,50 @@ ROI 路线只裁固定槽位、只跑 rec，不跑全图检测，是实时链路
   点击后约 0.5s 用动作指纹（`hero_turn` / 动作徽章 / 底池 / 下注 / 筹码）确认
   是否生效；没变化会再点一次（`retry_delay_ms=500`、`retry_count=1`，可配置）。
   真实点击需要 macOS「辅助功能」权限，且客户端要保持在最前。
+- **自定义下注额（`--bet-slider`）**：web 端**长按**主按钮会打开竖向滑杆，
+  顶部气泡显示「加注到多少 BB」；**新 UI 要按住橙色额度手柄上下拖**才能改额
+  （滚轮无效，实测 2026-11-10 滚 3 次数值不动），拖到目标 BB 再点『确定』落注。
+  **打开判据 = 顶部金额气泡读得出内容**（`NBB` 或 ALLIN/全下）。既不能只看
+  「槽位里有字」（真实关闭帧上纯 rec 会把毛毡读成 `9`/`O`/`Q`），也不能只看
+  `hero_bet_slider` 的深色占比（黑帧/调暗遮罩同样很深，实测全黑帧
+  dark_frac=1.0）。深色只在「气泡读不出额」时提示「可能开着但读不准」，
+  这种情况下不会再长按一次主按钮。
+  取消：只点滑杆右边的空白毛毡（`hero_bet_close`），**不发 Esc** —— 新 UI 不认
+  Esc，而且 Esc 是发给当前键盘焦点 App 的全局按键，窗口不在最前时会落到别的程序上。
+  所有按钮点击（长按主按钮 / 确定 / 关滑杆）都在按钮圆盘内**随机取点**，
+  半径 = 原半径 × 70%（`SLIDER_CLICK_INSET`，点击范围 ≈ 49% 按钮面积），
+  不会每次都点在几何中心。
+  AI 的 1/3 池常是 `1.33BB`，客户端滑杆只能落整数 BB，所以 `config/bet_slider_mac.json`
+  的 `round_to_bb` 默认 1（1.33→1），日志/看板会注明「AI 1.33 → 取 1」。
+  下单前先做 5% 判定：推荐额与 1/3、1/2、2/3、1、1.2 五个快捷档位的实际
+  目标额相对误差 ≤5% 时**直接点快捷档位**（快、稳）；超过 5% 才长按走滑杆。
+  阈值住在 `clicker.preset_tolerance`（默认 0.05）。**`--bet-slider-only`**
+  会跳过整套档位逻辑：下注/加注无条件长按滑杆，不判 5%、不看置灰、不读档位
+  截图，少两个失败点，适合「只求稳定走加注按钮」的场景。
+  **allin 有两条路**：别人下注 > 后手时 `options.py` 给 `kind=call`（跟全下），
+  走右侧 call 按钮；主动全下 `kind=allin` 在启用滑杆时走 `set_all_in`——一直
+  向上拖/滚到顶部气泡变成 **ALLIN / 全下**，连续两次读到才点确定，不依赖 allin
+  按钮。**不能用「金额不再变化」猜顶端**：拖动没生效/手柄找错时金额同样不变，
+  旧口径会在 2BB 这种中间额上点确定还记成全下；现在到不了 ALLIN 就报
+  `allin_not_reached` 并把滑杆关掉。**启用 `--bet-slider` 时
+  不再手标 clicker_local 的 buttons**：fold / call / 5 个档位的屏幕矩形由
+  profile 槽位（hero_fold_button / hero_call_button / bet_preset_*）+ window
+  直接算；clicker_local 只提供 inset/retry/tolerance 等标量。**档位被置灰**（后手不够
+  这个档位 / 低于最低加注）时即使误差在 5% 内也不点，退回滑杆：置灰检测看
+  按钮圆盘白字占比 + V99（`bet_preset_1_3` … `bet_preset_1_2x`），读不准
+  同样按不可点处理。识别槽位住在
+  `table_wpk_mac.json` 的 `hero_bet_slider / hero_bet_amount / hero_bet_fraction /
+  hero_bet_confirm`；操作参数在 `config/bet_slider_mac.json`。启动时给窗口坐标
+  （先 `tools/bet_slider.py --list-windows`，再填 `index:N` / `title:...` /
+  `owner:...` / `x,y,w,h`；**别用 `front`**，从终端跑时前台是终端），闭环每滚一次都读回
+  顶部气泡，**只有读到目标额才点『确定』**；到不了目标（超过 all-in → 顶部出现
+  ALLIN、低于最小注、滑杆只支持整数而目标是小数）就报错停手，不近似落注。
+  整个闭环有 `total_timeout_ms`（默认 8s）总时限：客户端回合只有 10–15s，
+  `max_steps × 每步耗时` 很容易超时，超时报 `slider_timeout` 并关掉滑杆。
+  `config/bet_slider_mac.json` 的每个键在启动时逐个校验（类型/范围/枚举），
+  写错直接报错退出，不会静默退化成别的行为（`control: "dragg"`、`hold_ms:
+  "650ms"`、`release_after_open: "false"` 都会被拦下）。
+  先用 `tools/bet_slider.py --image 帧.jpg` 离线验识别，再在屏幕上 dry-run。
 - **连接复用**：同一 host 的 HTTP/1.1 长连接会缓存下来，省掉每次建议的 TLS
   握手（国内到 OpenRouter 实测 0.4–1.4s，常常比模型本身还慢）。配置了
   `HTTPS_PROXY` 等代理变量时退回 urllib 的默认行为，不绕过代理。
@@ -452,10 +503,10 @@ OpenCV 的 AVFoundation 后端能直接打开它：
 ```bash
 # 1) 在 OBS 里点 Start Virtual Camera
 # 2) 查索引（分辨率等于 OBS 画布的那一项）
-.venv/bin/python tools/list_cameras.py
+nv tools/list_cameras.py
 
 # 3) 用 cam:N 启动，不再需要 MediaMTX
-.venv/bin/python -m poker_ocr.live \
+nv -m poker_ocr.live \
   --url cam:1 --profile config/table_wpk_live.json \
   --initial-blinds 1/2 --out logs/live.states.jsonl
 ```
@@ -476,7 +527,7 @@ macOS 首次使用要允许终端访问相机。
 
 ```bash
 # OBS 顺时针转了 90° → worker 用 270 转回来；逆时针转则用 90
-.venv/bin/python -m poker_ocr.live --url cam:1 --rotate 270 ...
+nv -m poker_ocr.live --url cam:1 --rotate 270 ...
 ```
 
 这样有效内容是 864x1920，约参考尺寸的 **88%**，足够 OCR。
@@ -513,7 +564,7 @@ srt://<Mac IP>:8890?streamid=publish:live&passphrase=<口令>&pbkeylen=16&latenc
 ```bash
 # 1) OBS 浏览器源加载 docs/live-clock.html，放在画面顶部
 # 2) 启动 worker 并保存采样帧
-.venv/bin/python -m poker_ocr.live --dump-frames /tmp/liveframes --no-ai-advice
+nv -m poker_ocr.live --dump-frames /tmp/liveframes --no-ai-advice
 # 3) 对比 dump 帧文件名的墙钟时间和画面里的时钟
 ```
 
@@ -526,12 +577,12 @@ OBS/SRT/RTSP，所以它很小不代表端到端不慢。
 cd ~/codes/poker-ocr
 
 # 先跑 10 帧冒烟（不调模型、不点击）
-.venv/bin/python -m poker_ocr.live --max-frames 10 --no-ai-advice
+nv -m poker_ocr.live --max-frames 10 --no-ai-advice
 
 # 正式运行（Ctrl-C 结束，自动写 session_end）
 # 默认 --url cam:auto（自动选 OBS 虚拟摄像头）、--auto-click 开启
 # 建议返回后默认在终端问 y/n；要直接执行就加 --no-confirm
-.venv/bin/python -m poker_ocr.live \
+nv -m poker_ocr.live \
   --profile config/table_wpk_1080x2400.json \
   --every 0.5 \
   --out logs/live.states.jsonl
@@ -557,7 +608,7 @@ cd ~/codes/poker-ocr
 
 ```bash
 # 抓 200 张（约 100 秒）
-.venv/bin/python tools/capture_stream.py \
+nv tools/capture_stream.py \
   --every 0.5 --max-frames 200 --out logs/live_frames
 ```
 
@@ -568,7 +619,7 @@ cd ~/codes/poker-ocr
 ### 4.2 裁黑边 + 对齐比例
 
 ```bash
-.venv/bin/python tools/crop_frames.py logs/live_frames \
+nv tools/crop_frames.py logs/live_frames \
   --out logs/live_frames_cropped
 ```
 
@@ -577,7 +628,7 @@ cd ~/codes/poker-ocr
 ### 4.3 用现有 profile 验证
 
 ```bash
-.venv/bin/python tools/validate_roi.py logs/live_frames_cropped \
+nv tools/validate_roi.py logs/live_frames_cropped \
   --profile config/table_wpk_1080x2400.json \
   --initial-blinds 1/2 \
   --out-dir logs/roi_validation
@@ -592,7 +643,7 @@ cd ~/codes/poker-ocr
 ### 4.4 重新标注 ROI
 
 ```bash
-.venv/bin/python tools/refit_profile.py logs/live_frames_cropped \
+nv tools/refit_profile.py logs/live_frames_cropped \
   --profile config/table_wpk_1080x2400.json \
   --out config/table_wpk_live.json --step 2
 ```
@@ -610,7 +661,7 @@ cd ~/codes/poker-ocr
 ### 4.5 用新 profile 运行
 
 ```bash
-.venv/bin/python -m poker_ocr.live \
+nv -m poker_ocr.live \
   --profile config/table_wpk_live.json \
   --initial-blinds 1/2 \
   --out logs/live.states.jsonl
@@ -639,7 +690,7 @@ cd ~/codes/poker-ocr
 
 ```bash
 # 默认 cam:auto + 自动点击；自动点击需先标定 config/clicker_local.json
-.venv/bin/python -m poker_ocr.live \
+nv -m poker_ocr.live \
   --profile config/table_wpk_live.json \
   --initial-blinds 1/2 \
   --every 0.5 \
@@ -652,7 +703,7 @@ cd ~/codes/poker-ocr
 ### 实时 ROI（使用通用 1080x2400 profile）
 
 ```bash
-.venv/bin/python -m poker_ocr.live \
+nv -m poker_ocr.live \
   --profile config/table_wpk_1080x2400.json \
   --out logs/live.states.jsonl
 ```
@@ -661,13 +712,13 @@ cd ~/codes/poker-ocr
 
 ```bash
 # 1) 标定一次
-.venv/bin/python tools/calibrate_live.py \
+nv tools/calibrate_live.py \
   --url rtsp://127.0.0.1:8554/live \
   --frames 5 --crop auto \
   --out config/runtime_browser.json
 
 # 2) 稳定运行
-.venv/bin/python -m poker_ocr.live \
+nv -m poker_ocr.live \
   --recognizer roi \
   --profile config/runtime_browser.json \
   --crop auto \
@@ -676,10 +727,29 @@ cd ~/codes/poker-ocr
   --out logs/live.states.jsonl
 ```
 
+### 直接截浏览器窗口（不经过 OBS）
+
+```bash
+# 先列窗口，拿到 id/标题
+nv tools/bet_slider.py --list-windows
+
+nv -m poker_ocr.live \
+  --url "window:title:WePoker" \
+  --profile config/table_wpk_mac.json \
+  --recognizer roi --crop none --initial-blinds 1/2 \
+  --auto-click --bet-slider --bet-slider-window "title:WePoker" \
+  --out logs/live.mac.test.jsonl
+```
+
+`window:` 源按 **window id** 用 `screencapture -l` 截指定窗口：别的窗口盖在
+上面也能拿到该窗口内容，不经过 OBS，不会缩放/加黑边。手填 `x,y,w,h` 没有 id
+时退回 `-R` 屏幕矩形，被遮挡会截错。**点击仍要求游戏窗口在最前**，否则鼠标
+事件会落到盖住它的窗口上。
+
 ### 全图路线（不依赖固定槽位）
 
 ```bash
-.venv/bin/python -m poker_ocr.live \
+nv -m poker_ocr.live \
   --recognizer full --no-ai-advice \
   --full-config config/full_browser.json \
   --out logs/live.states.jsonl
@@ -688,7 +758,7 @@ cd ~/codes/poker-ocr
 ### 离线视频
 
 ```bash
-.venv/bin/python tools/video_to_states.py images/video/video1.mp4 \
+nv tools/video_to_states.py images/video/video1.mp4 \
   --every 0.5 --out /tmp/video1.states.json
 ```
 
@@ -696,16 +766,16 @@ cd ~/codes/poker-ocr
 
 ```bash
 # 只处理 10 帧（不调模型、不点击）
-.venv/bin/python -m poker_ocr.live --max-frames 10 --no-ai-advice
+nv -m poker_ocr.live --max-frames 10 --no-ai-advice
 
 # 保存每个采样帧
-.venv/bin/python -m poker_ocr.live --dump-frames /tmp/liveframes --no-ai-advice
+nv -m poker_ocr.live --dump-frames /tmp/liveframes --no-ai-advice
 
 # 关掉 ROI 去重
-.venv/bin/python -m poker_ocr.live --no-dedup
+nv -m poker_ocr.live --no-dedup
 
 # 不读头像（省 9 块 ROI，失去弃牌检测）
-.venv/bin/python -m poker_ocr.live --no-fold
+nv -m poker_ocr.live --no-fold
 ```
 
 ---
@@ -864,6 +934,10 @@ cd ~/codes/poker-ocr
           "elapsed_ms":95}}
 ```
 
+滑杆路径（`--bet-slider`）的 `click` 形状不同：`mapping="bet_slider"`，
+带 `target_bb` 和 `detail.slider`（起止额 / 拖动次数或滚动格数 / 最终读数 /
+是否读到 ALLIN）；失败时 `status="error"`，不会点确定，只点右侧空白毛毡关掉滑杆。
+
 | 字段 | 含义 |
 |---|---|
 | `hand_id` | 第几手（换手时 +1） |
@@ -989,7 +1063,7 @@ All-in 文本）会立即收掉当前手牌，不依赖牌面/庄位变化。
 要按手牌批量分析时，用 `tools/export_live_hands.py` 导出 `hands.json`：
 
 ```bash
-.venv/bin/python tools/export_live_hands.py
+nv tools/export_live_hands.py
 ```
 
 默认只保留「从翻前开始、且不是退出时截断」的完整手牌，并给每条记录追加
@@ -1081,9 +1155,9 @@ advice / hand / incident / session_end`。`frame` 每个处理过的帧都写（
 ### 6.10 手牌识别倒查
 
 ```bash
-.venv/bin/python tools/hand_recognition_audit.py --top 20 \
+nv tools/hand_recognition_audit.py --top 20 \
     --html logs/audit.html --json logs/audit.json --csv logs/audit.csv
-.venv/bin/python tools/hand_recognition_audit.py --explain <hand_id>
+nv tools/hand_recognition_audit.py --explain <hand_id>
 ```
 
 它把 states 的 `hand` / `advice` 与 events 的 `frame` / `incident` 对齐到
@@ -1096,7 +1170,7 @@ advice / hand / incident / session_end`。`frame` 每个处理过的帧都写（
 不是实战、只是拿实战视频做测试时加 `--test`：
 
 ```bash
-.venv/bin/python -m poker_ocr.live --test \
+nv -m poker_ocr.live --test \
   --profile config/table_wpk_live.json --initial-blinds 1/2
 ```
 
@@ -1160,6 +1234,10 @@ advice / hand / incident / session_end`。`frame` 每个处理过的帧都写（
 | `--no-confirm` | 关 | 自动点击不再询问；默认每次执行前单键读 `y` 确认 / `n` 拒绝（其他键忽略） |
 | `--clicker-config` | `config/clicker_local.json` | 自动点击按钮坐标 JSON |
 | `--clicker-dry-run` | 关 | 只打印将点击的随机坐标，不发送真实鼠标事件 |
+| `--bet-slider` | 关 | 下注/加注走「长按主按钮 → 拖手柄/滚动到目标额 → 确定」滑杆，用 AI 精确额度（需 `--auto-click` + 窗口坐标） |
+| `--bet-slider-window` | 无 | 游戏窗口：`index:N` / `title:...` / `owner:...` / `x,y,w,h`；先跑 `tools/bet_slider.py --list-windows` |
+| `--bet-slider-only` | 关 | 下注/加注只走长按滑杆，跳过 5% 判定/置灰检测/快捷档位（需 `--bet-slider`） |
+| `--bet-slider-config` | `config/bet_slider_mac.json` | 滑杆长按/拖动(control=drag)/滚动/容差参数 |
 | `--quiet` | 关 | 只打状态行和最终汇总 |
 | `--web` / `--no-web` | 开 | 本地 Web 看板（只读，默认 `127.0.0.1:8020`） |
 | `--web-host` | `127.0.0.1` | 看板监听地址；`0.0.0.0` 会暴露提示词/玩家名 |
@@ -1193,7 +1271,7 @@ worker 采用最新帧优先，处理不过来就丢中间帧，队列深度恒�
 ```bash
 # 1) OBS 浏览器源加载 docs/live-clock.html，放在画面顶部
 # 2) 启动 worker 并保存采样帧
-.venv/bin/python -m poker_ocr.live --dump-frames /tmp/liveframes --no-ai-advice
+nv -m poker_ocr.live --dump-frames /tmp/liveframes --no-ai-advice
 # 3) 对比记录 ts、dump 帧文件名墙钟和画面里的时钟
 ```
 
@@ -1257,7 +1335,7 @@ worker 采用最新帧优先，处理不过来就丢中间帧，队列深度恒�
 ## 11. 测试
 
 ```bash
-.venv/bin/python tests/run_all.py
+nv tests/run_all.py
 ```
 
 共 16 个套件，覆盖位置推导、`.env` 加载、翻后规则、实时建议链路、庄位、

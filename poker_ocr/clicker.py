@@ -31,6 +31,7 @@ from typing import Callable, Mapping, Protocol, TYPE_CHECKING
 
 if TYPE_CHECKING:                       # 只用于类型，避免运行时循环导入
     from .advice import Advice
+    from .bet_slider import BetSliderController
     from .options import Option
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -52,8 +53,14 @@ BUTTON_LABELS = {
     "allin": "全下（可选）",
 }
 PRESET_ORDER = {pid: i for i, pid in enumerate(PRESET_IDS)}
+# 推荐额与客户端快捷档位的相对误差 ≤ 5% 时优先点快捷档位；
+# 超过 5% 才走长按滑杆手动加注。
+DEFAULT_PRESET_TOLERANCE = 0.05
 
-DEFAULT_INSET_RATIO = 0.15
+# 随机点击的内缩比例：半径 = 原半径 × (1 - 0.30) = 70%
+# （点击范围 = π(0.7r)² ≈ 49% 的按钮面积）。点太靠边会落到按钮外/被动画遮住，
+# 点在正中心又容易被同一个像素上的遮挡物吃掉，所以留一圈边再随机取点。
+DEFAULT_INSET_RATIO = 0.30
 DEFAULT_CLICK_DELAY_MS = 70
 DEFAULT_CONFIRM_GAP_MS = 180
 
@@ -145,9 +152,31 @@ class Rect:
         r = math.sqrt(rng.random())
         return self.cx + ra * r * math.cos(theta), self.cy + rb * r * math.sin(theta)
 
+    def inset_disc_point(self, rng: random.Random,
+                         ratio: float = DEFAULT_INSET_RATIO
+                         ) -> tuple[float, float]:
+        """圆形按钮：在**正圆**内部取样，半径取 min(w,h)/2 再内缩。
+
+        和 `inset_ellipse_point` 的区别：槽位如果不是正方形，椭圆会把
+        长边方向的点推到按钮圆外（例如 80x95 的预设钮，ry 比真实半径大）。
+        圆形按钮一律用这个，保证点落在可见圆盘里。
+        """
+        ratio = min(max(float(ratio), 0.0), 0.45)
+        if self.w <= 2 or self.h <= 2:
+            return self.cx, self.cy
+        radius = min(self.w, self.h) / 2.0
+        radius = max(0.0, radius - radius * ratio)
+        if radius <= 0:
+            return self.cx, self.cy
+        theta = rng.uniform(0.0, 2.0 * math.pi)
+        r = math.sqrt(rng.random()) * radius
+        return self.cx + r * math.cos(theta), self.cy + r * math.sin(theta)
+
     def sample_point(self, rng: random.Random,
                      ratio: float = DEFAULT_INSET_RATIO) -> tuple[float, float]:
-        """按按钮形状取随机点：circle → 内切椭圆，其他 → 矩形内缩。"""
+        """按按钮形状取随机点：disc → 正圆，circle → 内切椭圆，其他 → 矩形内缩。"""
+        if self.shape == "disc":
+            return self.inset_disc_point(rng, ratio)
         if self.shape == "circle":
             return self.inset_ellipse_point(rng, ratio)
         return self.inset_point(rng, ratio)
@@ -181,6 +210,8 @@ class ClickerConfig:
     # retry_count=0 关闭；默认只补一次。
     retry_delay_ms: int = 500
     retry_count: int = 1
+    # 推荐额与快捷档位的相对误差门槛（0.05 = 5%）。超过才走滑杆。
+    preset_tolerance: float = DEFAULT_PRESET_TOLERANCE
     version: int = 1
     display: dict | None = None
     created_at: str | None = None
@@ -196,7 +227,7 @@ class ClickerConfig:
         except FileNotFoundError as exc:
             raise ClickerConfigError(
                 f"点击配置不存在：{path}。先运行 "
-                f"`.venv/bin/python tools/calibrate_clicker.py --out {path}` 标定按钮"
+                f"`nv tools/calibrate_clicker.py --out {path}` 标定按钮"
             ) from exc
         except (OSError, json.JSONDecodeError) as exc:
             raise ClickerConfigError(f"点击配置读取失败：{path}：{exc}") from exc
@@ -226,6 +257,8 @@ class ClickerConfig:
             allow_fallback=bool(raw.get("allow_fallback", False)),
             retry_delay_ms=int(raw.get("retry_delay_ms", 500)),
             retry_count=int(raw.get("retry_count", 1)),
+            preset_tolerance=float(raw.get("preset_tolerance",
+                                           DEFAULT_PRESET_TOLERANCE)),
             version=version,
             display=raw.get("display") if isinstance(raw.get("display"), dict) else None,
             created_at=raw.get("created_at"),
@@ -243,6 +276,7 @@ class ClickerConfig:
             "allow_fallback": self.allow_fallback,
             "retry_delay_ms": self.retry_delay_ms,
             "retry_count": self.retry_count,
+            "preset_tolerance": self.preset_tolerance,
             "buttons": {
                 name: {"x": r.x, "y": r.y, "w": r.w, "h": r.h,
                        "shape": r.shape}
@@ -271,9 +305,9 @@ class ClickerConfig:
             if rect.w <= 0 or rect.h <= 0:
                 raise ClickerConfigError(
                     f"{name} 矩形宽高必须大于 0：{rect.w}x{rect.h}")
-            if rect.shape not in ("rect", "circle"):
+            if rect.shape not in ("rect", "circle", "disc"):
                 raise ClickerConfigError(
-                    f"{name} 的 shape 只能是 rect 或 circle：{rect.shape!r}")
+                    f"{name} 的 shape 只能是 rect / circle / disc：{rect.shape!r}")
         if not (0.0 <= self.inset_ratio <= 0.45):
             raise ClickerConfigError(
                 f"inset_ratio 必须在 0–0.45 之间：{self.inset_ratio}")
@@ -289,6 +323,9 @@ class ClickerConfig:
         if self.retry_count < 0 or self.retry_count > 5:
             raise ClickerConfigError(
                 f"retry_count 必须在 0–5 之间：{self.retry_count}")
+        if not (0.0 <= self.preset_tolerance <= 1.0):
+            raise ClickerConfigError(
+                f"preset_tolerance 必须在 0–1 之间：{self.preset_tolerance}")
 
     @property
     def preset_button_ids(self) -> tuple[str, ...]:
@@ -341,6 +378,8 @@ class ClickResult:
     reason: str | None = None
     error: str | None = None
     elapsed_ms: int = 0
+    target_bb: float | None = None
+    detail: dict | None = None       # 滑杆等非按钮路径的明细
 
     def to_dict(self) -> dict:
         out: dict = {"status": self.status}
@@ -356,6 +395,10 @@ class ClickResult:
             out["reason"] = self.reason
         if self.error:
             out["error"] = self.error
+        if self.target_bb is not None:
+            out["target_bb"] = self.target_bb
+        if self.detail:
+            out["detail"] = self.detail
         out["elapsed_ms"] = self.elapsed_ms
         return out
 
@@ -388,6 +431,41 @@ def choose_preset(
         return None
     _delta, _order, pid, target = min(candidates)
     return pid, target, "nearest"
+
+
+def choose_preset_within(
+    option: "Option",
+    preset_amounts: Mapping[str, float],
+    tolerance: float = DEFAULT_PRESET_TOLERANCE,
+) -> tuple[str, float, str] | None:
+    """推荐额与某个快捷档位的**实际目标额**相对误差 ≤ tolerance 时选它。
+
+    返回 `(preset_id, preset_target_bb, "within_5pct")`；都不在门槛内返回
+    None（调用方再决定走滑杆还是跳过）。比的是金额不是档位名字：
+    翻前 `open-2.5` 也可能刚好落在 1/2 池档位附近。
+
+    多个档位同时命中时取相对误差最小的；平局按 1/3→1.2 的顺序。
+    """
+    amount = option.amount
+    if amount is None or not math.isfinite(float(amount)) or amount <= 0:
+        return None
+    candidates: list[tuple[float, int, str, float]] = []
+    for pid, target in preset_amounts.items():
+        if pid not in PRESET_ORDER:
+            continue
+        try:
+            value = float(target)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(value) or value <= 0:
+            continue
+        rel = abs(float(amount) - value) / value
+        if rel <= tolerance + 1e-12:
+            candidates.append((rel, PRESET_ORDER[pid], pid, value))
+    if not candidates:
+        return None
+    _rel, _order, pid, value = min(candidates)
+    return pid, value, "within_5pct"
 
 
 def _step(button: str, config: ClickerConfig,
@@ -455,13 +533,14 @@ class ClickBackend(Protocol):
     def move(self, x: float, y: float) -> None: ...
     def mouse_down(self, x: float, y: float) -> None: ...
     def mouse_up(self, x: float, y: float) -> None: ...
+    def scroll(self, x: float, y: float, delta: int) -> None: ...
 
 
 class DryRunBackend:
     """只记录、不真正发事件。用于 `--clicker-dry-run` 和单测。"""
 
     def __init__(self) -> None:
-        self.events: list[tuple[str, float, float]] = []
+        self.events: list[tuple] = []
 
     def preflight(self) -> bool:
         return True
@@ -475,6 +554,10 @@ class DryRunBackend:
     def mouse_up(self, x: float, y: float) -> None:
         self.events.append(("up", x, y))
 
+    def scroll(self, x: float, y: float, delta: int) -> None:
+        """滚轮：delta>0 向上（加额度），<0 向下。只记录。"""
+        self.events.append(("scroll", x, y, int(delta)))
+
 
 # CoreGraphics 常量
 kCGEventLeftMouseDown = 1
@@ -483,6 +566,7 @@ kCGEventMouseMoved = 5
 kCGHIDEventTap = 0
 kCGMouseButtonLeft = 0
 kCGMouseEventClickState = 1
+kCGScrollEventUnitLine = 1
 
 
 class _CGPoint(ctypes.Structure):
@@ -580,6 +664,9 @@ class CGEventBackend:
             app.CGEventSetIntegerValueField.argtypes = [
                 ctypes.c_void_p, ctypes.c_uint32, ctypes.c_int64]
             app.CGEventSetIntegerValueField.restype = None
+        app.CGEventCreateScrollWheelEvent.argtypes = [
+            ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_int32]
+        app.CGEventCreateScrollWheelEvent.restype = ctypes.c_void_p
         app.CGPreflightPostEventAccess.argtypes = []
         app.CGPreflightPostEventAccess.restype = ctypes.c_bool
         app.CGRequestPostEventAccess.argtypes = []
@@ -623,6 +710,24 @@ class CGEventBackend:
     def mouse_up(self, x: float, y: float) -> None:
         self._post(kCGEventLeftMouseUp, x, y)
 
+    def scroll(self, x: float, y: float, delta: int) -> None:
+        """滚轮：先把光标移到 (x,y)，再发 line 单位的竖向滚动。
+
+        web 端的滑杆监听 wheel 事件；滚动事件本身没有坐标，落到**光标所在窗口**，
+        所以必须先 move。delta>0 = 向上滚（加额度），<0 = 向下。
+        """
+        if int(delta) == 0:
+            return
+        self.move(x, y)
+        event = self._app.CGEventCreateScrollWheelEvent(
+            None, kCGScrollEventUnitLine, 1, int(delta))
+        if not event:
+            raise ClickerError("CGEventCreateScrollWheelEvent 返回空事件")
+        try:
+            self._app.CGEventPost(kCGHIDEventTap, event)
+        finally:
+            self._cf.CFRelease(event)
+
 
 # ─────────────────────────── 执行器 ───────────────────────────
 
@@ -634,10 +739,16 @@ class Clicker:
                  rng: random.Random | None = None,
                  sleep: Callable[[float], None] = time.sleep,
                  clock: Callable[[], float] = time.monotonic,
-                 log: Callable[[str], None] | None = None) -> None:
+                 log: Callable[[str], None] | None = None,
+                 bet_slider: "BetSliderController | None" = None,
+                 force_slider: bool = False) -> None:
         config.validate()
         self.config = config
         self.backend = backend
+        self.bet_slider = bet_slider
+        self.force_slider = bool(force_slider)
+        if bet_slider is not None and dry_run:
+            bet_slider.dry_run = True
         self.dry_run = dry_run
         self.rng = rng or random.Random()
         self._sleep = sleep
@@ -650,14 +761,89 @@ class Clicker:
             return 0.0
         return max(0.0, base_ms * self.rng.uniform(0.8, 1.2) / 1000.0)
 
+    def _run_bet_slider(self, option: "Option",
+                        started: float) -> ClickResult:
+        """只走长按滑杆，不用任何快捷档位。"""
+        outcome = self.bet_slider.set_amount(float(option.amount))  # type: ignore[union-attr]
+        status = {"set": "clicked", "dry_run": "dry_run",
+                  "skipped": "skipped", "error": "error"}.get(
+                      outcome.status, "error")
+        return ClickResult(
+            status, action=option.kind, mapping="bet_slider",
+            target_bb=option.amount,
+            reason=("bet_slider" if status in ("clicked", "dry_run")
+                    else (outcome.reason or "bet_slider")),
+            error=outcome.error,
+            detail={"slider": outcome.to_dict()},
+            elapsed_ms=int((self._clock() - started) * 1000))
+
     def run(self, advice: "Advice") -> ClickResult:
         started = self._clock()
-        plan = plan_clicks(advice, self.config, self.rng)
+        option = advice.option
+        plan: ClickPlan | None = None
+        # 主动全下（kind=allin）也走滑杆：一直滚到顶端，不依赖 allin 按钮。
+        # 面对「别人下注 > 我的后手」时 options.py 给的是 kind=call
+        # （label=跟全下），仍走右侧 call 按钮，不在这里。
+        if self.bet_slider is not None and option.kind == "allin":
+            outcome = self.bet_slider.set_all_in()
+            status = {"set": "clicked", "dry_run": "dry_run",
+                      "skipped": "skipped", "error": "error"}.get(
+                          outcome.status, "error")
+            return ClickResult(
+                status, action="allin", mapping="bet_slider",
+                target_bb=outcome.final_bb,
+                reason=("bet_slider_allin" if status in ("clicked", "dry_run")
+                        else (outcome.reason or "bet_slider_allin")),
+                error=outcome.error,
+                detail={"slider": outcome.to_dict()},
+                elapsed_ms=int((self._clock() - started) * 1000))
+        # --bet-slider-only：下注/加注无条件走滑杆，不判 5%、不看档位、
+        # 不做置灰检测。档位/置灰逻辑本身有截图和 OCR，跳过它们能少两个
+        # 失败点，适合「只想稳定用加注按钮」的场景。
+        if (self.bet_slider is not None and self.force_slider
+                and option.kind in ("bet", "raise")):
+            if option.amount is None:
+                return ClickResult("skipped", action=option.kind,
+                                   reason="amount_unknown",
+                                   elapsed_ms=int((self._clock() - started) * 1000))
+            self._log("[点击] 强制滑杆：跳过快捷档位/5%/置灰检测")
+            return self._run_bet_slider(option, started)
+        # 下注/加注：先看推荐额是否落在某个快捷档位的 5% 内 —— 在就点档位
+        # （快、稳）；不在才走长按滑杆手动加注。call/fold/allin 仍走普通按钮。
+        if (self.bet_slider is not None and option.kind in ("bet", "raise")
+                and option.amount is not None):
+            chosen = choose_preset_within(
+                option, dict(advice.preset_amounts),
+                self.config.preset_tolerance)
+            if chosen is not None and chosen[0] in self.config.buttons:
+                preset_id, target_bb, mapping = chosen
+                # 快捷档位可能因为后手不够 / 低于最低加注被置灰；置灰或
+                # 读不准都不点，退回滑杆精确下注。
+                enabled = None
+                checker = getattr(self.bet_slider, "preset_enabled", None)
+                if checker is not None:
+                    try:
+                        enabled = checker(preset_id)
+                    except Exception:   # noqa: BLE001 — 读不准按不可点
+                        enabled = None
+                if enabled is True:
+                    step = _step(preset_id, self.config, self.rng)
+                    if step is not None:
+                        plan = ClickPlan(option.kind, (step,),
+                                         preset=preset_id,
+                                         mapping=mapping, target_bb=target_bb)
+                else:
+                    self._log(f"[点击] 档位 {preset_id} 置灰/读不准，"
+                              "改走滑杆")
+            if plan is None:
+                return self._run_bet_slider(option, started)
+        if plan is None:
+            plan = plan_clicks(advice, self.config, self.rng)
         if plan.skip_reason is not None:
             return ClickResult(
                 "skipped", action=plan.action, preset=plan.preset,
                 mapping=plan.mapping, steps=plan.steps,
-                reason=plan.skip_reason,
+                reason=plan.skip_reason, target_bb=plan.target_bb,
                 elapsed_ms=int((self._clock() - started) * 1000))
         if not plan.steps:
             return ClickResult("skipped", action=plan.action,
@@ -671,12 +857,14 @@ class Clicker:
                 return ClickResult("error", action=plan.action, preset=plan.preset,
                                    mapping=plan.mapping, steps=plan.steps,
                                    error=f"{type(exc).__name__}: {exc}",
+                                   target_bb=plan.target_bb,
                                    elapsed_ms=int((self._clock() - started) * 1000))
             if not allowed:
                 return ClickResult(
                     "error", action=plan.action, preset=plan.preset,
                     mapping=plan.mapping, steps=plan.steps,
                     error="accessibility_permission_denied",
+                    target_bb=plan.target_bb,
                     elapsed_ms=int((self._clock() - started) * 1000))
 
         down_at: tuple[float, float] | None = None
@@ -703,10 +891,11 @@ class Clicker:
             return ClickResult("error", action=plan.action, preset=plan.preset,
                                mapping=plan.mapping, steps=plan.steps,
                                error=f"{type(exc).__name__}: {exc}",
+                               target_bb=plan.target_bb,
                                elapsed_ms=int((self._clock() - started) * 1000))
 
         return ClickResult(
             "dry_run" if self.dry_run else "clicked",
             action=plan.action, preset=plan.preset, mapping=plan.mapping,
-            steps=plan.steps,
+            steps=plan.steps, target_bb=plan.target_bb,
             elapsed_ms=int((self._clock() - started) * 1000))

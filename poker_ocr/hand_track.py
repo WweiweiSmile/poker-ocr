@@ -116,6 +116,8 @@ ALL_IN_CONFIRM_FRAMES = 2
 # `finish_current()` / 换手之后等新手信号的上限帧数。超过就强制开新手：
 # 牌背/弹窗可能让 hero 手牌和庄位连续读不到，不能无限等下去。
 AWAIT_NEW_HAND_MAX_FRAMES = 20
+# 开局头几帧的庄位确认：连续读到同一个 D 这么多帧，才相信 hero 的位置。
+DEALER_SETTLE_FRAMES = 2
 
 # 新手开局的头几秒：这一手还没任何动作时，hero 手牌从旧读数变成真读数
 # 只能是 OCR 纠正。真人一手牌不可能几秒内打完，这个窗口内换牌不能当成
@@ -146,6 +148,17 @@ STREET_ACCOUNT_TOLERANCE_RATIO = 0.1    # 或本街投入的 10%，取大者
 # 爆炸底池强制前注：每人 5BB。横幅没抓到时，用「ante≥5 且翻前无动作」
 # 兜底识别，不能把这条强制前注当成一次翻前行动机会。
 BOMB_ANTE_BB = 5.0
+# 第二个兜底方向（2026-11-10 实测 54BB 底池：横幅会被大筹码动画盖住/晚到）：
+# **翻前没有任何行动 + 底池 ÷ 在局人数正好落在客户端的前注水位（5BB/6BB）**，
+# 并且至少 4 人参与、连续 BOMB_CONFIRM_FRAMES 帧都成立才钉。
+#
+# 口径必须收这么紧：普通底池的人均额也常常是整数 —— 单挑 4BB/2 人 = 2、
+# 9 人 27BB = 3（README 旧口径说「不会整除」是错的）。宽口径会把普通牌局
+# 判成 Explosive pot，提示词、落库、对手画像全部跟着错。
+BOMB_PER_PERSON_LEVELS = (5.0, 6.0)
+BOMB_PER_PERSON_TOLERANCE = 0.02
+BOMB_MIN_PLAYERS = 4
+BOMB_CONFIRM_FRAMES = 2
 
 
 def street_of_board(board_len: int) -> str | None:
@@ -407,6 +420,16 @@ class LiveHandTracker:
         # 本手开始时间。新手开局头几秒里的换牌只当 OCR 纠正，见
         # PREFLOP_CARD_CORRECTION_SECONDS。
         self._hand_started_at: datetime | None = None
+        # 新手开局头两帧的庄位读数会抖（实测单挑 2026-11-10 21:42：同一手
+        # 5s4c 先读成 hero BB、115ms 后纠正成 hero SB）。庄位没连续确认
+        # DEALER_SETTLE_FRAMES 帧之前不给建议，否则会先按错误位置问一次模型，
+        # 纠正后同一个决策点又问一次（看板连闪两条）。
+        self._dealer_seen: str | None = None
+        self._dealer_stable = 0
+        self._hand_obs_frames = 0
+        # 连续多少帧满足「人均前注水位 + 翻前无动作」：够 BOMB_CONFIRM_FRAMES
+        # 才把整手标成爆炸底池（单帧底池读数抖动不算）。
+        self._bomb_streak = 0
         # seat_id → 连续读到 all_in 的帧数。够 ALL_IN_CONFIRM_FRAMES 才写记录。
         self._all_in_streak: dict[str, int] = {}
         # 上一次 observe 不给建议的原因（只给 live 打日志 / 发 advice_skip 事件）。
@@ -465,7 +488,8 @@ class LiveHandTracker:
             self._await_hand = None
             self._await_frames = 0
 
-        if self._is_new_hand(state, cards, board_len):
+        new_hand = self._is_new_hand(state, cards, board_len)
+        if new_hand:
             if self.hand is not None:
                 # 正常换手（不是 finish_current 主动收手）也要补全最后一街：
                 # 弃牌徽章漏读时，最后几帧的 active 差集就是全部证据。
@@ -487,18 +511,49 @@ class LiveHandTracker:
                 self._all_in_streak.clear()
                 return None
             self._start_hand(state, cards, board_len, board)
+        elif (self.hand is not None and state.dealer and self.hand.dealer
+                and self.hand.dealer != state.dealer):
+            # 发牌期庄位纠正（不是换手）：把这一手钉死的位置一起改掉，
+            # 否则 hero 更新成 SB、对手还留在 SB，提示词自相矛盾。
+            self._correct_seat_positions(state, self.hand)
 
         hand = self.hand
         assert hand is not None
+        self._hand_obs_frames += 1
+        dealer = state.dealer
+        if dealer:
+            if dealer == self._dealer_seen:
+                self._dealer_stable += 1
+            else:
+                self._dealer_seen = dealer
+                self._dealer_stable = 1
         hand.hero_seat_id = state.hero_seat_id or hand.hero_seat_id
 
         # 这一帧仍在局的人。弃牌徽章漏读时，街末就是靠它和街初快照的差集
         # 补出弃牌；不只看 action=="fold"（实测大量弃牌徽章根本没读到）。
         current_active = self._active_seats(state)
 
-        # 手牌/位置在遮挡帧里可能读空，只更新有值的
+        hero = self._hero(state)
+        # 手牌/位置在遮挡帧里可能读空，只更新有值的。
+        #
+        # **弃牌后不再改写已经确认过的手牌**：一手之内底牌物理上不会变，而
+        # 弃牌后 WPK 会把 hero 手牌调暗（V 246 → ≈100），读数系统性变差 ——
+        # 实测 2026-11-08 22:51 的 6s4d 在弃牌后 1.4s 被读成 8s4d，整手牌
+        # 记成 84（cards.py 的 6/8 拓扑仲裁只在「第二个候选是 6」时介入，
+        # 暗牌糊出的第二个假孔把 holes=2 判成了 8）。弃牌后本来也不再需要
+        # 手牌给建议，所以这里的「新读数」只可能是降质读数：保留弃牌前的，
+        # 差异记进 cards_warnings 供复盘。中途接管（还没有手牌）照常补。
+        hero_folded = hero is not None and bool(
+            hero.fold or hero.status == "folded")
         if cards:
-            hand.hero_cards = cards
+            if not hand.hero_cards or not hero_folded:
+                hand.hero_cards = cards
+            elif tuple(cards) != tuple(hand.hero_cards):
+                note = (f"hero_cards: 弃牌后读数 {''.join(cards)} 与弃牌前的 "
+                        f"{''.join(hand.hero_cards)} 不同（暗牌降质），"
+                        "保留弃牌前读数")
+                if note not in hand.cards_warnings:
+                    hand.cards_warnings.append(note)
         # 这一手遇到过的牌面异常。只留真正值得复盘的原因（回退/牌背/遮挡/
         # 张数不合法），跳过动画期间每帧的「新读数待确认」，并限 20 条。
         for warning in cards_warnings:
@@ -506,7 +561,6 @@ class LiveHandTracker:
                 continue
             if warning not in hand.cards_warnings and len(hand.cards_warnings) < 20:
                 hand.cards_warnings.append(warning)
-        hero = self._hero(state)
         if hero is not None and hero.position:
             hand.hero_position = hero.position
         # 桌型 = 座位数。不能再拿 players_in_hand：弃牌会让 9 人桌越打越小，
@@ -547,6 +601,16 @@ class LiveHandTracker:
         # inferred fold（名字/位置沿用离桌前），让 AI 在当前街的行动线里就能
         # 看到「这家已经弃牌」。状态层误判恢复时由上一步精确撤销。
         self._record_left_folds(state, hand)
+        # 横幅之外的第二个判据：翻前无动作 + 人均正好是客户端前注水位
+        # （爆炸底池的强制前注）。放在动作记录之后，避免把本帧刚到的下注
+        # 误判成前注；还要连续 BOMB_CONFIRM_FRAMES 帧都成立才钉，单帧抖动不算。
+        if not hand.bomb_pot:
+            if self._looks_like_bomb_pot(state, hand, board_len):
+                self._bomb_streak += 1
+                if self._bomb_streak >= BOMB_CONFIRM_FRAMES:
+                    hand.bomb_pot = True
+            else:
+                self._bomb_streak = 0
         # 记录完本帧动作后再更新在局集合：本帧的弃牌徽章已经落成 fold，
         # 街末补弃牌时不会重复补。
         hand.active = set(current_active)
@@ -699,7 +763,18 @@ class LiveHandTracker:
         if self._shows_finished_board(board, board_len):
             return False
         if hand.dealer and state.dealer and hand.dealer != state.dealer:
-            return True
+            # 发牌期（无人行动 + 底池还在盲目水位）的庄位翻转更像读数抖动：
+            # 同一组手牌、同一手牌，只是 D 圆片晚一帧才认对。直接当换手会把
+            # 一手牌劈成两条记录，并让 AI 先按错的位置问一次。当成纠正，
+            # 交给后面 `hand.dealer = state.dealer or hand.dealer` 更新；
+            # 真换手会在 hero 手牌变化或牌面清空时再触发。
+            if (board_len == 0
+                    and self._in_deal_settle(hand)
+                    and self._pot_is_initial(state, hand)
+                    and tuple(cards) == tuple(hand.hero_cards or ())):
+                pass
+            else:
+                return True
         if (len(cards) == 2 and len(hand.hero_cards) == 2
                 and cards != hand.hero_cards):
             return True
@@ -728,13 +803,85 @@ class LiveHandTracker:
 
     # ─────────────────────────── 换手 ───────────────────────────
 
+    def _correct_seat_positions(self, state: FrameState,
+                               hand: _LiveHand) -> None:
+        """发牌期庄位读数纠正后，重写这一手钉死的位置。
+
+        `_seat_info` 优先用 start_stacks 里的「开手位置」，那是按第一帧的 D
+        钉的；D 晚一帧才认对时如果不改，hero 记录成 SB、对手还留在 SB，
+        提示词里的位置就自相矛盾。动作记录/底池分账仍按同一套位置。
+        """
+        positions = {p.seat_id: p.position for p in state.players
+                     if p.position}
+        if not positions:
+            return
+        for seat_id, position in positions.items():
+            if seat_id == state.hero_seat_id:
+                continue
+            entry = hand.start_stacks.get(seat_id)
+            if entry is not None and entry.get("position") != position:
+                entry["position"] = position
+        for row in hand.table_roster:
+            seat_id = row.get("seat_id")
+            if seat_id in positions:
+                row["position"] = positions[seat_id]
+        hero_position = positions.get(state.hero_seat_id or "")
+        if hero_position:
+            hand.hero_position = hero_position
+
+    def _looks_like_bomb_pot(self, state: FrameState, hand: _LiveHand,
+                             board_len: int) -> bool:
+        """没有横幅时，用「人均正好是客户端前注水位 + 翻前无行动」兜底判爆炸底池。
+
+        爆炸底池的规则是所有在座玩家强制放同样多的前注（实测 5BB/6BB），然后
+        直接发翻牌；所以底池 ÷ 人数一定落在 `BOMB_PER_PERSON_LEVELS` 上。
+        判据刻意收得很紧：
+
+          · 至少 `BOMB_MIN_PLAYERS` 人（单挑/3 人局的整数人均很常见）；
+          · 人均是整 BB，且正好是 5 或 6（不是「任何整数 ≥2」）；
+          · 翻前一条 call/raise/check 都没有（有就不是强制前注）；
+          · 翻牌已经有人下注时不再判（底池不再只是前注）。
+
+        调用方还要连续 `BOMB_CONFIRM_FRAMES` 帧都成立才钉标记 —— 单帧读数
+        抖动不足以把整手牌标成 Explosive pot。
+        """
+        if board_len not in (0,) and board_len < 3:
+            return False                     # 1/2 张是动画，不判
+        if board_len >= 3 and (state.street_bet_total or 0.0) > 0.01:
+            return False                     # 翻牌已经有人下注：底池不再只是前注
+        try:
+            if hand.street_actions(PREFLOP):
+                return False
+        except Exception:                    # noqa: BLE001 — 查不到就别判
+            return False
+        pot = state.pot
+        players = state.players_in_hand or 0
+        if pot is None or pot <= 0 or players < BOMB_MIN_PLAYERS:
+            return False
+        per_person = pot / players
+        level = round(per_person)
+        if abs(per_person - level) > BOMB_PER_PERSON_TOLERANCE:
+            return False
+        return float(level) in BOMB_PER_PERSON_LEVELS
+
     def _is_new_hand(self, state: FrameState, cards: tuple[str, ...],
                      board_len: int) -> bool:
         hand = self.hand
         if hand is None:
             return True
         if hand.dealer and state.dealer and hand.dealer != state.dealer:
-            return True
+            # 发牌期（无人行动 + 底池还在盲目水位）的庄位翻转更像读数抖动：
+            # 同一组手牌、同一手牌，只是 D 圆片晚一帧才认对。直接当换手会把
+            # 一手牌劈成两条记录，并让 AI 先按错的位置问一次。当成纠正，
+            # 交给后面 `hand.dealer = state.dealer or hand.dealer` 更新；
+            # 真换手会在 hero 手牌变化或牌面清空时再触发。
+            if (board_len == 0
+                    and self._in_deal_settle(hand)
+                    and self._pot_is_initial(state, hand)
+                    and tuple(cards) == tuple(hand.hero_cards or ())):
+                pass
+            else:
+                return True
         # 公共牌读空（0 张）连续两帧才是换手。**不把 4→3 当换手**：
         # 转牌某一张被动画/遮挡读丢时，牌面会从 4 掉到 3；实测这会把同一手
         # 劈成两半，AI 建议留在前半段、all-in/亮牌落在后半段。
@@ -863,6 +1010,10 @@ class LiveHandTracker:
         )
         self._used_hand_ids.add(identity.hand_id)
         self._hand_started_at = started_at
+        self._hand_obs_frames = 0
+        self._dealer_seen = None
+        self._dealer_stable = 0
+        self._bomb_streak = 0
         hand = _LiveHand(
             hand_id=identity.hand_id,
             hand_index=self.hand_seq,
@@ -1582,6 +1733,19 @@ class LiveHandTracker:
         # 也写进每一手牌。
         if not cards_reliable:
             hand.cards_unreliable = True
+            return None
+        # 单挑开局头两帧：D 圆片可能还停在上一手的座位，hero 的位置会先读错
+        # 再纠正（实测 5s4c 先 BB 后 SB）。位置没稳定之前先不投建议，
+        # 否则会先按错位置问一次、纠正后同一个决策点又问一次。
+        #
+        # 只限单挑：满桌时 hero 通常不是第一个行动，轮到他时已经有人行动过，
+        # `_in_deal_settle`（要求本手零动作）自然为假，不需要这条闸；
+        # 反过来给满桌也加，只会让「中途接管、第一帧就轮到我」这种局面
+        # 白等两帧。庄位纠正本身（_correct_seat_positions）对所有桌型都生效。
+        if (state.players_in_hand <= 2
+                and self._hand_obs_frames <= DEALER_SETTLE_FRAMES
+                and self._in_deal_settle(hand)
+                and self._dealer_stable < DEALER_SETTLE_FRAMES):
             return None
 
         # 本街「底池账单」对不上：有人下注读小了（24.5 → 4.5）或漏抓了行动，

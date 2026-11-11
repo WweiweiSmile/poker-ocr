@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """桌面自动点击的单测：坐标、配置、档位映射、执行顺序、安全闸。
 
-    .venv/bin/python tests/test_clicker.py
+    nv tests/test_clicker.py
 
 全部是纯逻辑 + 假后端，不发送真实鼠标事件，不需要 Tk。
 """
@@ -13,6 +13,7 @@ import random
 import sys
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -21,7 +22,7 @@ from poker_ocr.advice import Advice, Option  # noqa: E402
 from poker_ocr.clicker import (  # noqa: E402
     DEFAULT_INSET_RATIO, PRESET_IDS, Clicker, ClickerConfig,
     ClickerConfigError, DisplayInfo, DryRunBackend, Rect, choose_preset,
-    plan_clicks, rect_inside_displays,
+    choose_preset_within, plan_clicks, rect_inside_displays,
 )
 
 FAILS: list[str] = []
@@ -70,6 +71,10 @@ class FakeBackend:
         if self.fail_on == "up":
             raise RuntimeError("up failed")
         self.events.append(("up", x, y))
+
+    def scroll(self, x: float, y: float, delta: int) -> None:
+        self.events.append(("scroll", x, y, int(delta)))
+
 
 
 # ─────────────────────────── 矩形 ───────────────────────────
@@ -147,10 +152,13 @@ def test_config_roundtrip() -> None:
     check(loaded.confirm_gap_ms == 250, "confirm_gap_ms 应原样读回")
     check(loaded.retry_delay_ms == 750 and loaded.retry_count == 2,
           "重试参数应原样读回")
+    check(loaded.preset_tolerance == 0.05,
+          f"preset_tolerance 默认应是 0.05，实际 {loaded.preset_tolerance}")
 
 
 def test_config_validates_retry_bounds() -> None:
-    for kwargs in ({"retry_delay_ms": -1}, {"retry_count": 6}):
+    for kwargs in ({"retry_delay_ms": -1}, {"retry_count": 6},
+                   {"preset_tolerance": -0.1}, {"preset_tolerance": 1.1}):
         cfg = cfg_all(**kwargs)
         try:
             cfg.validate()
@@ -215,6 +223,197 @@ def test_config_rejects_bad_version() -> None:
 
 
 # ─────────────────────────── 档位映射 ───────────────────────────
+
+
+def test_choose_preset_within_tolerance() -> None:
+    """5% 内选快捷档位；超过 5% 返回 None（调用方再走滑杆）。"""
+    presets = {"raise-1/3": 3.0, "raise-1/2": 5.0, "raise-2/3": 7.0,
+               "raise-1": 10.0, "raise-1.2": 12.0}
+    chosen = choose_preset_within(Option("bet", "Bet", "bet", 5.2), presets)
+    check(chosen is not None and chosen[0] == "raise-1/2",
+          f"5.2 对 5.0 是 4% 应选 1/2，实际 {chosen}")
+    check(chosen[2] == "within_5pct", f"mapping 应为 within_5pct，实际 {chosen}")
+    check(choose_preset_within(Option("bet", "Bet", "bet", 6.0), presets) is None,
+          "6.0 对 5.0/7.0 都超过 5%，应返回 None")
+    exact = choose_preset_within(Option("bet", "Bet", "bet", 5.0), presets)
+    check(exact is not None and exact[0] == "raise-1/2",
+          f"正好 5.0 应选 1/2，实际 {exact}")
+
+
+def test_choose_preset_within_picks_closest() -> None:
+    presets = {"raise-1/3": 5.0, "raise-1/2": 5.2}
+    chosen = choose_preset_within(Option("bet", "Bet", "bet", 5.1), presets)
+    check(chosen is not None and chosen[0] == "raise-1/2",
+          f"5.1 离 5.2 更近，应选 1/2，实际 {chosen}")
+
+
+def test_slider_prefers_preset_within_5pct() -> None:
+    """推荐额在快捷档位 5% 内：点档位，不碰滑杆。"""
+    class FakeSlider:
+        def __init__(self) -> None:
+            self.called = False
+
+        def preset_enabled(self, _preset_id):
+            return True
+
+        def set_amount(self, _target):
+            self.called = True
+            return SimpleNamespace(status="set", error=None, reason="bet_slider",
+                                   to_dict=lambda: {"status": "set"})
+
+    cfg = cfg_all()
+    slider = FakeSlider()
+    backend = FakeBackend()
+    clicker = Clicker(cfg, backend, bet_slider=slider)
+    advice = adv(Option("bet", "Bet 5.2", "bet", 5.2), {"raise-1/2": 5.0})
+    r = clicker.run(advice)
+    check(r.status == "clicked" and r.mapping == "within_5pct"
+          and r.preset == "raise-1/2",
+          f"5% 内应点档位，实际 {r.to_dict()}")
+    check(not slider.called, "5% 内不该走滑杆")
+    check([e[0] for e in backend.events] == ["move", "down", "up"],
+          f"应只点一次档位，实际 {backend.events}")
+
+
+def test_slider_used_when_outside_5pct_or_button_missing() -> None:
+    class FakeSlider:
+        def __init__(self) -> None:
+            self.targets: list[float] = []
+
+        def set_amount(self, target):
+            self.targets.append(target)
+            return SimpleNamespace(status="set", error=None, reason="bet_slider",
+                                   to_dict=lambda: {"status": "set"})
+
+    slider = FakeSlider()
+    cfg = cfg_all()
+    clicker = Clicker(cfg, FakeBackend(), bet_slider=slider)
+    clicker.run(adv(Option("bet", "Bet 6.5", "bet", 6.5), {"raise-1/2": 5.0}))
+    check(slider.targets == [6.5], f"超出 5% 应走滑杆 6.5，实际 {slider.targets}")
+
+    # 档位在 5% 内但按钮没标定 → 退回滑杆，不 skip
+    cfg2 = cfg_all()
+    cfg2.buttons.pop("raise-1/2")
+    slider2 = FakeSlider()
+    clicker2 = Clicker(cfg2, FakeBackend(), bet_slider=slider2)
+    clicker2.run(adv(Option("bet", "Bet 5.2", "bet", 5.2), {"raise-1/2": 5.0}))
+    check(slider2.targets == [5.2],
+          f"档位按钮缺失应退回滑杆，实际 {slider2.targets}")
+
+
+def test_slider_used_when_preset_disabled() -> None:
+    """5% 内但档位置灰（后手不够/低于最低加注）→ 退回滑杆。"""
+    class FakeSlider:
+        def __init__(self) -> None:
+            self.targets: list[float] = []
+
+        def preset_enabled(self, _preset_id):
+            return False
+
+        def set_amount(self, target):
+            self.targets.append(target)
+            return SimpleNamespace(status="set", error=None, reason="bet_slider",
+                                   to_dict=lambda: {"status": "set"})
+
+    slider = FakeSlider()
+    clicker = Clicker(cfg_all(), FakeBackend(), bet_slider=slider)
+    r = clicker.run(adv(Option("bet", "Bet 5.2", "bet", 5.2),
+                        {"raise-1/2": 5.0}))
+    check(r.mapping == "bet_slider" and slider.targets == [5.2],
+          f"档位置灰应走滑杆 5.2，实际 {r.to_dict()} {slider.targets}")
+
+
+def test_slider_used_when_preset_state_unknown() -> None:
+    """档位状态读不准（None）也按不可点，退回滑杆。"""
+    class FakeSlider:
+        def __init__(self) -> None:
+            self.targets: list[float] = []
+
+        def preset_enabled(self, _preset_id):
+            return None
+
+        def set_amount(self, target):
+            self.targets.append(target)
+            return SimpleNamespace(status="set", error=None, reason="bet_slider",
+                                   to_dict=lambda: {"status": "set"})
+
+    slider = FakeSlider()
+    clicker = Clicker(cfg_all(), FakeBackend(), bet_slider=slider)
+    clicker.run(adv(Option("bet", "Bet 5.2", "bet", 5.2),
+                    {"raise-1/2": 5.0}))
+    check(slider.targets == [5.2],
+          f"状态未知应走滑杆 5.2，实际 {slider.targets}")
+
+
+def test_force_slider_skips_presets() -> None:
+    """--bet-slider-only：即使档位在 5% 内且可点，也强制走滑杆。"""
+    class FakeSlider:
+        def __init__(self) -> None:
+            self.targets: list[float] = []
+
+        def preset_enabled(self, _preset_id):
+            return True
+
+        def set_amount(self, target):
+            self.targets.append(target)
+            return SimpleNamespace(status="set", error=None, reason="bet_slider",
+                                   to_dict=lambda: {"status": "set",
+                                                    "target_bb": target})
+
+    slider = FakeSlider()
+    backend = FakeBackend()
+    clicker = Clicker(cfg_all(), backend, bet_slider=slider,
+                      force_slider=True)
+    r = clicker.run(adv(Option("bet", "Bet 5.2", "bet", 5.2),
+                        {"raise-1/2": 5.0}))
+    check(r.mapping == "bet_slider" and slider.targets == [5.2],
+          f"强制滑杆应直接到 5.2，实际 {r.to_dict()} {slider.targets}")
+    check(not backend.events, "强制滑杆不该再点档位")
+
+    r2 = clicker.run(adv(Option("bet", "Bet", "bet", None)))
+    check(r2.status == "skipped" and r2.reason == "amount_unknown"
+          and slider.targets == [5.2],
+          f"金额未知应 skip 而不是回退档位，实际 {r2.to_dict()}")
+
+
+def test_clicker_routes_allin_to_slider_top() -> None:
+    """主动 allin（kind=allin）走滑杆顶端，不依赖 allin 按钮。"""
+    class FakeSlider:
+        def __init__(self) -> None:
+            self.called = 0
+
+        def set_all_in(self):
+            self.called += 1
+            return SimpleNamespace(status="set", error=None,
+                                   reason="bet_slider_allin",
+                                   final_bb=68.0,
+                                   to_dict=lambda: {"status": "set",
+                                                    "final_bb": 68.0})
+
+    slider = FakeSlider()
+    clicker = Clicker(cfg_all(), FakeBackend(), bet_slider=slider)
+    r = clicker.run(adv(Option("all-in", "全下 68", "allin", 68.0)))
+    check(r.status == "clicked" and r.mapping == "bet_slider"
+          and slider.called == 1,
+          f"allin 应走滑杆顶端，实际 {r.to_dict()} called={slider.called}")
+    check(r.target_bb == 68.0, f"target 应为最终 68，实际 {r.target_bb}")
+
+
+def test_clicker_allin_call_stays_on_call_button() -> None:
+    """别人下注 > 后手时 kind=call（跟全下），走右侧 call 按钮，不碰滑杆。"""
+    class FakeSlider:
+        def set_all_in(self):
+            raise AssertionError("跟全下不该走滑杆")
+
+        def set_amount(self, _target):
+            raise AssertionError("跟全下不该走滑杆")
+
+    backend = FakeBackend()
+    clicker = Clicker(cfg_all(), backend, bet_slider=FakeSlider())
+    r = clicker.run(adv(Option("call", "跟全下 92", "call", 92.0)))
+    check(r.status == "clicked" and r.action == "call"
+          and [e[0] for e in backend.events] == ["move", "down", "up"],
+          f"跟全下应点 call，实际 {r.to_dict()} {backend.events}")
 
 def test_choose_preset_direct() -> None:
     got = choose_preset(Option("raise-1/2", "Raise", "raise", 2.25), PRESETS)
@@ -345,6 +544,36 @@ def test_clicker_releases_mouse_on_failure() -> None:
           f"按下失败后仍应尽力抬起：{backend.events}")
 
 
+def test_bet_slider_path_bypasses_buttons() -> None:
+    """注入 bet_slider 后，下注/加注直接走滑杆，不再点档位/主按钮。"""
+    class FakeSlider:
+        def __init__(self) -> None:
+            self.target = None
+
+        def set_amount(self, target):
+            self.target = target
+            return SimpleNamespace(status="set", error=None, reason="bet_slider",
+                                   to_dict=lambda: {"status": "set",
+                                                    "target_bb": target})
+
+    cfg = cfg_all()
+    slider = FakeSlider()
+    backend = FakeBackend()
+    clicker = Clicker(cfg, backend, bet_slider=slider)
+    r = clicker.run(adv(Option("bet", "Bet 5", "bet", 5.0)))
+    check(r.status == "clicked" and r.mapping == "bet_slider",
+          f"应走滑杆，实际 {r.to_dict()}")
+    check(slider.target == 5.0, f"目标额应传给滑杆，实际 {slider.target}")
+    check(not backend.events, f"滑杆路径不该再点普通按钮，实际 {backend.events}")
+    check(r.detail and r.detail["slider"]["status"] == "set",
+          f"明细应带滑杆结果，实际 {r.detail}")
+
+    # 跟注不归滑杆管
+    r2 = clicker.run(adv(Option("call", "Call", "call", 1.0)))
+    check(r2.mapping != "bet_slider" and slider.target == 5.0,
+          f"跟注不该再调滑杆，实际 {r2.to_dict()}")
+
+
 # ─────────────────────────── 显示器 ───────────────────────────
 
 def test_rect_inside_displays() -> None:
@@ -371,6 +600,15 @@ def main() -> int:
         test_config_accepts_list_coordinates,
         test_config_rejects_bad_version,
         test_choose_preset_direct,
+        test_choose_preset_within_tolerance,
+        test_choose_preset_within_picks_closest,
+        test_slider_prefers_preset_within_5pct,
+        test_slider_used_when_outside_5pct_or_button_missing,
+        test_slider_used_when_preset_disabled,
+        test_slider_used_when_preset_state_unknown,
+        test_force_slider_skips_presets,
+        test_clicker_routes_allin_to_slider_top,
+        test_clicker_allin_call_stays_on_call_button,
         test_choose_preset_nearest_preflop,
         test_choose_preset_tie_breaks_by_order,
         test_choose_preset_missing_amount,
@@ -383,6 +621,7 @@ def main() -> int:
         test_clicker_dry_run_sends_no_events,
         test_clicker_blocks_without_accessibility,
         test_clicker_releases_mouse_on_failure,
+        test_bet_slider_path_bypasses_buttons,
         test_rect_inside_displays,
     ]
     for t in tests:
