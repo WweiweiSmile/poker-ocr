@@ -6,7 +6,7 @@
 所以「不该改」的用例和「该改」的一样多。
 
 不依赖 pytest：
-    .venv/bin/python tests/test_name_lexicon.py
+    nv tests/test_name_lexicon.py
 """
 
 from __future__ import annotations

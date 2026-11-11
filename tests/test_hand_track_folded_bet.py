@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """HUD 残留 bet pill 不能把已弃牌座位推成 3-bet。
 
-    .venv/bin/python tests/test_hand_track_folded_bet.py
+    nv tests/test_hand_track_folded_bet.py
 
 2026-11-06 实盘：SB 已经弃牌，bet 槽读到 20.5；底池 20.5、本街总下注
 16.5，按座位下注反推成了「SB 3-bet」，整手牌被标成 3-bet 底池。

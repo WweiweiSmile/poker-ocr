@@ -2,13 +2,13 @@
 """把已导出的手牌 + 实时日志，转成 LLaMA-Factory 能直接吃的 SFT 数据集。
 
     # 先看看能转出多少条，不写文件
-    .venv/bin/python tools/build_sft_dataset.py --dry-run
+    nv tools/build_sft_dataset.py --dry-run
 
     # 真写：data/sft/{train,eval}.json + dataset_info.json + system.txt
-    .venv/bin/python tools/build_sft_dataset.py --out data/sft
+    nv tools/build_sft_dataset.py --out data/sft
 
     # 带上理由一起学（输出更长、更慢，但能给复盘用）
-    .venv/bin/python tools/build_sft_dataset.py --with-reason --out data/sft
+    nv tools/build_sft_dataset.py --with-reason --out data/sft
 
 ## 为什么用「当时的提示词」而不是另写一套
 

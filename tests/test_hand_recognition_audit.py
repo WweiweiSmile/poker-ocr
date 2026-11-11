@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """手牌识别问题倒查工具：对齐 states/events、评分、explain、导出。
 
-    .venv/bin/python tests/test_hand_recognition_audit.py
+    nv tests/test_hand_recognition_audit.py
 """
 
 from __future__ import annotations

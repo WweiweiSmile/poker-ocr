@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """LiveProcessor 的事件出口：每一帧都发 frame，丢弃帧带 errors、不更新 state。
 
-    .venv/bin/python tests/test_live_events.py
+    nv tests/test_live_events.py
 
 不连摄像头、不加载模型：用桩 StateStream 返回 record/discard。
 """

@@ -14,10 +14,10 @@
 不依赖 advice.facts（老记录里大多是空值）。
 
 用法：
-    .venv/bin/python tools/advice_scorecard.py
-    .venv/bin/python tools/advice_scorecard.py --since 2026-11-04T20:00
-    .venv/bin/python tools/advice_scorecard.py --replay /tmp/advice-ab.json
-    .venv/bin/python tools/advice_scorecard.py --json /tmp/scorecard.json
+    nv tools/advice_scorecard.py
+    nv tools/advice_scorecard.py --since 2026-11-04T20:00
+    nv tools/advice_scorecard.py --replay /tmp/advice-ab.json
+    nv tools/advice_scorecard.py --json /tmp/scorecard.json
 """
 
 from __future__ import annotations

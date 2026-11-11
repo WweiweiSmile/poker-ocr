@@ -16,7 +16,7 @@ AI 模型（advice.py 的 `advise`），走 OpenAI 兼容的 /chat/completions�
       FROM review_hands WHERE deleted_at IS NULL;" > /tmp/hands.jsonl
 
     # 2) 跑对比。每个决策点 = 一次真实模型调用，按额度计费，默认上限 --limit 20
-    .venv/bin/python tools/ai_advice_dev_hands.py /tmp/hands.jsonl
+    nv tools/ai_advice_dev_hands.py /tmp/hands.jsonl
 
 ## 与 replay_dev_hands.py 相同的口径
 

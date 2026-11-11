@@ -10,13 +10,13 @@ scorecard 比的是「复跑 vs 当时记录的建议」——里面混着**代�
     # A：改动前
     cp poker_ocr/ranges.py /tmp/new.py
     git show HEAD:poker_ocr/ranges.py > poker_ocr/ranges.py
-    .venv/bin/python tools/replay_live_decisions.py --model --since 2026-11-04 --json /tmp/ab-a.json
+    nv tools/replay_live_decisions.py --model --since 2026-11-04 --json /tmp/ab-a.json
     cp /tmp/new.py poker_ocr/ranges.py
 
     # B：改动后
-    .venv/bin/python tools/replay_live_decisions.py --model --since 2026-11-04 --json /tmp/ab-b.json
+    nv tools/replay_live_decisions.py --model --since 2026-11-04 --json /tmp/ab-b.json
 
-    .venv/bin/python tools/ab_diff.py /tmp/ab-a.json /tmp/ab-b.json
+    nv tools/ab_diff.py /tmp/ab-a.json /tmp/ab-b.json
 
 **噪声基线**：同一份代码连跑两遍，翻转率通常 3–5%（temperature + 上下文敏感）。
 低于这个数的差异不要当信号。

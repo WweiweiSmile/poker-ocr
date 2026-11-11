@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """tools/hand_leak_report.py 的单测：净值口径、补码识别、炸弹池判定、牌力。
 
-    .venv/bin/python tests/test_hand_leak_report.py
+    nv tests/test_hand_leak_report.py
 """
 
 from __future__ import annotations

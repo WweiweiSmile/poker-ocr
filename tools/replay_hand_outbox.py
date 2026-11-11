@@ -19,11 +19,11 @@
   · 可回填 advice.context 的桌况统计与逐座位画像。
 
     # 只看事实层（不调模型）
-    .venv/bin/python tools/replay_hand_outbox.py --hand 20261030-acf43ea34f
+    nv tools/replay_hand_outbox.py --hand 20261030-acf43ea34f
 
     # 真跑模型
-    .venv/bin/python tools/replay_hand_outbox.py --hand 20261030-acf43ea34f --model
-    .venv/bin/python tools/replay_hand_outbox.py --all --model --json /tmp/rerun.json
+    nv tools/replay_hand_outbox.py --hand 20261030-acf43ea34f --model
+    nv tools/replay_hand_outbox.py --all --model --json /tmp/rerun.json
 
 注意：outbox 的 `advices` 是**当时**的建议，不是 hand 记录里的实际动作；
 `action_index` 是「下一个动作」的全局下标（0 起）。

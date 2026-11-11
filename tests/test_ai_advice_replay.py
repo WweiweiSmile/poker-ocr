@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """tools/ai_advice_dev_hands.py 的重建逻辑测试（不连库、不调模型）。
 
-    .venv/bin/python tests/test_ai_advice_replay.py
+    nv tests/test_ai_advice_replay.py
 
 只测 walk_snapshots / classify：把一手真实形状的复盘手牌（dev 库 id=990010）
 喂进去，核对每个决策点的底池、需跟额、行动线截断、对手快照等关键字段。

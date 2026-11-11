@@ -28,10 +28,10 @@
       ORDER BY t.created_at DESC, t.id DESC;" > /tmp/review30.jsonl
 
     # 2) 只跑事实层（不花钱）
-    .venv/bin/python tools/compare_review_hands.py /tmp/review30.jsonl
+    nv tools/compare_review_hands.py /tmp/review30.jsonl
 
     # 3) 真跑模型
-    .venv/bin/python tools/compare_review_hands.py /tmp/review30.jsonl \
+    nv tools/compare_review_hands.py /tmp/review30.jsonl \
         --json logs/latest-advice-review30.json
 
 ## 对比口径

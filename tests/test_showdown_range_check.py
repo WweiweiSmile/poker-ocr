@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """摊牌反核范围的单元测试：`tools/showdown_range_check.py`。
 
-    .venv/bin/python tests/test_showdown_range_check.py
+    nv tests/test_showdown_range_check.py
 
 锁死三件事：
 

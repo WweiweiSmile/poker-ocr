@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """牌桌识别 HTTP API。
 
-    .venv/bin/python -m uvicorn api:app --host 0.0.0.0 --port 8000
+    nv -m uvicorn api:app --host 0.0.0.0 --port 8000
 
 接口文档（自动生成，可直接给对接方看）：http://localhost:8000/docs
 

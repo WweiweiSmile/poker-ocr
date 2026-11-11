@@ -33,9 +33,9 @@
 
 用法
 ────
-    .venv/bin/python tools/fold_curve_probe.py --source local
-    .venv/bin/python tools/fold_curve_probe.py --source db
-    .venv/bin/python tools/fold_curve_probe.py --source all --html /tmp/fold-curve.html
+    nv tools/fold_curve_probe.py --source local
+    nv tools/fold_curve_probe.py --source db
+    nv tools/fold_curve_probe.py --source all --html /tmp/fold-curve.html
 """
 
 from __future__ import annotations

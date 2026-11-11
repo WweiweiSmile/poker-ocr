@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """手牌 vs 范围：精确 behind、联合 MC、权益、去重牌、确定性与渲染。
 
-    .venv/bin/python tests/test_hand_vs_ranges.py
+    nv tests/test_hand_vs_ranges.py
 """
 
 from __future__ import annotations

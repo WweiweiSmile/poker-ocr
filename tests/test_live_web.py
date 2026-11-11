@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """实时 Web 看板：内存快照、SSE 首帧、静态页面、profile → 座位坐标。
 
-    .venv/bin/python tests/test_live_web.py
+    nv tests/test_live_web.py
 
 不依赖浏览器、不依赖 live 主循环：只起一个本地端口，验证协议和布局。
 """

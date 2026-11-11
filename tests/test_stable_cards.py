@@ -7,7 +7,7 @@
   · 新读数要连续 2 帧一致才替换 last-good；
   · 牌背/遮挡/低置信度即使连续两帧一致也不能采用。
 
-    .venv/bin/python tests/test_stable_cards.py
+    nv tests/test_stable_cards.py
 """
 
 from __future__ import annotations

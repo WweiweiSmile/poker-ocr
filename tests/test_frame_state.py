@@ -9,7 +9,7 @@
      pbs 误读都不能制造假记录。
 
 不依赖 pytest，直接跑：
-    .venv/bin/python tests/test_frame_state.py
+    nv tests/test_frame_state.py
 """
 
 from __future__ import annotations

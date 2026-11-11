@@ -8,7 +8,7 @@
 模板的**跨花色**能力来自「点数形与花色无关」：K♠ 的 K 和 K♥ 的 K 是同一个字形，
 所以每个点数一张就够（实测 16 张样本、81 张牌零错配）。
 
-    .venv/bin/python tools/build_card_templates.py
+    nv tools/build_card_templates.py
 
 样本换了（App 改版、字体变了）时重跑一次即可。
 """

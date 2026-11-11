@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """手牌 outbox：一手一文件、幂等、sent/failed 迁移。
 
-    .venv/bin/python tests/test_hand_outbox.py
+    nv tests/test_hand_outbox.py
 """
 
 from __future__ import annotations

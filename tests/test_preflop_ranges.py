@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """翻前范围表（preflop_ranges）与提示词的一致性的回归。
 
-    .venv/bin/python tests/test_preflop_ranges.py
-    .venv/bin/python -m pytest tests/test_preflop_ranges.py -q
+    nv tests/test_preflop_ranges.py
+    nv -m pytest tests/test_preflop_ranges.py -q
 
 背景：旧 `lean-rules` 提示词里的 RFI 表曾经是手写文本，模型会凭记忆引用、编出
 「AJo is in UTG+1's RFI range」这种和表矛盾的理由。中文 lean 已不再注入 RFI 表；

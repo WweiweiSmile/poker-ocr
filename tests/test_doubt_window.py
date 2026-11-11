@@ -10,7 +10,7 @@
   · 窗口内读数恢复干净时提前解除，不用等满整个窗口；
   · 当前帧有疑点时 `reliable=False`（不能拿上一帧的旧牌继续给建议）。
 
-    .venv/bin/python tests/test_doubt_window.py
+    nv tests/test_doubt_window.py
 """
 
 from __future__ import annotations

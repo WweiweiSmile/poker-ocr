@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """实时牌力解析：牌力档位 + 权益档次 + 价值/听牌判定 + 一行结论渲染。
 
-    .venv/bin/python tests/test_hand_strength.py
+    nv tests/test_hand_strength.py
 
 纯判定层单测：构造 HandVsRanges 数字（不跑 Monte Carlo），验证 size / equity_tier /
 kind / summary_en 与设计文档 §4 / §7 一致。

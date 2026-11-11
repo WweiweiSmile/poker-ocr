@@ -5,7 +5,7 @@
 --   export $(grep -E '^DB_' .env | xargs)
 --   mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -p"$DB_PASSWORD" "$DB_NAME" -N \
 --     < ~/codes/poker-ocr/tools/export_hands.sql > /tmp/hands.jsonl
---   ~/codes/poker-ocr/.venv/bin/python ~/codes/poker-ocr/tools/replay_dev_hands.py /tmp/hands.jsonl
+--   ~/codes/poker-ocr/nv ~/codes/poker-ocr/tools/replay_dev_hands.py /tmp/hands.jsonl
 --
 -- 每行一个 JSON 对象 = 一手牌（JSON_OBJECT 会把换行转义掉，所以一行一手，方便 JSONL 解析）。
 -- streets 就是行动路线：每街 [{street, actions:[{actor, action, amountBb}], potStartBb?}]。

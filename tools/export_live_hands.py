@@ -3,10 +3,10 @@
 
 用法：
 
-    .venv/bin/python tools/export_live_hands.py
-    .venv/bin/python tools/export_live_hands.py logs/live.states.jsonl -o hands.json
-    .venv/bin/python tools/export_live_hands.py --require-hero-cards --require-actions
-    .venv/bin/python tools/export_live_hands.py --mid-hand --include-partial
+    nv tools/export_live_hands.py
+    nv tools/export_live_hands.py logs/live.states.jsonl -o hands.json
+    nv tools/export_live_hands.py --require-hero-cards --require-actions
+    nv tools/export_live_hands.py --mid-hand --include-partial
 
 默认的「完整」口径（同时满足）：
 

@@ -1,6 +1,6 @@
 """gunicorn 生产配置。
 
-    .venv/bin/gunicorn -c gunicorn.conf.py api:app
+    nv -m gunicorn -c gunicorn.conf.py api:app
 
 跟直接 `uvicorn --workers N` 的区别：gunicorn 多了 master 进程看护、worker 崩溃
 自动重启、超时杀进程、定期回收这几个能力，适合挂着长期跑。

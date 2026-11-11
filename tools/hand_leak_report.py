@@ -18,9 +18,9 @@
     只当**下限**看；下注尺寸、大池里的动作线基本都能抓到。
 
 用法：
-    .venv/bin/python tools/hand_leak_report.py
-    .venv/bin/python tools/hand_leak_report.py --json
-    .venv/bin/python tools/hand_leak_report.py --top 20
+    nv tools/hand_leak_report.py
+    nv tools/hand_leak_report.py --json
+    nv tools/hand_leak_report.py --top 20
 """
 
 from __future__ import annotations

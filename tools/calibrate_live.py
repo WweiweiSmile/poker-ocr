@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """从实时流标定 runtime profile：全图 OCR 一次 → 生成固定 ROI 配置。
 
-    .venv/bin/python tools/calibrate_live.py \
+    nv tools/calibrate_live.py \
         --url rtsp://127.0.0.1:8554/live \
         --frames 5 --crop auto \
         --out config/runtime_browser.json
 
 之后实时链路走固定 ROI：
 
-    .venv/bin/python -m poker_ocr.live --recognizer roi \
+    nv -m poker_ocr.live --recognizer roi \
         --profile config/runtime_browser.json --crop auto
 
 标定只在当前窗口尺寸/布局下有效；浏览器窗口大小或站点布局变了要重新跑。

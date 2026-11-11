@@ -6,7 +6,7 @@
 名字和筹码必须和 golden 一致。底池/盲注槽位可能缺失（这张图没有底池），
 不影响座位/名字/筹码的验证。
 
-    .venv/bin/python tests/test_runtime_profile.py
+    nv tests/test_runtime_profile.py
 """
 
 from __future__ import annotations

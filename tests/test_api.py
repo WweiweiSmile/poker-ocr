@@ -2,7 +2,7 @@
 """HTTP 接口测试，用 FastAPI 的 TestClient，不需要起服务。
 
 不依赖 pytest，直接跑：
-    .venv/bin/python tests/test_api.py
+    nv tests/test_api.py
 """
 
 from __future__ import annotations

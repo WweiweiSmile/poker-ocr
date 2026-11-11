@@ -2,20 +2,20 @@
 """M2.1 / M2.2 的验证载体：把固定 ROI 的读数打出来给人眼看，并量去重的效果。
 
     # 纯单帧（M2.1）：每张图独立读，不跨帧复用
-    .venv/bin/python tools/roi_probe.py images/roi/*.jpg --no-dedup
+    nv tools/roi_probe.py images/roi/*.jpg --no-dedup
 
     # 抽帧流（M2.2）：按命令行给的顺序当一段视频喂进去，没变的 ROI 复用上一帧读数
-    .venv/bin/python tools/roi_probe.py images/roi/*.jpg --stream
+    nv tools/roi_probe.py images/roi/*.jpg --stream
 
     # 视频夹具：先抽帧再跑（0.5s 一帧 = 实时链路的节奏）
-    .venv/bin/python tools/video_frames.py images/video/video1.mp4 --every 0.5 --out /tmp/v1
-    .venv/bin/python tools/roi_probe.py /tmp/v1/*.jpg --stream --quiet
+    nv tools/video_frames.py images/video/video1.mp4 --every 0.5 --out /tmp/v1
+    nv tools/roi_probe.py /tmp/v1/*.jpg --stream --quiet
 
-    .venv/bin/python tools/roi_probe.py images/roi/*.jpg --stream --mad-eps 0    # 退回纯 dhash
-    .venv/bin/python tools/roi_probe.py images/roi/*.jpg --stream --max-distance 2
-    .venv/bin/python tools/roi_probe.py images/roi/*.jpg --stream --hash 9x8   # 复现碰撞
-    .venv/bin/python tools/roi_probe.py images/roi/*.jpg --json /tmp/roi.json
-    .venv/bin/python tools/roi_probe.py images/roi/*.jpg --dump-crops /tmp/crops
+    nv tools/roi_probe.py images/roi/*.jpg --stream --mad-eps 0    # 退回纯 dhash
+    nv tools/roi_probe.py images/roi/*.jpg --stream --max-distance 2
+    nv tools/roi_probe.py images/roi/*.jpg --stream --hash 9x8   # 复现碰撞
+    nv tools/roi_probe.py images/roi/*.jpg --json /tmp/roi.json
+    nv tools/roi_probe.py images/roi/*.jpg --dump-crops /tmp/crops
 
 为什么要有这个脚本：这类 OCR 活的错法全是「安静地读成另一个东西」
 （`11BB`→`11B`、`01BB` 开头那个 0 是筹码图标、动作徽章盖住名字）。

@@ -9,13 +9,13 @@
 保证和全量批跑的口径一致（同一帧、同一 facts、同一 .table_dy 注入）。
 
     # 只看事实层，不调模型
-    .venv/bin/python tools/replay_hand_repeat.py --hand h88
+    nv tools/replay_hand_repeat.py --hand h88
 
     # 每个决策点重跑 3 次
-    .venv/bin/python tools/replay_hand_repeat.py --hand h88 --repeat 3 --model
+    nv tools/replay_hand_repeat.py --hand h88 --repeat 3 --model
 
     # 换模型对比
-    .venv/bin/python tools/replay_hand_repeat.py --hand h88 --repeat 3 --model \
+    nv tools/replay_hand_repeat.py --hand h88 --repeat 3 --model \
         --model-name deepseek-v4-pro
 """
 

@@ -10,17 +10,17 @@
 用法：
 
     # 默认读 logs/live.states.jsonl + 同目录 live.events.jsonl
-    .venv/bin/python tools/hand_recognition_audit.py
+    nv tools/hand_recognition_audit.py
 
     # 只看前 10 名，并生成可点击的 HTML 报告
-    .venv/bin/python tools/hand_recognition_audit.py --top 10 --html logs/audit.html
+    nv tools/hand_recognition_audit.py --top 10 --html logs/audit.html
 
     # 展开某一手：逐帧 kind / errors / cards warnings / 建议兜底 / 疑惑帧目录
-    .venv/bin/python tools/hand_recognition_audit.py --explain 20261105-abcdef1234
+    nv tools/hand_recognition_audit.py --explain 20261105-abcdef1234
 
     # 导出 JSON / CSV 给别的脚本
-    .venv/bin/python tools/hand_recognition_audit.py --json logs/audit.json
-    .venv/bin/python tools/hand_recognition_audit.py --csv logs/audit.csv
+    nv tools/hand_recognition_audit.py --json logs/audit.json
+    nv tools/hand_recognition_audit.py --csv logs/audit.csv
 
 评分口径（0–100，越高越可疑）：
 

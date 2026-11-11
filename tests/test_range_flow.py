@@ -9,7 +9,7 @@
   · §9.4 回归：本手河牌两次决策权益低于门槛；combo draw 不被强度门槛杀掉；
     短码顶对 jam 倾向高于深码。
 
-    .venv/bin/python tests/test_range_flow.py
+    nv tests/test_range_flow.py
 """
 
 from __future__ import annotations

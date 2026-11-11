@@ -2,7 +2,7 @@
 
 API 进程默认自带 worker；要把长任务和 API 分开时：
 
-    ../.venv/bin/python -m replay.worker
+    ../nv -m replay.worker
 
 API 侧设 `REPLAY_WORKER_ENABLED=0`，两边共用同一个 MySQL 即可。
 """

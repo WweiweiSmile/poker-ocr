@@ -1840,13 +1840,13 @@ HAND_SET_AB=1                  # 新手牌集/成对 A/B
 
 ```bash
 # 已入库但没有 prompt 的旧手牌：标 prompt_missing，不伪造
-.venv/bin/python tools/backfill_hand_library.py --prompts missing
+nv tools/backfill_hand_library.py --prompts missing
 
 # 重新生成 timeline/flags（不重跑模型）
-.venv/bin/python tools/backfill_hand_library.py --timeline --flags
+nv tools/backfill_hand_library.py --timeline --flags
 
 # 从 outbox 补发历史手牌
-.venv/bin/python tools/sync_hand_outbox.py --retry-failed
+nv tools/sync_hand_outbox.py --retry-failed
 ```
 
 旧手牌如果只有 `advices` 没有 prompt：

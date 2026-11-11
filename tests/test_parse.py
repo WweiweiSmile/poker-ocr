@@ -5,7 +5,7 @@
 sb≈5e-11、把 `11B` 当成没有单位。所以这里既测「该解析的」，也测「必须拒绝的」。
 
 不依赖 pytest，直接跑：
-    .venv/bin/python tests/test_parse.py
+    nv tests/test_parse.py
 """
 
 from __future__ import annotations

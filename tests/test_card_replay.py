@@ -11,7 +11,7 @@
 
 需要 images/card 样张；不连 RTSP、不调模型。
 
-    .venv/bin/python tests/test_card_replay.py
+    nv tests/test_card_replay.py
 """
 
 from __future__ import annotations

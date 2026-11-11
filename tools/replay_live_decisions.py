@@ -5,11 +5,11 @@
 `--table-dynamics PATH` 指定别的文件。
 
     # 只看事实层（不调模型、不花钱）：新的牌型排名 / 价值指令 vs 当时的选择
-    .venv/bin/python tools/replay_live_decisions.py
+    nv tools/replay_live_decisions.py
 
     # 真跑模型：每个决策点重新问一次，和当时的 option 对比
-    .venv/bin/python tools/replay_live_decisions.py --model
-    .venv/bin/python tools/replay_live_decisions.py --model --limit 20 --losses-only
+    nv tools/replay_live_decisions.py --model
+    nv tools/replay_live_decisions.py --model --limit 20 --losses-only
 
 ## 决策点从哪里来
 

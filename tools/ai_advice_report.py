@@ -2,7 +2,7 @@
 """把 ai_advice_dev_hands.py --json 的输出渲染成按街对比的静态 HTML 报告。
 
 用法：
-    .venv/bin/python tools/ai_advice_report.py /tmp/ai_advice_compare.json \
+    nv tools/ai_advice_report.py /tmp/ai_advice_compare.json \
         -o /tmp/ai_advice_compare.html [--analysis verdict.json]
 
 报告内容：

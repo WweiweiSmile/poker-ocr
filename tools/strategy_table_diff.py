@@ -24,11 +24,11 @@ P1 给 `facing_probs` / `base_fold` / `size_gamma` 填了一版**按公式推导
 用法
 ────
     # 分开跑（子进程保证模块常量按 profile 重新加载）
-    STRATEGY_TABLES_PROFILE=hand-tuned .venv/bin/python tools/strategy_table_diff.py --dump /tmp/v0.json
-    STRATEGY_TABLES_PROFILE=sourced    .venv/bin/python tools/strategy_table_diff.py --dump /tmp/v1.json
+    STRATEGY_TABLES_PROFILE=hand-tuned nv tools/strategy_table_diff.py --dump /tmp/v0.json
+    STRATEGY_TABLES_PROFILE=sourced    nv tools/strategy_table_diff.py --dump /tmp/v1.json
 
     # 一条命令跑完并对比
-    .venv/bin/python tools/strategy_table_diff.py --compare
+    nv tools/strategy_table_diff.py --compare
 
 注意：默认不注入对手画像（不读 ProfileStore），这样差异**只来自策略表**，
 不掺画像噪声。

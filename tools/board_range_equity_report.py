@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """从历史手牌库生成「牌面范围权益」HTML 报告。
 
-    .venv/bin/python tools/board_range_equity_report.py
-    .venv/bin/python tools/board_range_equity_report.py --ids h4,h29,h31
-    .venv/bin/python tools/board_range_equity_report.py --out reports/xxx.html
+    nv tools/board_range_equity_report.py
+    nv tools/board_range_equity_report.py --ids h4,h29,h31
+    nv tools/board_range_equity_report.py --out reports/xxx.html
 
 口径（按当前需求）：
   · **不使用翻前范围**：不读 RFI / BB 防守 / 冷跟表，也不把历史翻前动作

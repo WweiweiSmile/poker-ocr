@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """策略表（P0 抽表 + P1 推导）的测试：来源完整、profile 生效、接线正确、数值不变。
 
-    .venv/bin/python tests/test_strategy_tables.py
+    nv tests/test_strategy_tables.py
 
 关键不变量：
 

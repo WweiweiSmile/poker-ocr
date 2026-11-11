@@ -517,7 +517,7 @@ def _load_templates() -> dict[str, np.ndarray]:
     if atlas is None:
         raise RuntimeError(
             f"缺少点数模板图集 {_TEMPLATE_ATLAS}；"
-            "运行 `.venv/bin/python tools/build_card_templates.py` 生成")
+            "运行 `nv tools/build_card_templates.py` 生成")
     if atlas.shape[0] != _GLYPH_H or atlas.shape[1] < _GLYPH_W * len(RANKS):
         raise RuntimeError(
             f"点数模板图集尺寸不对：{atlas.shape}，"

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """条件弃牌率的测试：公式、分档、范围加权、与提示词接线。
 
-    .venv/bin/python tests/test_fold_equity.py
+    nv tests/test_fold_equity.py
 
 全部是纯逻辑，不连 RTSP、不读表、不调模型。关键不变量：
 

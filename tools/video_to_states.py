@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """整段视频 → 变化触发的桌面状态 JSON（M2.3 + M2.4）。
 
-    .venv/bin/python tools/video_to_states.py images/video/video1.mp4 --every 0.5 \
+    nv tools/video_to_states.py images/video/video1.mp4 --every 0.5 \
         --out /tmp/video1.states.json
 
 规则（用户定的）：

@@ -144,9 +144,9 @@ Warnings:
 跑法：
 
 ```bash
-.venv/bin/python -m pytest tests/test_ground_truth.py tests/test_beat_rate.py \
+nv -m pytest tests/test_ground_truth.py tests/test_beat_rate.py \
     tests/test_advice.py tests/test_coach.py -q
-.venv/bin/python tests/test_api.py
+nv tests/test_api.py
 ```
 
 当前结果：上述 153 条逻辑测试 + API 脚本全部通过。
@@ -193,7 +193,7 @@ gt = compute_ground_truth("AsTh", "Jc8dKdQc", opponents=3)
 命令：
 
 ```bash
-.venv/bin/python tools/compare_review_hands.py /tmp/review-990009-990010.jsonl \
+nv tools/compare_review_hands.py /tmp/review-990009-990010.jsonl \
     --no-dedupe --json logs/review-990009-990010-advice.json
 ```
 

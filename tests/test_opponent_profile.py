@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """对手类型识别：观察解析、统计聚合、规则分类、pin/先验与建议集成。
 
-    .venv/bin/python tests/test_opponent_profile.py
+    nv tests/test_opponent_profile.py
 
 全部是纯逻辑：手工拼 hand dict / FrameState，不连 RTSP，不调模型。
 """

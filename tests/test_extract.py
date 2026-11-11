@@ -2,7 +2,7 @@
 """回归测试：拿 golden 里的图各跑一遍，逐项比对。
 
 不依赖 pytest，直接跑：
-    .venv/bin/python tests/test_extract.py
+    nv tests/test_extract.py
 """
 
 from __future__ import annotations

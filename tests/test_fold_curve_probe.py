@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """弃牌曲线探针的价格口径测试：`tools/fold_curve_probe.py`。
 
-    .venv/bin/python tests/test_fold_curve_probe.py
+    nv tests/test_fold_curve_probe.py
 
 为什么值得单独测
 ────────────────

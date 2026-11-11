@@ -41,15 +41,19 @@
 
 ## 常用命令
 
+命令里的 `nv` = 仓库根的 `nv` 脚本 = `.venv/bin/python`（参数原样透传、cwd 不变；
+`nv pip …` 等价 `python -m pip`，venv 没 pip 时自动走 `uv pip`）。
+装一次：`ln -sf "$PWD/nv" ~/.local/bin/nv`。
+
 ```bash
-.venv/bin/python tests/run_all.py                              # 全量测试（分层，先快后慢）
-.venv/bin/python -m uvicorn api:app --port 8000                # 单图识别服务
-.venv/bin/python -m poker_ocr.live --profile config/table_wpk_live.json \
+nv tests/run_all.py                              # 全量测试（分层，先快后慢）
+nv -m uvicorn api:app --port 8000                # 单图识别服务
+nv -m poker_ocr.live --profile config/table_wpk_live.json \
     --initial-blinds 1/2 --out logs/live.states.jsonl          # 实时链路 + Web 看板 :8020
-.venv/bin/python tools/hand_recognition_audit.py --top 20 --html logs/audit.html # 手牌识别倒查
+nv tools/hand_recognition_audit.py --top 20 --html logs/audit.html # 手牌识别倒查
 cd replay-console && ./start.sh                                # 复盘控制台 :8010
-.venv/bin/python -m poker_ocr.strategy_tables --profile sourced # 策略表生效/回落情况
-.venv/bin/python tools/export_strategy_tables.py --check        # JSON↔代码逐值一致
+nv -m poker_ocr.strategy_tables --profile sourced # 策略表生效/回落情况
+nv tools/export_strategy_tables.py --check        # JSON↔代码逐值一致
 ```
 
 ## 改提示词必须三步走（有 golden test 兜底）

@@ -10,13 +10,13 @@
 ## 用法
 
     # 看哪些人的名字像同一个（只读，不改文件）
-    .venv/bin/python tools/name_alias.py --suspects
+    nv tools/name_alias.py --suspects
 
     # 合并：把「别名」的样本并进「规范名字」
-    .venv/bin/python tools/name_alias.py --add 台风来吧多=台风来咯咯
+    nv tools/name_alias.py --add 台风来吧多=台风来咯咯
 
     # 查看现有别名
-    .venv/bin/python tools/name_alias.py --list
+    nv tools/name_alias.py --list
 
 合并会：① 把别名条目的统计并进目标条目（保留目标的手数/画像）；
 ② 写 `aliases[别名] = 目标`，之后 `_resolve_key` / 实时链路的词表都会认；

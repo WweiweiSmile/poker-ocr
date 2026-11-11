@@ -348,7 +348,7 @@ export default function RangeABPage() {
             <span>
               在父项目跑{' '}
               <span className="mono">
-                .venv/bin/python tools/ab_range_set.py --json tools/ab_results.json
+                nv tools/ab_range_set.py --json tools/ab_results.json
               </span>
               ，刷新本页即可看到 PASS/FAIL、权益漂移和模型建议差异。
             </span>

@@ -2,7 +2,7 @@
 """位置推导的单元测试。
 
 不依赖 pytest，直接跑：
-    .venv/bin/python tests/test_positions.py
+    nv tests/test_positions.py
 """
 
 from __future__ import annotations

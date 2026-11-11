@@ -13,17 +13,17 @@
   · `blocked_*` / `manual` / `needs_reconstruction`：只打印原因，不参与判定。
 
     # 只校验清单与本地手牌
-    .venv/bin/python tools/ab_range_set.py --check
+    nv tools/ab_range_set.py --check
 
     # 跑 ready 用例（事实层，不调模型）
-    .venv/bin/python tools/ab_range_set.py
-    .venv/bin/python tools/ab_range_set.py --priority P0
+    nv tools/ab_range_set.py
+    nv tools/ab_range_set.py --priority P0
 
     # 同时跑旧/新模型（慢，需要 AI 凭据）
-    .venv/bin/python tools/ab_range_set.py --model --priority P0
+    nv tools/ab_range_set.py --model --priority P0
 
     # 落盘
-    .venv/bin/python tools/ab_range_set.py --json /tmp/ab_set.json
+    nv tools/ab_range_set.py --json /tmp/ab_set.json
 
 `--model` 每行除建议外还记录 `prompt_version`（行级）与每个路径的
 `*_source` / `*_finish_reason`：跨提示词版本对比时才能分清是提示词变了、

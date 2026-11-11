@@ -5,7 +5,7 @@
 换成桩，帧用 `test_frame_state.make_frame` 手工拼。真正跑 OCR 的等价性
 由 `tools/video_to_states.py` 对 video1 的离线回归保证。
 
-    .venv/bin/python tests/test_state_stream.py
+    nv tests/test_state_stream.py
 """
 
 from __future__ import annotations

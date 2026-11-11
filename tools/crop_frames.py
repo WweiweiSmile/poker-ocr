@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """批量裁掉截图/抓帧的黑边，并按 profile 参考比例对齐（ROI 预处理）。
 
-    .venv/bin/python tools/crop_frames.py logs/live_frames \
+    nv tools/crop_frames.py logs/live_frames \
         --out logs/live_frames_cropped
 
 流程和实时链路完全一致：

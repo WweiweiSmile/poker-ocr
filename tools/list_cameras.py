@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """列出本机摄像头索引 —— 找 OBS 虚拟摄像头用。
 
-    .venv/bin/python tools/list_cameras.py
+    nv tools/list_cameras.py
 
 用法：
 

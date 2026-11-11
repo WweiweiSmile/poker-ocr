@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """实时牌面范围：combo 级分类、连接度打分、动作 mode 与宽度。
 
-    .venv/bin/python tests/test_board_range.py
+    nv tests/test_board_range.py
 
 验收基准来自 docs/实时牌面范围与手牌强度-设计文档.md：
   · AsKs4d 上 25/34/5s6s/7s8s/7h8h/QJ/22/44 的分类；

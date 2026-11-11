@@ -26,9 +26,9 @@
 
 用法
 ────
-    .venv/bin/python tools/showdown_range_check.py
-    STRATEGY_TABLES_PROFILE=sourced .venv/bin/python tools/showdown_range_check.py
-    .venv/bin/python tools/showdown_range_check.py --html reports/showdown-range-2026-11-05.html
+    nv tools/showdown_range_check.py
+    STRATEGY_TABLES_PROFILE=sourced nv tools/showdown_range_check.py
+    nv tools/showdown_range_check.py --html reports/showdown-range-2026-11-05.html
 """
 
 from __future__ import annotations

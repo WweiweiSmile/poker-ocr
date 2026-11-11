@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """用一批真实帧重新标注 ROI 槽位（全图检测框 → 中位数 → 新 profile）。
 
-    .venv/bin/python tools/refit_profile.py logs/live_frames_cropped \
+    nv tools/refit_profile.py logs/live_frames_cropped \
         --profile config/table_wpk_1080x2400.json \
         --out config/table_wpk_live.json --step 2
 

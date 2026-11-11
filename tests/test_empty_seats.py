@@ -5,7 +5,7 @@
 读不到」不是一回事：读不到只说明遮挡，不能判离桌。这个检测器只认那个
 细十字，且必须把头像照片里的白字（等待中 / 弃牌）排除掉。
 
-    .venv/bin/python tests/test_empty_seats.py
+    nv tests/test_empty_seats.py
 """
 
 from __future__ import annotations

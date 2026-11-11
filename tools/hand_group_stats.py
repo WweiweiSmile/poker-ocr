@@ -22,10 +22,10 @@
 
 用法：
 
-    .venv/bin/python tools/hand_group_stats.py
-    .venv/bin/python tools/hand_group_stats.py logs/live.states.jsonl
-    .venv/bin/python tools/hand_group_stats.py hands/1023.hands.json
-    .venv/bin/python tools/hand_group_stats.py --json
+    nv tools/hand_group_stats.py
+    nv tools/hand_group_stats.py logs/live.states.jsonl
+    nv tools/hand_group_stats.py hands/1023.hands.json
+    nv tools/hand_group_stats.py --json
 """
 
 from __future__ import annotations

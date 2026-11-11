@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """翻后建议引擎的测试（纯逻辑，不需要图片、不需要 fastapi）。
 
-    .venv/bin/python tests/test_coach.py
+    nv tests/test_coach.py
 
 只 import poker_ocr.coach，不碰 api —— 这样即使没有 cv2 也能跑。
 所有用例的期望值都对着 call-back/services/skills/ 里的规则表：

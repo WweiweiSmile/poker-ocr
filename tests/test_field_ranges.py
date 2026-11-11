@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """角色解析：快照 → 每个在局对手的翻前先验 + 当前街 mode。
 
-    .venv/bin/python tests/test_field_ranges.py
+    nv tests/test_field_ranges.py
 """
 
 from __future__ import annotations

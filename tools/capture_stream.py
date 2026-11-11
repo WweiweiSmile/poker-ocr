@@ -2,13 +2,13 @@
 """从 RTSP 流按固定间隔截图保存（默认 0.5s 一张）。
 
     # 连续截图（Ctrl-C 结束），默认存到 logs/live_frames/
-    .venv/bin/python tools/capture_stream.py
+    nv tools/capture_stream.py
 
     # 先取 10 张看看
-    .venv/bin/python tools/capture_stream.py --max-frames 10 --out /tmp/live_frames
+    nv tools/capture_stream.py --max-frames 10 --out /tmp/live_frames
 
     # 指定地址 / 间隔 / 质量
-    .venv/bin/python tools/capture_stream.py \
+    nv tools/capture_stream.py \
         --url rtsp://127.0.0.1:8554/live --every 0.5 --quality 92
 
 为什么要单独一个工具：`poker_ocr.live --dump-frames` 也能存采样帧，

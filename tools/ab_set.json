@@ -4,7 +4,7 @@
  "model": "range_event_model",
  "baseline": "RANGE_EVENT_MODEL=0",
  "candidate": "RANGE_EVENT_MODEL=1",
- "run": ".venv/bin/python tools/ab_range_set.py --check",
+ "run": "nv tools/ab_range_set.py --check",
  "cases": [
   {
    "id": "P0-01",

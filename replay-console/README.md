@@ -68,10 +68,10 @@
 
 ```bash
 cd ..                       # poker-ocr 仓库根
-uv pip install --python .venv/bin/python -r replay-console/requirements.txt
+nv pip install -r replay-console/requirements.txt
 ```
 
-（没有 `uv` 时用 `.venv/bin/python -m pip install ...`；如果 `.venv` 没有 pip，按父项目现有方式安装。）
+（`nv pip` = `.venv` 的 pip；这个 venv 是 uv 建的、没有 pip 时自动改走 `uv pip`。）
 
 前端：
 
@@ -101,7 +101,7 @@ cp .env.example .env
 
 ```bash
 # 开发
-../.venv/bin/python -m uvicorn replay_api:app --host 127.0.0.1 --port 8010 --reload
+../nv -m uvicorn replay_api:app --host 127.0.0.1 --port 8010 --reload
 
 # 或
 ./start.sh
@@ -264,7 +264,7 @@ live 默认把**已结束**手牌写进 `data/hand_outbox/pending/`（一手一�
 原子写；`--no-hand-outbox` 关闭）。手牌库在线时用工具同步：
 
 ```bash
-.venv/bin/python tools/sync_hand_outbox.py \
+nv tools/sync_hand_outbox.py \
   --url http://127.0.0.1:8010 --token "$REPLAY_TOKEN"
 ```
 
@@ -369,7 +369,7 @@ curl -s http://127.0.0.1:8010/api/hands/delete \
 
 ```bash
 cd replay-console
-CI=true ../.venv/bin/python -m pytest tests -q
+CI=true ../nv -m pytest tests -q
 ```
 
 覆盖：
@@ -399,9 +399,9 @@ CI=true pnpm build
 
   ```bash
   # API 进程
-  REPLAY_WORKER_ENABLED=0 ../.venv/bin/python -m uvicorn replay_api:app --host 127.0.0.1 --port 8010
+  REPLAY_WORKER_ENABLED=0 ../nv -m uvicorn replay_api:app --host 127.0.0.1 --port 8010
   # worker 进程
-  ../.venv/bin/python -m replay.worker
+  ../nv -m replay.worker
   ```
 
 - 默认只绑 `127.0.0.1`。对局域网开放时设置 `REPLAY_TOKEN`；非本机请求必须带 `Authorization: Bearer <token>`。

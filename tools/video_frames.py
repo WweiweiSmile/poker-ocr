@@ -2,16 +2,16 @@
 """把视频按固定间隔抽帧成图片，喂给 roi_probe.py 当「抽帧流」用。
 
     # 0.5s 一帧（实时链路的抽帧节奏），存到 /tmp/video1_frames
-    .venv/bin/python tools/video_frames.py images/video/video1.mp4 --every 0.5 \
+    nv tools/video_frames.py images/video/video1.mp4 --every 0.5 \
         --out /tmp/video1_frames
 
     # 只取前 20 帧先看看
-    .venv/bin/python tools/video_frames.py images/video/video1.mp4 --every 0.5 --limit 20
+    nv tools/video_frames.py images/video/video1.mp4 --every 0.5 --limit 20
 
 然后：
 
-    .venv/bin/python tools/roi_probe.py /tmp/video1_frames/*.jpg --stream --quiet
-    .venv/bin/python tools/roi_probe.py /tmp/video1_frames/*.jpg --no-dedup --quiet
+    nv tools/roi_probe.py /tmp/video1_frames/*.jpg --stream --quiet
+    nv tools/roi_probe.py /tmp/video1_frames/*.jpg --no-dedup --quiet
 
 **顺序读取 + 按帧号跳，不做时间戳 seek**：seek 在部分编码上会落到关键帧、
 时间戳不准；顺序解码 2556 帧不到一秒，换来的是「第 N 帧就是第 N 帧」。
@@ -71,7 +71,7 @@ def main() -> int:
 
     print(f"抽出 {saved} 帧 → {args.out}")
     if saved:
-        print(f"下一步：.venv/bin/python tools/roi_probe.py '{args.out}/*.jpg' --stream --quiet")
+        print(f"下一步：nv tools/roi_probe.py '{args.out}/*.jpg' --stream --quiet")
     return 0
 
 

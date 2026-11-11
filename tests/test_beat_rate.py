@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """牌型「名字 vs 排名」的回归：board_ceiling 的葫芦修正 + beat_rate + 价值指令降级。
 
-    .venv/bin/python tests/test_beat_rate.py
-    .venv/bin/python -m pytest tests/test_beat_rate.py -q
+    nv tests/test_beat_rate.py
+    nv -m pytest tests/test_beat_rate.py -q
 
 背景（2026-10-23 那局的复盘）：h75 拿 22 在 88T 上、h100 拿 44 在 QJ266 上，
 两次都被当成「我中了两对 → 收价值」，实际上 8822 / 6644 是最差的两对，

@@ -11,7 +11,7 @@
   * 同一手牌的多个街、同一张图的两个副本
 
 不依赖 pytest，直接跑：
-    .venv/bin/python tests/test_cards.py
+    nv tests/test_cards.py
 """
 
 from __future__ import annotations

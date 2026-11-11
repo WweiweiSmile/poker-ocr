@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """`.env` 加载器的测试：解析、环境变量优先、ENV_FILE 显式指定。
 
-    .venv/bin/python tests/test_env.py
+    nv tests/test_env.py
 
 全是纯逻辑，不读项目根的真实 .env（用例都传临时目录）。
 """

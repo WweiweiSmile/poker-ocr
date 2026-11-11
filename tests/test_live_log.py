@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """实时日志底座：结构化事件 JSONL + 控制台文本落盘。
 
-    .venv/bin/python tests/test_live_log.py
+    nv tests/test_live_log.py
 
 不启动 live / 不读摄像头：只验证落盘格式、压缩规则和派生路径。
 """

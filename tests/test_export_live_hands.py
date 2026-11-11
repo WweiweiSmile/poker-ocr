@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """tools/export_live_hands.py 的单测：筛选口径、跨会话 uid、坏行容错。
 
-    .venv/bin/python tests/test_export_live_hands.py
+    nv tests/test_export_live_hands.py
 """
 
 from __future__ import annotations

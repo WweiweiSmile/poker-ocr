@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """SFT 数据集导出的测试：标签合法性、陈旧帧过滤、按手牌切分。
 
-    .venv/bin/python tests/test_build_sft_dataset.py
+    nv tests/test_build_sft_dataset.py
 
 全部用合成日志，不读真实 hands.json、不连模型。
 """

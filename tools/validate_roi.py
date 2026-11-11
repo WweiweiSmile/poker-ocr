@@ -2,7 +2,7 @@
 """用固定 ROI profile 批量识别图片，输出 JSON 报告 + 带框叠加图。
 
     # 验证裁剪后的实时抓帧
-    .venv/bin/python tools/validate_roi.py logs/live_frames_cropped \
+    nv tools/validate_roi.py logs/live_frames_cropped \
         --profile config/table_wpk_1080x2400.json \
         --out-dir logs/roi_validation
 

@@ -12,7 +12,7 @@
       FROM review_hands WHERE deleted_at IS NULL;" > /tmp/hands.jsonl
 
     # 2) 跑对比
-    .venv/bin/python tools/replay_dev_hands.py /tmp/hands.jsonl
+    nv tools/replay_dev_hands.py /tmp/hands.jsonl
 
 ## 底池是**重建**的，不是库里读的
 

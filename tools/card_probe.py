@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """单图读牌：识别公共牌与 hero 手牌。
 
-    .venv/bin/python tools/card_probe.py images/card/redA.jpg
-    .venv/bin/python tools/card_probe.py shot.jpg --debug
+    nv tools/card_probe.py images/card/redA.jpg
+    nv tools/card_probe.py shot.jpg --debug
 
 默认输出紧凑 JSON：{"board": [...], "hero_cards": [...]}。
 --debug 追加逐张的像素框、花色/形状证据、点数模板分数 —— 排查误识别时用。

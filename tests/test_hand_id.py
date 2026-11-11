@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """手牌 ID：名单 + 位置 + 日期/开始时间的摘要。
 
-    .venv/bin/python tests/test_hand_id.py
+    nv tests/test_hand_id.py
 """
 
 from __future__ import annotations

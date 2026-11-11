@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# nv —— 项目 .venv 里的 Python 启动器，代替冗长的 .venv/bin/python。
+#
+#   nv tests/run_all.py
+#   nv -m uvicorn api:app --port 8000
+#   nv -m poker_ocr.live --profile config/table_wpk_live.json --initial-blinds 1/2
+#   nv tools/hand_recognition_audit.py --top 20 --html logs/audit.html
+#   nv pip install -r requirements.txt      # pip 简写 → python -m pip
+#   nv - <<'PY'                             # stdin 脚本，和 python - 一致
+#
+# 语义就是 `.venv/bin/python`：**cwd 不变**，参数原样透传。
+# 所以 `cd replay-console && ../nv replay_api.py` 这类相对路径用法同样成立。
+#
+# 安装到 PATH（装一次即可，仓库里的 nv 就是脚本本体）：
+#   ln -sf "$PWD/nv" ~/.local/bin/nv        # ~/.local/bin 通常已在 PATH
+set -euo pipefail
+
+# 解析符号链接，拿到仓库根目录（从 ~/.local/bin/nv 调用也能找对）
+SELF="${BASH_SOURCE[0]}"
+while [[ -L "$SELF" ]]; do
+  DIR="$(cd "$(dirname "$SELF")" && pwd)"
+  SELF="$(readlink "$SELF")"
+  [[ "$SELF" != /* ]] && SELF="$DIR/$SELF"
+done
+ROOT="$(cd "$(dirname "$SELF")" && pwd)"
+PY="$ROOT/.venv/bin/python"
+
+if [[ ! -x "$PY" ]]; then
+  echo "nv: 找不到 $PY（先在 $ROOT 建好 .venv）" >&2
+  exit 1
+fi
+
+# nv pip ... → .venv/bin/python -m pip ...
+# 这个 .venv 是 uv 建的、通常没装 pip；没 pip 就退到 `uv pip <子命令> --python <venv>`。
+if [[ "${1:-}" == "pip" ]]; then
+  shift
+  if "$PY" -m pip --version >/dev/null 2>&1; then
+    exec "$PY" -m pip "$@"
+  fi
+  if [[ -z "${1:-}" || "${1#-}" != "$1" ]]; then
+    echo "nv: $PY 里没有 pip（uv 建的 venv）；用 uv pip <install|list|...> 代替" >&2
+    exit 1
+  fi
+  sub="$1"
+  shift
+  if command -v uv >/dev/null 2>&1; then
+    exec uv pip "$sub" --python "$PY" "$@"
+  fi
+  echo "nv: $PY 里没有 pip，也没找到 uv；请先装 uv，或 uv pip --python $PY install ..." >&2
+  exit 1
+fi
+
+exec "$PY" "$@"

@@ -5,20 +5,20 @@
 缓存；分类规则/阈值改动后，用这个脚本从头重算，保证可复现。
 
     # 从导出的 hands JSON + 实时 JSONL 重建（两者重叠的 hand_uid 会自动去重）
-    .venv/bin/python tools/rebuild_opponent_profiles.py \\
+    nv tools/rebuild_opponent_profiles.py \\
         --hands hands/1023.hands.json logs/live.states.jsonl \\
         --out data/opponents/profiles.json
 
     # 只看现有画像，不重建
-    .venv/bin/python tools/rebuild_opponent_profiles.py --list
+    nv tools/rebuild_opponent_profiles.py --list
 
     # 人工修正：pin 永远优先于自动分类；--unpin 清除
-    .venv/bin/python tools/rebuild_opponent_profiles.py \\
+    nv tools/rebuild_opponent_profiles.py \\
         --pin "芒果与西米=maniac" --pin "好运常在ok=station"
-    .venv/bin/python tools/rebuild_opponent_profiles.py --unpin "芒果与西米"
+    nv tools/rebuild_opponent_profiles.py --unpin "芒果与西米"
 
     # 第一次全量重建时清掉旧数据（默认就会重算，--append 才追加）
-    .venv/bin/python tools/rebuild_opponent_profiles.py --hands ... --reset
+    nv tools/rebuild_opponent_profiles.py --hands ... --reset
 
 输入可以是：
   · JSON 数组（`export_live_hands.py` 的产物）；

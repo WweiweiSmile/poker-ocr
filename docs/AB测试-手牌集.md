@@ -18,17 +18,17 @@
 
 ```bash
 # 校验清单与本地手牌
-.venv/bin/python tools/ab_range_set.py --check
+nv tools/ab_range_set.py --check
 
 # 跑全部 ready 用例（事实层，不调模型）
-.venv/bin/python tools/ab_range_set.py
+nv tools/ab_range_set.py
 
 # 只跑 P0；同时跑旧/新模型（慢，需要 AI 凭据）
-.venv/bin/python tools/ab_range_set.py --priority P0
-.venv/bin/python tools/ab_range_set.py --model --priority P0
+nv tools/ab_range_set.py --priority P0
+nv tools/ab_range_set.py --model --priority P0
 
 # 落盘
-.venv/bin/python tools/ab_range_set.py --json tools/ab_results.json
+nv tools/ab_range_set.py --json tools/ab_results.json
 ```
 
 控制台只读页（复跑控制台）：`http://127.0.0.1:8010/range-ab`。

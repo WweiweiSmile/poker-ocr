@@ -2,9 +2,9 @@
 """手牌复跑控制台入口。
 
     # 开发 / 本机运行（前端构建后）
-    ../.venv/bin/python replay_api.py
+    ../nv replay_api.py
     # 或
-    ../.venv/bin/python -m uvicorn replay_api:app --host 127.0.0.1 --port 8010 --reload
+    ../nv -m uvicorn replay_api:app --host 127.0.0.1 --port 8010 --reload
 """
 
 from __future__ import annotations

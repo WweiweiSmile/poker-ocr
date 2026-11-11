@@ -21,10 +21,10 @@
 
 用法：
 
-    .venv/bin/python tools/opponent_table.py
-    .venv/bin/python tools/opponent_table.py --min-hands 20
-    .venv/bin/python tools/opponent_table.py --csv reports/opponents.csv
-    .venv/bin/python tools/opponent_table.py --profile data/opponents/profiles.json
+    nv tools/opponent_table.py
+    nv tools/opponent_table.py --min-hands 20
+    nv tools/opponent_table.py --csv reports/opponents.csv
+    nv tools/opponent_table.py --profile data/opponents/profiles.json
 """
 
 from __future__ import annotations

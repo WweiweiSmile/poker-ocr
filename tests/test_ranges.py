@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """翻前范围层：169 键展开、宽度、具名/规则先验、归一化。
 
-    .venv/bin/python tests/test_ranges.py
+    nv tests/test_ranges.py
 """
 
 from __future__ import annotations

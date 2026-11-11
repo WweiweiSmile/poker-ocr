@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """`tools/ab_diff.py` 的段落级解析测试。
 
-    .venv/bin/python tests/test_ab_diff.py
+    nv tests/test_ab_diff.py
 
 事实块是按 `## 段落名` 组织的。归因正确与否全看这两件事：
 

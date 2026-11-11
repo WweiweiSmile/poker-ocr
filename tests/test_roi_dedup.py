@@ -12,7 +12,7 @@
   3. **安全阀**：分辨率/参数一变，缓存必须整份作废，不能跨场景复用。
 
 不依赖 pytest，直接跑：
-    .venv/bin/python tests/test_roi_dedup.py
+    nv tests/test_roi_dedup.py
 """
 
 from __future__ import annotations

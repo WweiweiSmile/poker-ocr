@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Ground Truth 事实层回归：坚果校验、两张同花 ≠ 花面、最好五张、提示词注入。
 
-    .venv/bin/python tests/test_ground_truth.py
-    .venv/bin/python -m pytest tests/test_ground_truth.py -q
+    nv tests/test_ground_truth.py
+    nv -m pytest tests/test_ground_truth.py -q
 
 对应 2026-10-23 复盘的两次退化：
   · 990010 转牌 `Jc8dKdQc`：只有两张方块/梅花，模型却读成「花面」，把坚果顺

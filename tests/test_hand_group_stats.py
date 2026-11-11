@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """手牌分组统计：炸弹池判定、净值对齐、按组汇总。
 
-    .venv/bin/python tests/test_hand_group_stats.py
+    nv tests/test_hand_group_stats.py
 """
 
 from __future__ import annotations

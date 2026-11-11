@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """给已入库手牌补 timeline / flags / review_score（不调模型）。
 
-    .venv/bin/python tools/backfill_hand_enrichment.py --dry-run
-    .venv/bin/python tools/backfill_hand_enrichment.py
+    nv tools/backfill_hand_enrichment.py --dry-run
+    nv tools/backfill_hand_enrichment.py
 
 只写 replay_imported_hands 的 timeline_json/flags/review_score，不碰 review_hands。
 旧手牌没有 prompt 时 flags 会标 PROMPT_MISSING；这是事实，不是补造 prompt。

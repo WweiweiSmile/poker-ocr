@@ -2,14 +2,14 @@
 """把 `data/hand_outbox/pending/` 里的已结束手牌同步到手牌库。
 
     # 预览
-    .venv/bin/python tools/sync_hand_outbox.py --dry-run
+    nv tools/sync_hand_outbox.py --dry-run
 
     # 同步到 replay-console
-    .venv/bin/python tools/sync_hand_outbox.py \
+    nv tools/sync_hand_outbox.py \
       --url http://127.0.0.1:8010 --token "$REPLAY_TOKEN"
 
     # 重试 failed/
-    .venv/bin/python tools/sync_hand_outbox.py --retry-failed
+    nv tools/sync_hand_outbox.py --retry-failed
 
 优先级：
 

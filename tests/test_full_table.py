@@ -6,7 +6,7 @@
   2. 真图：table-8p.jpg（1280x2844，8 人桌）上跑完整全图 OCR，
      对齐 golden 的名字、筹码、庄位和位置。
 
-    .venv/bin/python tests/test_full_table.py
+    nv tests/test_full_table.py
 """
 
 from __future__ import annotations

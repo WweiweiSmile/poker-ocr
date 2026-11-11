@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """实时建议链路的测试：行动线累积、决策点触发、中文事实、选项与模型调用。
 
-    .venv/bin/python tests/test_advice.py
+    nv tests/test_advice.py
 
 全部是纯逻辑：手工拼 FrameState，不连 RTSP、不加载 OCR、不真的调模型
 （模型调用用注入的 `complete` 桩）。

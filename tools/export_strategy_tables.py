@@ -11,12 +11,12 @@
 两种用法
 ────────
 1. **引导（只跑一次）**：模块还写死常数时，
-   `.venv/bin/python tools/export_strategy_tables.py`
+   `nv tools/export_strategy_tables.py`
    生成 `poker_ocr/tables/{range_flow,fold_equity}.json`，值逐字复制，
    不四舍五入（用 repr 语义，float 往返无损）。
 
 2. **校验（重构之后随时跑）**：
-   `.venv/bin/python tools/export_strategy_tables.py --check`
+   `nv tools/export_strategy_tables.py --check`
    断言「模块当前读到的表」与「JSON 里的值」逐项相等。这是「重构没有改变
    行为」的机器证据 —— 不靠人眼比对。
 

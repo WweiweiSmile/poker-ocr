@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """全图 OCR 座位聚类探针（M3.2）。
 
-    .venv/bin/python tools/full_table_probe.py table-8p.jpg --out /tmp/full.png
+    nv tools/full_table_probe.py table-8p.jpg --out /tmp/full.png
 
 不依赖固定 ROI/profile：全图 OCR → 名字/筹码聚类 → D 庄位 → 位置。
 输出 JSON + 一张叠加图（座位中心、名字、筹码、位置、庄位、桌心）。
