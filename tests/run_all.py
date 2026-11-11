@@ -23,6 +23,8 @@
     test_opponent_profile 对手画像：弃牌补全/统计/分类/pin/建议集成（纯逻辑）
     test_clicker    桌面自动点击：坐标/配置/档位映射/安全闸（纯逻辑，不点鼠标）
     test_bet_slider 下注滑杆：识别/长按/滚动/确定闭环（假后端，不点鼠标）
+    test_click_marks 点击标注：槽位/命中点 → 浮层像素、几何偏移（合成图）
+    test_box_editor  按钮框编辑器：槽位↔画布、命中/拖动、写回 profile（纯逻辑）
     test_ai_advice_replay 复盘手牌 → 决策点快照的重建（纯逻辑，不连库不调模型）
     test_dealer     庄位检测（合成图，不依赖照片）
     test_roi_reader ROI 读取器（合成图 + 假 OCR 引擎，不依赖照片和模型）
@@ -65,6 +67,7 @@ SUITES = ["test_positions.py", "test_env.py", "test_coach.py",
           "test_advice.py",
           "test_hand_id.py", "test_hand_outbox.py",
           "test_opponent_profile.py", "test_clicker.py", "test_bet_slider.py",
+          "test_click_marks.py", "test_box_editor.py",
           "test_ai_advice_replay.py", "test_dealer.py", "test_roi_reader.py",
           "test_roi_dedup.py", "test_parse.py", "test_name_lexicon.py",
           "test_frame_state.py", "test_empty_seats.py",
