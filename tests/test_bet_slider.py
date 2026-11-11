@@ -162,6 +162,54 @@ def test_window_mapper() -> None:
     check(abs(y - (50 + 0.3 * 833)) < 1e-6, f"y 映射错：{y}")
 
 
+def test_effective_rect_uses_capture_size() -> None:
+    """映射必须跟**实际截图**同一个网格，不能用 CGWindowList 的取整 bounds。
+
+    2026-11-11 实盘：bounds 说 845pt，画面只有 1676px（=838pt），归一化坐标
+    按 845 映射时 y 越靠下偏移越大，滑杆橙色手柄（半径约 7pt）被按到边缘。
+    """
+    from poker_ocr.bet_slider import WindowCapture
+
+    def make(rect: WindowRect, size: tuple[int, int]):
+        cap = WindowCapture.__new__(WindowCapture)     # 跳过 swift 枚举
+        cap.rect = rect
+        cap._size = size
+        return cap
+
+    eff = make(WindowRect(0, 33, 736, 845), (1472, 1676)).effective_rect()
+    check(abs(eff.h - 838.0) < 1e-6, f"高度应按截图反推成 838：{eff.h}")
+    check(eff.x == 0 and eff.y == 33 and eff.w == 736, f"其余字段不能动：{eff}")
+
+    # 一致时原样返回，不做无谓的改动
+    cap = make(WindowRect(0, 33, 736, 833), (1472, 1666))
+    check(cap.effective_rect() == cap.rect, "截图与 bounds 一致时不该改窗口")
+
+    # 拿不到截图尺寸时退回 bounds，不能抛异常挡住主链路
+    cap = make(WindowRect(0, 33, 736, 845), (0, 0))
+    check(cap.effective_rect() == cap.rect, "无尺寸应退回 bounds")
+
+
+def test_refresh_throttles_and_ignores_literal_rect() -> None:
+    """手填 x,y,w,h 没有窗口可查；变更是限流的，别每次点击都起 swift。"""
+    import time as _time
+
+    from poker_ocr.bet_slider import WindowCapture
+
+    cap = WindowCapture.__new__(WindowCapture)
+    cap.spec = "0,33,736,833"
+    cap.rect = WindowRect(0, 33, 736, 833)
+    cap.window_id = 0
+    cap.owner = ""
+    cap._last_refresh = 0.0
+    check(cap.refresh() is False, "字面坐标不该解析出窗口")
+
+    cap.spec = "title:WePoker-H5"
+    cap._last_refresh = _time.monotonic()
+    t0 = _time.monotonic()
+    check(cap.refresh() is False, "限流窗口内应为 False")
+    check(_time.monotonic() - t0 < 0.05, "10s 内应被限流，不该起 swift")
+
+
 # ─────────────────────────── 闭环 ───────────────────────────
 
 class FakeTable:

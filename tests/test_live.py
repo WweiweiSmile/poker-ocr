@@ -1582,8 +1582,9 @@ class FakeClicker:
         self.dry_run = dry_run
         self.calls = []
 
-    def run(self, advice):
+    def run(self, advice, *, targets=None):
         self.calls.append(advice)
+        self.targets = targets
         return ClickResult(self.status, action=advice.option.kind,
                            steps=(ClickStep("fold", 1.0, 2.0),))
 
@@ -1908,6 +1909,48 @@ def test_auto_click_skips_unreliable_frame() -> None:
     check(clicker.calls == [], "牌面不可靠/换手帧不应点击")
     check(rows[0]["click"]["reason"] == "frame_not_clickable",
           f"应记录 frame_not_clickable：{rows[0]}")
+
+
+def test_deferred_click_fires_when_frame_recovers() -> None:
+    """建议返回时那一帧不能点：挂起，下一帧画面恢复就补点。
+
+    2026-11-11 20:33 实盘 `20261111-9a644e4153`：T9o 弃牌的建议正好落在
+    `stack:topL` 被质量闸丢掉的那一帧，`frame_not_clickable` 直接 skipped ——
+    建议被静默吞掉，hero 只能等超时。牌面/下注读数抖一下是瞬时的，同一决策
+    点还在、回合也没结束，下一帧就该补点。
+    """
+    clicker = FakeClicker()
+    proc, rows = _drain_click(_click_advice(), clicker=clicker,
+                              allow_click=False)
+    check(clicker.calls == [], "那一帧不能点")
+    check(rows[0]["click"]["reason"] == "frame_not_clickable",
+          f"应记录 frame_not_clickable：{rows[0]}")
+    check(proc._deferred_click is not None, "不能点的那一帧应挂起补点")
+    check(proc._pending_decision_key is not None,
+          "挂起补点时不能把决策点清掉（否则下一帧判成 stale_decision）")
+
+    # 下一帧还没恢复：继续等，不能点
+    proc._service_deferred_click(click_state(ok=False), allow_click=False)
+    check(clicker.calls == [], "画面没恢复不能点")
+
+    # 画面恢复：补点
+    proc._service_deferred_click(click_state(), allow_click=True)
+    check(len(clicker.calls) == 1, f"恢复后应补点：{clicker.calls}")
+    check(proc.click_defer_count == 1, f"补点计数 {proc.click_defer_count}")
+    check(proc._deferred_click is None, "点完要清掉挂起")
+    check(proc._pending_decision_key is None, "补点成功也要清掉决策点")
+
+
+def test_deferred_click_dropped_when_decision_changed() -> None:
+    """挂起的建议在决策点变了之后绝不能补点（新街/新行动已经另有建议）。"""
+    clicker = FakeClicker()
+    proc, _rows = _drain_click(_click_advice(), clicker=clicker,
+                               allow_click=False)
+    check(proc._deferred_click is not None, "应先挂起")
+    proc._pending_decision_key = ("h1", "turn", 9, 9.0, 3.0, ("Ah", "Kd"))
+    proc._service_deferred_click(click_state(), allow_click=True)
+    check(clicker.calls == [], "决策点变了不能补点")
+    check(proc._deferred_click is None, "应清掉挂起")
 
 
 def test_auto_click_off_preserves_advice_shape() -> None:

@@ -1033,6 +1033,103 @@ def test_unbalanced_street_blocks_advice_until_bet_recovers() -> None:
     check(tr.skip_reason is None, "读数恢复后不该再标跳过原因")
 
 
+def test_hero_bet_without_pill_does_not_lock_rest_of_street() -> None:
+    """客户端不给 hero 画下注 pill：hero 先下注、被加注后必须还能给建议。
+
+    2026-11-11 20:27 实盘 `20261111-e8194f46f8`：turn hero 下注 3BB，对手加到
+    9BB。web 客户端的 `state.hero.bet` **恒为 0**（profile 里 hero 没有
+    bet_slot，见 `_hero_bet_note`），底池账单「本街投入 12.00BB 只对上
+    9.00BB」→ 判「下注金额没读全」→ 整条街连跳三次不建议，hero 的下注被加注
+    后再也没拿到建议，只能等换街。
+
+    这里同时锁住三件事：不当成账单异常、to_call 扣掉 hero 已投的 3BB、
+    行动线金额补成 3BB（否则落库写成「hero 下注 0BB」）。
+    """
+    tr = LiveHandTracker(confirm_frames=1)
+    board, cards = ["8d", "2c", "Kc", "9d"], ["6s", "4s"]
+
+    # 转牌开局：底池 6，双方各 97BB
+    feed(tr, state(player("hero", position="BB", stack=97.0),
+                   player("a", name="老王", position="SB", stack=97.0),
+                   pot=6.0, pbs=6.0, dealer="a"), cards, board)
+
+    # hero 下注 3BB：只有徽章、没有下注数字 → bet 仍 0，筹码 97 → 94
+    feed(tr, state(player("hero", position="BB", stack=94.0, action="bet"),
+                   player("a", name="老王", position="SB", stack=97.0),
+                   pot=9.0, pbs=6.0, dealer="a"), cards, board)
+
+    # 对手加到 9BB，轮回 hero：to_call 该是 6BB
+    point = feed(tr, state(player("hero", position="BB", stack=94.0,
+                                  action="bet"),
+                           player("a", name="老王", position="SB", stack=88.0,
+                                  bet=9.0, action="raise"),
+                           pot=18.0, pbs=6.0, dealer="a", hero_turn=True),
+                 cards, board)
+    check(tr.skip_reason is None,
+          f"hero 自己投的钱不该判成「下注金额没读全」：{tr.skip_detail}")
+    check(point is not None, "hero 下注后被加注仍是决策点，不能被锁死")
+    if point is not None:
+        check(abs(point.to_call - 6.0) < 1e-6,
+              f"to_call 要扣掉 hero 已投的 3BB，实际 {point.to_call}")
+        check(abs((point.hero_bet or 0.0) - 3.0) < 1e-6,
+              f"hero_bet 应从账单反解成 3BB，实际 {point.hero_bet}")
+    acts = [a for a in tr.hand.street_actions("turn") if a.is_hero]
+    check(acts and abs((acts[-1].amount or 0.0) - 3.0) < 1e-6,
+          f"hero 的下注金额要补回行动线，实际 {[a.amount for a in acts]}")
+
+
+def test_missing_hero_pill_does_not_excuse_underread_opponent_bet() -> None:
+    """hero 也没 pill 时，账单差额不能无脑算成 hero 的钱。
+
+    2026-11-08 实盘 `20261108-171b48f66f`：BTN 的 24.5BB 下注被读成 4.5。
+    这次 hero 自己也下了 3.5BB（同样没有 pill），账单差 23.5BB —— 远超 hero
+    实际投进去的 3.5BB，所以那是**别人**的下注读小了，仍要拦住。
+    """
+    tr = LiveHandTracker(confirm_frames=1)
+    feed(tr, state(player("hero", position="BB", stack=100.0),
+                   player("a", name="老王", position="CO", stack=100.0),
+                   player("b", name="小李", position="BTN", stack=100.0),
+                   pot=3.0, pbs=0.0, dealer="a"),
+         ["7c", "Qh"], [])
+
+    point = feed(tr, state(player("hero", position="BB", stack=96.5,
+                                  action="bet"),
+                           player("a", name="老王", position="CO", stack=96.5,
+                                  bet=3.5),
+                           player("b", name="小李", position="BTN", stack=75.5,
+                                  bet=4.5),
+                           pot=42.0, pbs=10.5, dealer="a", hero_turn=True),
+                 ["7c", "Qh"], ["9s", "Qs", "9h"])
+    check(point is None, f"差额远超 hero 投进去的钱，仍应拦住：{point}")
+    check(tr.skip_reason == "street_account_mismatch",
+          f"应标账单对不上，实际 {tr.skip_reason}")
+
+
+def test_bb_without_pill_is_a_free_check() -> None:
+    """hero 是 BB 且没有下注 pill：SB 补齐到 1BB 后，hero 是免费过牌。
+
+    2026-11-11 20:28 实盘 `20261111-0dc09551c1`：SB 平跟 1BB，`state.hero.bet`
+    恒为 0 → 把 hero 已经投的 BB 当成没投，`to_call` 算成 1BB（实际是 0），
+    模型于是拿「需跟 1BB」去决定要不要加注。
+    """
+    tr = LiveHandTracker(confirm_frames=1)
+    feed(tr, state(player("hero", position="BB", stack=99.0),
+                   player("a", name="老王", position="SB", stack=99.5,
+                          bet=0.5),
+                   pot=1.5, pbs=0.0, dealer="a"), ["Ah", "Kd"], [])
+    point = feed(tr, state(player("hero", position="BB", stack=99.0),
+                           player("a", name="老王", position="SB", stack=99.0,
+                                  bet=1.0, action="call"),
+                           pot=2.0, pbs=0.0, dealer="a", hero_turn=True),
+                 ["Ah", "Kd"], [])
+    check(point is not None, "BB 过牌机会也是一个决策点")
+    if point is not None:
+        check(abs(point.to_call) < 1e-6,
+              f"BB 已经投过 1BB，补齐后 to_call 应为 0，实际 {point.to_call}")
+        check(abs((point.hero_bet or 0.0) - 1.0) < 1e-6,
+              f"hero_bet 要算上盲注 1BB，实际 {point.hero_bet}")
+
+
 def test_hand_end_audit_flags_unbalanced_last_street() -> None:
     """读数一直没恢复：手末把最后一街的账单差额写进落库告警。"""
     tr = LiveHandTracker(confirm_frames=1)
@@ -1521,14 +1618,26 @@ def test_preflop_min_raise_floor_is_five_half_bb() -> None:
           f"后手不足 5.5BB 应封顶为全下：{[(o.id, o.amount, o.note) for o in short_raises]}")
 
 
-def test_preflop_presets_respect_five_half_bb_floor() -> None:
-    """点击器用的翻前档位也要 ≥5.5BB：否则建议 5.5BB、却点了一个更小的档位。"""
+def test_preflop_presets_follow_client_buttons_not_table_floor() -> None:
+    """翻前档位按**客户端按钮**算，5.5BB 桌规只约束建议，不约束按钮金额。
+
+    2026-11-11 20:47 实盘 `20261111-687aa58a5d`：旧口径把翻前 1/3 档也 `_cap`
+    到 5.5BB，点击器选中 1/3（以为它是 5.5BB），客户端实际只加到 3BB。
+    桌规体现在**建议的 label/note 与提示词**里，不在按钮金额里。
+    """
+    from poker_ocr.options import build_preflop_options
+
     point = make_point(street="preflop", board=(), to_call=0.0, pot=1.5,
                        hero_position="BTN", hero_bet=0.0, hero_stack=100.0,
                        preflop_shapes=("unopened",), cbet_spot=False)
     got = preset_amounts(point)
-    check(all(amount >= 5.5 for amount in got.values()),
-          f"翻前点击档位不得低于 5.5BB：{got}")
+    # 客户端按钮 = f × 底池 1.5，不套 5.5BB
+    check(abs(got["raise-1/3"] - 0.5) < 1e-9,
+          f"翻前 1/3 档应是客户端按钮的 0.5BB：{got}")
+    # 建议仍然不得低于 5.5BB
+    raises = [o for o in build_preflop_options(point) if o.kind == "raise"]
+    check(raises and all((o.amount or 0) >= 5.5 for o in raises),
+          f"翻前建议仍不得低于 5.5BB：{[(o.id, o.amount) for o in raises]}")
     # 翻后不受这条牌桌规则影响
     post = preset_amounts(make_point())
     check(post["raise-1/3"] == 2.0,
@@ -1755,6 +1864,114 @@ def test_preset_amounts_preflop_follows_pot_fraction() -> None:
     check(got["raise-1/3"] == 6.5, f"翻前 1/3 档应 6.5：{got}")
     check(got["raise-2/3"] == 9.0, f"翻前 2/3 档应 9.0：{got}")
     check(got["raise-1.2"] == 13.0, f"翻前 1.2 档应 13.0：{got}")
+
+
+def test_preset_targets_are_client_buttons_not_table_minimum() -> None:
+    """档位金额要按客户端按钮算，不能被本桌 5.5BB 最低加注抬高。
+
+    2026-11-11 20:47 实盘 `20261111-687aa58a5d`：UTG AQo，建议「开池到
+    5.5BB」。旧口径把 1/3、1/2 档都 `_cap` 成 5.5BB，点击器以为 1/3 档就是
+    5.5BB 就点了它，客户端实际只加到 3BB（底池 6 → 9），尺度小了一档。
+    """
+    from poker_ocr.advice import Option
+    from poker_ocr.clicker import choose_preset_within
+
+    point = make_point(street="preflop", board=(), to_call=1.0, pot=6.0,
+                       hero_bet=0.0, hero_stack=168.5, second_bet=1.0,
+                       cbet_spot=False)
+    got = preset_amounts(point)
+    # 客户端按钮 = 最高下注 1 + f ×（底池 6 + 需跟 1）
+    check(abs(got["raise-1/3"] - 3.33) < 1e-6,
+          f"1/3 档应是客户端按钮的 3.33BB，实际 {got}")
+    check(abs(got["raise-1/2"] - 4.5) < 1e-6,
+          f"1/2 档应是 4.5BB，实际 {got}")
+    check(abs(got["raise-2/3"] - 5.67) < 1e-6,
+          f"2/3 档应是 5.67BB，实际 {got}")
+    chosen = choose_preset_within(
+        Option("open-2.5", "开池到 5.5BB", "raise", 5.5, ""), got, 0.05)
+    check(chosen is not None and chosen[0] == "raise-2/3",
+          f"5.5BB 应落到 2/3 档（≈5.67），实际 {chosen}")
+
+
+def test_preflop_limp_is_not_recorded_as_raise() -> None:
+    """盲注 pill 晚渲染时，溜入的 1BB 不能记成「加注到 1BB」。
+
+    2026-11-11 20:37 实盘 `20261111-465848a317`：UTG 溜入 1BB 被记成 raise，
+    行动线变成「UTG 加注到 1BB → … → HJ 加注到 7BB」，翻前形态算成 3-bet
+    （实际只有一个加注），提示词整套结论跟着错。
+    翻前水位至少是大盲（发牌时就投进去了），溜入只是跟注。
+    """
+    tr = LiveHandTracker(confirm_frames=1)
+    # 开手帧：盲注 pill 还没渲染，各家下注都读成 0
+    feed(tr, state(player("hero", position="BB", stack=99.0),
+                   player("a", name="老王", position="UTG", stack=100.0),
+                   player("b", name="小李", position="BB", stack=99.0),
+                   pot=1.5, pbs=0.0, dealer="b"), ["Ah", "Kd"], [])
+    # UTG 溜入到 1BB（没有徽章，只有下注额）
+    feed(tr, state(player("hero", position="BB", stack=99.0),
+                   player("a", name="老王", position="UTG", stack=99.0,
+                          bet=1.0),
+                   player("b", name="小李", position="BB", stack=99.0,
+                          bet=1.0),
+                   pot=2.5, pbs=0.0, dealer="b"), ["Ah", "Kd"], [])
+    acts = [a for a in tr.hand.street_actions("preflop") if a.seat_id == "a"]
+    check(acts and acts[0].action == "call",
+          f"1BB 溜入应记成跟注，实际 {[a.action for a in acts]}")
+
+    # 之后 HJ 加到 7BB 才是真正的加注；翻前形态仍是单加注
+    feed(tr, state(player("hero", position="BB", stack=99.0),
+                   player("a", name="老王", position="UTG", stack=99.0,
+                          bet=1.0),
+                   player("b", name="小李", position="BB", stack=99.0,
+                          bet=1.0),
+                   player("c", name="小张", position="HJ", stack=100.0,
+                          bet=7.0, action="raise"),
+                   pot=9.0, pbs=0.0, dealer="b"), ["Ah", "Kd"], [])
+    raises = [a for a in tr.hand.street_actions("preflop")
+              if a.action in ("raise", "bet")]
+    check(len(raises) == 1 and raises[0].amount == 7.0,
+          f"翻前只应有一次加注（到 7BB），实际 {[(a.action, a.amount) for a in raises]}")
+
+
+def test_hero_open_without_pill_keeps_callers_as_calls() -> None:
+    """hero 开池 3BB（没有下注 pill）后，后面的跟注不能被反推成加注。
+
+    2026-11-11 20:47 实盘 `20261111-687aa58a5d`：UTG Hero open 3BB，UTG+1 跟注
+    3BB。hero 的金额记成 0、水位没抬，跟注被反推成「加注到 3BB」，翻前形态
+    变成 3-bet（提示词写「4 人 3-bet 池」，模型按 3-bet 出弃牌结论）。
+    """
+    tr = LiveHandTracker(confirm_frames=1)
+    cards = ["Qh", "Ac"]
+
+    def table(*, hero_stack: float, hero_action: str | None = None,
+              caller_bet: float = 0.0, caller_action: str | None = None,
+              caller_stack: float = 168.0, pot: float) -> FrameState:
+        return state(
+            player("hero", position="UTG", stack=hero_stack,
+                   action=hero_action),
+            player("a", name="老王", position="UTG+1", stack=caller_stack,
+                   bet=caller_bet, action=caller_action),
+            player("b", name="小李", position="BB", stack=168.0, bet=1.0),
+            player("c", name="小张", position="SB", stack=168.5, bet=0.5),
+            pot=pot, pbs=4.5, dealer="b")
+
+    feed(tr, table(hero_stack=168.5, pot=6.0), cards, [])
+    # hero open 到 3BB：只有徽章，没有下注数字（bet 恒 0）
+    feed(tr, table(hero_stack=165.5, hero_action="raise", pot=9.0), cards, [])
+    # UTG+1 跟注到 3BB
+    feed(tr, table(hero_stack=165.5, hero_action="raise", caller_bet=3.0,
+                   caller_action="call", caller_stack=165.0, pot=12.0),
+         cards, [])
+
+    acts = tr.hand.street_actions("preflop")
+    hero_acts = [a for a in acts if a.is_hero]
+    check(hero_acts and abs((hero_acts[-1].amount or 0.0) - 3.0) < 1e-9,
+          f"hero 的开池金额应从账单推回 3BB：{[a.amount for a in hero_acts]}")
+    caller = [a for a in acts if a.seat_id == "a"]
+    check(caller and caller[-1].action == "call",
+          f"跟注 3BB 不能记成加注：{[(a.action, a.amount) for a in caller]}")
+    raises = [a for a in acts if a.action in ("raise", "bet")]
+    check(len(raises) == 1, f"翻前只应有 hero 那一次加注：{raises}")
 
 
 def test_advice_carries_click_metadata() -> None:

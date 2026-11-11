@@ -692,6 +692,71 @@ def test_pbs_equal_pot_with_bets_is_an_error() -> None:
     check("pbs_inconsistent" in s.errors, f"应报 pbs_inconsistent，实际 {s.errors}")
 
 
+def test_pot_label_is_idle_gap_not_ocr_failure() -> None:
+    """底池横幅显示「总底池」= 手牌间隙，不是「底池没读出来」。
+
+    2026-11-11 实盘：这类帧占全部丢弃的 62%（942/1508）；同一块 ROI 正常帧
+    读 `6.5BB`（0.95）、收池/开手帧读 `总底池`（0.98）。
+    """
+    s = state(pot="总底池", pbs="")
+    check(s.pot_idle, f"应标成间隙帧：{s.pot_idle}")
+    check(s.pot is None, "间隙帧的 pot 不能被当成 0")
+    check("pot" in s.errors,
+          "状态仍然不可用（上层按间隙帧处理，不能当有效状态）")
+    normal = state()
+    check(not normal.pot_idle, "正常帧不该标间隙")
+
+
+def test_showdown_seat_exempt_from_stack_and_bet_checks() -> None:
+    """摊牌座位：头像被亮牌盖住、筹码读不到、All-in 徽章也没了。
+
+    2026-11-11 实盘：两手全下摊牌各丢 147 / 108 帧（19.9s / 14.5s），
+    摊牌窗口里没有任何状态、手牌结束判定被拖慢。
+    """
+    rows = {k: dict(v) for k, v in BASE.items()}
+    rows["lowL"] = {"name": "YKY", "chip": "", "bet": "BB"}
+    frame = make_frame(rows)
+    plain = build_state(frame, PROFILE)
+    check(not plain.ok and "stack:lowL" in plain.errors,
+          f"没亮牌时仍应报筹码读不到：{plain.errors}")
+    shown = build_state(frame, PROFILE, shown_seats={"lowL"})
+    check(shown.ok, f"亮牌座位不该拖垮整帧：{shown.errors}")
+    check(shown.player("lowL").stack is None,
+          "读不到的筹码保持 None，不能编一个数")
+
+
+def test_bet_pill_garbage_carries_previous_reading() -> None:
+    """下注 pill 淡入那一帧读成非金额：底池没变 → 沿用上一帧读数。
+
+    2026-11-11 实盘 `bet:<座>` 占丢弃的 15.5%，incident 里 upR 的 `1BB`
+    被读成非金额形状；同一帧重跑 OCR 能稳定读出 `1BB`。
+    """
+    prev = state()
+    rows = {k: dict(v) for k, v in BASE.items()}
+    rows["topR"]["bet"] = "lBB"
+    s = build_state(make_frame(rows), PROFILE, prev_state=prev)
+    check(s.ok, f"底池没变时应沿用上一帧下注：{s.errors}")
+    check(s.player("topR").bet == 6.0,
+          f"topR 的下注应沿用 6BB，实际 {s.player('topR').bet}")
+    # hero 回合里不兜底：宁可丢一帧，也不能拿旧下注去算 to_call
+    s2 = build_state(make_frame(rows, hero_turn=True), PROFILE,
+                     prev_state=prev)
+    check("bet:topR" in s2.errors,
+          f"hero 回合不该沿用旧下注：{s2.errors}")
+
+
+def test_pbs_banner_lag_uses_previous_when_pot_unchanged() -> None:
+    """换街那一帧 pbs 横幅先跳、底池横幅还没跟上：沿用上一帧 pbs。
+
+    2026-11-11 实盘 `pbs_gt_pot` / `pbs_inconsistent` 共 16 帧。
+    """
+    prev = state()                      # pot 38 / pbs 4.5
+    s = build_state(make_frame(pbs="38BB"), PROFILE, prev_state=prev)
+    check(s.ok, f"底池没变时应沿用上一帧 pbs：{s.errors}")
+    check(s.pot_before_street == 4.5,
+          f"pbs 应沿用 4.5，实际 {s.pot_before_street}")
+
+
 def test_impossible_bet_is_downgraded_not_discarded() -> None:
     """下注读到大于底池：只把这一位降级成未知，不丢整帧。
 
@@ -910,6 +975,10 @@ def main() -> int:
         test_ante_fallback_when_banner_loses_it,
         test_ante_inherited_when_parenthesis_lost,
         test_pbs_gt_pot_is_an_error,
+        test_pot_label_is_idle_gap_not_ocr_failure,
+        test_showdown_seat_exempt_from_stack_and_bet_checks,
+        test_bet_pill_garbage_carries_previous_reading,
+        test_pbs_banner_lag_uses_previous_when_pot_unchanged,
         test_impossible_bet_is_downgraded_not_discarded,
         test_pbs_equal_pot_with_bets_is_an_error,
         test_bomb_banner_detection,

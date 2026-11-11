@@ -876,6 +876,27 @@ def test_lexicon_never_merges_two_live_players() -> None:
               f"原来的那位不应改名：{out.state.player('midL').name}")
 
 
+def test_pot_idle_frames_end_hand_and_skip_discard_stats() -> None:
+    """底池横幅显示「总底池」= 这一手已经收池：连续 2 帧给 hand_end。
+
+    这类帧 2026-11-11 实盘占全部丢弃的 62%（942/1508），但它是**手牌间隙**
+    而不是识别失败 —— 不该进「丢弃原因」，还要顺手给换手一个早信号。
+    """
+    with stub_env():
+        s = new_stream()
+        first = feed(s, make_frame(), 0.0)
+        check(first.kind in ("record", "no_change"), f"正常帧：{first.kind}")
+        gap = make_frame(pot="总底池", pbs="")
+        a = feed(s, gap, 0.2)
+        b = feed(s, gap, 0.4)
+        check(a.kind == "idle" and b.kind == "idle",
+              f"应标成间隙帧，实际 {a.kind}/{b.kind}")
+        check(not a.hand_end, "单帧「总底池」只算候选，不能收手")
+        check(b.hand_end, "连续 2 帧「总底池」应给 hand_end")
+        check(s.idle_frames == 2, f"间隙帧计数 {s.idle_frames}")
+        check(not s.discarded, f"间隙帧不该进丢弃原因：{dict(s.discarded)}")
+
+
 def main() -> int:
     tests = [
         test_first_frame_is_baseline,
@@ -913,6 +934,7 @@ def main() -> int:
         test_lexicon_corrects_known_player_name,
         test_lexicon_flags_suspect_without_changing,
         test_lexicon_never_merges_two_live_players,
+        test_pot_idle_frames_end_hand_and_skip_discard_stats,
     ]
     for t in tests:
         before = len(FAILS)

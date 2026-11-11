@@ -384,6 +384,10 @@ def collect(states_paths: list[Path], event_paths: list[Path],
                     discard_reasons[str(error).split(":", 1)[0] or "unknown"] += 1
             elif kind == "stale":
                 stale += 1
+            elif kind == "idle":
+                # 底池横幅显示「总底池」的手牌间隙帧：既不是识别失败，
+                # 也没产生状态。不算进丢弃率（见 state_stream 的 idle）。
+                continue
             else:
                 accepted += 1
         frame_count = len(frames)

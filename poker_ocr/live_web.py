@@ -176,6 +176,7 @@ class LiveWebStore:
             "advice_count": 0, "advice_done": 0,
             "incidents": 0, "fallbacks": 0,
             "cards_unreliable_skips": 0, "discarded_reasons": {},
+            "idle_frames": 0,
         }
         self.latest_frame: dict | None = None
         self.table: dict | None = None

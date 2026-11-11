@@ -51,7 +51,7 @@
 from __future__ import annotations
 
 import copy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Callable
 
@@ -346,6 +346,22 @@ class _LiveHand:
     # 水位不可信的街：有座位下注未知时置位，全场读数都可靠后清除。置位期间
     # 不按下注额反推 call/raise —— 分不清，宁可漏一次也不凭空造一个。
     level_unknown: set[str] = field(default_factory=set)
+    # 街 → hero 本街已投入（本街加到总额）。
+    #
+    # web 客户端**不给 hero 画下注 pill**（profile 里 hero 没有 bet_slot，见
+    # `config/table_wpk_mac.json` 的 `_hero_bet_note`），`state.hero.bet` 恒为 0，
+    # hero 自己投进底池的钱在状态读数里是隐形的。不补这笔钱会同时坏两件事：
+    #
+    #   · `_street_account` 差出 hero 那一笔 → 判「下注金额没读全」→ 整条街
+    #     不再给建议。2026-11-11 20:27 实盘 `20261111-e8194f46f8`：turn hero
+    #     下注 3BB、对手加到 9BB，账单「本街投入 12.00BB 只对上 9.00BB」连跳
+    #     三次，hero 的下注被加注后再没拿到建议，只能等换街；
+    #   · `to_call = 最大下注 − hero_bet` 把 hero 已经投的钱再算一次
+    #     （同一手 turn 会算成「需跟 9BB」而不是 6BB）。
+    #
+    # 值从底池账单反解（本街实际投入 − 其他座已记录投入），再由「起始筹码 −
+    # 当前后手」兜住，见 `_note_hero_bet` / `_hero_bet_plausible`。
+    hero_street_bet: dict[str, float] = field(default_factory=dict)
     # 手末核对底池账单发现的异常（某街「各座投入之和」对不上 pot − pbs）。
     # 落进 hand 记录的 data_quality.warnings，复盘时先看这手能不能信。
     data_warnings: list[str] = field(default_factory=list)
@@ -596,6 +612,16 @@ class LiveHandTracker:
 
         # 弹窗/遮挡让状态层误判离桌、随后图标恢复时，先撤销之前补的离桌弃牌。
         self._revoke_left_folds(state, hand)
+        # hero 自己的投入必须**先**认定（客户端不给 hero 画下注 pill，账单里
+        # 这笔钱只能从「本街实际投入 − 其他座」反解）：
+        #   · 动作记录要用它当金额 —— 否则 hero 的加注记成「加注 0BB」；
+        #   · 水位要跟着抬 —— 否则下一个跟注 3BB 会被反推成「加注到 3BB」，
+        #     翻前形态整个错成 3-bet（2026-11-11 20:47 实盘 `202687aa58a5d`：
+        #     Hero UTG open 3BB，UTG+1 跟注 3BB 记成 raise，提示词写成
+        #     「3-bet 池」、给 hero 的理由也按 3-bet 说）。
+        # 不认的话下面所有用账单的地方（账单校验 / to_call / 街末对账）也会
+        # 把它当成「没读全」，整条街不再给建议（见 `_LiveHand.hero_street_bet`）。
+        self._note_hero_bet(hand, state)
         self._record_actions(state, hand)
         # 中途离桌的人必然已经弃牌：状态层把他保留成 folded，这里立刻补一条
         # inferred fold（名字/位置沿用离桌前），让 AI 在当前街的行动线里就能
@@ -1042,10 +1068,18 @@ class LiveHandTracker:
         # 基线：接管链路时桌上可能已经有下注/加注，先把它当当前水位。
         # 下注读数不可信（> 底池）的座位不进水位/基线：那个数字明确是错的，
         # 拿它当基线会让后面的正常读数被当成一次「行动」。
+        #
+        # 翻前的水位**至少是大盲**：大盲是发牌时就已经投进去的确定事实。
+        # 开手那几帧盲注 pill 可能还没渲染，水位读成 0，之后第一个溜入的
+        # 1BB 就会被反推成「加注到 1BB」—— 2026-11-11 20:37 实盘
+        # `20261111-465848a317`：UTG 溜入 1BB 记成 raise，翻前形态被算成
+        # 3-bet（实际只有 HJ 一个加注），提示词整套结论跟着错。
         reliable = [p for p in state.players
                     if not getattr(p, "bet_unknown", False)]
-        hand.level[street] = (max((p.bet or 0.0) for p in reliable)
-                              if reliable else 0.0)
+        base_level = max((p.bet or 0.0) for p in reliable) if reliable else 0.0
+        if street == PREFLOP and state.blinds is not None:
+            base_level = max(base_level, state.blinds.bb)
+        hand.level[street] = base_level
         for p in state.players:
             if getattr(p, "bet_unknown", False):
                 hand.baseline_unknown.add((street, p.seat_id))
@@ -1120,6 +1154,10 @@ class LiveHandTracker:
         """
         ante = hand.blinds.ante if hand.blinds and hand.blinds.ante else 0.0
         total = ante + (p.bet or 0.0)
+        if (p.seat_id == hand.hero_seat_id
+                and hand.hero_street_bet.get(hand.street)):
+            # hero 没有下注 pill：本街投入只能取反解值，pill 恒为 0
+            total = max(total, ante + hand.hero_street_bet[hand.street])
         for street in (PREFLOP, FLOP, TURN, RIVER):
             if street == hand.street:
                 break
@@ -1128,6 +1166,9 @@ class LiveHandTracker:
                 if (a.street == street and a.seat_id == p.seat_id
                         and a.amount is not None):
                     last = a.amount
+            if p.seat_id == hand.hero_seat_id:
+                # 已结束的街同样可能有反解值（行动金额是 0 时它才是准的）
+                last = max(last or 0.0, hand.hero_street_bet.get(street, 0.0))
             if street == PREFLOP and hand.blinds is not None:
                 blind = {"SB": hand.blinds.sb,
                          "BB": hand.blinds.bb}.get(p.position or "", 0.0)
@@ -1252,13 +1293,20 @@ class LiveHandTracker:
                     hand.baseline_unknown.discard(key)
                     continue
 
+            # hero 没有下注 pill（`p.bet` 恒为 0）：金额用 `_note_hero_bet`
+            # 从底池账单反解出来的本街投入。少了它，`level` 抬不上去，紧跟
+            # 着的跟注 3BB 会被反推成「加注到 3BB」。
+            amount = p.bet
+            if (p.seat_id == hero_seat and not amount
+                    and action in ("bet", "raise", "call")):
+                amount = hand.hero_street_bet.get(hand.street) or amount
             record = ActionRecord(
                 street=hand.street,
                 seat_id=p.seat_id,
                 name=p.name,
                 position=p.position,
                 action=action,
-                amount=p.bet,
+                amount=amount,
                 all_in=p.all_in,
                 is_hero=p.seat_id == hero_seat,
             )
@@ -1266,8 +1314,10 @@ class LiveHandTracker:
             hand.last_index[key] = len(hand.actions) - 1
             hand.baseline[key] = bet
             hand.baseline_unknown.discard(key)
-            if action in AGGRESSIVE and bet > level:
-                level = bet
+            # 水位按**记录的金额**抬（hero 的 pill 是 0，得用反解值）
+            level_amount = amount if amount is not None else bet
+            if action in AGGRESSIVE and level_amount > level:
+                level = level_amount
 
         hand.level[hand.street] = level
         if not unknown_now and hand.street in hand.level_unknown:
@@ -1324,8 +1374,14 @@ class LiveHandTracker:
 
     @staticmethod
     def _street_known(hand: _LiveHand, street: str,
-                      state: FrameState | None = None) -> dict[str, float]:
-        """这一街「能对上账」的每座投入：盲注基线 + 已记录动作 + 当前下注。"""
+                      state: FrameState | None = None, *,
+                      with_hero_bet: bool = True) -> dict[str, float]:
+        """这一街「能对上账」的每座投入：盲注基线 + 已记录动作 + 当前下注。
+
+        `with_hero_bet=True` 时把 `hand.hero_street_bet` 里反解出来的那笔也算上
+        —— 客户端不给 hero 画下注 pill，只有这个数能代表 hero 投进底池的钱。
+        反解本身（`_derive_hero_bet`）必须传 False，否则是拿结论证前提。
+        """
         known: dict[str, float] = {}
         for (s, seat), amount in hand.baseline.items():
             if s == street:
@@ -1336,12 +1392,162 @@ class LiveHandTracker:
             for p in state.players:
                 if p.bet is not None:
                     known[p.seat_id] = max(known.get(p.seat_id, 0.0), p.bet)
+        if with_hero_bet and hand.hero_seat_id is not None:
+            hero_bet = hand.hero_street_bet.get(street)
+            if hero_bet:
+                known[hand.hero_seat_id] = max(
+                    known.get(hand.hero_seat_id, 0.0), hero_bet)
         return known
+
+    def _hero_known(self, hand: _LiveHand, street: str,
+                    state: FrameState | None) -> float:
+        """hero 本街**已经读出来**的投入（pill / 行动金额 / 基线），不含反解。"""
+        seat = hand.hero_seat_id or (state.hero_seat_id if state else None)
+        if not seat:
+            return 0.0
+        known = self._street_known(hand, street, state, with_hero_bet=False)
+        return known.get(seat, 0.0)
+
+    def _derive_hero_bet(self, hand: _LiveHand, street: str,
+                         end_pot: float | None,
+                         state: FrameState | None) -> float | None:
+        """底池账单里属于 hero 的那一笔 = 本街实际投入 − 其他座已记录投入。
+
+        客户端不给 hero 画下注 pill（见 `_LiveHand.hero_street_bet` 的说明），
+        hero 的钱只能这样反解。返回 None 表示账单本身读不到（pbs 缺失）。
+        """
+        account = self._street_account(hand, street, end_pot, state,
+                                       with_hero_bet=False)
+        if account is None:
+            return None
+        actual, known_sum = account
+        hero_known = self._hero_known(hand, street, state)
+        return max(0.0, round(actual - (known_sum - hero_known), 2))
+
+    def _hero_spent(self, hand: _LiveHand, state: FrameState) -> float | None:
+        """这一手 hero **物理上**投进底池多少（起始筹码 − 当前后手）。"""
+        hero = self._hero(state)
+        if hand.start_stack is None or hero is None or hero.stack is None:
+            return None
+        return max(0.0, round(float(hand.start_stack) - float(hero.stack), 2))
+
+    def _hero_bet_plausible(self, hand: _LiveHand, state: FrameState,
+                            derived: float, street: str | None = None) -> bool:
+        """反解出来的 hero 投入，能不能被筹码变化兜住。
+
+        hero 这一手最多只能投「起始筹码 − 当前后手」，本街的上限还要再扣掉
+        前面几条街已认定的部分。超出的钱不属于 hero —— 是别人下注读小了
+        （2026-11-08 实盘 `20261108-171b48f66f`：24.5BB 读成 4.5，差额 20BB
+        不能因为「hero 也没 pill」就被当 hero 的投入放过）。
+
+        起始筹码读不到时返回 False：不替 hero 认这笔钱，退回旧的保守口径
+        （账单对不上就不给建议），宁可忘一次也不能拿错金额去点。
+        """
+        street = street or hand.street
+        spent = self._hero_spent(hand, state)
+        if spent is None:
+            return False
+        here = STREET_SEQ.get(street, 0)
+        before = sum(v for s, v in hand.hero_street_bet.items()
+                     if STREET_SEQ.get(s, 0) < here)
+        cap = max(0.0, spent - before)
+        limit = max(STREET_ACCOUNT_TOLERANCE,
+                    derived * STREET_ACCOUNT_TOLERANCE_RATIO)
+        return derived <= cap + limit
+
+    def _fill_hero_action_amount(self, hand: _LiveHand, street: str,
+                                 amount: float) -> None:
+        """把反解出来的 hero 本街投入补回行动线。
+
+        客户端 hero 没有下注 pill，徽章记下来的金额是 0 —— 不补的话落库/提示词
+        里会写成「hero 下注 0BB」，`to_call <= 0` 那条「自己已经行动过」的判据
+        也会失效（0 不比自己盲注大）。
+        """
+        if amount <= 0 or not hand.hero_seat_id:
+            return
+        idx = hand.last_index.get((street, hand.hero_seat_id))
+        if idx is None:
+            return
+        act = hand.actions[idx]
+        if act.action in ("check", "fold"):
+            return
+        # 只补「金额还不知道」的那条（pill 缺位记下的 0/None）。已经有正金额
+        # 的记录是前面某一动（下注 3 → 被加到 9 之后这 street 的总投入变成 9），
+        # 不能再拿新总额去覆盖它 —— 这次新的跟注会由 `_record_actions` 用同一个
+        # 反解值记成新的一条。
+        if act.amount is None or act.amount <= 1e-9:
+            hand.actions[idx] = replace(act, amount=round(amount, 2))
+        # 水位跟着抬：`_record_actions` 里 hero 的 pill 是 0，漏了这一步，
+        # 紧跟的跟注（同一个 3BB）会被反推成「加注到 3BB」。
+        if act.action in AGGRESSIVE:
+            hand.level[street] = max(hand.level.get(street, 0.0), amount)
+
+    def _note_hero_bet(self, hand: _LiveHand, state: FrameState, *,
+                       street: str | None = None,
+                       end_pot: float | None = None) -> None:
+        """从底池账单反解 hero 本街投入；认不下来就留空（不猜）。
+
+        两个前提缺一不可：
+          · 翻前的盲注是**确定事实**（位置 + 盲注额），先按它垫底；
+          · 反解值要有 hero 自己的动作徽章作证。没有徽章时账单里多出来的钱
+            不能算到 hero 头上（他根本没动），否则会把「别人下注读小了」
+            洗成 hero 的投入。
+        """
+        if hand.street == PREFLOP:
+            self._seed_hero_blind(hand, state)
+        street = street or hand.street
+        if end_pot is None:
+            end_pot = state.pot
+        if not self._hero_acted(hand, street, state):
+            return
+        derived = self._derive_hero_bet(hand, street, end_pot, state)
+        if not derived or derived <= 0:
+            return
+        if not self._hero_bet_plausible(hand, state, derived, street):
+            return
+        if derived <= hand.hero_street_bet.get(street, 0.0):
+            return
+        hand.hero_street_bet[street] = derived
+        self._fill_hero_action_amount(hand, street, derived)
+
+    def _hero_acted(self, hand: _LiveHand, street: str,
+                    state: FrameState | None = None) -> bool:
+        """hero 这一街有没有「投钱」的动作（下注/加注/跟注）。
+
+        `state` 传进来时连**本帧的徽章**一起看：`_note_hero_bet` 跑在
+        `_record_actions` 之前，这一帧刚亮起的徽章还没进行动线。
+        """
+        if not hand.hero_seat_id:
+            return False
+        if (state is not None and street == hand.street):
+            hero = self._hero(state)
+            if hero is not None and hero.action in ("bet", "raise", "call"):
+                return True
+        return any(a.seat_id == hand.hero_seat_id
+                   and a.action in ("bet", "raise", "call")
+                   for a in hand.street_actions(street))
+
+    def _seed_hero_blind(self, hand: _LiveHand, state: FrameState) -> None:
+        """翻前把 hero 的盲注先记进本街投入。
+
+        盲注是**确定事实**（位置 + 盲注额），不依赖任何读数；hero 没有下注
+        pill，不垫这一笔的话 BB 过牌的机会会被算成「需跟 1BB」。
+        """
+        if hand.street != PREFLOP or hand.blinds is None:
+            return
+        hero = self._hero(state)
+        if hero is None:
+            return
+        blind = {"SB": hand.blinds.sb,
+                 "BB": hand.blinds.bb}.get(hero.position or "", 0.0)
+        if blind and blind > hand.hero_street_bet.get(PREFLOP, 0.0):
+            hand.hero_street_bet[PREFLOP] = blind
 
     @staticmethod
     def _street_account(hand: _LiveHand, street: str,
                         end_pot: float | None,
-                        state: FrameState | None = None) -> tuple[float, float] | None:
+                        state: FrameState | None = None, *,
+                        with_hero_bet: bool = True) -> tuple[float, float] | None:
         """(本街实际投入, 各座投入之和)。对不上说明有下注读小或漏抓了行动。"""
         start = hand.pot_start.get(street)
         if start is None and state is not None and hand.street == street:
@@ -1352,7 +1558,8 @@ class LiveHandTracker:
         actual = round(end_pot - start, 2)
         if actual <= 1e-9:
             return None
-        known = LiveHandTracker._street_known(hand, street, state)
+        known = LiveHandTracker._street_known(hand, street, state,
+                                               with_hero_bet=with_hero_bet)
         return actual, round(sum(known.values()), 2)
 
     @staticmethod
@@ -1425,7 +1632,11 @@ class LiveHandTracker:
         if actual <= 1e-9 or level <= 1e-9:
             return
 
-        # 已经记进账的投入：盲注基线 + 每条动作的「本街加到总额」
+        # hero 那一笔先认下来：客户端不给 hero 画下注 pill，不认的话这条街的
+        # 账单永远差他投的钱，下面会把差额补成别人的跟注/加注（凭空造行动）。
+        self._note_hero_bet(hand, state, street=street, end_pot=end)
+
+        # 已经记进账的投入：盲注基线 + 每条动作的「本街加到总额」+ hero 反解
         known = self._street_known(hand, street)
         missing = round(actual - sum(known.values()), 2)
         if missing <= 1e-9:
@@ -1751,6 +1962,10 @@ class LiveHandTracker:
         # 本街「底池账单」对不上：有人下注读小了（24.5 → 4.5）或漏抓了行动，
         # 最大下注/to_call 就会算小 —— 建议「只需跟 1BB」比不给建议危险得多。
         # 这一帧不给建议，也不占用 advised 名额：读数恢复后同一个决策点还能补投。
+        #
+        # hero 自己那一笔已经由 observe 里的 `_note_hero_bet` 认过（客户端不给
+        # hero 画下注 pill，只能从账单反解，再用筹码变化兜住）。这里剩下的差额
+        # 就是**别人**的读数问题，照旧跳过。
         account = self._street_account(hand, hand.street, state.pot, state)
         if account is not None and self._account_suspicious(*account):
             actual, known_sum = account
@@ -1820,6 +2035,12 @@ class LiveHandTracker:
         hero = self._hero(state)
         hero_seat = hero.seat_id if hero else state.hero_seat_id
         hero_bet = (hero.bet or 0.0) if hero else 0.0
+        # hero 没有下注 pill 的客户端：`hero.bet` 恒为 0，本街投入只能取反解值，
+        # 否则 to_call 会把 hero 已经下过的钱再算一次（下注 3BB 被加到 9BB 时
+        # 会显示「需跟 9BB」而不是 6BB）。有 pill 的客户端取两者较大值。
+        street_bet = hand.hero_street_bet.get(hand.street)
+        if street_bet:
+            hero_bet = max(hero_bet, street_bet)
 
         bets = sorted(
             (p.bet for p in state.players if p.bet is not None and p.in_hand),

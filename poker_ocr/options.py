@@ -344,7 +344,9 @@ def _raise_geometry(snap: HandSnapshot) -> tuple[float, float, float, float | No
 
     `build_options()` 和 `preset_targets()` 共用，避免两处对「最小加注 / 全下
     封顶」的算法漂移。翻前还要叠加本桌的 5.5BB 下限（`PREFLOP_MIN_RAISE_BB`）：
-    点击器按这个几何选档位，档位目标低于 5.5BB 就等于点出一个牌桌拒绝的动作。
+    这是**建议**必须落在这条线以上（低于它的开池会被牌桌拒绝）。
+    `preset_targets()` 只取几何、不用 `min_raise_to` —— 客户端档位按钮按底池
+    比例自己算，不会被这条下限抬价（见该函数的说明）。
     """
     to_call = max(snap.to_call or 0.0, 0.0)
     pot = snap.pot or 0.0
@@ -361,23 +363,42 @@ def _raise_geometry(snap: HandSnapshot) -> tuple[float, float, float, float | No
     return to_call, pot, max_bet, hero_max, min_raise_to
 
 
-def preset_targets(snap: HandSnapshot) -> dict[str, tuple[float, str]]:
-    """五个快捷档位（底池 1/3 … 1.2）在当前局面的目标额。
+def _fraction_targets(snap: HandSnapshot) -> dict[str, float]:
+    """五个底池档位的**客户端**目标额（未做最小加注修正）。
 
-    与 `build_options()` 的翻后档位使用同一套公式和 `_cap()`：面对下注时
-    `最高下注 + f × (底池 + 需跟额)`，没人下注时 `f × 底池`。翻前也一样算，
-    虽然翻前建议用的是 bb 口径，但客户端按钮仍按底池档位显示，点击器要拿它
-    做「最近档位」映射。返回 `{option_id: (amount_bb, note)}`。
+    面对下注：`最高下注 + f × (底池 + 需跟额)`；没人下注：`f × 底池`。
+    `build_options()` 会在这个基础上补「至少最小加注」；`preset_targets()`
+    直接用原值 —— 客户端的档位按钮就是按这个公式画的。
     """
-    to_call, pot, max_bet, hero_max, min_raise_to = _raise_geometry(snap)
-    out: dict[str, tuple[float, str]] = {}
+    to_call, pot, max_bet, _hero_max, _min_raise_to = _raise_geometry(snap)
+    out: dict[str, float] = {}
     for name in ("1/3", "1/2", "2/3", "1", "1.2"):
         if to_call > 0:
-            target = max_bet + RAISE_FRACTIONS[name] * (pot + to_call)
+            out[f"raise-{name}"] = max_bet + RAISE_FRACTIONS[name] * (pot + to_call)
         else:
-            target = RAISE_FRACTIONS[name] * pot
-        out[f"raise-{name}"] = _cap(target, hero_max, min_raise_to)
+            out[f"raise-{name}"] = RAISE_FRACTIONS[name] * pot
     return out
+
+
+def preset_targets(snap: HandSnapshot) -> dict[str, tuple[float, str]]:
+    """五个快捷档位（底池 1/3 … 1.2）在客户端的**实际**目标额。
+
+    这里算的是「点下去客户端会加注到多少」，**不是**我们的建议尺度：
+
+      · 面对下注：`最高下注 + f × (底池 + 需跟额)`；没人下注：`f × 底池`；
+      · 只保留后手封顶（超过后手等同全下）—— 那是客户端自己的行为；
+      · **不套最小加注 / 本桌 5.5BB 下限**。客户端档位按钮按底池比例算，
+        不会替牌桌下限抬价。旧口径在这里也 `_cap` 到 5.5BB，点击器于是把
+        「1/3 档 = 5.5BB」当真：2026-11-11 20:47 实盘 `20261111-687aa58a5d`，
+        建议「开池到 5.5BB」，`choose_preset_within` 选中 1/3（以为它是 5.5），
+        客户端实际只加到 3BB —— 尺度整个小了一档。
+        `build_options()` 仍然按最小加注抬，那是**建议**的合法尺度。
+
+    返回 `{option_id: (amount_bb, note)}`。
+    """
+    _to_call, _pot, _max_bet, hero_max, _min_raise_to = _raise_geometry(snap)
+    return {oid: _cap(target, hero_max, 0.0)
+            for oid, target in _fraction_targets(snap).items()}
 
 
 def preset_amounts(snap: HandSnapshot) -> dict[str, float]:
@@ -492,17 +513,20 @@ def build_options(snap: HandSnapshot,
                               _round_bb(to_call)))
         options.append(Option("fold", "弃牌", "fold"))
 
-    presets = preset_targets(snap)
+    # 档位金额与客户端按钮同源（`_fraction_targets`），但**建议**必须合法：
+    # 低于最小加注的档位要抬上去（客户端的按钮自己不会抬，那是另一回事，
+    # 见 `preset_targets` 的说明）。
+    _tc, _pot, _maxb, hero_max, min_raise_to = _raise_geometry(snap)
+    raw = _fraction_targets(snap)
     for name in ("1/3", "1/2", "2/3", "1", "1.2"):
         option_id = f"raise-{name}"
-        amount, note = presets[option_id]
+        amount, note = _cap(raw[option_id], hero_max, min_raise_to)
         if to_call > 0:
             label, kind = (f"加注到 {amount:g}BB（{_SIZE_ZH[name]}加注）",
                            "raise")
         else:
             label, kind = f"下注 {amount:g}BB（{_SIZE_ZH[name]}）", "bet"
         options.append(Option(option_id, label, kind, amount, note))
-
     extra = _all_in_option(snap)
     if extra is not None:
         options.append(extra)

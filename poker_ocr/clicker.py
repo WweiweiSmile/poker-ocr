@@ -477,21 +477,43 @@ def _step(button: str, config: ClickerConfig,
     return ClickStep(button, x, y)
 
 
+def _target_step(button: str, targets: dict | None,
+                 config: ClickerConfig, rng: random.Random) -> ClickStep | None:
+    """优先用「按文字现找」的坐标；没有才退回固定槽位。
+
+    客户端的操作行有多个版面（见 `action_buttons` 模块），固定槽位只对其中
+    一种成立。现找的坐标已经落在按钮文字中心，不再做随机内缩——再缩反而
+    可能偏出小圆钮。
+    """
+    if targets:
+        hit = targets.get(button)
+        if hit is not None:
+            x, y = hit
+            return ClickStep(button, float(x), float(y))
+    return _step(button, config, rng)
+
+
 def plan_clicks(advice: "Advice", config: ClickerConfig,
-                rng: random.Random | None = None) -> ClickPlan:
+                rng: random.Random | None = None,
+                targets: dict | None = None) -> ClickPlan:
     """把一条建议映射成 0–1 步点击。纯函数，不碰鼠标。"""
     rng = rng or random.Random()
     option = advice.option
     kind = option.kind
 
     if kind == "fold":
-        step = _step("fold", config, rng)
+        step = _target_step("fold", targets, config, rng)
         if step is None:
             return ClickPlan("fold", skip_reason="missing_button:fold")
         return ClickPlan("fold", (step,))
 
     if kind in ("call", "check"):
-        step = _step("call", config, rng)
+        # 同一个右 pill 在不同状态下叫「让牌」或「免费」；两种都算过牌。
+        step = None
+        for name in ("check", "call"):
+            step = _target_step(name, targets, config, rng)
+            if step is not None:
+                break
         if step is None:
             return ClickPlan(kind, skip_reason="missing_button:call")
         return ClickPlan(kind, (step,))
@@ -777,7 +799,14 @@ class Clicker:
             detail={"slider": outcome.to_dict()},
             elapsed_ms=int((self._clock() - started) * 1000))
 
-    def run(self, advice: "Advice") -> ClickResult:
+    def run(self, advice: "Advice", *, targets: dict | None = None
+            ) -> ClickResult:
+        """执行一条建议。
+
+        `targets`：动作名 → 屏幕逻辑点，由调用方按当前画面**现找**按钮后传入
+        （见 `poker_ocr.action_buttons`）。为 None 时退回 profile 固定槽位，
+        这样离线回放/没有屏幕权限时行为不变。
+        """
         started = self._clock()
         option = advice.option
         plan: ClickPlan | None = None
@@ -838,7 +867,8 @@ class Clicker:
             if plan is None:
                 return self._run_bet_slider(option, started)
         if plan is None:
-            plan = plan_clicks(advice, self.config, self.rng)
+            plan = plan_clicks(advice, self.config, self.rng,
+                               targets=targets)
         if plan.skip_reason is not None:
             return ClickResult(
                 "skipped", action=plan.action, preset=plan.preset,

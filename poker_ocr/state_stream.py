@@ -82,6 +82,9 @@ ROSTER_DEFER_MAX = 3
 # 爆炸底池横幅在开局出现，而换手信号（庄位落位 / hero 换牌）可能晚 1–2 帧。
 # 横幅刚出现过就遇到换手时保留标记，否则新手开局会把刚读到的炸弹池清掉。
 BOMB_BANNER_GRACE_SAMPLES = 3
+# 底池横幅连续几帧显示「总底池」才认手牌间隙（= 已经收池）。和 All-in 徽章
+# 消失同一口径：单帧文字抖动不当真。
+POT_IDLE_CONFIRM_FRAMES = 2
 
 
 def _equity_slot(chip: tuple[float, float, float, float]) -> tuple[float, float, float, float]:
@@ -103,6 +106,10 @@ class FrameOutcome:
       · record   —— 产生了可写入输出的新状态（record 字段可直接用）
       · no_change —— 状态有效，但和上一份记录一样（或还没稳定）
       · discard  —— 有字段无法精准识别 / 座位疑似消失，整帧放弃
+      · idle     —— 底池横幅显示「总底池」= 这一手已经收池（或还没开手）。
+                    这是手牌间隙帧，不是误读：单独计数，不算「丢弃原因」，
+                    也不喂给手牌追踪（pot 为 None）。连续 2 帧会给
+                    `hand_end`，换手判定因此比等下一手信号早 2–3 秒。
     """
 
     kind: str
@@ -170,6 +177,10 @@ class StateStream:
                                  corrector=self._name_corrector())
 
         self.prev: FrameState | None = None
+        # 底池横幅连续多少帧显示「总底池」（= 这手已经收池/还没开手）。
+        # 连续 2 帧就认定手牌间隙 → 给 live 一个明确的 hand_end。
+        self._pot_idle_streak = 0
+        self._idle_end_fired = False
         self.prev_all_in: set[str] = set()
         # 头像上读到过 All-in 徽章的座位，以及「徽章连续消失」计数。
         # 徽章消失（连续 2 帧可读的非 All-in 文本）是换手的额外信号。
@@ -227,6 +238,8 @@ class StateStream:
         self.accepted = 0
         self.records = 0
         self.discarded: Counter = Counter()
+        # 「总底池」间隙帧单独计数：它们不是识别失败（见 pot_idle）。
+        self.idle_frames = 0
 
     # ─────────────────────────── 主流程 ───────────────────────────
 
@@ -404,7 +417,25 @@ class StateStream:
             ante_fallback=self.ante_fallback,
             hand_roster=(self.hand_roster if self._roster_locked else None),
             left_seats=(self.hand_left if self._roster_locked else None),
+            prev_state=self.prev,
         )
+        # 底池横幅显示「总底池」= 这一手已经收池（或还没开手）。连续 2 帧
+        # 就认，和 All-in 徽章消失同一口径 —— 但比等下一手的庄位/牌面信号
+        # 早 2–3 秒，换手判定因此更快（2026-11-11 实盘：这类帧占全部
+        # 丢弃帧的 62%，属于画面结构而非误读，见 `FrameState.pot_idle`）。
+        had_live_pot = self.prev is not None and (self.prev.pot or 0) > 0
+        if (state.pot_idle and had_live_pot and not new_hand
+                and state.hero_turn is not True):
+            self._pot_idle_streak += 1
+        else:
+            self._pot_idle_streak = 0
+        # 一手只报一次 hand_end：间隙窗口可能连续几十帧，重复收手没有意义。
+        idle_end = (self._pot_idle_streak >= POT_IDLE_CONFIRM_FRAMES
+                    and not self._idle_end_fired)
+        if idle_end:
+            self._idle_end_fired = True
+            self._restart_sticky()
+
         # 一手牌的身份锁在**这一手第一帧**建立；之后中途退出/新入座都按
         # 锁定的 roster 处理（见 _track_vanished / build_state 的说明）。
         # 只有 live 有可靠换手边界（extra_signature），离线视频不启用。
@@ -439,6 +470,14 @@ class StateStream:
         self._track_vanished(state)
 
         if not state.ok:
+            if state.pot_idle:
+                # 「总底池」不是读数坏：这手已经收池，这一帧是手牌间隙。
+                # 单独计数、不进「丢弃原因」，也不喂给手牌追踪（pot 是 None）。
+                self.idle_frames += 1
+                return FrameOutcome("idle", state, list(state.errors), None,
+                                    frame.n_reused, frame.n_roi,
+                                    hand_end=badge_ended or idle_end,
+                                    new_hand=new_hand)
             for e in state.errors:
                 self.discarded[e.split(":", 1)[0]] += 1
             # 丢弃帧打断"连续两帧"：否则动画里的 2 个接受帧能跨过丢弃帧
@@ -452,6 +491,9 @@ class StateStream:
                                 hand_end=badge_ended, new_hand=new_hand)
 
         self.accepted += 1
+        # 新手（或同一手的下一帧）已经生效：间隙信号重新计数。
+        self._pot_idle_streak = 0
+        self._idle_end_fired = False
         sig = signature(state)
         if extra_signature is not None:
             sig = (sig, extra_signature)
@@ -845,6 +887,8 @@ class StateStream:
     def reset(self) -> None:
         """断流重连 / 换桌时清掉跨帧状态。累计计数保留。"""
         self.prev = None
+        self._pot_idle_streak = 0
+        self._idle_end_fired = False
         self.prev_all_in = set()
         self.prev_all_in_badges = set()
         self._all_in_gone.clear()
@@ -890,6 +934,7 @@ class StateStream:
             "accepted_frames": self.accepted,
             "discarded_frames": self.sampled - self.accepted,
             "discarded_reasons": dict(self.discarded),
+            "idle_frames": self.idle_frames,
             "record_count": self.records,
             "roi_threads": self.roi_threads,
             "hand_roster": len(self.hand_roster),

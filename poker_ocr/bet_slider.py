@@ -473,10 +473,12 @@ class WindowCapture:
 
     def __init__(self, spec, command: str | None = None,
                  *, window_command: str | None = None) -> None:
+        self.spec = spec
         info = resolve_window_info(spec)
         self.rect = info.rect if info is not None else resolve_window(spec)
         self.window_id = info.window_id if info is not None else 0
         self.owner = info.owner if info is not None else ""
+        self._last_refresh = time.monotonic()
         self._source = ScreenCapture(
             self.rect,
             command or "screencapture -x -R {x},{y},{w},{h} {out}",
@@ -525,6 +527,54 @@ class WindowCapture:
 
     def release(self) -> None:        # noqa: N802
         return None
+
+    def refresh(self, min_interval: float = 10.0) -> bool:
+        """重新读窗口 bounds；变了就同步 ScreenCapture 并返回 True。
+
+        CGWindowList 的 bounds 只在构造时读一次。用户中途把浏览器拉高/拉窄、
+        或者换显示器后，rect 会变成过期值 —— 而按钮槽位是归一化坐标，
+        用过期高度去映射会让**所有点击按比例偏移**（2026-11-11 实盘：
+        标定 838pt、运行时读成 845pt，预设行整体偏低约 8pt，滑杆手柄被按到边缘）。
+
+        `min_interval` 限流：枚举窗口要起一次 swift（实测 0.29s），每次点击
+        前都跑会白吃掉点击时机；10s 一次足够发现窗口被拖动/缩放。
+        只能按 index/title/owner 解析；手填的 "x,y,w,h" 没有窗口可查，返回 False。
+        """
+        now = time.monotonic()
+        if now - self._last_refresh < min_interval:
+            return False
+        self._last_refresh = now
+        try:
+            info = resolve_window_info(self.spec)
+        except (ValueError, RuntimeError):
+            return False
+        if info is None or info.rect == self.rect:
+            return False
+        self.rect = info.rect
+        self.window_id = info.window_id or self.window_id
+        self._source.window = info.rect
+        self._source.window_id = self.window_id
+        # 窗口变了，缓存的截图像素尺寸也过期了；置空让 effective_rect()/get()
+        # 重新截一张，否则会用「新 bounds + 旧像素」算出错误的网格。
+        self._size = None
+        return True
+
+    def effective_rect(self) -> WindowRect:
+        """按**实际截图像素**校正后的窗口矩形（映射点击时必须用这个）。
+
+        `rect` 来自 CGWindowList（逻辑点，取整），截图却是按 backing scale
+        换算后的像素图；两者高度可能差 1–2pt（窗口含圆角/边框），而
+        normalized→屏幕 的映射一旦用了偏高的 h，y 越靠下偏移越大。
+        这里用截图宽高比反推高度，保证 `window` 和画面是同一个网格。
+        拿不到尺寸时原样返回 rect，不阻塞主链路。
+        """
+        w, h = self._ensure_size()
+        if w <= 0 or h <= 0 or self.rect.w <= 0:
+            return self.rect
+        height = self.rect.w * h / w
+        if abs(height - self.rect.h) < 0.5:
+            return self.rect
+        return WindowRect(self.rect.x, self.rect.y, self.rect.w, height)
 
 
 def front_window() -> WindowRect:

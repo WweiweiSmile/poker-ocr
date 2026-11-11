@@ -63,6 +63,7 @@ from .advice import (AISettings, AdviceRunner, PROMPT_LANGUAGE, PROMPT_VERSION,
                      build_situation, call_amount)
 from .cards import (DEFAULT_CARD_SLOTS, DEFAULT_DOUBT_WINDOW, CardsResult,
                     StableCards, recognize_cards, recognize_shown_cards)
+from .action_buttons import find_action_buttons
 from .bet_slider import (BetSliderController, SliderSettings, WindowCapture,
                          WindowMapper, clicker_config_from_profile)
 from .clicker import (DEFAULT_CONFIG_PATH as DEFAULT_CLICKER_CONFIG,
@@ -360,6 +361,24 @@ class _ClickRetry:
     signature: tuple
     next_at: float
     remaining: int
+
+
+# 建议已经生成、但**这一帧**不能点：牌面/下注读数这一帧不可靠
+# （`frame_not_clickable`），或整帧被质量闸丢了（`state_not_ok`）。
+# 这两种都是瞬时的 —— 同一决策点还在、回合还没结束，下一帧恢复就该补点。
+# 别的跳过原因（`stale_*` / `hero_turn_false` / 决策点不匹配）说明这条建议
+# 已经作废，不能补。
+DEFER_CLICK_REASONS = ("frame_not_clickable", "state_not_ok")
+# 补点窗口（秒）。回合时限通常 10–15s；超过这个窗口画面还没恢复就别点了。
+DEFER_CLICK_SECONDS = 3.0
+
+
+@dataclass
+class _DeferredClick:
+    """一条已经生成、但当时没能点出去的建议，等下一帧补点。"""
+
+    advice: object
+    until: float
 
 
 class LatestFrame:
@@ -1146,6 +1165,13 @@ class LiveProcessor:
         self.click_error_count = 0
         self.click_retry_count = 0
         self._click_retry: _ClickRetry | None = None
+        # 建议已生成、但那一帧不能点（`frame_not_clickable` / `state_not_ok`）。
+        # 这两种跳过是**瞬时**的：同一个决策点还在、回合也没结束，下一帧
+        # 画面恢复就该补点。不补的话这条建议会被静默吞掉，hero 只能等超时
+        # —— 2026-11-11 20:33 实盘：T9o 弃牌的建议正好落在 `stack:topL` 被
+        # 质量闸丢掉的那一帧，`frame_not_clickable` 直接 skipped。
+        self._deferred_click: _DeferredClick | None = None
+        self.click_defer_count = 0
         # 返回 TableDynamics 的可调用对象；None = 不读牌桌动态（单测默认）。
         # 之所以传 loader 而不是一段固定文本：换桌后改 .table_dy 不必重启。
         self.table_dynamics_loader = table_dynamics_loader
@@ -1216,6 +1242,9 @@ class LiveProcessor:
         self.gate_dumps = 0
         self.last_gate_dump: str | None = None
         self._zero_accept_warned = False
+        # 最近一帧原图（数组引用，不拷贝）。点击前用它按文字现找按钮位置：
+        # 客户端的操作行有多个版面，固定槽位只对其中一种成立。
+        self._last_image = None
 
         self.started_mono = clock()
         self.last_epoch = 0
@@ -1292,6 +1321,8 @@ class LiveProcessor:
 
         t = now - self.started_mono
         frame_id = f"live_e{packet.epoch}_{packet.seq:06d}_{t:07.2f}s"
+        # 只存引用，不拷贝也不编码：点击时按文字定位按钮要用同一帧。
+        self._last_image = packet.image
         # 疑惑帧环形缓冲只存数组引用，不逐帧编码；异常时才落盘。
         if self._frame_ring is not None:
             self._frame_ring.append((packet.seq, round(t, 2), frame_id,
@@ -1560,6 +1591,7 @@ class LiveProcessor:
             # 这一手已经结束：结果只落库，绝不点击，也不再确认上一次点击。
             self._pending_decision_key = None
             self._click_retry = None
+            self._deferred_click = None
             self.drain_advice(state=outcome.state, allow_click=False)
 
         if outcome.state is None or not outcome.state.ok:
@@ -1577,6 +1609,9 @@ class LiveProcessor:
         # 手牌追踪照常吃（别的字段都是好的），但**不给 AI 建议** ——
         # to_call 依赖最大下注，静默少算一位就会点错金额。
         bet_warnings = tuple(getattr(outcome.state, "bet_warnings", ()) or ())
+        # 上一次建议因为「这一帧不能点」被挂起：画面恢复了就补点。
+        self._service_deferred_click(
+            outcome.state, allow_click=cards_reliable and not bet_warnings)
         # 这一次「轮到我」是否已经投过建议：只有 hero 真的行动（这一街多出
         # 一条 is_hero 动作）、换街或换手才解锁。**hero_turn 单帧闪断不解锁**
         # ——拖动滑杆要好几秒，期间按钮/预设行被遮住，hero_turn 会抖；
@@ -1933,6 +1968,62 @@ class LiveProcessor:
         self.log(prompt)
         return _ask_confirm(self.log, timeout=self.confirm_timeout)
 
+    def _locate_click_targets(self) -> dict[str, tuple[float, float]]:
+        """按当前画面里的**文字**找动作按钮 → {动作: 屏幕逻辑点}。
+
+        客户端的操作行有多个版面（录屏实测：弃牌有时在最左 @566、有时在正中
+        @736；过牌有时叫「让牌」、有时叫「免费」）。固定槽位只对其中一种成立，
+        另一种会把点击送到促销位/毛毡上。这里每次点击前现找一次；
+        找不到（不是操作行、没权限、OCR 失败）返回空 dict，调用方退回槽位。
+
+        只在启用滑杆（web 桌面）时有意义：那时才有 profile 槽位和窗口映射。
+        """
+        slider = getattr(self.clicker, "bet_slider", None) if self.clicker else None
+        mapper = getattr(slider, "mapper", None) if slider is not None else None
+        engine = getattr(slider, "engine", None) if slider is not None else None
+        img = self._last_image
+        if mapper is None or engine is None or img is None:
+            return {}
+        try:
+            found = find_action_buttons(img, engine)
+        except Exception as exc:      # noqa: BLE001 — 定位失败只回退，不阻断
+            self.log(f"  [点击] 按钮定位失败：{type(exc).__name__}: {exc}")
+            return {}
+        if not found:
+            return {}
+        h, w = img.shape[:2]
+        return {name: mapper.point_from_image(cx / w, cy / h)
+                for name, (cx, cy) in found.items()}
+
+    def _sync_click_window(self) -> None:
+        """窗口被拉高/拉窄后，重建按钮几何——否则所有点击按比例偏移。
+
+        按钮槽位是**归一化**坐标，屏幕位置 = window.x + nx * window.w。
+        window 只在启动时读一次；用户中途改了浏览器窗口（2026-11-11 实盘：
+        标定的 838pt → 运行中 845pt → 当前 833pt）后，同一条建议会点到
+        按钮外面。这里每次真正点之前校一次，变了就重建 ClickerConfig 和
+        滑杆的 WindowMapper。解析失败/手填坐标时静默跳过，不阻塞主链路。
+        """
+        slider = getattr(self.clicker, "bet_slider", None) if self.clicker else None
+        capture = getattr(slider, "frames", None) if slider is not None else None
+        if capture is None or not hasattr(capture, "refresh"):
+            return
+        if not capture.refresh():
+            return
+        window = capture.effective_rect()
+        profile = getattr(slider, "profile", None)
+        if profile is None:
+            return
+        try:
+            self.clicker.config = clicker_config_from_profile(
+                profile, window, base=self.clicker.config)
+            slider.mapper = WindowMapper(profile, window)
+        except (ValueError, ClickerConfigError) as exc:
+            self.log(f"  [点击] 窗口尺寸变化，但重建按钮失败：{exc}")
+            return
+        self.log(f"  [点击] 窗口尺寸变化，已重建按钮几何："
+                 f"window={window.to_dict()}")
+
     def _maybe_click(self, advice, *, state, allow_click: bool):
         """执行自动点击；未启用点击器时返回 None（JSONL 不出现 click 键）。
 
@@ -1945,15 +2036,23 @@ class LiveProcessor:
             and advice.decision_key == self._pending_decision_key
         reason = self._click_skip_reason(
             advice, state=state, allow_click=allow_click)
+        deferred = False
         if reason is None:
             if self.confirm_click and not self._confirm_click(advice):
                 result = ClickResult("skipped", action=advice.option.kind,
                                      reason="user_rejected")
             else:
-                result = self.clicker.run(advice)
+                self._sync_click_window()
+                result = self.clicker.run(advice,
+                                          targets=self._locate_click_targets())
         else:
             result = ClickResult("skipped", action=advice.option.kind,
                                  reason=reason)
+            # 这一帧不能点不等于这条建议作废：牌面/下注读数抖一下、或者整帧
+            # 被质量闸丢掉，下一帧就恢复正常。记下来补点，别把建议吞掉。
+            if reason in DEFER_CLICK_REASONS and matched:
+                self._defer_click(advice, reason)
+                deferred = True
         if result.status in ("clicked", "dry_run"):
             self.click_count += 1
             if advice.decision_key:
@@ -1968,10 +2067,68 @@ class LiveProcessor:
             self.click_error_count += 1
         else:
             self.click_skip_count += 1
-        # 只清掉「这条建议对应的决策点」；晚到的旧建议不能把新决策点清掉
-        if matched:
+        # 只清掉「这条建议对应的决策点」；晚到的旧建议不能把新决策点清掉。
+        # 挂了补点的建议要留着 —— 下一帧还要用它判「还是同一个决策点」。
+        if matched and not deferred:
             self._pending_decision_key = None
         return result
+
+    def _defer_click(self, advice, reason: str) -> None:
+        """记住一条「这一帧不能点、下一帧补点」的建议。
+
+        同一个决策点只挂一次，不因为连续几帧不可点而一直续命：窗口从
+        第一次挂起开始算（`DEFER_CLICK_SECONDS`）。
+        """
+        pending = self._deferred_click
+        if pending is not None and pending.advice is advice:
+            return
+        self._deferred_click = _DeferredClick(
+            advice=advice, until=self.clock() + DEFER_CLICK_SECONDS)
+        self.log(f"  [点击] 这一帧不能点（{reason}），保持待点，"
+                 f"{DEFER_CLICK_SECONDS:g}s 内画面恢复就补点")
+
+    def _service_deferred_click(self, state, *, allow_click: bool) -> None:
+        """补点上一帧没能点出去的建议（只在画面恢复、仍是同一决策点时）。"""
+        pending = self._deferred_click
+        if pending is None:
+            return
+        if self.clock() >= pending.until:
+            self._deferred_click = None
+            self.log("  [点击] 补点窗口已过，放弃这条建议")
+            return
+        if state is None or not getattr(state, "ok", False):
+            return
+        if state.hero_turn is not True:
+            self._deferred_click = None
+            self.log("  [点击] 已不是我的回合，取消补点")
+            return
+        if pending.advice.decision_key != self._pending_decision_key:
+            # 决策点已经变了（换街/换手/新的行动）：这条建议作废
+            self._deferred_click = None
+            self.log("  [点击] 决策点已变，取消补点")
+            return
+        if not allow_click:
+            # 这一帧还是不能点（牌面/下注读数没恢复），下一帧再试
+            return
+        result = self._maybe_click(pending.advice, state=state,
+                                   allow_click=True)
+        if result is None:
+            self._deferred_click = None
+            return
+        if result.status in ("clicked", "dry_run"):
+            self._deferred_click = None
+            self.click_defer_count += 1
+            self.writer.write({
+                "type": "click_retry",
+                "ts": _iso_now(),
+                "hand_id": pending.advice.hand_id,
+                "decision_key": list(pending.advice.decision_key),
+                "attempt": 1,
+                "deferred": True,
+                "click": result.to_dict(),
+            })
+        elif result.status == "error" or result.reason not in DEFER_CLICK_REASONS:
+            self._deferred_click = None
 
     def _arm_click_retry(self, advice, state) -> None:
         """点击成功后挂一个 0.5s 的「动作是否生效」确认。"""
@@ -2014,7 +2171,9 @@ class LiveProcessor:
         attempt = cfg.retry_count - pending.remaining + 1
         self.log(f"  [点击] {cfg.retry_delay_ms / 1000:.1f}s 页面未变化，"
                  f"重试第 {attempt} 次")
-        result = self.clicker.run(pending.advice)
+        self._sync_click_window()
+        result = self.clicker.run(pending.advice,
+                                  targets=self._locate_click_targets())
         self.click_retry_count += 1
         self.writer.write({
             "type": "click_retry",
@@ -2495,6 +2654,13 @@ class LiveProcessor:
         if self.full_recorder is not None:
             return dict(self.full_recorder.discarded)
         return dict(self.state_stream.discarded)  # type: ignore[union-attr]
+
+    @property
+    def idle_frames(self) -> int:
+        """底池横幅显示「总底池」的手牌间隙帧（不是识别失败）。"""
+        if self.full_recorder is not None:
+            return int(getattr(self.full_recorder, "idle_frames", 0))
+        return int(getattr(self.state_stream, "idle_frames", 0))
 
     def summary(self) -> dict:
         extra = {"cards_unreliable_skips": self.cards_unreliable_skips,
@@ -3165,7 +3331,15 @@ def main(argv: list[str] | None = None) -> int:
                                         window_command=window_command)
             except (ValueError, RuntimeError) as exc:
                 ap.error(f"滑杆窗口坐标不合法：{exc}")
-            window = capture.rect
+            # 用**实际截图像素**反推窗口高度，而不是直接用 CGWindowList 的
+            # bounds：后者按逻辑点取整，可能和画面差 1–2pt；norm→屏幕 的映射
+            # 一旦用偏高的 h，y 越靠下偏移越大（预设行/滑杆手柄最先中招）。
+            window = capture.effective_rect()
+            if (abs(window.h - capture.rect.h) >= 0.5
+                    or abs(window.w - capture.rect.w) >= 0.5):
+                _log(f"[点击] 窗口几何已按截图校正："
+                     f"bounds={capture.rect.to_dict()} → "
+                     f"有效={window.to_dict()}")
             # 启用了滑杆就说明是 web 桌面：按钮坐标直接用 profile 槽位 +
             # window 计算，不再依赖 clicker_local 的手工绝对坐标。
             try:
@@ -3320,6 +3494,7 @@ def main(argv: list[str] | None = None) -> int:
             "avg_proc_ms": round(processor.avg_proc_ms, 1),
             "reconnects": reader.reconnects,
             "discarded_reasons": processor.discard_reasons,
+            "idle_frames": processor.idle_frames,
             "advice_count": processor.advice_count,
             "advice_done": processor.advice_done,
             "cards_unreliable_skips": processor.cards_unreliable_skips,
@@ -3505,6 +3680,9 @@ def main(argv: list[str] | None = None) -> int:
              f"记录 {summary['record_count']} 条，重连 {reader.reconnects} 次；"
              f"平均 {summary['avg_proc_ms']:.0f}ms/帧，"
              f"有效 {summary['eff_hz']:.2f}Hz")
+        if summary.get("idle_frames"):
+            _log(f"手牌间隙帧（底池横幅显示「总底池」）："
+                 f"{summary['idle_frames']}（不是识别失败）")
         if summary["discarded_reasons"]:
             _log("丢弃原因：" + "  ".join(
                 f"{k}={v}" for k, v in
@@ -3548,9 +3726,14 @@ def _log_status(processor: LiveProcessor, reader: RtspReader,
     elapsed = time.monotonic() - started_mono
     eff = processor.processed / elapsed if elapsed else 0.0
     reasons = processor.discard_reasons
+    # 间隙帧（底池横幅显示「总底池」= 已收池/还没开手）不算识别失败，
+    # 单独报，免得把 20% 的丢弃率全算到 OCR 头上。
+    idle = processor.idle_frames
     _log(f"[状态] 采样={processor.sampled} 处理={processor.processed} "
          f"接受={processor.accepted} 记录={processor.records} "
-         f"读帧={reader.grabbed} 丢弃帧={processor.sampled - processor.accepted} "
+         f"读帧={reader.grabbed} "
+         f"丢弃帧={processor.sampled - processor.accepted - idle} "
+         f"间隙帧={idle} "
          f"平均={processor.avg_proc_ms:.0f}ms 有效={eff:.2f}Hz "
          f"重连={reader.reconnects}")
     since = since or {}

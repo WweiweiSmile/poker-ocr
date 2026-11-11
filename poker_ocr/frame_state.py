@@ -24,6 +24,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field as dc_field
 
 from .parse import (
@@ -37,6 +38,11 @@ from .roi_reader import RoiFrame
 
 # 状态里的动作枚举（与 call-back / api.py 的口径一致）
 ACTIONS = ("check", "call", "bet", "raise", "fold")
+
+# 底池横幅的「没有底池」文案。客户端的底池槽在开手前/收池动画里显示的是
+# 「总底池」三个字（不是数字），这时的 pot 为 None 是**画面结构**，不是误读。
+# 2026-11-11 实盘占比最高的一类丢弃（942/1508 帧）全是这个。
+_POT_IDLE_RE = re.compile(r"总?底池")
 
 
 @dataclass
@@ -133,6 +139,9 @@ class FrameState:
     hero_turn: bool | None = None
     pot: float | None = None
     pot_before_street: float | None = None
+    # 底池横幅这一帧显示的是「总底池」标签（没有活的底池）= 手牌间隙帧。
+    # 上层据此把它算成「手牌间隙」而不是「识别失败」，并可当换手信号用。
+    pot_idle: bool = False
     street_bet_total: float | None = None
     # 屏幕中央的爆炸底池横幅（「幸运暴击 / BOMB POT」）。这是**本帧**是否
     # 看到横幅；跨帧保持由 StateStream / LiveHandTracker 负责。
@@ -242,11 +251,15 @@ def build_state(frame: RoiFrame, profile: Profile,
                 prev_fold: dict[str, bool | None] | None = None,
                 ante_fallback: float | None = None,
                 hand_roster: dict[str, tuple[str | None, str | None]] | None = None,
-                left_seats: set[str] | None = None) -> FrameState:
+                left_seats: set[str] | None = None,
+                prev_state: "FrameState | None" = None) -> FrameState:
     """一帧 RoiFrame → FrameState（含解析错误清单）。
 
     `prev_names` 是**上一份被接受的状态**里的名字（名称粘性用）；
-    `prev_blinds` 用于盲注横幅被盖住时继承；`avatar_reads` 是头像 ROI 的
+    `prev_blinds` 用于盲注横幅被盖住时继承；`prev_state` 是完整的上一份
+    被接受状态，只用于**一帧级的兜底**：底池没变时沿用上一帧的
+    `pot_before_street` / 某个座位读不出的下注额（见质量闸前的说明）。
+    `avatar_reads` 是头像 ROI 的
     `{seat_id: (text, score)}`（弃牌 / All-in 徽章，可选）；`equity_reads`
     是筹码胶囊下方胜率槽的 `{seat_id: (text, score)}`（全下摊牌时可选）；
     `card_icons` 是头像底角「POKER」手牌图标的三态检测结果
@@ -303,6 +316,11 @@ def build_state(frame: RoiFrame, profile: Profile,
     pot_a = parse_amount(frame.text("pot"))
     pbs_a = parse_amount(frame.text("pot_before_street"))
     pot, pbs = pot_a.value, pbs_a.value
+    # 底池横幅在「没有活的底池」时显示的是**标签**「总底池」，不是数字
+    # （2026-11-11 实盘：同一块 ROI 正常帧读 `6.5BB`、收池帧读 `总底池`，
+    # 置信 0.98/0.95）。这是手牌间隙帧，不是读数坏了 —— 单独标出来，
+    # 让上层把它算成「手牌间隙」而不是「识别失败」，并顺手当换手信号。
+    pot_idle = _POT_IDLE_RE.search(frame.text("pot") or "") is not None
     street_total = (round(pot - pbs, 2) if pot is not None and pbs is not None
                     and pbs <= pot else None)
 
@@ -627,9 +645,45 @@ def build_state(frame: RoiFrame, profile: Profile,
             p.position = pos.positions.get(p.seat_id)
 
     # ── 质量闸：无法精准识别的帧要能被明确区分 ─────────────
+    #
+    # 先做两处**一帧级**的兜底（底池没变 = 这一帧没有新的事实，读数抖一下
+    # 不该整帧丢）：
+    #
+    # ① 上一街底池横幅和底池横幅不是同一帧刷新：换街那一帧 pbs 已经跳到
+    #    「上一街结算后的底池」，底池却还是旧值（pbs > pot / pbs == pot 而
+    #    场上还有下注）。这时沿用上一帧的 pbs，下一帧两个横幅就对齐了。
+    # ② 某个座位的下注 pill 在淡入/淡出那一两帧读成非金额（`lBB`、`BB`）。
+    #    底池没变 → 下注额也不可能变，沿用上一帧读数。**hero 回合不兜底**：
+    #    宁可丢一帧，也不能拿旧下注去算 to_call。
+    if prev_state is not None and pot is not None \
+            and prev_state.pot is not None \
+            and abs(pot - prev_state.pot) < 1e-9:
+        prev_pbs = prev_state.pot_before_street
+        if (prev_pbs is not None and prev_state.pot > prev_pbs + 1e-9
+                and (pbs is None or pbs > pot + 1e-6
+                     or (pbs >= pot - 1e-6
+                         and any((p.bet or 0) > 0 for p in in_hand)))):
+            pbs = prev_pbs
+            street_total = (round(pot - pbs, 2)
+                            if pbs <= pot else None)
+        if frame.hero_turn is not True:
+            prev_bets = {p.seat_id: p.bet for p in prev_state.players
+                         if p.in_hand}
+            same_seats = prev_bets.keys() == {p.seat_id for p in in_hand}
+            if same_seats:
+                for p in in_hand:
+                    if (p.bet is None and not p.all_in and not p.bet_unknown
+                            and prev_bets.get(p.seat_id) is not None):
+                        p.bet = prev_bets[p.seat_id]
+                        p.notes.append(
+                            f"bet: 沿用上一帧 {p.bet:g}BB（这一帧读不出，"
+                            "底池没变）")
+
     errors: list[str] = []
     if blinds is None:
         errors.append("blinds")
+    # 间隙帧的 pot 仍然是 None（不能当成 0 传下去）：这里照样报错，让状态
+    # 保持「不可用」；上层用 `pot_idle` 把它归类成手牌间隙，而不是识别失败。
     if pot is None:
         errors.append("pot")
     if dealer is None:
@@ -659,9 +713,15 @@ def build_state(frame: RoiFrame, profile: Profile,
         # 离桌的人筹码/下注位已经不存在，读不到是正常的：不能因此整帧丢弃。
         if p.left:
             continue
+        # **摊牌**的座位：头像被亮出的两张牌盖住、筹码胶囊显示 `0`（没有 BB
+        # 单位 → None）、All-in 徽章也被牌盖住 —— 这时读不到筹码/下注是画面
+        # 结构决定的，不是读数坏了。2026-11-11 实盘：两手全下摊牌各丢
+        # 147 / 108 帧（19.9s / 14.5s），整个摊牌窗口没有状态、手牌结束判定
+        # 也被拖慢。
+        showdown = p.seat_id in shown
         # 全下玩家的筹码/下注位可能被 All-in 徽章或胜率百分比替代，允许读不到；
         # 其他玩家仍然要求这两个字段精准，否则整帧丢弃。
-        if p.stack is None and not p.all_in:
+        if p.stack is None and not p.all_in and not showdown:
             errors.append(f"stack:{p.seat_id}")
         # **本街下注不可能大于底池**（底池 = 全场投入之和），读到就是串位：
         # bet 槽左侧的筹码图标会被 rec 读成前导数字（实测 6.5BB → 26.5BB，
@@ -680,7 +740,7 @@ def build_state(frame: RoiFrame, profile: Profile,
                 # 底池自己就可疑（0/比前注总额还小）：这时分不清是 bet 还是
                 # pot 读坏，照旧整帧丢弃。
                 errors.append(f"bet_gt_pot:{p.seat_id}")
-        if p.bet is None and not p.all_in and not p.bet_unknown:
+        if p.bet is None and not p.all_in and not p.bet_unknown and not showdown:
             errors.append(f"bet:{p.seat_id}")
 
     return FrameState(
@@ -695,6 +755,7 @@ def build_state(frame: RoiFrame, profile: Profile,
         hero_turn=frame.hero_turn,
         pot=pot,
         pot_before_street=pbs,
+        pot_idle=pot_idle,
         street_bet_total=street_total,
         bomb_pot=_bomb_banner(frame),
         errors=errors,
