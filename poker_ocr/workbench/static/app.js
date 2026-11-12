@@ -1127,7 +1127,7 @@ function renderPreflightSummaryHtml(pre) {
 
 const runState = {
   id: null, status: null, layout: null, groups: {}, selected: null,
-  imageTimer: null, errors: {}, lastSeq: null,
+  imageTimer: null, errors: {}, lastSeq: null, logAuto: true,
 };
 
 async function pageRun(id) {
@@ -1189,7 +1189,10 @@ async function pageRun(id) {
       </div>
     </div>
     <section class="panel" style="margin-top:14px">
-      <div class="panel-head"><h2>日志 / 识别帧流</h2></div>
+      <div class="panel-head"><h2>日志 / 识别帧流</h2>
+        <label class="checkbox"><input type="checkbox" id="run-log-auto" checked>
+          自动滚到底部</label>
+      </div>
       <div class="panel-body tight"><div class="log" id="run-log"></div></div>
     </section>`;
 
@@ -1262,6 +1265,14 @@ function bindRunControls(ws) {
   dash.addEventListener('click', (ev) => {
     if (!dash.href || dash.href.endsWith('#')) { ev.preventDefault(); toast('live 还没起来', 'err'); }
   });
+  const logAuto = document.getElementById('run-log-auto');
+  if (logAuto) {
+    logAuto.addEventListener('change', (ev) => {
+      runState.logAuto = ev.target.checked;
+      const log = document.getElementById('run-log');
+      if (runState.logAuto && log) log.scrollTop = log.scrollHeight;
+    });
+  }
   document.getElementById('btn-pause').addEventListener('click', async () => {
     const paused = runState.status && runState.status.click && runState.status.click.paused;
     try {
@@ -1354,7 +1365,17 @@ function updateRunPage(status) {
   renderHealth(status);
   renderEvents(status);
   const log = document.getElementById('run-log');
-  if (log) log.textContent = (status.log_tail || []).join('\n') || '（暂无日志）';
+  if (log) {
+    const text = (status.log_tail || []).join('\n') || '（暂无日志）';
+    if (log.textContent !== text) {
+      log.textContent = text;
+      // 实时日志始终跟到底部；用户取消勾选才保留自己的滚动位置。
+      if (runState.logAuto) log.scrollTop = log.scrollHeight;
+    } else if (runState.logAuto) {
+      // 内容没变也保证停在底部（切页/重排后 scrollTop 可能丢）。
+      log.scrollTop = log.scrollHeight;
+    }
+  }
   if (status.state === 'idle' || status.state === 'failed') {
     const ph = document.getElementById('run-placeholder');
     if (ph) {
