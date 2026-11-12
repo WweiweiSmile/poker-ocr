@@ -28,14 +28,19 @@ def render_previous_advice_zh(sit) -> list[str]:
              or getattr(option, "id", None) or "未知动作")
     amount = getattr(option, "amount", None)
     reason = " ".join(str(getattr(prev, "reason", "") or "").split())
+    plan = " ".join(str(getattr(prev, "plan", "") or "").split())
     line = f"{_STREET_ZH.get(street, street)}：{label}"
     if amount is not None:
         line += f"（{amount:g}BB）"
     if reason:
         line += f"；理由：{reason}"
-    return [
+    lines = [
         "## 上一街我的建议（同一手；用于保持一致，不是新事实）",
         "- " + line,
-        "- 当前街的事实/价格变了就按新事实改线路；「上一街已经下注」是"
-        "沉没成本，不能当成继续投入的理由。",
     ]
+    if plan:
+        lines.append("- 当时的计划：" + plan
+                     + "（执行到哪一步以当前街事实为准；计划不构成继续投入的理由）")
+    lines.append("- 当前街的事实/价格变了就按新事实改线路；「上一街已经下注」是"
+                 "沉没成本，不能当成继续投入的理由。")
+    return lines

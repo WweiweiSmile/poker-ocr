@@ -165,7 +165,7 @@ def render_pool_prior_zh(sit: "Situation") -> list[str]:
     else:
         verdict = "高于 1/3 门槛，但仍是无条件历史均值"
     weak_hand = sit.hand_tier == WEAK_DRAW or (
-        sit.hand_tier is not None and sit.hand_class == "air")
+        sit.hand_tier is not None and sit.hand_playing_class == "air")
     lines = [
         "## 池子先验（逐座位数据缺失时的兜底，不是这个座位）",
         f"- 面对{cn}下注弃 {pct:.0f}%{n}；口径：{source}",

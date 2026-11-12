@@ -533,7 +533,7 @@ def test_situation_has_report() -> None:
 
 
 def test_prompt_renders_block() -> None:
-    from poker_ocr.advice import render_hand_facts
+    from poker_ocr.prompt.offline.hand_facts import render_hand_facts
 
     sit = _situation(to_call=2.0, pot=8.0)
     user = render_hand_facts(sit)
@@ -557,7 +557,7 @@ def test_preflop_returns_none() -> None:
 
 def test_no_fold_equity_uses_number() -> None:
     """有数字时按数字判定，不再用「3 家以上」一刀切。"""
-    from poker_ocr.advice import _no_fold_equity
+    from poker_ocr.prompt.offline.strategy import _no_fold_equity
     from poker_ocr.coach import STRONG_DRAW
 
     sit = _situation(to_call=2.0, pot=8.0)
@@ -576,7 +576,7 @@ def test_no_fold_equity_uses_number() -> None:
 
 def test_no_fold_equity_falls_back() -> None:
     """没有报告时保留旧口径：3 家以上 + 听牌 = 没有弃牌率。"""
-    from poker_ocr.advice import _no_fold_equity
+    from poker_ocr.prompt.offline.strategy import _no_fold_equity
     from poker_ocr.coach import STRONG_DRAW
     from dataclasses import replace as _replace
 

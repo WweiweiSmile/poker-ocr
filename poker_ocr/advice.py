@@ -41,6 +41,7 @@ from datetime import datetime
 from .opponent_profile import (
     OpponentRead, TENDENCY_PCT_FIELDS, pooled_stats_to_dict,
 )
+from .cross_check import check as _cross_action
 
 # ── 事实 / 选项：拆到独立模块，这里 re-export 保持旧调用口径 ──
 from .options import (  # noqa: F401
@@ -71,12 +72,6 @@ from .pot_math import (  # noqa: F401
 from .prompt import (  # noqa: F401
     PROMPT_LANGUAGE, PROMPT_VERSION, build_messages, build_system,
     render_facts_zh,
-)
-from .prompt.offline.audit import audit_advice_tags  # noqa: F401
-from .prompt.offline.hand_facts import render_hand_facts  # noqa: F401
-from .prompt.offline.strategy import (  # noqa: F401
-    DOMINATED_BEAT_PCT, IMPLIED_ODDS_CAP_PCT, MathGate, _aggressive_context,
-    _no_fold_equity, _pick_size, decision_read, math_gate, value_directive,
 )
 from .prompt.user.action_line import _fmt_actions_zh  # noqa: F401
 from .prompt.user.attack import render_attack_zh  # noqa: F401
@@ -465,6 +460,56 @@ def parse_json_content(content: str) -> dict:
 
 # ─────────────────────────── 兜底 ───────────────────────────
 
+def _rule_fallback(sit: Situation) -> tuple[str, str] | None:
+    """翻后兜底：用 coach 规则引擎产出一个可执行的 option id。
+
+    只在「模型不可用」时调用。翻前没有规则引擎（coach 只覆盖 flop/turn/river），
+    底池/后手缺失、牌不合法时 coach 返回 ok=False，这里一律放弃、交给最保守口径。
+    """
+    snap = sit.snap
+    if snap.street == "preflop":
+        return None
+    if not snap.hero_cards or len(snap.board) < 3:
+        return None
+    if snap.pot is None or snap.pot <= 0:
+        return None
+    from .coach import advise as rule_advise
+    from .situation import _coach_actions
+
+    try:
+        d = rule_advise(
+            list(snap.hero_cards),
+            "".join(str(c) for c in snap.board[:5]),
+            actions=_coach_actions(snap),
+            street=snap.street,
+            pot=float(snap.pot),
+            hero_position=snap.hero_position,
+            opponents=snap.opponents_in_hand,
+            stack_bb=snap.hero_stack,
+            hero_invested_bb=snap.hero_invested,
+        )
+    except (ValueError, KeyError):
+        return None
+    if not d.ok or not d.action:
+        return None
+
+    ids = {o.id for o in sit.options}
+    if d.action == "fold":
+        return ("fold", "规则引擎：牌力与赔率不支持继续") if "fold" in ids else None
+    if d.action == "check":
+        return ("call", "规则引擎：过牌看下一张") if "call" in ids else None
+    if d.action == "call":
+        return ("call", "规则引擎：赔率支持跟注") if "call" in ids else None
+    # bet / raise：挑最接近 sizing 的档位；没有 sizing 就用 1/3 池
+    sized = [o for o in sit.options
+             if o.kind in ("bet", "raise") and o.amount is not None]
+    if not sized:
+        return None
+    target = float(d.sizing_bb or 0.0) or float(snap.pot) / 3.0
+    best = min(sized, key=lambda o: abs(float(o.amount) - target))
+    return (best.id, "规则引擎：按牌力与底池尺度下注")
+
+
 def fallback_option(sit: Situation) -> str:
     """模型不可用时的确定性兜底。
 
@@ -532,6 +577,9 @@ class Advice:
     completion_tokens: int | None = None
     # 模型用了别名（check/bet-1/3/allin）时记下原词，便于发现 id 歧义。
     alias_from: str | None = None
+    # 模型动作与规则引擎的交叉校验结论：ok | mild | severe。
+    # severe 时自动点击默认拦下（见 live._click_skip_reason）。
+    cross_check: str | None = None
 
     # ── 复盘/手牌库：真正发给模型的 prompt 与原始响应 ──
     # prompt_version 只是版本号，下面的字段才是「模型当时看到了什么」。
@@ -582,6 +630,8 @@ class Advice:
                if self.completion_tokens is not None else {}),
             **({"alias_from": self.alias_from}
                if self.alias_from else {}),
+            **({"cross_check": self.cross_check}
+               if self.cross_check else {}),
             # 只有真的捕获到才写，保持旧记录形状稳定。
             **({"prompt_system": self.prompt_system}
                if self.prompt_system else {}),
@@ -775,7 +825,7 @@ def _facts_snapshot(sit: Situation, options=None) -> dict:
         "hand_tier": sit.hand_tier,
         # 这次注入的是哪套牌型规则（听牌/成牌/空气）；与 prompt_version 一起
         # 用于复盘归因「建议变了是提示词哪一支换了」。
-        "hand_class": sit.hand_class,
+        "hand_class": sit.hand_playing_class,
         "hand_label": sit.hand_label,
         "hand_label_en": sit.hand_label_en,
         "equity_pct": (round(sit.equity_pct, 1)
@@ -890,11 +940,21 @@ def advise(sit: Situation, settings: AISettings | None,
     options = list(option_space) if option_space else list(sit.options)
     by_id = {o.id: o for o in options}
 
-    def fallback() -> Option:
+    def fallback() -> tuple[Option, str, str]:
+        """模型不可用时的确定性兜底：翻后先用规则引擎，其余按最保守。"""
+        hit = _rule_fallback(sit)
+        if hit is not None:
+            oid, reason = hit
+            option = by_id.get(oid) or next(
+                (o for o in sit.options if o.id == oid), None)
+            if option is not None:
+                return option, reason, "fallback_rules"
         oid = fallback_option(sit)
+        reason = "未配置模型/模型不可用，按最保守的默认动作"
         if oid in by_id:
-            return by_id[oid]
-        return next((o for o in sit.options if o.id == oid), sit.options[0])
+            return by_id[oid], reason, "fallback"
+        return (next((o for o in sit.options if o.id == oid), sit.options[0]),
+                reason, "fallback")
     prompt_holder: dict[str, str | None] = {}
     raw_holder: dict[str, str | None] = {}
 
@@ -905,7 +965,8 @@ def advise(sit: Situation, settings: AISettings | None,
              meta: dict | None = None,
              prompt_missing: bool = False,
              prompt_missing_reason: str | None = None,
-             reason_full: str | None = None) -> Advice:
+             reason_full: str | None = None,
+             cross_check: str | None = None) -> Advice:
         snap = sit.snap
         meta = meta or {}
         usage = meta.get("usage") or {}
@@ -941,19 +1002,20 @@ def advise(sit: Situation, settings: AISettings | None,
             captured_at=datetime.now().astimezone().isoformat(timespec="seconds"),
             prompt_missing=prompt_missing,
             prompt_missing_reason=prompt_missing_reason,
+            cross_check=cross_check,
         )
 
     if settings is None:
-        return make(fallback(),
-                    "未配置 AI_SERVER_*，按最保守的默认动作",
-                    "fallback", "未配置模型凭据",
+        option, why, source = fallback()
+        return make(option, why, source,
+                    "未配置模型凭据",
                     prompt_missing=True,
                     prompt_missing_reason="no_settings")
     if sit.abnormal_no_opponents:
         # 0 对手异常帧不调模型：任何牌力/赔率/筹码数字都是伪事实。
-        return make(fallback(),
-                    "状态帧异常（在局对手为 0），按最保守动作",
-                    "fallback", "状态帧异常：在局对手为 0",
+        option, why, source = fallback()
+        return make(option, why, source,
+                    "状态帧异常：在局对手为 0",
                     prompt_missing=True,
                     prompt_missing_reason="abnormal_no_opponents")
 
@@ -983,16 +1045,17 @@ def advise(sit: Situation, settings: AISettings | None,
         raw_reason = " ".join(str(data.get("reason", "")).split())
         reason = _clip_reason(raw_reason or "（模型未给理由）")
         plan = str(data.get("plan", "") or "").strip()[:160]
+        cc = _cross_action(sit, by_id[choice])
         return make(by_id[choice], reason, "model", plan=plan,
                     confidence=_confidence(data.get("confidence")),
                     alias_from=alias_from,
                     meta=data.get("_meta") if isinstance(data, dict) else None,
-                    reason_full=raw_reason or None)
+                    reason_full=raw_reason or None,
+                    cross_check=cc.conflict)
     except AIError as exc:
         # prompt 已经构建/发出去过，必须保留；raw 可能为空（连接失败）。
-        return make(fallback(),
-                    "模型不可用，按最保守的默认动作",
-                    "fallback", str(exc))
+        option, why, source = fallback()
+        return make(option, why, source, str(exc))
 
 
 # ─────────────────────────── 后台执行 ───────────────────────────

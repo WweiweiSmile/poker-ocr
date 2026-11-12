@@ -51,7 +51,7 @@ _TEXTURE_EN = {
     "花顺面": "Flush + straight", "公对面": "Paired",
 }
 
-# 牌型规则集：提示词按 hand_class 四选一注入（听牌 / 成牌+听 / 成牌 / 空气）。
+# 牌型规则集：提示词按 hand_playing_class 四选一注入（听牌 / 成牌+听 / 成牌 / 空气）。
 # combo 按真实补牌听牌归类，不设强度门槛；听牌质量由牌力事实描述。
 _DRAW_TIERS = (STRONG_DRAW, WEAK_DRAW)
 _MADE_TIERS = (STRONG_MADE, OVERPAIR, TPTK, TP_WEAK, MID_BOTTOM, BOARD_PLAY)
@@ -147,7 +147,7 @@ class Situation:
         return self.snap.street
 
     @property
-    def hand_class(self) -> str:
+    def hand_playing_class(self) -> str:
         """牌型规则集：`draw` / `combo` / `made` / `air`，互斥四类。
 
         · draw = 当前未成牌，但有真实可兑现听牌；

@@ -150,6 +150,18 @@ def test_invalid_board_and_cache() -> None:
     check(warm < 10, f"缓存后应 <10ms，实际 {warm:.1f}ms")
 
 
+def test_board_range_is_marked_legacy() -> None:
+    """board_range 只服务离线；live 的范围来源不得再直接引用它。"""
+    import inspect
+
+    import poker_ocr.situation as situation_mod
+
+    check("legacy" in (board_range.__doc__ or "").lower(),
+          "board_range 模块头未标 legacy")
+    check("board_range" not in inspect.getsource(situation_mod),
+          "live 的 situation 不应直接引用 board_range")
+
+
 def main() -> int:
     tests = [
         test_as_ks_4d_classification,
@@ -158,6 +170,7 @@ def main() -> int:
         test_widths_match_design,
         test_check_mode_keeps_preflop_range,
         test_invalid_board_and_cache,
+        test_board_range_is_marked_legacy,
     ]
     for t in tests:
         before = len(FAILS)

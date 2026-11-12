@@ -24,13 +24,18 @@ import poker_ocr.advice as advice_mod  # noqa: E402
 from poker_ocr.advice import (  # noqa: E402
     AISettings, AIError, AdviceRunner, EXPLOSIVE_POT_BB_PER_PLAYER, OPTION_ORDER,
     _canonical_choice,
-    advise, audit_advice_tags, build_messages, build_options,
+    advise, build_messages, build_options,
     build_situation, call_amount,
-    complete_json, is_explosive_pot, math_gate, parse_json_content,
+    complete_json, is_explosive_pot, parse_json_content,
     pot_per_player,
     preset_amounts, preset_targets, previous_street_pot, render_facts_zh,
     render_options_zh,
-    render_hand_facts, uncalled_excess, value_directive, winnable_pot,
+    uncalled_excess, winnable_pot,
+)
+from poker_ocr.prompt.offline.audit import audit_advice_tags  # noqa: E402
+from poker_ocr.prompt.offline.hand_facts import render_hand_facts  # noqa: E402
+from poker_ocr.prompt.offline.strategy import (  # noqa: E402
+    math_gate, value_directive,
 )
 from poker_ocr.frame_state import FrameState, PlayerState  # noqa: E402
 from poker_ocr.hand_track import LiveHandTracker, street_of_board  # noqa: E402
@@ -2596,7 +2601,7 @@ def test_pool_prior_fills_missing_seat_data() -> None:
 
     single = build_situation(make_point())
     _, single_user = build_messages(single)
-    check("池子先验" not in single_user,
+    check("## 池子先验" not in single_user,
           "事实块已给逐尺寸 EV 时不该再给池子均值")
 
     mw_opps = (OpponentSnapshot("a", "老王", "BB", 97.0, 0.0, False),
@@ -2605,7 +2610,7 @@ def test_pool_prior_fills_missing_seat_data() -> None:
     _, mw_user = build_messages(mw)
     # 有条件弃牌率时，它已经是同一节点的结论来源，不再补池子均值。
     check(mw.fold_eq is not None, "多人池应有条件弃牌率")
-    check("池子先验" not in mw_user,
+    check("## 池子先验" not in mw_user,
           "已有条件弃牌率时不该再给池子先验（两个口径会打架）")
 
     # 范围不可用时（fold_eq 为 None）才退回池子先验。
@@ -2613,17 +2618,17 @@ def test_pool_prior_fills_missing_seat_data() -> None:
         blind = build_situation(make_point(opponents=mw_opps))
     _, blind_user = build_messages(blind)
     check(blind.fold_eq is None, "范围关闭时应没有条件弃牌率")
-    check("池子先验" in blind_user, "没有条件弃牌率时应给池子先验兜底")
+    check("## 池子先验" in blind_user, "没有条件弃牌率时应给池子先验兜底")
     check("1/3 池需要 25%" in blind_user, "要先给盈亏平衡对照再给结论")
     check("不是这个座位" in blind_user, "必须写明这是池子均值，不是这个座位")
 
     facing = build_situation(make_point(to_call=4.0, pot=10.0))
     _, facing_user = build_messages(facing)
-    check("池子先验" not in facing_user, "面对下注不给池子先验（它描述的是对手弃牌）")
+    check("## 池子先验" not in facing_user, "面对下注不给池子先验（它描述的是对手弃牌）")
 
     pre = build_situation(make_point(street="preflop", board=()))
     _, pre_user = build_messages(pre)
-    check("池子先验" not in pre_user, "翻前不给池子先验")
+    check("## 池子先验" not in pre_user, "翻前不给池子先验")
 
 
 def test_pool_prior_multiplies_by_actual_opponent_count() -> None:
@@ -2655,7 +2660,7 @@ def test_pool_prior_multiplies_by_actual_opponent_count() -> None:
                        opponents=opponents),
             table_stats=stats)
     text = render_facts_zh(sit)
-    check("池子先验" in text, f"应有池子先验：\n{text}")
+    check("## 池子先验" in text, f"应有池子先验：\n{text}")
     check("本手 8 名对手全弃 ≈6%" in text,
           f"8 家 71% 连乘应约 6%，不能只显示 4 家：\n{text}")
     check("2 家 ≈50%" in text and "4 家 ≈25%" in text,
@@ -2713,8 +2718,8 @@ def test_lean_prompt_is_compact_facts_only() -> None:
     check("赔率门槛" in user or "需跟 0BB" in user, "应有价格事实")
     # 预算只是防重复膨胀的回归闸，不是产品上限：条件场景段（短码/多人池/
     # 单挑/听牌/河牌）会按局面追加，长一点换来更少的误读是划算的。
-    check(len(system) < 6000,
-          f"system 不应无限膨胀（< 6000），实际 {len(system)}")
+    check(len(system) < 6500,
+          f"system 不应无限膨胀（< 6500），实际 {len(system)}")
 
 
 def test_hand_vs_ranges_facts_block() -> None:
@@ -2814,9 +2819,9 @@ def test_combo_draw_facts_show_combo_and_fair_share_ratio() -> None:
         hero_cards=("8c", "8d"), to_call=0.0))
     straight_text = render_facts_zh(straight_combo)
     straight_system, _ = build_messages(straight_combo)
-    check(straight_combo.hand_class == "combo"
+    check(straight_combo.hand_playing_class == "combo"
           and straight_combo.ground_truth.draws.straight_draw,
-          f"对子+听顺应归 combo：{straight_combo.hand_class}")
+          f"对子+听顺应归 combo：{straight_combo.hand_playing_class}")
     check("成牌+有效听牌" in straight_system
           and "听顺" in straight_text,
           f"听顺成牌的 prompt 应标明 combo：\n{straight_system}\n{straight_text}")
@@ -2825,23 +2830,23 @@ def test_combo_draw_facts_show_combo_and_fair_share_ratio() -> None:
     overcard_air = build_situation(make_point(
         street="flop", board=("7d", "4c", "2h"),
         hero_cards=("Jc", "Tc"), to_call=0.0))
-    check(overcard_air.hand_class == "air",
-          f"两高张反超 outs 不可单独成为 combo：{overcard_air.hand_class}")
+    check(overcard_air.hand_playing_class == "air",
+          f"两高张反超 outs 不可单独成为 combo：{overcard_air.hand_playing_class}")
 
     # 有真实成牌但没有听花/听顺时，不能进 combo。
     made_only = build_situation(make_point(
         street="flop", board=("9d", "7c", "2h"),
         hero_cards=("9c", "Ad"), to_call=0.0))
-    check(made_only.hand_class == "made"
+    check(made_only.hand_playing_class == "made"
           and not made_only.ground_truth.draws.flush_draw
           and not made_only.ground_truth.draws.straight_draw,
-          f"无听花/听顺的成牌应保持 made：{made_only.hand_class}")
+          f"无听花/听顺的成牌应保持 made：{made_only.hand_playing_class}")
 
     pure = build_situation(make_point(
         hero_cards=("Ah", "Qh"), board=("9h", "6h", "5s"),
         to_call=4.0, pot=10.5, hero_stack=94.0))
     pure_text = render_facts_zh(pure)
-    check(pure.hand_class == "draw", f"纯听牌应分类为 draw：{pure.hand_class}")
+    check(pure.hand_playing_class == "draw", f"纯听牌应分类为 draw：{pure.hand_playing_class}")
     check("有牌又有听" not in pure_text,
           f"纯听牌不该有 combo 标签：\n{pure_text}")
 
@@ -3249,8 +3254,9 @@ def test_advise_rejects_unknown_option() -> None:
     sit = build_situation(make_point(to_call=4.0, pot=10.0))
     advice = advise(sit, SETTINGS,
                     complete=lambda *a, **k: {"option": "shove-99", "reason": "x"})
-    check(advice.source == "fallback", "不在选项里的答案应走兜底")
-    check(advice.option.id == "fold", f"面对下注的兜底应是弃牌：{advice.option.id}")
+    check(advice.source in ("fallback", "fallback_rules"),
+          f"不在选项里的答案应走兜底：{advice.source}")
+    check(advice.option.id != "shove-99", f"不该采信编造 id：{advice.option.id}")
     check(advice.error and "选项" in advice.error, f"应记下原因：{advice.error}")
 
 
@@ -3358,10 +3364,14 @@ def test_advise_baseline_uses_stored_option_space() -> None:
 
 
 def test_advise_fallback_without_settings() -> None:
+    """没配置模型：翻后先走规则引擎（不再一律弃/过），翻前仍最保守。"""
     sit = build_situation(make_point(to_call=0.0))
     advice = advise(sit, None)
-    check(advice.source == "fallback" and advice.option.kind == "check",
-          f"没配置时应给过牌：{advice.option}")
+    check(advice.source == "fallback_rules" and advice.option.kind in ("bet", "raise"),
+          f"翻后满牌力应走规则引擎：{advice.source}/{advice.option}")
+    pre = advise(build_situation(make_point(street="preflop", board=())), None)
+    check(pre.source == "fallback" and pre.option.kind in ("call", "check"),
+          f"翻前没有规则引擎，应给保守过牌/平跟：{pre.source}/{pre.option}")
 
 
 def test_post_json_reuses_connection() -> None:
@@ -4116,7 +4126,7 @@ def test_system_has_id_mapping_and_budget() -> None:
           "system 应说明翻后加注用 raise-1/3…1.2")
     check("翻前面对加注" in system and "raise-3x/raise-4x" in system,
           "system 应把 raise-3x/4x 限定在翻前")
-    check(len(system) <= 6000, f"system 不应重新膨胀，实际 {len(system)}")
+    check(len(system) <= 6500, f"system 不应重新膨胀，实际 {len(system)}")
 
 
 def test_short_stack_prompt_dedupes_capped_options() -> None:
@@ -4187,7 +4197,7 @@ def test_system_ante_module_is_conditional() -> None:
           f"前注局不能默认 SPR 低：\n{ante}")
     check("范围通常放宽" not in ante,
           f"前注局不能无条件放宽范围：\n{ante}")
-    check(len(ante) < 6000, f"前注局 system 不应无限膨胀：{len(ante)}")
+    check(len(ante) < 6500, f"前注局 system 不应无限膨胀：{len(ante)}")
 
 
 def test_all_in_amount_uses_effective_stack() -> None:
@@ -4687,7 +4697,7 @@ def test_pool_prior_not_rendered_with_conditional_fold_equity() -> None:
     check(sit.fold_eq is not None, "这个局面应有条件弃牌率报告")
     text = render_facts_zh(sit)
     check("## 范围弱点与弃牌率" in text, f"应有条件弃牌率：\n{text}")
-    check("池子先验" not in text,
+    check("## 池子先验" not in text,
           f"已有条件弃牌率时不该再给池子先验：\n{text}")
 
 
@@ -5024,7 +5034,8 @@ def test_zero_opponents_hard_gate() -> None:
 
     result = advise(sit, AISettings(api_key="k", base_url="http://x",
                                     model="m"), complete=boom)
-    check(result.source == "fallback" and result.option.id == "call",
+    check(result.source in ("fallback", "fallback_rules")
+          and result.option.id == "call",
           f"异常帧应直接 fallback 过牌：{result.source}/{result.option.id}")
 
 
@@ -5757,6 +5768,157 @@ def test_constant_sections_have_no_scenario_specific_rules() -> None:
     check("## 规则仲裁" in system, "system 应含规则仲裁段")
     check("硬缺口保守线，任何场景段或建议块不得覆盖" in system,
           "仲裁表应声明输出契约最高")
+
+
+def test_attack_word_has_no_draw_on_river() -> None:
+    """河牌没有听牌：攻击块不得出现「强听」半诈唬口径。"""
+    from poker_ocr.prompt.user.attack import _attack_word
+    river = _attack_word("river")
+    check(all("强听" not in v for v in river.values()),
+          f"河牌措辞里仍有强听：{river}")
+    check(river["semi_small"] == "", "河牌不该有半诈唬措辞")
+    flop = _attack_word("flop")
+    check(flop["semi"] == "，强听可按牌型段下注诈唬",
+          f"非河牌文案必须逐字不变（现有测试依赖）：{flop['semi']!r}")
+    check(flop["mid"] == "强听/空气按攻击口径可以 1/3 池小注",
+          f"非河牌文案必须逐字不变：{flop['mid']!r}")
+
+
+def test_attack_river_has_no_strong_draw() -> None:
+    """溜入池/收尾/河牌：攻击块整段不得出现「强听」。"""
+    from poker_ocr.hand_track import (
+        ActionRecord, OpponentSnapshot, StreetRecord,
+    )
+    from poker_ocr.prompt.user.attack import render_attack_zh
+    snap = make_point(
+        street="river", board=("Ks", "7d", "2c", "9h", "3d"),
+        hero_cards=("Ah", "Kd"), pot=12.0, pot_before_street=12.0, to_call=0.0,
+        # 必须是 limped，否则 pot_type 会算成 single-raised，攻击块不触发。
+        preflop_shapes=("limped",), hero_is_pfr=False, cbet_spot=False,
+        opponents=(OpponentSnapshot("a", "老王", "BB", 97.0, 0.0, False),
+                   OpponentSnapshot("b", "小李", "CO", 97.0, 0.0, False)),
+        streets=(StreetRecord("preflop", 1.5, (
+                     ActionRecord("preflop", "a", "老王", "BB", "call", 1.0, False, False),
+                 )),
+                 StreetRecord("flop", 2.5, ()),
+                 StreetRecord("turn", 2.5, ()),
+                 StreetRecord("river", 2.5, ())))
+    sit = build_situation(snap)
+    check(sit.pot_type == "limped pot", f"用例应构造溜入池：{sit.pot_type}")
+    text = "\n".join(render_attack_zh(sit))
+    check(bool(text), "这一节点攻击块应当触发")
+    check("强听" not in text, f"河牌攻击块出现了「强听」：{text}")
+
+
+def test_frequency_target_is_marked_historical() -> None:
+    """恒定段的池级频率常数必须标为历史统计，否则会被读成当前桌事实。"""
+    from poker_ocr.prompt.system.aggression import AGGRESSION
+    check("历史池" in AGGRESSION, "频率目标段未标注「历史池」")
+    check("本池历史" not in AGGRESSION, "仍把历史统计写成「本池历史」")
+    check("冲突时以实测为准" in AGGRESSION, "缺少与实测冲突时的让位句")
+
+
+def test_board_play_draw_is_not_called_unmade() -> None:
+    """9♥9♠5♥ + A♥K♥：一对来自公面 + 坚果花听，不得写「一对（未成牌）」。"""
+    sit = build_situation(make_point(
+        board=("9h", "9s", "5h"), hero_cards=("Ah", "Kh")))
+    check(sit.hand_playing_class == "draw", f"用例应落在听牌段：{sit.hand_playing_class}")
+    user = render_facts_zh(sit)
+    check("一对（未成牌）" not in user, f"打牌面+听仍写成未成牌：{user}")
+    check("打牌面，未成自己的牌" in user, "缺少「打牌面」限定语")
+
+
+def test_true_air_draw_still_says_unmade() -> None:
+    """9♥5♠2♥ + A♥K♥（真高牌 + 花听）仍应写「未成牌」。"""
+    sit = build_situation(make_point(
+        board=("9h", "5s", "2h"), hero_cards=("Ah", "Kh")))
+    check("未成牌" in render_facts_zh(sit), "真高牌+听牌不该丢掉「未成牌」")
+
+
+def test_arbitration_exempts_pool_prior() -> None:
+    from poker_ocr.prompt.system.arbitration import ARBITRATION
+    check("池子先验" in ARBITRATION and "不属于本条禁止" in ARBITRATION,
+          "仲裁 #5 未给池子先验豁免")
+
+
+def test_output_contract_defers_hard_gap_list() -> None:
+    from poker_ocr.prompt.system.output import OUTPUT_CONTRACT
+    check("数据质量" in OUTPUT_CONTRACT,
+          "输出契约未指向数据质量段")
+    check("需跟" not in OUTPUT_CONTRACT, "契约仍列了没有对应文案的「需跟」")
+
+
+def test_multiway_air_matches_constant_section() -> None:
+    from poker_ocr.prompt.system.scenario import _MW_AIR
+    check("空气优先小注" not in _MW_AIR, "多人池空气默认仍与恒定段相反")
+    check("默认过牌" in _MW_AIR, "多人池空气应默认过牌")
+
+
+def test_history_renders_previous_plan() -> None:
+    from types import SimpleNamespace
+    from poker_ocr.prompt.user.history import render_previous_advice_zh
+
+    class P:  # 最小替身
+        street = "flop"
+        reason = "顶对价值下注"
+        plan = "转牌不改进就放弃"
+        option = SimpleNamespace(label="下注 4BB", id="raise-1/2", amount=4.0)
+
+    sit = build_situation(make_point(street="turn",
+                                     board=("Ks", "7d", "2c", "9h")),
+                          previous=P())
+    text = "\n".join(render_previous_advice_zh(sit))
+    check("当时的计划" in text and "转牌不改进就放弃" in text, text)
+
+
+def test_fallback_uses_rule_engine_postflop() -> None:
+    """满堂面对下注、模型不可用：兜底不能一律弃牌。"""
+    from poker_ocr.coach import advise as rule_advise
+    # 9h5s5h + 9c9d = 99955（满堂）。注意别写成 9h9s5h，那是四条。
+    sit = build_situation(make_point(
+        board=("9h", "5s", "5h"), hero_cards=("9c", "9d"),
+        to_call=6.0, pot=20.0))
+    d = rule_advise(list(sit.snap.hero_cards), "9h5s5h",
+                    street="flop", pot=20.0, hero_position="BTN",
+                    opponents=1, stack_bb=97.0)
+    check(d.ok, "coach 不该在这个节点放弃")
+    adv = advise(sit, None)          # settings=None ⇒ 走兜底
+    check(adv.source in ("fallback", "fallback_rules"),
+          f"来源标记不对：{adv.source}")
+    check(adv.option.id != "fold",
+          f"满堂面对小额下注不该兜底弃牌：{adv.option.id}")
+
+
+def test_fallback_stays_conservative_preflop() -> None:
+    sit = build_situation(make_point(street="preflop", board=(), to_call=3.0))
+    adv = advise(sit, None)
+    check(adv.source == "fallback", f"翻前没有规则引擎，应是 fallback：{adv.source}")
+
+
+def test_cross_check_flags_reverse_action() -> None:
+    from poker_ocr.cross_check import check as cross_check
+    from poker_ocr.hand_track import ActionRecord, StreetRecord
+
+    sit = build_situation(make_point(
+        board=("Ks", "7d", "2c"), hero_cards=("2h", "3d"),
+        to_call=8.0, pot=20.0,
+        streets=(StreetRecord("preflop", 1.5, (
+                     ActionRecord("preflop", "a", "老王", "BB", "call", 1.0,
+                                  False, False),)),
+                 StreetRecord("flop", 6.0, (
+                     ActionRecord("flop", "a", "老王", "BB", "bet", 8.0,
+                                  False, False),)))))
+    raise_opt = next(o for o in sit.options if o.kind in ("bet", "raise"))
+    cc = cross_check(sit, raise_opt)
+    check(cc.conflict in ("mild", "severe"),
+          f"空气加注 vs 规则弃牌应被标记：{cc}")
+
+
+def test_cross_check_skips_preflop() -> None:
+    sit = build_situation(make_point(street="preflop", board=()))
+    from poker_ocr.cross_check import check as cross_check
+    check(cross_check(sit, sit.options[0]).conflict == "ok",
+          "翻前不该交叉校验")
 
 
 def main() -> int:

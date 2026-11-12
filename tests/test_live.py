@@ -1558,14 +1558,15 @@ def test_hand_gap_without_hero_is_skipped_by_default() -> None:
 def _click_advice(*, kind: str = "fold", option_id: str | None = None,
                   amount: float | None = None, source: str = "model",
                   error: str | None = None, hand_id: str = "h1",
-                  key: tuple | None = None, confidence: float | None = None):
+                  key: tuple | None = None, confidence: float | None = None,
+                  cross_check: str | None = None):
     from poker_ocr.advice import Advice, Option
     oid = option_id or kind
     opt = Option(oid, kind.title(), kind, amount)
     return Advice(hand_id, "flop", opt, "reason", source, error=error,
                   decision_key=key or (hand_id, "flop", 0, 6.0, 0.0,
                                        ("Ah", "Kd")),
-                  confidence=confidence)
+                  confidence=confidence, cross_check=cross_check)
 
 
 class FakeClicker:
@@ -1623,7 +1624,8 @@ def _drain_click(advice, *, clicker, state=None, allow_click: bool = True,
                  clock=None, confirm_click: bool = False,
                  confirm_answer: bool | None = None,
                  logs: list[str] | None = None,
-                 min_confidence: float = 0.0):
+                 min_confidence: float = 0.0,
+                 cross_check_mode: str = "block"):
     writer = StubWriter()
     tracker = SimpleNamespace(
         hand=SimpleNamespace(hand_id=current_hand),
@@ -1633,6 +1635,7 @@ def _drain_click(advice, *, clicker, state=None, allow_click: bool = True,
                          hand_tracker=tracker, clicker=clicker,
                          confirm_click=confirm_click,
                          min_advice_confidence=min_confidence,
+                         cross_check_mode=cross_check_mode,
                          advice_runner=OneShotRunner([advice]),
                          log=(logs.append if logs is not None
                               else (lambda *_: None)), **kwargs)
@@ -1866,6 +1869,22 @@ def test_auto_click_skips_low_confidence() -> None:
     proc3, rows3 = _drain_click(
         _click_advice(confidence=0.8), clicker=clicker3, min_confidence=0.5)
     check(len(clicker3.calls) == 1, "高置信度应正常点击")
+
+
+def test_auto_click_blocks_severe_cross_check() -> None:
+    """规则喊弃、模型喊加注：默认 block 不点；warn 只记录不拦。"""
+    clicker = FakeClicker()
+    proc, rows = _drain_click(
+        _click_advice(kind="raise", cross_check="severe"), clicker=clicker)
+    check(clicker.calls == [], "严重冲突不应自动点击")
+    check(rows[0]["click"]["reason"] == "cross_check_conflict",
+          f"应记录 cross_check_conflict：{rows[0]}")
+
+    clicker2 = FakeClicker()
+    proc2, rows2 = _drain_click(
+        _click_advice(kind="raise", cross_check="severe"), clicker=clicker2,
+        cross_check_mode="warn")
+    check(len(clicker2.calls) == 1, "warn 模式只记录，不应拦截")
 
 
 def test_auto_click_allows_fallback_when_configured() -> None:

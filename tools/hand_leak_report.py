@@ -138,7 +138,7 @@ def is_bomb(hand):
     return bool(hand.get("bomb_pot"))
 
 
-def hand_class(hole):
+def hand_bucket(hole):
     if len(hole) != 2:
         return "?"
     (r1, s1), (r2, s2) = hole
@@ -194,7 +194,7 @@ def build(hands):
             calls=[(a.get("amount") or 0.0) for a in
                    [x for st in hand.get("streets") or [] for x in st.get("actions") or []
                     if (x.get("is_hero") or x.get("seat_id") == "hero") and x.get("action") == "call"]],
-            cls=hand_class(hole),
+            cls=hand_bucket(hole),
             final=best_hand(hole + board) if len(board) == 5 else None,
             bomb=is_bomb(hand),
             shown=[best_hand(cards(s.get("cards")) + board)

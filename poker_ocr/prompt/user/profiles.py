@@ -31,7 +31,7 @@ def render_profiles_zh(sit, *, suppress_action_hints: bool = False) -> list[str]
         in_hand_reads,
         key=lambda read: (order_rank.get(active.get(read.seat_id, ""), len(order_rank)),
                           active.get(read.seat_id, "")))
-    header = "## 对手画像（逐座位；Hero 下注后行动顺序；优先于全场统计）"
+    header = "## 对手画像（逐座位；Hero 下注后行动顺序；优先于池子先验/全场先验）"
     lines = render_reads_zh(
         ordered_reads, active,
         header=header,

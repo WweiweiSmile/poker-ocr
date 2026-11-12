@@ -24,8 +24,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from poker_ocr.advice import (  # noqa: E402
-    DOMINATED_BEAT_PCT, build_situation, render_facts_zh, value_directive,
+from poker_ocr.advice import build_situation, render_facts_zh  # noqa: E402
+from poker_ocr.prompt.offline.strategy import (  # noqa: E402
+    DOMINATED_BEAT_PCT, value_directive,
 )
 from poker_ocr.coach import (  # noqa: E402
     FLUSH, FULL_HOUSE, ONE_PAIR, STRAIGHT, beat_rate, board_ceiling, parse_cards,

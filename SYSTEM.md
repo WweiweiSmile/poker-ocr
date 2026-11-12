@@ -81,7 +81,6 @@ LiveHandTracker                       逐帧累积行动线 → 轮到我时产�
    ├─ build_situation()              situation.Situation：模型看到的唯一事实源
    │     ├─ ground_truth            牌型/踢脚/坚果（精确枚举，不可由模型断言）
    │     ├─ range_flow              对手范围事件模型（按动作连乘）
-   │     ├─ hand_strength           一行「大/中/小 + 价值/听牌」结论
    │     ├─ fold_equity             逐座位条件弃牌率
    │     ├─ opponent_profile        本手在局对手画像（VPIP/PFR/AF…）
    │     └─ options.build_options() 可选动作 id + 金额（尺度不由模型生成）
@@ -172,10 +171,10 @@ range_flow.py / fold_equity.py  ──读表──►  范围似然 · 条件弃
 | `options.py` | 可选动作空间（翻后按池倍数、翻前按位置/前注/溜入者） |
 | `coach.py` | 规则引擎（`advise()` 纯规则版 + 牌型评估原语），被 `ground_truth` / `hand_strength` 复用 |
 | `ground_truth.py` | 不可变牌力事实；`beaten_by` / `hero_is_nuts` 用精确枚举 |
-| `board_range.py` | 牌面连接度 × 翻前先验 → 动作条件范围（**旧路径**，按街一次过滤） |
+| `board_range.py` | 牌面连接度 × 翻前先验 → 动作条件范围（**legacy 旧路径**，按街一次过滤；live 不读，只有离线工具用） |
 | `range_flow.py` | 范围事件模型：按动作顺序连乘，成牌档按牌面百分位（**新路径**） |
 | `hand_vs_ranges.py` | 手牌 vs 范围：精确 `behind` + MC 权益 |
-| `hand_strength.py` | 纯判定层：`size` / `equity_tier` / `kind` / `summary_en` |
+| `hand_strength.py` | 纯判定层：`size` / `equity_tier` / `kind` / `summary_en`（**只服务离线审计**，live 传 `include_strength=False` 不渲染） |
 | `fold_equity.py` | 逐座位条件弃牌率与各尺寸盈亏平衡（数字来自 `tables/fold_equity.json`） |
 | `strategy_tables.py` | 策略表加载器：profile → 变体，缺变体回落 v0 并标记 `fell_back` |
 | `pot_math.py` / `allin.py` / `preflop_ranges.py` / `ranges.py` / `field_ranges.py` | 底池赔率、全下判定、翻前范围与先验 |
@@ -273,8 +272,9 @@ advice / hand / incident / session_end`。`frame` 每帧一条，带 `hand_id` /
 
 ## 7. 提示词系统
 
-- 当前版本：`PROMPT_VERSION = "lean-zh-2026-11-08.2"`（[poker_ocr/prompt/version.py](poker_ocr/prompt/version.py)）。
+- 当前版本：`PROMPT_VERSION = "lean-zh-2026-11-11.1"`（[poker_ocr/prompt/version.py](poker_ocr/prompt/version.py)）。
 - 只有**一套中文 lean**：不注入 Math gate、不做弃牌重问、不加载技能库。
+- prompt 里**不得出现 `offline/` 的英文规则**；`poker_ocr/prompt/offline/` 是 legacy，只服务离线审计与历史 A/B，不进 live prompt。
 - 版本号写进 `session_start` / advice JSONL；`replay/versioning.py` 的 `CURRENT_ADVICE_VERSION` 由它派生，**不要手工同步**。
 - 改动 system、事实块或模块顺序 ⇒ 必须 bump，并在 `version.py` 顶部写清「为什么改、依据哪次复盘」。
 - `advise()` 会把 `system/user/raw/reason_full` 与 `prompt_sha256` 一起带进 `Advice`；没调模型时显式标 `prompt_missing`。
@@ -282,7 +282,7 @@ advice / hand / incident / session_end`。`frame` 每帧一条，带 `hand_id` /
 - 有 **golden test 锁死提示词哈希**：[replay-console/tests/test_prompt_golden.py](replay-console/tests/test_prompt_golden.py)。
   改了 system/user/事实块/选项规则却没同步版本号会直接失败。正确做法：
   1. bump `poker_ocr/prompt/version.py` 的 `PROMPT_VERSION`；
-  2. bump `replay-console/replay/versioning.py` 的 `CURRENT_ADVICE_VERSION`；
+  2. `replay-console/replay/versioning.py` 的 `CURRENT_ADVICE_VERSION` 由它派生，**不要手改**；
   3. 更新 golden test 里的 `EXPECTED_ADVICE_VERSION` / `EXPECTED_PROMPT_HASH`。
 
 ---
@@ -347,7 +347,9 @@ STRATEGY_TABLES_PROFILE=sourced nv -m poker_ocr.live ...
 - **3/8 的闭合孔数不是硬保证**：低分辨率/JPEG 会把 3 的开口糊成 1–2 个假孔，也会把 8 的孔糊掉。现在用 `glyph_left_indent`（中段最左墨迹）判左开口兜底；6 的凹口在右侧，不能用凸包缺陷当左开口（会把 6 误判成 3）。
 - **6/8 在暗牌里会互相翻**：`6` 的上半缺口只有 1–2px，弃牌后 WPK 把 hero 手牌调暗（V 246 → ≈100），缺口被糊死、上半冒出一个几 px 的假孔，`holes=2` 且 NCC 略偏 `8` → 判成 `8`（实测 2026-11-08 22:51 的 `6s4d` 记成 `8s4d`；本地把 6 的字形降采样到 0.6–0.8x 可复现同一跳变）。6 与 8 的「上半孔/下半孔」面积比在降质后重叠（6 的 0.16–0.37 vs 8 的 0.2–0.7），单靠阈值分不干净。所以口径放在状态机：**弃牌后不再改写已确认的 hero 手牌**（`hand_track.observe`），差异只记 `cards_warnings` 供复盘。
 - **同名不同人不做身份识别**：名字只是字符串。
-- **`board_range.build`（旧）与 `range_flow`（新）语义不同**：旧路径按街一次过滤会丢掉上一街的收窄信息；新代码用 `range_flow`。
+- **`board_range.build`（旧）与 `range_flow`（新）语义不同**：旧路径按街一次过滤会丢掉上一街的收窄信息；新代码用 `range_flow`，`board_range` 只作为离线工具的 legacy 路径保留。
+- **恒定段的池级频率常数是历史统计，不是当前桌**：`AGGRESSION` 里 40% 下注率 / 14–16% PFR / 跟注站阈值来自 2026-11-04 的 665 手复盘；与实测冲突时以实测为准。
+- **攻击块必须按街分支才能写半诈唬**：河牌没有听牌，`attack._attack_word()` 在河牌用「纯诈唬」口径；把「强听」写回河牌会与「场景：河牌」直接冲突。
 - **`table_default` 的 `region_gate.y_max=0.855` 会切掉 WPK 竖屏 hero 的筹码胶囊**：所以 `table_wpk_live.json` 改成 `0.99`。
 - **onnxruntime 的 session 不保证线程安全**：`api.py` 用一把锁串行推理（6 并发结果一致但排队）；要吞吐只能多进程（每个 worker 各加载一份模型，内存翻倍）。
 - **OBS 虚拟摄像头固定 1920×1080**：手机源竖屏铺满时必须 `--rotate 90`，否则 ROI 被横向压扁。

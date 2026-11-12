@@ -17,9 +17,9 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from poker_ocr import advice as advice_mod  # noqa: E402
-from poker_ocr.advice import (  # noqa: E402
-    _aggressive_context, advise, build_situation, decision_read,
-    render_facts_zh, value_directive,
+from poker_ocr.advice import advise, build_situation, render_facts_zh  # noqa: E402
+from poker_ocr.prompt.offline.strategy import (  # noqa: E402
+    _aggressive_context, decision_read, value_directive,
 )
 from poker_ocr.frame_state import FrameState, PlayerState  # noqa: E402
 from poker_ocr.hand_track import (  # noqa: E402
@@ -875,7 +875,7 @@ def test_prompt_renders_opponent_reads() -> None:
               source="unknown", gate="unknown")))
     facts = render_facts_zh(sit)
     # 标题要写明排序口径：按 Hero 下注后的行动顺序，不是静态翻前位置。
-    check("## 对手画像（逐座位；Hero 下注后行动顺序；优先于全场统计）" in facts,
+    check("## 对手画像（逐座位；Hero 下注后行动顺序；优先于池子先验/全场先验）" in facts,
           f"事实块应含对手画像：\n{facts}")
     check("BTN 芒果与西米：MANIAC" in facts,
           f"画像应带位置和类型：\n{facts}")

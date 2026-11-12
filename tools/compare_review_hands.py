@@ -66,8 +66,9 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from poker_ocr.advice import (  # noqa: E402
-    AISettings, advise, audit_advice_tags, build_situation,
+    AISettings, advise, build_situation,
 )
+from poker_ocr.prompt.offline.audit import audit_advice_tags  # noqa: E402
 from poker_ocr.env import load_env  # noqa: E402
 from poker_ocr.hand_track import (  # noqa: E402
     ActionRecord, HandSnapshot, OpponentSnapshot, StreetRecord,

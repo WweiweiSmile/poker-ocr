@@ -275,15 +275,48 @@ def _board_wet(sit: Situation, street: str) -> bool:
     return bool(info.flush_made_possible or info.straight_possible or draw)
 
 
+def _attack_word(street: str) -> dict[str, str]:
+    """攻击块里四处「听牌/空气」措辞；河牌没有听牌，必须按街分支。
+
+    河牌不会再发牌：`强听` 在事实层等同空气（见 system/scenario.py 河牌段），
+    攻击块再说「强听可以小注诈唬」就是同屏两条相反规则（历史 P1-14 开放分支）。
+    非河牌的返回值必须**逐字**保持原样——现有测试依赖「强听/空气」这个字面量。
+    """
+    if street == "river":
+        bluff = "纯诈唬只在「他弃 ≥ 该尺寸需要」时成立（优先小注），否则弃"
+        return {
+            "semi": "，" + bluff,        # 接在「可下注价值牌拿价值」后面
+            "semi_small": "",
+            "air": bluff,
+            "weak": "空气按默认过牌",
+            "mid": "纯诈唬只在「他弃 ≥ 该尺寸需要」时小注，否则弃",
+            "mid_unknown": "纯诈唬只在「他弃 ≥ 该尺寸需要」时小注，否则弃",
+        }
+    return {
+        "semi": "，强听可按牌型段下注诈唬",
+        "semi_small": "，强听可按牌型段小注诈唬",
+        "air": "空气过牌",
+        "weak": "强听/空气按默认过牌",
+        "mid": "强听/空气按攻击口径可以 1/3 池小注",
+        "mid_unknown": "强听/空气可以 1/3 池小注",
+    }
+
+
 def _attack_evidence(sit: Situation, seats: list[_SeatFold], street: str,
                      fold_verdict: str) -> list[str]:
     """攻击块的「依据」：先给全部对手的逐座位事实，再给牌面/A 高面约束。"""
     lines: list[str] = [_seat_evidence_line(seats, street)]
 
     if _board_wet(sit, street):
-        lines.append(
-            "牌面有花/顺可能：对手范围更容易连上，降低开火频率；"
-            "优先用有摊牌价值或能改进的牌，纯空气别硬开。")
+        if street == "river":
+            lines.append(
+                "牌面有花/顺可能：河牌已成牌面，没有听牌可买；"
+                "价值只问「更差的牌会不会跟」，诈唬只问「更好的牌会不会弃」，"
+                "纯空气别硬开。")
+        else:
+            lines.append(
+                "牌面有花/顺可能：对手范围更容易连上，降低开火频率；"
+                "优先用有摊牌价值或能改进的牌，纯空气别硬开。")
 
     if any(str(card)[:1].upper() == "A" for card in sit.snap.board):
         if _notes_ace_weakness(sit.table_dynamics):
@@ -387,27 +420,25 @@ def render_attack_zh(sit: Situation) -> list[str]:
         lines.append(
             "没有对手过牌-加注数据，不能把这里当无风险开火点。")
 
+    w = _attack_word(street)
     if fold_verdict == "support" and xr_known and not wet:
-        conclusion = ("可高频小注攻击（1/3–1/2 池）：可下注价值牌拿价值，"
-                      "强听可按牌型段下注诈唬")
+        conclusion = f"可高频小注攻击（1/3–1/2 池）：可下注价值牌拿价值{w['semi']}"
     elif fold_verdict == "support" and xr_known:
-        conclusion = ("可小注，但牌面有花/顺可能，降低频率；"
-                      "可下注价值牌拿价值，强听可按牌型段下注诈唬")
+        conclusion = (f"可小注，但牌面有花/顺可能，降低频率；"
+                      f"可下注价值牌拿价值{w['semi']}")
     elif fold_verdict == "support":
-        conclusion = ("可小注，但不默认高频（没有 xr 数据）；"
-                      "可下注价值牌下注拿价值，强听可按牌型段小注诈唬，空气过牌")
+        conclusion = (f"可小注，但不默认高频（没有 xr 数据）；"
+                      f"可下注价值牌下注拿价值{w['semi_small']}，{w['air']}")
     elif fold_verdict == "weak":
-        conclusion = ("不开火：可下注价值（两对+/超对/顶对强踢）下注拿价值，"
-                      "强听/空气按默认过牌")
+        conclusion = (f"不开火：可下注价值（两对+/超对/顶对强踢）下注拿价值，"
+                      f"{w['weak']}")
     elif fold_verdict == "small":
-        conclusion = ("价值牌下注拿价值；强听/空气按攻击口径可以 1/3 池小注"
-                      "（样本不足，不做大注）")
+        conclusion = f"价值牌下注拿价值；{w['mid']}（样本不足，不做大注）"
     elif fold_verdict == "neutral":
-        conclusion = ("价值牌下注拿价值；强听/空气按攻击口径可以 1/3 池小注"
-                      "（弃牌率一般，不能作为大注理由）")
+        conclusion = f"价值牌下注拿价值；{w['mid']}（弃牌率一般，不能作为大注理由）"
     else:
-        conclusion = ("价值牌下注拿价值；强听/空气可以 1/3 池小注"
-                      "（没有该街实测，按范围估计；大注仍要 L2–L3）")
+        conclusion = (f"价值牌下注拿价值；{w['mid_unknown']}"
+                      f"（没有该街实测，按范围估计；大注仍要 L2–L3）")
     reason = _verdict_reason(seats, fold_verdict)
     lines.append("结论：" + conclusion + (f"（{reason}）" if reason else ""))
     lines.extend(_attack_evidence(sit, seats, street, fold_verdict))

@@ -81,7 +81,7 @@ def test_prompt_and_raw_are_captured():
 
 def test_no_settings_is_explicitly_missing():
     advice = advise(make_sit(), None)
-    assert advice.source == "fallback"
+    assert advice.source in ("fallback", "fallback_rules")
     assert advice.prompt_missing is True
     assert advice.prompt_missing_reason == "no_settings"
     data = advice.to_dict()

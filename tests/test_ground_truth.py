@@ -20,10 +20,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from poker_ocr.advice import (  # noqa: E402
-    build_messages, build_situation, render_facts_zh, render_hand_facts,
-    value_directive,
-)
+from poker_ocr.advice import build_messages, build_situation, render_facts_zh  # noqa: E402
+from poker_ocr.prompt.offline.hand_facts import render_hand_facts  # noqa: E402
+from poker_ocr.prompt.offline.strategy import value_directive  # noqa: E402
 from poker_ocr.coach import CATEGORY_NAMES, parse_cards  # noqa: E402
 from poker_ocr.ground_truth import card_text, compute_ground_truth  # noqa: E402
 from poker_ocr.hand_track import (  # noqa: E402

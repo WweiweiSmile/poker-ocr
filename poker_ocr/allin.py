@@ -90,7 +90,7 @@ def _rank_suit(card: str) -> tuple[str, str]:
     return rank, suit.lower()
 
 
-def hand_class(cards) -> str:
+def hole_class(cards) -> str:
     """把具体底牌归约成 169 个手牌类之一：'AA' / 'AKs' / 'AKo'。
 
     同花与否只看花色是否相同；对子不带后缀。'AsKh' → 'AKo'，
@@ -156,7 +156,7 @@ class RangeTable:
 
     def prob(self, position: str, cards, already_allin=()) -> float | None:
         node = self.node(position, already_allin)
-        return None if node is None else node.prob(hand_class(cards))
+        return None if node is None else node.prob(hole_class(cards))
 
 
 def _canonical_allin(already_allin) -> tuple[str, ...]:
@@ -234,6 +234,6 @@ def decide(position: str, cards, already_allin=(),
         return Decision(False, None, None, None, node,
                         reason=f"{node.key} 是多路跟注节点，数值偏宽，已拒绝作答")
 
-    hand = hand_class(cards)
+    hand = hole_class(cards)
     p = node.prob(hand)
     return Decision(True, ALLIN if p >= threshold else FOLD, p, hand, node)

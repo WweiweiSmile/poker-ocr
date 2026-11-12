@@ -4,7 +4,7 @@
 其他改善 outs 不触发 combo 分类，牌力质量与行动阈值另行判断。
 
 牌型段只写「这手牌靠什么赢 + 默认动作」；人数/位置/短码/河牌修正留在
-`scenario.py`，场景段按 hand_class 只渲染对应口径。
+`scenario.py`，场景段按 hand_playing_class 只渲染对应口径。
 """
 
 from __future__ import annotations
@@ -49,10 +49,10 @@ AIR_RULES = """## 牌型：空气
 
 
 def hand_type_section(sit) -> str | None:
-    """按 `sit.hand_class` 返回唯一一段牌型规则；翻前/牌不全时不注入。"""
+    """按 `sit.hand_playing_class` 返回唯一一段牌型规则；翻前/牌不全时不注入。"""
     if sit.snap.street == PREFLOP or sit.ground_truth is None:
         return None
-    cls = sit.hand_class
+    cls = sit.hand_playing_class
     if cls == "draw":
         return DRAW_RULES
     if cls == "combo":

@@ -1093,6 +1093,7 @@ class LiveProcessor:
                  confirm_click: bool = False,
                  confirm_timeout: float = 6.0,
                  min_advice_confidence: float = 0.0,
+                 cross_check_mode: str = "block",
                  table_dynamics_loader: Callable[[], TableDynamics] | None = None,
                  table_dynamics_text: str = "",
                  profile_store: ProfileStore | None = None,
@@ -1149,6 +1150,12 @@ class LiveProcessor:
             raise ValueError("min_advice_confidence 应在 0–1 之间")
         # 0 = 不启用。>0 时，模型给了置信度且低于阈值的建议只显示不自动点。
         self.min_advice_confidence = confidence
+        # 模型动作与规则引擎严重冲突时的自动点击策略：off=不校验记录、
+        # warn=只记录、block=不自动点击（默认）。
+        if cross_check_mode not in ("off", "warn", "block"):
+            raise ValueError(
+                f"cross_check_mode 只能是 off/warn/block，收到 {cross_check_mode!r}")
+        self.cross_check_mode = cross_check_mode
         # 终端确认最多等多久（秒）；0 = 一直等。默认 6s，避免把 OCR 主循环
         # 无限期挂在一次按键上（客户端回合时限通常 10–15s）。
         self.confirm_timeout = max(0.0, float(confirm_timeout))
@@ -1789,7 +1796,7 @@ class LiveProcessor:
                         "decision_key": list(situation.snap.decision_key),
                         "hand_tier": situation.hand_tier,
                         "hand_label": situation.hand_label,
-                        "hand_class": situation.hand_class,
+                        "hand_class": situation.hand_playing_class,
                         "equity_pct": (round(situation.equity_pct, 1)
                                        if situation.equity_pct is not None
                                        else None),
@@ -2209,6 +2216,11 @@ class LiveProcessor:
             if (advice.confidence is None
                     or advice.confidence < self.min_advice_confidence):
                 return "low_confidence"
+        if (self.cross_check_mode == "block"
+                and getattr(advice, "cross_check", None) == "severe"):
+            # 规则喊弃、模型喊加注/全下：不自动执行。这个原因**不**进
+            # DEFER_CLICK_REASONS——冲突不会因为等下一帧而消失。
+            return "cross_check_conflict"
         if not allow_click:
             return "frame_not_clickable"
         if state is None or not getattr(state, "ok", False):
@@ -2843,6 +2855,11 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--min-advice-confidence", type=float, default=0.0,
                     help="自动点击的最低置信度（0 = 关闭）；低于该值或模型没给"
                          "confidence 时只显示建议，不自动点击")
+    ap.add_argument("--cross-check", choices=("off", "warn", "block"),
+                    default="block", dest="cross_check",
+                    help="模型建议与规则引擎交叉校验：off=不校验、warn=只记录、"
+                         "block=严重冲突（规则弃牌/模型加注全下）不自动点击"
+                         "（默认 block；只影响点击，不影响落库/看板）")
     ap.add_argument("--quiet", action="store_true", help="只打状态行和最终汇总")
     # ── 日志 / Web 看板 ──
     ap.add_argument("--web", action=argparse.BooleanOptionalAction, default=True,
@@ -2963,10 +2980,8 @@ def _install_signals(stop: threading.Event) -> None:
             pass
 
 
-def main(argv: list[str] | None = None) -> int:
-    ap = build_parser()
-    args = ap.parse_args(argv)
-
+def _load_runtime_env(ap: argparse.ArgumentParser, args) -> object:
+    """加载 .env、补齐环境变量默认值并做参数校验；返回 env_load。"""
     # `.env` 在任何配置读取之前加载：已存在的环境变量优先，文件只补齐。
     # 找不到文件不报错（全靠环境变量是合法部署方式），但 --ai-advice 下会告警 ——
     # 「.env 明明放了却没生效」是这类配置最难查的故障
@@ -2996,7 +3011,31 @@ def main(argv: list[str] | None = None) -> int:
     # 和是否写手牌 outbox（见 apply_test_mode）。
     apply_test_mode(args)
     _validate_args(ap, args)
+    return env_load
 
+
+@dataclass
+class _Runtime:
+    """main 装配好、主循环要用的运行时对象（避免 main 继续长参数）。"""
+    started_mono: object
+    mailbox: object
+    reader: object
+    processor: object
+    writer: object
+    web: object
+    event_log: object
+    console_log: object
+    settle_gate: object
+    advice_runner: object
+    ingest_worker: object
+    profile_store: object
+    state_stream: object
+    publish: object
+    stop: object
+    profile: object
+
+def _build_runtime(ap: argparse.ArgumentParser, args, env_load) -> _Runtime:
+    """装配日志/看板/OCR/建议/点击器/处理器；不启动拉流。"""
     started_wall = _iso_now()
     started_mono = time.monotonic()
     session_id = (datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -3454,6 +3493,7 @@ def main(argv: list[str] | None = None) -> int:
         clicker=clicker, confirm_click=not args.no_confirm,
         confirm_timeout=args.confirm_timeout,
         min_advice_confidence=args.min_advice_confidence,
+        cross_check_mode=args.cross_check,
         table_dynamics_loader=load_table_dynamics if args.ai_advice else None,
         table_dynamics_text=table_dynamics_text,
         profile_store=profile_store,
@@ -3471,6 +3511,44 @@ def main(argv: list[str] | None = None) -> int:
     settle_gate = (SettleGate(profile, settle=args.settle,
                               max_wait=args.settle_max)
                    if args.settle > 0 and args.recognizer == "roi" else None)
+    return _Runtime(
+        started_mono=started_mono,
+        mailbox=mailbox,
+        reader=reader,
+        processor=processor,
+        writer=writer,
+        web=web,
+        event_log=event_log,
+        console_log=console_log,
+        settle_gate=settle_gate,
+        advice_runner=advice_runner,
+        ingest_worker=ingest_worker,
+        profile_store=profile_store,
+        state_stream=state_stream,
+        publish=publish,
+        stop=stop,
+        profile=profile,
+    )
+
+
+def _run_live(args, rt: _Runtime) -> int:
+    """主循环与退出清理；顺序与拆分前保持逐行一致。"""
+    started_mono = rt.started_mono
+    mailbox = rt.mailbox
+    reader = rt.reader
+    processor = rt.processor
+    writer = rt.writer
+    web = rt.web
+    event_log = rt.event_log
+    console_log = rt.console_log
+    settle_gate = rt.settle_gate
+    advice_runner = rt.advice_runner
+    ingest_worker = rt.ingest_worker
+    profile_store = rt.profile_store
+    state_stream = rt.state_stream
+    publish = rt.publish
+    stop = rt.stop
+    profile = rt.profile
 
     _log(f"[启动] 拉流 {args.url}")
     cadence = (f"间隔 {args.every}s" if args.every > 0
@@ -3703,6 +3781,14 @@ def main(argv: list[str] | None = None) -> int:
             console_log.close()
 
     return 0
+
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = build_parser()
+    args = ap.parse_args(argv)
+    env_load = _load_runtime_env(ap, args)
+    return _run_live(args, _build_runtime(ap, args, env_load))
 
 
 def _format_reasons(reasons: dict[str, int], limit: int = 8) -> str:

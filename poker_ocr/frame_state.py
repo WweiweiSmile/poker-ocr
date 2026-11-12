@@ -283,20 +283,42 @@ def build_state(frame: RoiFrame, profile: Profile,
       · 位置/名字被 ROI 缓存钉住时，名字槽的「文本非空」不再作为在场证据
         （空座会一直判在场并报 stack 错误）。老调用方不传这两个参数，行为不变。
     """
-    prev_names = prev_names or {}
-    avatar_reads = avatar_reads or {}
-    equity_reads = equity_reads or {}
-    prev_all_in = prev_all_in or set()
-    shown = set(shown_seats or ())
-    # 一手牌内的座位身份锁（见 docstring）。空 dict = 未启用，走旧逻辑。
-    roster = dict(hand_roster or {})
-    left = set(left_seats or ())
-    # 整帧都判断不了（4x4 单测桩、整桌摊牌亮牌）时当作「没有这项信息」；
-    # 只要有一座位给出了明确结果（有/没有图标），就按座位各自判断。
-    icons = dict(card_icons or {})
-    if not any(v is not None for v in icons.values()):
-        icons = {}
+    return _build_state(BuildContext(
+        frame=frame, profile=profile, prev_names=prev_names,
+        prev_blinds=prev_blinds, avatar_reads=avatar_reads,
+        equity_reads=equity_reads, name_tracker=name_tracker,
+        prev_all_in=prev_all_in, lenient_chips=lenient_chips,
+        card_icons=card_icons, shown_seats=shown_seats,
+        prev_fold=prev_fold, ante_fallback=ante_fallback,
+        hand_roster=hand_roster, left_seats=left_seats,
+        prev_state=prev_state))
 
+
+@dataclass(frozen=True)
+class BuildContext:
+    """`build_state` 的输入快照；避免编排函数继续加位置参数。"""
+    frame: RoiFrame
+    profile: Profile
+    prev_names: dict[str, str] | None
+    prev_blinds: Blinds | None
+    avatar_reads: dict[str, tuple[str, float]] | None
+    equity_reads: dict[str, tuple[str, float]] | None
+    name_tracker: NameTracker | None
+    prev_all_in: set[str] | None
+    lenient_chips: bool
+    card_icons: dict[str, bool | None] | None
+    shown_seats: set[str] | None
+    prev_fold: dict[str, bool | None] | None
+    ante_fallback: float | None
+    hand_roster: dict[str, tuple[str | None, str | None]] | None
+    left_seats: set[str] | None
+    prev_state: FrameState | None
+
+def _global_facts(ctx: BuildContext):
+    """解析盲注/底池/庄位等全局字段。"""
+    frame = ctx.frame
+    prev_blinds = ctx.prev_blinds
+    ante_fallback = ctx.ante_fallback
     # ── 全局 ──────────────────────────────────────────────
     blinds = parse_blinds(frame.text("blinds"))
     blinds_source = "frame"
@@ -325,7 +347,36 @@ def build_state(frame: RoiFrame, profile: Profile,
                     and pbs <= pot else None)
 
     dealer = frame.dealer.seat_id if (frame.dealer and frame.dealer.status == "found") else None
+    return blinds, blinds_source, pot, pbs, pot_idle, street_total, dealer
 
+
+def _build_players(ctx: BuildContext):
+    """逐座位重建 PlayerState（名字/筹码/下注/弃牌/All-in/名单锁）。"""
+    frame = ctx.frame
+    prev_names = ctx.prev_names or {}
+    avatar_reads = ctx.avatar_reads or {}
+    equity_reads = ctx.equity_reads or {}
+    prev_all_in = ctx.prev_all_in or set()
+    shown_seats = ctx.shown_seats
+    hand_roster = ctx.hand_roster
+    left_seats = ctx.left_seats
+    prev_fold = ctx.prev_fold
+    name_tracker = ctx.name_tracker
+    lenient_chips = ctx.lenient_chips
+    card_icons = ctx.card_icons
+    prev_names = prev_names or {}
+    avatar_reads = avatar_reads or {}
+    equity_reads = equity_reads or {}
+    prev_all_in = prev_all_in or set()
+    shown = set(shown_seats or ())
+    # 一手牌内的座位身份锁（见 docstring）。空 dict = 未启用，走旧逻辑。
+    roster = dict(hand_roster or {})
+    left = set(left_seats or ())
+    # 整帧都判断不了（4x4 单测桩、整桌摊牌亮牌）时当作「没有这项信息」；
+    # 只要有一座位给出了明确结果（有/没有图标），就按座位各自判断。
+    icons = dict(card_icons or {})
+    if not any(v is not None for v in icons.values()):
+        icons = {}
     # ── 每个座位 ──────────────────────────────────────────
     players: list[PlayerState] = []
     name_warnings: list[str] = []
@@ -627,7 +678,14 @@ def build_state(frame: RoiFrame, profile: Profile,
         ))
 
     in_hand = [p for p in players if p.in_hand]
+    return players, name_warnings
 
+
+def _assign_positions(ctx: BuildContext, in_hand: list[PlayerState],
+                      dealer: str | None):
+    """按名单锁（没有锁时按在局玩家）排位置。"""
+    frame = ctx.frame
+    roster = dict(ctx.hand_roster or {})
     # ── 位置（要等在场人数定下来） ─────────────────────────
     # `seat_ring` 传整张桌的固定座位环（含空座）：中途有人退出、按钮还留在
     # 空座上时按死按钮排，而不是把整帧判成「庄位不在环上」丢掉。见 positions.py。
@@ -643,7 +701,15 @@ def build_state(frame: RoiFrame, profile: Profile,
     if pos.ok:
         for p in in_hand:
             p.position = pos.positions.get(p.seat_id)
+    return pos
 
+
+def _quality_gate(ctx: BuildContext, in_hand: list[PlayerState],
+                  blinds, pot, pbs, street_total, dealer, pos):
+    """一帧级兜底 + errors/bet_warnings；errors 顺序即丢帧口径。"""
+    frame = ctx.frame
+    prev_state = ctx.prev_state
+    shown = set(ctx.shown_seats or ())
     # ── 质量闸：无法精准识别的帧要能被明确区分 ─────────────
     #
     # 先做两处**一帧级**的兜底（底池没变 = 这一帧没有新的事实，读数抖一下
@@ -742,7 +808,22 @@ def build_state(frame: RoiFrame, profile: Profile,
                 errors.append(f"bet_gt_pot:{p.seat_id}")
         if p.bet is None and not p.all_in and not p.bet_unknown and not showdown:
             errors.append(f"bet:{p.seat_id}")
+    return errors, bet_warnings, street_total, pbs
 
+
+def _build_state(ctx: BuildContext) -> FrameState:
+    """编排：全局事实 → 座位 → 位置 → 质量闸 → FrameState。"""
+    frame = ctx.frame
+    (blinds, blinds_source, pot, pbs, pot_idle, street_total,
+     dealer) = _global_facts(ctx)
+    players, name_warnings = _build_players(ctx)
+    in_hand = [p for p in players if p.in_hand]
+    pos = _assign_positions(ctx, in_hand, dealer)
+    if pos.ok:
+        for p in in_hand:
+            p.position = pos.positions.get(p.seat_id)
+    errors, bet_warnings, street_total, pbs = _quality_gate(
+        ctx, in_hand, blinds, pot, pbs, street_total, dealer, pos)
     return FrameState(
         frame_id=frame.frame_id,
         table_seats=len(players),

@@ -43,7 +43,7 @@ def render_hand_strength_zh(sit: Situation) -> list[str]:
     tier = sit.hand_tier
     is_draw = tier in (STRONG_DRAW, WEAK_DRAW)
     # 仅真实听花/听顺属于「成牌+听牌」分类；两高张等其他 outs 不算 combo。
-    combo_draw = sit.hand_class == "combo"
+    combo_draw = sit.hand_playing_class == "combo"
 
     if is_draw:
         kind = "强听牌" if tier == STRONG_DRAW else "弱听牌"
@@ -71,7 +71,7 @@ def render_hand_strength_zh(sit: Situation) -> list[str]:
         # 只给牌型标签；「大 / 中 / 小」是 hand_strength 的第 4 套口径，
         # 已经由 hand_tier / ground_truth / hand_ranges 的数字覆盖，不再重复。
         label = sit.hand_label
-        if sit.hand_class == "combo" and gt is not None:
+        if sit.hand_playing_class == "combo" and gt is not None:
             label = f"成牌+听花/听顺（{label}）｜{_draws_zh(gt)}"
         lines.append(f"牌力：{label}")
 
@@ -81,7 +81,13 @@ def render_hand_strength_zh(sit: Situation) -> list[str]:
             rank = card_text(gt.made.best_five[0])[0] if gt.made.best_five else ""
             made = f"{_RANK_ZH.get(rank, rank)} 高" if rank else made
         if is_draw:
-            made += "（未成牌）"
+            # 「未成牌」只对真的高牌成立。打牌面 + 强听时已成一对（公面给的），
+            # 写「未成牌」会和同屏「当前牌型：一对」自相矛盾；也不能用
+            # sit.plays_board 判断（那个字段只在 tier==打牌面 时为真）。
+            if gt.made.category >= ONE_PAIR:
+                made += "（打牌面，未成自己的牌）"
+            else:
+                made += "（未成牌）"
         elif sit.plays_board:
             made += "（打牌面）"
         lines.append(f"当前牌型：{made}")
@@ -114,7 +120,7 @@ def render_hand_strength_zh(sit: Situation) -> list[str]:
                 lines.append("能打败你的牌型（理论上）："
                              + "、".join(stronger))
         lines.append(f"听牌：{_draws_zh(gt)}")
-        if sit.hand_class == "combo":
+        if sit.hand_playing_class == "combo":
             lines.append("牌况分类：成牌+听花/听顺；该分类不代表听牌强度或下注许可")
         if gt.draws.overcard_outs:
             kind = ("两高张" if gt.draws.overcard_outs >= 6 else "单高张")

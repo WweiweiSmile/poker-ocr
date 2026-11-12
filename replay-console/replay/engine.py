@@ -13,9 +13,10 @@ from dataclasses import dataclass
 from typing import Any
 
 from poker_ocr.advice import (
-    AIError, Advice, AISettings, PROMPT_VERSION, advise, audit_advice_tags,
+    AIError, Advice, AISettings, PROMPT_VERSION, advise,
     complete_json,
 )
+from poker_ocr.prompt.offline.audit import audit_advice_tags
 from poker_ocr.opponent_profile import (
     OpponentRead, PooledStats, TENDENCY_PCT_FIELDS,
 )
