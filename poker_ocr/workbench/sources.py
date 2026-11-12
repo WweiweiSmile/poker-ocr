@@ -349,8 +349,8 @@ tell application "System Events"
             set nameHit to (nm is targetName)
             set posHit to ((nx > targetX - 3) and (nx < targetX + 3) and (ny > targetY - 3) and (ny < targetY + 3))
             if nameHit or posHit then
-              set position of w to {targetX, targetY}
               set size of w to {@W@, @H@}
+              set position of w to {targetX, targetY}
               set resized to true
               exit repeat
             end if
@@ -463,13 +463,25 @@ def resize_window(spec: str, width: int, height: int, *,
         if (abs(dw) > 2 or abs(dh) > 2) and abs(dw) <= 40 and abs(dh) <= 40:
             # 窗口装饰/标题栏导致第一次差几像素：按偏差补偿一次。
             ok2, detail2 = _apply_window_geometry(
-                owner, title, float(after["x"]), float(after["y"]),
+                owner, title, target_x, target_y,
                 int(round(width + dw)), int(round(height + dh)),
                 timeout=timeout)
             if ok2:
                 after = window_info(spec) or after
             else:
                 detail = detail2 or detail
+    if (after is not None and x is not None and y is not None
+            and (abs(float(after["x"]) - target_x) > 2
+                 or abs(float(after["y"]) - target_y) > 2)):
+        # 位置没生效时再单独试一次：有的窗口 resize 后会自己回位。
+        ok3, detail3 = _apply_window_geometry(
+            owner, title, target_x, target_y,
+            int(round(float(after["w"]))), int(round(float(after["h"]))),
+            timeout=timeout)
+        if ok3:
+            after = window_info(spec) or after
+        else:
+            detail = detail3 or detail
     if after is None:
         return {"ok": False,
                 "error": "调整后读不到窗口（可能已关闭/移动）",

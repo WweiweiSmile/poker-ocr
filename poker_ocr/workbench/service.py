@@ -358,20 +358,38 @@ class WorkbenchService:
         updated = self.store.update(workspace_id, {"window": patch})
         actual = ([round(float(after.get("w"))), round(float(after.get("h")))]
                   if after and after.get("w") and after.get("h") else target_size)
-        matched = bool(result.get("matched"))
         size_matched = bool(
             after and abs(float(after.get("w") or 0) - target_size[0]) <= 2
             and abs(float(after.get("h") or 0) - target_size[1]) <= 2) \
             if after else False
         pos_matched = bool(result.get("position_matched", True))
-        note = ("窗口已按目标尺寸和位置调整" if matched else
-                "系统没有完全按目标调整（可能受最小窗口/权限/屏幕限制），"
-                "已记录实际尺寸/位置")
+        matched = size_matched and pos_matched
+        actual_position = ([round(float(after.get("x")), 1),
+                            round(float(after.get("y")), 1)]
+                           if after and after.get("x") is not None
+                           and after.get("y") is not None else None)
+        if matched:
+            note = "窗口已按目标尺寸和位置调整"
+        else:
+            parts = []
+            if not size_matched:
+                parts.append(
+                    f"尺寸目标 {target_size[0]}×{target_size[1]}，"
+                    f"实际 {actual[0]}×{actual[1]}")
+            if not pos_matched:
+                actual_pos = (f"({actual_position[0]:g}, {actual_position[1]:g})"
+                              if actual_position else "未知")
+                parts.append(
+                    f"位置目标 ({target_position[0]:g}, "
+                    f"{target_position[1]:g})，实际 {actual_pos}")
+            note = "；".join(parts) + "（可能受窗口最小尺寸/权限/系统约束）"
         return {"ok": True, "requested": target_size,
                 "requested_position": target_position,
                 "position_basis": position_basis,
                 "basis": basis, "before": result.get("before"),
-                "after": after, "actual": actual, "matched": matched,
+                "after": after, "actual": actual,
+                "actual_position": actual_position,
+                "matched": matched,
                 "size_matched": size_matched,
                 "position_matched": pos_matched,
                 "note": note, "workspace": updated}

@@ -941,9 +941,14 @@ async function renderConfigTab(body, ws) {
       const actualPos = res.after
         ? `(${Math.round(res.after.x)}, ${Math.round(res.after.y)})`
         : `(${posX}, ${posY})`;
+      const winLabel = res.after
+        ? `${res.after.owner || '?'} | ${res.after.title || '无标题'}`
+        : '';
       toast(res.matched
         ? `窗口已调整为 ${actual} @ ${actualPos}（${res.basis}）`
-        : `窗口实际为 ${actual} @ ${actualPos}，未完全匹配目标（${res.basis}）`,
+        : `${res.note || '未完全匹配目标'}`
+          + (winLabel ? `；目标窗口：${winLabel}` : '')
+          + `（${res.basis}）`,
         res.matched ? 'ok' : 'err');
     } catch (err) {
       if (err.status === 404) {

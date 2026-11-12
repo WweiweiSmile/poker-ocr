@@ -859,6 +859,42 @@ def test_configure_window_one_click() -> None:
         check(False, "调整失败必须报错")
 
 
+def test_configure_window_reports_position_mismatch() -> None:
+    """尺寸 1px 在容忍内，但位置没到位时必须说清是位置问题，不能只报尺寸。"""
+    tmp = _tmp()
+
+    def offset_resize(spec, width, height, *, x=None, y=None):
+        return {"ok": True, "matched": False, "position_matched": False,
+                "before": {"x": 122, "y": 78, "w": 736, "h": 839},
+                "after": {"x": 122, "y": 78, "w": 736, "h": 839,
+                          "owner": "Microsoft Edge", "title": "知乎"}}
+
+    svc = WorkbenchService(
+        root=ROOT, workspaces_dir=tmp / "ws", runs_dir=tmp / "runs",
+        preflight_context=_ctx(tmp), window_resizer=offset_resize)
+    doc = svc.create_workspace({
+        "from_profile": str(PROFILE),
+        "source": {"kind": "window", "spec": "window:title:WePoker-H5"},
+        "window": {"spec": "id:2354", "expected_size": [736, 838],
+                   "position": [0, 33]},
+    })
+    res = svc.configure_window(doc["id"])
+    check(res["size_matched"] is True, f"1px 尺寸差应在容忍内：{res}")
+    check(res["position_matched"] is False, f"位置应判不匹配：{res}")
+    check(res["matched"] is False, "整体不应算匹配")
+    check("位置目标" in res["note"] and "(122, 78)" in res["note"],
+          f"note 应说清位置差异：{res['note']}")
+    check(res["after"]["title"] == "知乎", "应带回实际窗口标题")
+
+
+def test_resize_script_sets_size_before_position() -> None:
+    from poker_ocr.workbench import sources
+    script = sources._resize_script("Microsoft Edge", "WePoker-H5", 0, 33,
+                                    736, 838)
+    check(script.index("set size of w") < script.index("set position of w"),
+          "应先 resize 再 set position（避免 resize 把位置重置）")
+
+
 def test_service_start_requires_force_on_warn() -> None:
     tmp = _tmp()
     svc = _service(tmp)
@@ -944,6 +980,8 @@ def main() -> int:
         test_service_restore_and_overlay_update,
         test_slots_probe_uses_live_geometry,
         test_configure_window_one_click,
+        test_configure_window_reports_position_mismatch,
+        test_resize_script_sets_size_before_position,
         test_service_start_requires_force_on_warn, test_http_routes_and_token,
     ]
     print("── 工作台 ────────────────────────────────────")
