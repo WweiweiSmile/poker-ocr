@@ -729,7 +729,7 @@ async function renderConfigTab(body, ws) {
               : '当前源不是窗口：滑杆点击必须落到屏幕上的游戏浏览器窗口，请在这里指定。'}</div>
           </div>
           <div class="row">
-            <div class="field"><label>标定期望尺寸 w（逻辑点）</label>
+            <div class="field"><label>目标尺寸 w（逻辑点）</label>
               <input class="input" name="expected_w" placeholder="例如 736"
                 value="${esc((ws.window.expected_size || [])[0] || '')}"></div>
             <div class="field"><label>h</label>
@@ -737,11 +737,11 @@ async function renderConfigTab(body, ws) {
                 value="${esc((ws.window.expected_size || [])[1] || '')}"></div>
           </div>
           <div class="row">
-            <div class="field"><label>窗口位置 x（逻辑点）</label>
+            <div class="field"><label>目标位置 x（逻辑点）</label>
               <input class="input" name="window_x" type="number" step="1"
                 placeholder="0"
                 value="${esc(((ws.window.position || [0, 0])[0] ?? 0))}"></div>
-            <div class="field"><label>y（默认 0）</label>
+            <div class="field"><label>目标位置 y（默认 0）</label>
               <input class="input" name="window_y" type="number" step="1"
                 placeholder="0"
                 value="${esc(((ws.window.position || [0, 0])[1] ?? 0))}"></div>
@@ -751,8 +751,8 @@ async function renderConfigTab(body, ws) {
           <div class="hint">Retina 2x 下窗口逻辑点 ≠ profile reference_size（像素）。
             拿不准就留空，启动后在概览点「固定窗口」记录。</div>
           <div class="inline" style="margin-top:8px">
-            <button class="btn btn-sm" type="button" id="cfg-apply-window">一键配置窗口分辨率</button>
-            <span class="hint">把游戏窗口调整为上面的期望尺寸；为空时按 profile 比例和当前窗口宽度推算。</span>
+            <button class="btn btn-sm" type="button" id="cfg-apply-window">一键设置窗口 xywh</button>
+            <span class="hint">把上面配置的 x/y/w/h 一次性套到游戏窗口；会先显示当前目标窗口供确认。</span>
           </div>
         </div></fieldset>
 
@@ -909,15 +909,32 @@ async function renderConfigTab(body, ws) {
   document.getElementById('cfg-apply-window').addEventListener('click', async () => {
     const w = Number(form.querySelector('[name=expected_w]').value);
     const h = Number(form.querySelector('[name=expected_h]').value);
-    const target = (w > 0 && h > 0) ? [w, h] : null;
+    if (!(w > 0 && h > 0)) {
+      toast('先在「标定期望尺寸」里填写目标 w/h，再一键设置 xywh', 'err');
+      return;
+    }
+    const target = [w, h];
     const posX = Number(form.querySelector('[name=window_x]').value) || 0;
     const posY = Number(form.querySelector('[name=window_y]').value) || 0;
-    const label = target ? `${target[0]}×${target[1]}` : '按 profile 比例推算';
-    const ok = await confirmDialog('一键配置窗口分辨率',
-      `<p>把游戏窗口调整为 <b>${label}</b>，位置 <b>(${posX}, ${posY})</b>？</p>
-       <p class="hint" style="margin-top:8px">会移动/缩放游戏浏览器窗口，
-       需要辅助功能权限。窗口标题/位置会重新读取；若系统限制尺寸/位置，会记录实际值。</p>`,
-      '调整');
+    const specValue = form.querySelector('[name=window_spec]').value.trim();
+    let preview = null;
+    try {
+      preview = await api(`/api/workspaces/${ws.id}/window?spec=${encodeURIComponent(specValue)}`);
+    } catch (err) {
+      toast([err.message, err.data && err.data.fix].filter(Boolean).join('\n'), 'err');
+      return;
+    }
+    const cur = preview.window || {};
+    const ok = await confirmDialog('一键设置窗口 xywh',
+      `<p>目标窗口：<b>${esc(cur.owner || '?')} | ${esc(cur.title || '无标题')}</b></p>
+       <dl class="kv" style="grid-template-columns:88px 1fr;font-size:12px">
+         <dt>当前</dt><dd class="mono">${Math.round(cur.x)}, ${Math.round(cur.y)},
+           ${Math.round(cur.w)}×${Math.round(cur.h)}</dd>
+         <dt>将设置为</dt><dd class="mono">${posX}, ${posY}, ${target[0]}×${target[1]}</dd>
+       </dl>
+       <p class="hint" style="margin-top:8px">会移动/缩放这个游戏浏览器窗口，需要辅助功能权限。
+       如果窗口名不对，先取消并点「枚举窗口」重选。</p>`,
+      '设置为 xywh');
     if (!ok) return;
     try {
       const res = await api(`/api/workspaces/${ws.id}/configure-window`, {
@@ -925,7 +942,8 @@ async function renderConfigTab(body, ws) {
         body: {
           target,
           position: [posX, posY],
-          spec: form.querySelector('[name=window_spec]').value.trim() || null,
+          // 空字符串 = 窗口源跟随源；非窗口源后端会明确拒绝，而不是悄悄用旧窗口。
+          spec: specValue,
         },
       });
       const actual = res.after

@@ -791,7 +791,7 @@ def test_configure_window_one_click() -> None:
         preflight_context=_ctx(tmp), window_resizer=fake_resize)
     doc = svc.create_workspace({
         "from_profile": str(PROFILE),
-        "source": {"kind": "window", "spec": "window:title:WePoker-H5"},
+        "source": {"kind": "window", "spec": "window:0,33,736,841"},
         "window": {"spec": "0,33,736,841", "expected_size": [700, 800]},
     })
     res = svc.configure_window(doc["id"], target=[736, 838])
@@ -805,6 +805,17 @@ def test_configure_window_one_click() -> None:
           f"应记录实际 rect：{updated['window']}")
     check(updated["window"]["position"] == [0, 0],
           f"应记录位置：{updated['window']}")
+
+    # 预览：显式 spec 和「空 spec=跟随窗口源」都要解析对
+    state = svc.window_state(doc["id"], spec="0,33,736,838")
+    check(state["window"]["w"] == 736,
+          f"预览应返回窗口 rect：{state}")
+    state = svc.window_state(doc["id"], spec="")
+    check(state["window"]["w"] == 736 and state["window"]["x"] == 0,
+          f"空 spec 应跟随窗口源：{state}")
+    state = svc.window_state(doc["id"], spec="0,44,700,800")
+    check(state["window"]["x"] == 0 and state["window"]["y"] == 44,
+          f"预览应使用界面 spec：{state}")
 
     # 界面上改了窗口但还没保存：一键调整按新窗口来，并顺手落库
     res = svc.configure_window(doc["id"], target=[720, 820],

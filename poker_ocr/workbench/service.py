@@ -265,6 +265,40 @@ class WorkbenchService:
                 "note": "尺寸已记录；标定/体检会按这个 rect 核对，"
                         "live 运行中每 10s 也会重读窗口"}
 
+    def window_state(self, workspace_id: str,
+                     spec: str | None = None) -> dict:
+        """当前游戏窗口预览（一键设置前确认目标没选错）。"""
+        doc = self._doc(workspace_id)
+        explicit = (sources.normalize_window_spec(spec)
+                    if spec is not None else None)
+        if explicit:
+            game = sources.as_window_spec(explicit)
+        elif spec is not None:
+            # 界面留空 = 窗口源跟随源；非窗口源没有可跟随的窗口。
+            source_spec = str((doc.get("source") or {}).get("spec") or "")
+            game = (sources.as_window_spec(source_spec)
+                    if source_spec.startswith(("window:", "screen:")) else "")
+        else:
+            game = self._game_window_spec(doc)
+        if not game:
+            raise WorkbenchError(
+                "没有游戏窗口：先在「窗口」里填 title:... / index:N，"
+                "或把源改成 window:", status=400)
+        info = sources.window_info(game)
+        if not info:
+            raise WorkbenchError(
+                f"解析不到窗口：{sources.normalize_window_spec(game)}",
+                status=400,
+                detail={"fix": "打开游戏窗口，或点「枚举窗口」重新选"})
+        saved = doc.get("window") or {}
+        return {"ok": True,
+                "spec": sources.normalize_window_spec(game),
+                "window": info,
+                "target": {
+                    "position": saved.get("position") or [0, 0],
+                    "expected_size": saved.get("expected_size"),
+                }}
+
     def configure_window(self, workspace_id: str,
                          target: list | None = None,
                          spec: str | None = None,
@@ -286,6 +320,11 @@ class WorkbenchService:
                                "或把源改成 window:"})
         if explicit_spec:
             game = sources.as_window_spec(explicit_spec)
+        elif spec is not None:
+            # 界面把窗口清空 = 窗口源跟随源（不是继续用已保存的旧 spec）。
+            source_spec = str((doc.get("source") or {}).get("spec") or "")
+            game = (sources.as_window_spec(source_spec)
+                    if source_spec.startswith(("window:", "screen:")) else "")
         else:
             game = self._game_window_spec(doc)
         if not game:

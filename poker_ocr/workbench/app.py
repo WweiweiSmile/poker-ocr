@@ -198,6 +198,11 @@ def create_app(*, service: WorkbenchService | None = None,
     def pin_window(workspace_id: str) -> dict:
         return svc.pin_window(workspace_id)
 
+    @app.get("/api/workspaces/{workspace_id}/window")
+    def window_state(workspace_id: str,
+                     spec: str | None = Query(None)) -> dict:
+        return svc.window_state(workspace_id, spec=spec)
+
     @app.post("/api/workspaces/{workspace_id}/configure-window",
               dependencies=[Depends(require_token)])
     def configure_window(workspace_id: str,
