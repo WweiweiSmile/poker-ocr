@@ -585,7 +585,8 @@ function renderOverviewTab(body, ws, status) {
             ? `<span class="mono">${esc(ws.window.spec)}</span>`
             : (ws.source.kind === 'window'
               ? '<span class="faint">跟随源：' + esc(ws.source.spec) + '</span>'
-              : '<span class="yellow">未设置（非窗口源需指定）</span>')}</dd>
+              : '<span class="yellow">未设置（非窗口源需指定）</span>')}
+            · 位置 (${esc(((ws.window.position || [0, 0])[0]))}, ${esc(((ws.window.position || [0, 0])[1]))})</dd>
           <dt>运行</dt><dd>盲注 ${esc(ws.runtime.initial_blinds || '自动')}
             · every ${ws.runtime.every}s · AI ${ws.runtime.ai_advice ? '开' : '关'}</dd>
           <dt>调试</dt><dd>预览 ${ws.debug.preview_fps}fps · 浮层 ${ws.debug.screen_overlay ? '开' : '关'}</dd>
@@ -735,6 +736,18 @@ async function renderConfigTab(body, ws) {
               <input class="input" name="expected_h" placeholder="例如 838"
                 value="${esc((ws.window.expected_size || [])[1] || '')}"></div>
           </div>
+          <div class="row">
+            <div class="field"><label>窗口位置 x（逻辑点）</label>
+              <input class="input" name="window_x" type="number" step="1"
+                placeholder="0"
+                value="${esc(((ws.window.position || [0, 0])[0] ?? 0))}"></div>
+            <div class="field"><label>y（默认 0）</label>
+              <input class="input" name="window_y" type="number" step="1"
+                placeholder="0"
+                value="${esc(((ws.window.position || [0, 0])[1] ?? 0))}"></div>
+          </div>
+          <div class="hint">位置是屏幕逻辑点左上角，默认 (0, 0)；多显示器可为负。
+            一键配置会同时移动窗口到这里。</div>
           <div class="hint">Retina 2x 下窗口逻辑点 ≠ profile reference_size（像素）。
             拿不准就留空，启动后在概览点「固定窗口」记录。</div>
           <div class="inline" style="margin-top:8px">
@@ -831,6 +844,7 @@ async function renderConfigTab(body, ws) {
       window: {
         spec: String(fd.get('window_spec') || '').trim() || null,
         expected_size: (expectedW && expectedH) ? [expectedW, expectedH] : null,
+        position: [num('window_x', 0), num('window_y', 0)],
         pin: 'manual',
       },
       click: {
@@ -896,11 +910,13 @@ async function renderConfigTab(body, ws) {
     const w = Number(form.querySelector('[name=expected_w]').value);
     const h = Number(form.querySelector('[name=expected_h]').value);
     const target = (w > 0 && h > 0) ? [w, h] : null;
+    const posX = Number(form.querySelector('[name=window_x]').value) || 0;
+    const posY = Number(form.querySelector('[name=window_y]').value) || 0;
     const label = target ? `${target[0]}×${target[1]}` : '按 profile 比例推算';
     const ok = await confirmDialog('一键配置窗口分辨率',
-      `<p>把游戏窗口调整为 <b>${label}</b> 逻辑点？</p>
-       <p class="hint" style="margin-top:8px">会移动/缩放游戏浏览器窗口（保持左上角），
-       需要辅助功能权限。窗口标题/位置会重新读取；若系统限制尺寸，会记录实际值。</p>`,
+      `<p>把游戏窗口调整为 <b>${label}</b>，位置 <b>(${posX}, ${posY})</b>？</p>
+       <p class="hint" style="margin-top:8px">会移动/缩放游戏浏览器窗口，
+       需要辅助功能权限。窗口标题/位置会重新读取；若系统限制尺寸/位置，会记录实际值。</p>`,
       '调整');
     if (!ok) return;
     try {
@@ -908,6 +924,7 @@ async function renderConfigTab(body, ws) {
         method: 'POST',
         body: {
           target,
+          position: [posX, posY],
           spec: form.querySelector('[name=window_spec]').value.trim() || null,
         },
       });
@@ -916,11 +933,17 @@ async function renderConfigTab(body, ws) {
         : `${res.actual[0]}×${res.actual[1]}`;
       form.querySelector('[name=expected_w]').value = res.requested[0];
       form.querySelector('[name=expected_h]').value = res.requested[1];
+      const requestedPos = res.requested_position || [posX, posY];
+      form.querySelector('[name=window_x]').value = requestedPos[0];
+      form.querySelector('[name=window_y]').value = requestedPos[1];
       const hint = document.getElementById('cfg-hint');
       if (hint) hint.textContent = res.note || '';
+      const actualPos = res.after
+        ? `(${Math.round(res.after.x)}, ${Math.round(res.after.y)})`
+        : `(${posX}, ${posY})`;
       toast(res.matched
-        ? `窗口已调整为 ${actual}（${res.basis}）`
-        : `窗口实际为 ${actual}，未完全匹配目标（${res.basis}）`,
+        ? `窗口已调整为 ${actual} @ ${actualPos}（${res.basis}）`
+        : `窗口实际为 ${actual} @ ${actualPos}，未完全匹配目标（${res.basis}）`,
         res.matched ? 'ok' : 'err');
     } catch (err) {
       if (err.status === 404) {

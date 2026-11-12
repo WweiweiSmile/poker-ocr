@@ -92,6 +92,11 @@ def test_workspace_validation() -> None:
     errors, _ = validate_workspace(bad_window, root=ROOT)
     check(any(e["field"] == "window.spec" for e in errors),
           "window.spec 非字符串应报错")
+    bad_window = copy.deepcopy(doc)
+    bad_window["window"]["position"] = [1, 2, 3]
+    errors, _ = validate_workspace(bad_window, root=ROOT)
+    check(any(e["field"] == "window.position" for e in errors),
+          "window.position 形状不对应报错")
 
     unknown = copy.deepcopy(doc)
     unknown["mystery"] = 1
@@ -774,11 +779,12 @@ def test_configure_window_one_click() -> None:
     tmp = _tmp()
     calls = []
 
-    def fake_resize(spec, width, height):
-        calls.append((spec, width, height))
-        return {"ok": True, "matched": True,
+    def fake_resize(spec, width, height, *, x=None, y=None):
+        calls.append((spec, width, height, x, y))
+        return {"ok": True, "matched": True, "position_matched": True,
                 "before": {"x": 0, "y": 33, "w": 736, "h": 841},
-                "after": {"x": 0, "y": 33, "w": width, "h": height}}
+                "after": {"x": x or 0, "y": y or 0,
+                          "w": width, "h": height}}
 
     svc = WorkbenchService(
         root=ROOT, workspaces_dir=tmp / "ws", runs_dir=tmp / "runs",
@@ -790,18 +796,26 @@ def test_configure_window_one_click() -> None:
     })
     res = svc.configure_window(doc["id"], target=[736, 838])
     check(res["ok"] and res["requested"] == [736, 838], f"调整结果：{res}")
-    check(calls[-1][1:] == (736, 838), f"应调用 resize：{calls[-1]}")
+    check(calls[-1][1:] == (736, 838, 0.0, 0.0),
+          f"应调用 resize（默认位置 0,0）：{calls[-1]}")
     updated = svc.get_workspace(doc["id"])
     check(updated["window"]["expected_size"] == [736, 838],
           f"应记录期望尺寸：{updated['window']}")
     check(updated["window"]["pinned_rect"]["w"] == 736,
           f"应记录实际 rect：{updated['window']}")
+    check(updated["window"]["position"] == [0, 0],
+          f"应记录位置：{updated['window']}")
 
     # 界面上改了窗口但还没保存：一键调整按新窗口来，并顺手落库
     res = svc.configure_window(doc["id"], target=[720, 820],
+                               position=[120, 60],
                                spec="window:0,33,720,820")
     check(calls[-1][0] == "window:0,33,720,820",
           f"应按界面窗口调整：{calls[-1]}")
+    check(calls[-1][3:] == (120.0, 60.0),
+          f"应把位置传给 resize：{calls[-1]}")
+    check(res["requested_position"] == [120.0, 60.0],
+          f"返回应带目标位置：{res}")
     check(svc.get_workspace(doc["id"])["window"]["spec"] == "0,33,720,820",
           "应把界面窗口写回工作区")
 
@@ -823,7 +837,7 @@ def test_configure_window_one_click() -> None:
           f"应按参考比例推算目标：{res}")
 
     # 失败要带权限修复提示
-    def fail_resize(spec, width, height):
+    def fail_resize(spec, width, height, *, x=None, y=None):
         return {"ok": False, "error": "not allowed assistive access",
                 "fix": "系统设置 → 隐私与安全性 → 辅助功能"}
 

@@ -204,7 +204,8 @@ def create_app(*, service: WorkbenchService | None = None,
                          body: dict = Body(default={})) -> dict:
         return svc.configure_window(workspace_id,
                                     target=(body or {}).get("target"),
-                                    spec=(body or {}).get("spec"))
+                                    spec=(body or {}).get("spec"),
+                                    position=(body or {}).get("position"))
 
     # ── 预览 / 布局 ─────────────────────────────────────
     @app.get("/api/workspaces/{workspace_id}/preview.jpg")

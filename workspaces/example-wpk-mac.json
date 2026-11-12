@@ -14,7 +14,11 @@
       736,
       838
     ],
-    "pin": "manual"
+    "pin": "manual",
+    "position": [
+      0,
+      0
+    ]
   },
   "click": {
     "enabled": true,

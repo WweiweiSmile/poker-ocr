@@ -4,13 +4,14 @@
 
 - `profile`：引用 `config/table_*.json`（**不复制几何**）；
 - `source`：live 的 `--url` 写法（`window:title:...` / `cam:auto` / `rtsp://...` / 视频文件）；
-- `window`：期望尺寸（逻辑点）与手动固定记录；
+- `window`：期望尺寸/位置（逻辑点，位置默认 `[0,0]`）与手动固定记录；
 - `click` / `runtime` / `debug`：点击策略、运行参数、预览与浮层开关。
   `window.spec` 是**滑杆点击/浮层要落到的游戏窗口**：窗口源留空 = 跟随源；
   摄像头/RTSP/文件源必须显式填（识别走 OBS 不代表鼠标能点到 OBS 画面）。
   从窗口源切到摄像头后，工作台会把原窗口自动写进 `window.spec`（保存时迁移）。
   写法推荐 `id:N`（CoreGraphics window_id，标签页标题变了也不影响；窗口关闭或
   浏览器重启后需要重选），也支持 `index:N` / `title:...` / `owner:...`。
+  `window.position` 是一键配置时把窗口移动到的左上角（默认 `[0,0]`，多屏可为负）。
 
 仓库自带一个可提交的示例 `example-wpk-mac.json`（窗口源 + 736×838 + dry-run）；
 本机实际使用的工作区（如 `wpk-mac-live.json`，含窗口 id / 摄像头索引）属于本地配置，

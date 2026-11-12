@@ -404,6 +404,7 @@ def _apply_window_geometry(owner: str, title: str, x: float, y: float,
 
 
 def resize_window(spec: str, width: int, height: int, *,
+                  x: float | None = None, y: float | None = None,
                   timeout: float = 12.0) -> dict:
     """把游戏窗口调整到指定逻辑点尺寸（一键配置窗口分辨率）。
 
@@ -435,9 +436,10 @@ def resize_window(spec: str, width: int, height: int, *,
                 "fix": "系统设置 → 隐私与安全性 → 辅助功能，"
                        "勾上运行工作台的终端，完全退出后重开"}
 
+    target_x = float(info["x"]) if x is None else float(x)
+    target_y = float(info["y"]) if y is None else float(y)
     ok, detail = _apply_window_geometry(
-        owner, title, float(info["x"]), float(info["y"]), width, height,
-        timeout=timeout)
+        owner, title, target_x, target_y, width, height, timeout=timeout)
     if not ok:
         fix = "系统设置 → 隐私与安全性 → 辅助功能，勾上运行工作台的终端"
         if "assistive access" in detail or "辅助访问" in detail:
@@ -476,10 +478,20 @@ def resize_window(spec: str, width: int, height: int, *,
     return {
         "ok": True,
         "requested": [width, height],
+        "requested_position": [target_x, target_y],
         "before": info,
         "after": after,
-        "matched": bool(after and abs(float(after["w"]) - width) <= 2
-                        and abs(float(after["h"]) - height) <= 2),
+        "matched": bool(
+            after
+            and abs(float(after["w"]) - width) <= 2
+            and abs(float(after["h"]) - height) <= 2
+            and (x is None or abs(float(after["x"]) - target_x) <= 2)
+            and (y is None or abs(float(after["y"]) - target_y) <= 2)),
+        "position_matched": bool(
+            after
+            and (x is None or abs(float(after["x"]) - target_x) <= 2)
+            and (y is None or abs(float(after["y"]) - target_y) <= 2)),
+        "target_position": [target_x, target_y],
         "detail": detail,
     }
 

@@ -257,6 +257,7 @@ class WorkbenchService:
                 "w": info["w"], "h": info["h"]}
         updated = self.store.update(workspace_id, {
             "window": {"expected_size": [round(info["w"]), round(info["h"])],
+                       "position": [round(info["x"]), round(info["y"])],
                        "pinned_rect": rect, "pin": "manual"},
         })
         return {"ok": True, "window": rect,
@@ -266,7 +267,8 @@ class WorkbenchService:
 
     def configure_window(self, workspace_id: str,
                          target: list | None = None,
-                         spec: str | None = None) -> dict:
+                         spec: str | None = None,
+                         position: list | None = None) -> dict:
         """一键把游戏窗口调整为标定尺寸（显式用户动作，失败可解释）。
 
         `spec`：界面里当前填的游戏窗口（可能还没保存）。传了就按它调整并
@@ -317,7 +319,24 @@ class WorkbenchService:
         if target_size[0] <= 0 or target_size[1] <= 0:
             raise WorkbenchError("目标尺寸必须 > 0", status=400)
 
-        result = self._resize_window(game, target_size[0], target_size[1])
+        if isinstance(position, (list, tuple)) and len(position) == 2:
+            try:
+                target_position = [float(position[0]), float(position[1])]
+            except (TypeError, ValueError):
+                raise WorkbenchError("position 必须是两个数字", status=400)
+            position_basis = "本次界面填写的位置"
+        else:
+            saved = (doc.get("window") or {}).get("position")
+            if (isinstance(saved, (list, tuple)) and len(saved) == 2
+                    and all(isinstance(v, (int, float)) for v in saved)):
+                target_position = [float(saved[0]), float(saved[1])]
+            else:
+                target_position = [0.0, 0.0]
+            position_basis = "工作区/默认 (0,0)"
+
+        result = self._resize_window(game, target_size[0], target_size[1],
+                                     x=target_position[0],
+                                     y=target_position[1])
         if not result.get("ok"):
             raise WorkbenchError(
                 result.get("error") or "调整窗口失败", status=502,
@@ -325,7 +344,10 @@ class WorkbenchService:
                         "before": result.get("before"),
                         "requested": target_size})
         after = result.get("after") or {}
-        patch = {"expected_size": target_size, "pin": "manual"}
+        patch = {"expected_size": target_size,
+                 "position": [round(target_position[0], 3),
+                              round(target_position[1], 3)],
+                 "pin": "manual"}
         if explicit_spec is not None:
             # 用户在「游戏窗口」里改了但还没保存时，一键调整顺手把它落库。
             patch["spec"] = explicit_spec or None
@@ -337,12 +359,21 @@ class WorkbenchService:
         actual = ([round(float(after.get("w"))), round(float(after.get("h")))]
                   if after and after.get("w") and after.get("h") else target_size)
         matched = bool(result.get("matched"))
-        note = ("窗口已按目标尺寸调整" if matched else
+        size_matched = bool(
+            after and abs(float(after.get("w") or 0) - target_size[0]) <= 2
+            and abs(float(after.get("h") or 0) - target_size[1]) <= 2) \
+            if after else False
+        pos_matched = bool(result.get("position_matched", True))
+        note = ("窗口已按目标尺寸和位置调整" if matched else
                 "系统没有完全按目标调整（可能受最小窗口/权限/屏幕限制），"
-                "已记录实际尺寸")
+                "已记录实际尺寸/位置")
         return {"ok": True, "requested": target_size,
+                "requested_position": target_position,
+                "position_basis": position_basis,
                 "basis": basis, "before": result.get("before"),
                 "after": after, "actual": actual, "matched": matched,
+                "size_matched": size_matched,
+                "position_matched": pos_matched,
                 "note": note, "workspace": updated}
 
     # ─────────────────────────── 体检 ───────────────────────────

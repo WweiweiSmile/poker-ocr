@@ -101,7 +101,8 @@ def default_workspace(profile_path: str | Path, *, name: str | None = None,
         # spec = 滑杆点击/浮层要落到的**游戏窗口**；窗口源留空时跟随源。
         # 非窗口源（camera/rtsp/file）必须显式填：OBS 只是采集画面，
         # 鼠标仍然要按屏幕坐标点到浏览器窗口上。
-        "window": {"spec": None, "expected_size": expected, "pin": "manual"},
+        "window": {"spec": None, "expected_size": expected,
+                   "position": [0, 0], "pin": "manual"},
         "click": {"enabled": True, "mode": "profile_slots",
                   "dry_run": True, "confirm": True,
                   "bet_slider": True, "bet_slider_only": False},
@@ -227,6 +228,11 @@ def validate_workspace(doc: dict, *, root: Path = PROJECT_ROOT
         size = window.get("expected_size")
         if size is not None and not _is_size(size):
             err("window.expected_size", "expected_size 必须是两个正数 [w, h]")
+        position = window.get("position")
+        if position is not None:
+            if (not isinstance(position, (list, tuple)) or len(position) != 2
+                    or not all(_is_number(v) for v in position)):
+                err("window.position", "position 必须是两个数字 [x, y]")
         if window.get("pin") not in (None, *WINDOW_PINS):
             err("window.pin", f"pin 只支持 {WINDOW_PINS}")
         rect = window.get("pinned_rect")
@@ -338,6 +344,7 @@ def normalize_workspace(doc: dict, *, root: Path = PROJECT_ROOT,
     if window.get("expected_size") is None and expected:
         window["expected_size"] = expected
     window.setdefault("spec", None)
+    window.setdefault("position", [0, 0])
     window.setdefault("pin", "manual")
     out["window"] = window
 
