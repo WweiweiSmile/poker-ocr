@@ -668,6 +668,104 @@ def test_drag_overshoot_then_corrects() -> None:
     check(result.drags >= 2, f"应至少拖两次（上去再下来），实际 {result.drags}")
 
 
+class NonlinearGridDragBackend(FakeDragBackend):
+    """金额越大，每 BB 的像素越少；客户端按 1BB 网格落额。"""
+
+    def __init__(self, table, confirm_xy, close_xy, grid: float = 1.0) -> None:
+        super().__init__(table, confirm_xy, close_xy)
+        self.grid = grid
+
+    def mouse_up(self, x: float, y: float) -> None:
+        self.events.append(("up", round(x, 1), round(y, 1)))
+        if self._down is None:
+            return
+        dy = y - self._down[1]
+        amount = self.table.amount
+        px_per_bb = max(1.2, 6.0 - amount * 0.05)   # 越大越「灵敏」
+        value = amount - dy / px_per_bb
+        value = max(self.table.low, min(self.table.high, value))
+        if self.grid > 0:
+            value = round(value / self.grid) * self.grid
+        self.table.amount = value
+        self._down = None
+
+
+def _mk_nonlinear(table, **settings):
+    mapper = WindowMapper(PROFILE, WindowRect(0, 0, 734, 833))
+    backend = NonlinearGridDragBackend(
+        table, mapper.point(PROFILE.global_slots["hero_bet_confirm"]),
+        mapper.point(PROFILE.global_slots["hero_bet_close"]))
+    cfg = SliderSettings(hold_ms=0, click_ms=0, scroll_interval_ms=0,
+                         settle_ms=0, poll_ms=1, control="drag", **settings)
+    controller = BetSliderController(
+        PROFILE, backend, lambda: np.zeros((10, 10, 3), np.uint8), mapper, cfg,
+        reader=_reader_for(table), sleep=lambda _s: None,
+        handle_locator=lambda _img: (0.5, 0.75))
+    return controller, backend
+
+
+def test_drag_nonlinear_high_amount_reaches_target() -> None:
+    """金额越大 px/BB 越小：细步长要能走到高位目标，而不是 6px 跨过去。"""
+    table = DragTable(amount=1.0, high=98.0)
+    controller, _ = _mk_nonlinear(table)
+    result = controller.set_amount(60.0)
+    check(result.status == "set", f"应 set，实际 {result.to_dict()}")
+    check(table.confirmed == 60.0, f"应精确到 60BB，实际 {table.confirmed}")
+    check(result.drags >= 3, f"高位应多步逼近，实际 {result.drags}")
+
+
+class QuantizedDragBackend(NonlinearGridDragBackend):
+    """按 7BB 网格落额：目标 20 只能到 14/21，最近可达是 21。"""
+
+    def __init__(self, table, confirm_xy, close_xy) -> None:
+        super().__init__(table, confirm_xy, close_xy, grid=7.0)
+
+
+def _mk_quantized(table, **settings):
+    mapper = WindowMapper(PROFILE, WindowRect(0, 0, 734, 833))
+    backend = QuantizedDragBackend(
+        table, mapper.point(PROFILE.global_slots["hero_bet_confirm"]),
+        mapper.point(PROFILE.global_slots["hero_bet_close"]))
+    cfg = SliderSettings(hold_ms=0, click_ms=0, scroll_interval_ms=0,
+                         settle_ms=0, poll_ms=1, control="drag", **settings)
+    controller = BetSliderController(
+        PROFILE, backend, lambda: np.zeros((10, 10, 3), np.uint8), mapper, cfg,
+        reader=_reader_for(table), sleep=lambda _s: None,
+        handle_locator=lambda _img: (0.5, 0.75))
+    return controller, backend
+
+
+def test_accept_ratio_uses_nearest_not_first_band() -> None:
+    """网格不可达时才启用相对容忍；只看最近可达，不会停在更低的一侧。"""
+    table = DragTable(amount=7.0, low=7.0, high=21.0, allin=False)
+    controller, _ = _mk_quantized(table, accept_ratio=0.05)
+    result = controller.set_amount(20.0)
+    check(result.status == "set", f"应 set，实际 {result.to_dict()}")
+    check(table.confirmed == 21.0,
+          f"应选最近可达 21（+5%），而不是 14，实际 {table.confirmed}")
+    check(result.evidence.get("accepted_approx") is not None,
+          f"应记录近似落注证据：{result.evidence}")
+
+    table2 = DragTable(amount=7.0, low=7.0, high=21.0, allin=False)
+    controller2, _ = _mk_quantized(table2)      # accept_ratio=0
+    result2 = controller2.set_amount(20.0)
+    check(result2.status == "error" and table2.confirmed is None,
+          f"默认不允许近似落注：{result2.to_dict()}")
+
+
+def test_accept_ratio_is_off_by_default() -> None:
+    settings = SliderSettings()
+    check(settings.accept_ratio == 0.0, "默认绝不近似落注")
+    check(settings.drag_fine_min_px < settings.drag_min_px,
+          "细步长应小于常规最小拖距")
+    try:
+        SliderSettings(drag_fine_min_px=9.0, drag_min_px=6.0)
+    except ValueError:
+        pass
+    else:
+        check(False, "drag_fine_min_px 大于 drag_min_px 应报错")
+
+
 def test_drag_unreachable_does_not_confirm_and_closes_outside() -> None:
     # allin=False：客户端到顶也不显示 ALL IN，只能靠「额度不再变化」判停手
     table = DragTable(amount=1.0, high=4.0, allin=False)
@@ -799,6 +897,9 @@ def main() -> int:
         test_allin_requires_the_client_text,
         test_allin_needs_two_consecutive_reads,
         test_drag_reaches_target_and_confirms, test_drag_overshoot_then_corrects,
+        test_drag_nonlinear_high_amount_reaches_target,
+        test_accept_ratio_uses_nearest_not_first_band,
+        test_accept_ratio_is_off_by_default,
         test_drag_unreachable_does_not_confirm_and_closes_outside,
         test_drag_handle_missing_closes_outside, test_drag_all_in_stops_at_top,
         test_drag_all_in_stuck_does_not_confirm,

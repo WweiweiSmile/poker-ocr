@@ -37,18 +37,22 @@ extract_table.py        # 截图 → 识别结果 JSON（CLI）
 scan.py                 # ⚠ 已冻结的旧标定工具（仅保留 clean_number / preprocess / RapidEngine 被 import）
 rois.json               # ⚠ 现在是「识别结果」文件，不是配置！几何配置在 config/
 config/                 # 牌桌几何 profile（归一化坐标、环序、阈值）+ 点击器坐标 + MediaMTX
-poker_ocr/              # 全部核心逻辑（45 个模块 + __init__，见 §4）
+poker_ocr/              # 全部核心逻辑（64 个模块 + __init__，见 §4）
   prompt/               # 提示词包：system / user / shared / offline
   assets/               # 点数模板图集（工具生成，勿手改）
   tables/               # 策略表 JSON（26 张表：v0 手调 / v1 推导），改数字改这里
   live_web.py           # 本地 Web 看板（stdlib HTTP + SSE，只读）
+                        # + 工作台控制面（meta/preview/control，token 校验）
   live_log.py           # 事件 JSONL + 控制台文本落盘
   web/live/             # 看板前端（index/app/style，无构建）
+  workbench/            # 工作台：Web :8030 + 工作区/体检/live 子进程/标定/浮层
+workspaces/             # 工作台工作区（一次启动的配方；引用 config/table_*.json）
+runs/                   # 工作台运行产物（日志/manifest/预览；本地，不入库）
 replay-console/         # 独立子项目：手牌库 + A/B 复盘控制台（Python 后端 + React 前端）
-tests/                  # 51 个测试文件 + golden/ 期望 JSON，run_all.py 分层执行
+tests/                  # 52 个测试套件 + golden/ 期望 JSON，run_all.py 分层执行
 tools/                  # 离线 CLI（回放 / 画像重建 / 报表 / SFT 数据集 /
                         # hand_recognition_audit.py 手牌识别倒查）
-docs/                   # 51 篇设计文档与复盘（业务语义的真正来源）
+docs/                   # 56 篇设计文档与复盘（业务语义的真正来源）
 data/                   # 运行期数据：hand_outbox/、opponents/、sft/
 logs/                   # live.states.jsonl、复盘产物、incidents/
 images/                 # 标注样本与截图素材
@@ -133,6 +137,27 @@ range_flow.py / fold_equity.py  ──读表──►  范围似然 · 条件弃
 裁判仍未完成：`P(fold | 手牌档)` 在本地数据里**不可识别**（弃牌看不到手牌），
 所以 P2 只能先量「按价格的聚合曲线」，再谈校准。
 
+### 3.4 工作台（可选入口，`:8030`）
+
+```
+浏览器
+  │ HTTP（写操作要 X-Workbench-Token + Origin 同源）
+  ▼
+poker_ocr.workbench :8030
+  ├─ WorkspaceStore    workspaces/*.json（只引用 profile，不复制几何）
+  ├─ Preflight         17 项：源/窗口/权限/端口/凭据（fail 阻断，warn 需确认）
+  ├─ LiveSupervisor    子进程 + 进程组；runs/<时间>-<工作区>/ + manifest
+  ├─ live_client       读 live 的 /api/meta、/api/preview.jpg、控制点击
+  ├─ CalibrationEngine 冻结帧 + 单槽 OCR（试读，不冒充 live）
+  └─ OverlayController ScreenOverlay + Pillow 渲染（fail-open）
+        │ spawn（python -m poker_ocr.live --preview --control-token …）
+        ▼
+   poker_ocr.live :8020（现有看板 + 只读/控制端点）
+```
+
+规则：**一次只跑一路**；工作台不改识别口径、不启动 OBS/MediaMTX/浏览器；
+保存标定 = 改共享 profile（备份 + 原子写 + diff），然后重启 live。
+
 ---
 
 ## 4. 模块地图（`poker_ocr/`）
@@ -189,7 +214,22 @@ range_flow.py / fold_equity.py  ──读表──►  范围似然 · 条件弃
 | `hand_outbox.py` | 一手一文件、原子写、成功才迁 `sent/`、超次进 `failed/` |
 | `hand_ingest.py` | outbox → replay-console 的同步 worker（批量优先，坏数据自动降级单发；401/403 不挪文件） |
 
-### 4.5 提示词包（`poker_ocr/prompt/`）
+### 4.5 工作台（`poker_ocr/workbench/`）
+
+| 模块 | 职责 |
+|---|---|
+| `store.py` | 工作区 schema/CRUD、`config/table_*.json` 发现与兼容标签 |
+| `geometry.py` | 槽位 key（`global:*` / `seat:*:id:field`）、分组、像素换算、错误映射 |
+| `sources.py` | 窗口/摄像头/RTSP/文件枚举与单帧探测；屏幕录制/辅助功能/Automation |
+| `preflight.py` | 17 项体检，返回 `id/status/title/detail/fix` |
+| `supervisor.py` | live 子进程、端口、运行目录、manifest、历史；命令白名单 |
+| `live_client.py` | live HTTP 客户端（health/meta/preview/control/snapshot） |
+| `calibration.py` | 草稿 undo/redo、试读、diff、备份、原子写、回滚 |
+| `overlay_ctl.py` | `render_overlay()` + 浮层线程（1s 重画、5s 跟窗口） |
+| `service.py` | 编排层（可脱离 HTTP 单测） |
+| `app.py` / `static/` | FastAPI + 无构建前端（列表/详情/运行/标定） |
+
+### 4.6 提示词包（`poker_ocr/prompt/`）
 
 ```
 system/   输出契约、事实优先级、规则仲裁、决策顺序、指标口径、筹码深度、场景段
@@ -297,6 +337,12 @@ nv pip install -r requirements.txt
 nv -m uvicorn api:app --host 0.0.0.0 --port 8000
 #   生产：nv -m gunicorn -c gunicorn.conf.py api:app
 
+# 工作台（推荐入口：工作区/体检/启动/预览/标定/浮层，:8030）
+nv -m poker_ocr.workbench
+nv -m poker_ocr.workbench --port 8030 --open
+#   工作区默认 workspaces/，运行产物默认 runs/（可 --workspaces/--runs 指定）
+#   live 由工作台 spawn，端口默认 :8020 起；工作台只绑 127.0.0.1
+
 # 实时推流（默认 cam:auto，自动点击需确认；默认开 Web 看板 :8020）
 nv -m poker_ocr.live \
     --profile config/table_wpk_live.json --initial-blinds 1/2 \
@@ -367,6 +413,7 @@ STRATEGY_TABLES_PROFILE=sourced nv -m poker_ocr.live ...
 5. 新增配置项 → 写进 `config/` 并在 `profile.py` 校验（缺字段要 fail fast，不要静默默认）。
 6. 改 `api.py` 响应字段 → 下游（控制台、导出工具）会静默错，先 grep 调用点。
 7. 改策略数字（弃牌率 / 似然 / 弹性）→ 改 `poker_ocr/tables/*.json`，不要改 `.py`；跑 `tools/export_strategy_tables.py --check` + `tests/test_strategy_tables.py`。
+8. 改 live 的预览/控制端点或工作台 → 跑 `tests/test_live_web.py` + `tests/test_workbench.py`；控制接口只给工作台，看板 UI 保持只读。
 
 ---
 
@@ -385,6 +432,7 @@ STRATEGY_TABLES_PROFILE=sourced nv -m poker_ocr.live ...
 | 弃牌曲线 / 裁判 | [docs/弃牌曲线探针-2026-11-05.md](docs/弃牌曲线探针-2026-11-05.md) |
 | 复盘记录 | `docs/复盘-*.md`、`docs/复跑-*.md`（每次线上问题的事实来源） |
 | 实时看板 / 日志排查 | [docs/实时Web看板与日志排查-2026-11-05.md](docs/实时Web看板与日志排查-2026-11-05.md) |
+| 工作台 | [docs/工作台-需求与设计-2026-11-12.md](docs/工作台-需求与设计-2026-11-12.md)、[docs/工作台-实现说明.md](docs/工作台-实现说明.md) |
 
 ---
 

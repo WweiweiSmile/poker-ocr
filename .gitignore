@@ -10,10 +10,16 @@ __pycache__/
 .env.*
 !.env.example
 
+# profile 标定的备份（工作台/框编辑器自动生成，保留最近 20 份）
+config/*.bak-*
+
 # 自动点击的按钮坐标（因机器/窗口位置而异，由标定工具生成）
 config/clicker_local.json
 config/clicker_*.json
 !config/clicker.example.json
+
+# 工作台的运行产物（每个 run 一个目录：日志/manifest/预览）
+runs/
 
 # 实时识别的运行产物
 logs/

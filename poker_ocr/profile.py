@@ -177,7 +177,12 @@ class Profile:
                     f"配置写的是 {self.ring_order}"]
         return []
 
-    def validate(self) -> None:
+    def check(self) -> list[str]:
+        """返回问题列表（不打印、不退出）。
+
+        工作台要在网页里逐条显示「哪个字段、为什么」再让用户修；CLI 仍然
+        走 `validate()` 保持原来的打印 + sys.exit 行为。
+        """
         problems = []
         ids = [s.seat_id for s in self.seats]
         if not (2 <= len(ids) <= 9):
@@ -209,6 +214,10 @@ class Profile:
         if not self.runtime:
             problems += self.check_ring_geometry()
 
+        return problems
+
+    def validate(self) -> None:
+        problems = self.check()
         if problems:
             for p in problems:
                 print(f"配置有问题：{p}", file=sys.stderr)
@@ -217,12 +226,12 @@ class Profile:
     # ── 加载 ──────────────────────────────────────────────
 
     @classmethod
-    def load(cls, path: Path | None = None) -> "Profile":
-        path = Path(path or DEFAULT_PROFILE)
-        if not path.exists():
-            sys.exit(f"找不到配置文件 {path}")
-        raw = json.loads(path.read_text(encoding="utf-8"))
+    def from_raw(cls, raw: dict, path: Path) -> "Profile":
+        """从已解析的 JSON dict 构造 Profile（不做校验、不退出）。
 
+        拆出来是给工作台用的：它先读原始 dict（要保留 `_note`/未知键和键序），
+        再单独跑 `check()` 把问题列给用户，不能因为一个坏字段让整个进程退出。
+        """
         seats = [
             Seat(
                 seat_id=s["seat_id"],
@@ -237,7 +246,7 @@ class Profile:
             for s in raw["seats"]
         ]
 
-        profile = cls(
+        return cls(
             path=path,
             reference_size=tuple(raw["reference_size"]),  # type: ignore[arg-type]
             table_center=tuple(raw["table_center"]),      # type: ignore[arg-type]
@@ -259,6 +268,35 @@ class Profile:
             default_ante=(float(raw["default_ante"])
                           if raw.get("default_ante") is not None else None),
         )
+
+    @classmethod
+    def inspect(cls, path: Path | None = None) -> tuple["Profile | None", list[str]]:
+        """读 profile 并返回 (profile, 问题列表)；任何错误都只记录、不退出。
+
+        文件缺失/JSON 坏/结构缺键都返回 `(None, [可读原因])`；结构完整但
+        语义不合法时仍返回 profile（几何可用），问题列表交给体检页显示。
+        """
+        path = Path(path or DEFAULT_PROFILE)
+        if not path.exists():
+            return None, [f"找不到配置文件 {path}"]
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            return None, [f"读取/解析失败：{type(exc).__name__}: {exc}"]
+        try:
+            profile = cls.from_raw(raw, path)
+        except (KeyError, TypeError, ValueError) as exc:
+            key = getattr(exc, "args", ("?",))[0]
+            return None, [f"结构不完整：缺少或非法字段 {key!r}（{type(exc).__name__}）"]
+        return profile, profile.check()
+
+    @classmethod
+    def load(cls, path: Path | None = None) -> "Profile":
+        path = Path(path or DEFAULT_PROFILE)
+        if not path.exists():
+            sys.exit(f"找不到配置文件 {path}")
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        profile = cls.from_raw(raw, path)
         profile.validate()
         return profile
 

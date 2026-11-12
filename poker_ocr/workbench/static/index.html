@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Poker OCR 工作台</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="#/">
+    <span class="brand-mark">♠</span>
+    <span>Poker OCR 工作台</span>
+  </a>
+  <div class="topbar-right">
+    <span id="top-status" class="pill pill-idle">idle</span>
+    <a class="btn btn-ghost btn-sm" href="/" id="reload">刷新</a>
+  </div>
+</header>
+<main id="app" class="app">
+  <div class="boot">加载中…</div>
+</main>
+<div id="stale-banner" class="stale-banner" hidden>
+  后端代码已更新：请重启工作台进程（Ctrl-C 后重新运行 <code>nv -m poker_ocr.workbench</code>），
+  再启动 / 保存。静态页面会立即生效，Python 后端不会热重载。
+</div>
+<div id="toast" class="toast" aria-live="polite"></div>
+<dialog id="modal" class="modal"></dialog>
+<script>window.__WB_TOKEN__ = "__WB_TOKEN_VALUE__";</script>
+<script src="/app.js" defer></script>
+</body>
+</html>

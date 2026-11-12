@@ -41,6 +41,7 @@ OBS ──SRT──▶ MediaMTX ──RTSP──▶ 本进程。
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import signal
@@ -79,7 +80,8 @@ from .hand_ingest import HandIngestWorker, IngestConfig
 from .hand_track import LiveHandTracker
 from .live_log import (ConsoleLog, LiveEventLog, derive_console_path,
                        derive_event_path)
-from .live_web import LiveWebServer, build_layout
+from .live_web import (LiveControl, LiveWebServer, PreviewStore,
+                       build_layout)
 from .name_lexicon import NameLexicon, duplicate_pairs
 from .ocr import OcrEngine
 from .parse import parse_blinds
@@ -339,6 +341,51 @@ def _ask_confirm(log: Callable[[str], None],
 
 def _iso_now() -> str:
     return datetime.now().astimezone().isoformat(timespec="milliseconds")
+
+
+def _sha256_file(path: Path) -> str | None:
+    """文件内容哈希（相对路径溯源用）；读不到返回 None，不抛。"""
+    try:
+        digest = hashlib.sha256()
+        with path.open("rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 16), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+    except OSError:
+        return None
+
+
+def _source_kind(url: str) -> str:
+    text = str(url or "")
+    if text.startswith(("window:", "screen:")):
+        return "window"
+    if text.startswith(("cam:", "camera:")):
+        return "camera"
+    if text.startswith(("rtsp://", "rtsps://")):
+        return "rtsp"
+    if text.startswith(("http://", "https://")):
+        return "stream"
+    return "file"
+
+
+def _resolve_source_window(url: str) -> dict | None:
+    """窗口源启动时解析一次屏幕矩形（逻辑点）；解析失败返回 None。
+
+    只给 `/api/meta` 和工作台浮层追溯用，不参与识别/点击路径 —— 失败
+    fail-open，绝不能让一个读窗口的动作拖住启动。
+    """
+    text = str(url or "")
+    if not text.startswith(("window:", "screen:")):
+        return None
+    _, _, raw = text.partition(":")
+    try:
+        from .bet_slider import resolve_window, resolve_window_info
+        info = resolve_window_info(raw)
+        rect = info.rect if info is not None else resolve_window(raw)
+        return {"spec": raw, **rect.to_dict(),
+                "window_id": (info.window_id if info is not None else 0)}
+    except Exception:  # noqa: BLE001 — 窗口解析失败不影响识别
+        return None
 
 
 @dataclass(frozen=True)
@@ -1105,6 +1152,8 @@ class LiveProcessor:
                  card_confirm_frames: int = 2,
                  card_doubt_window: float = DEFAULT_DOUBT_WINDOW,
                  clock=time.monotonic, log=_log,
+                 control: LiveControl | None = None,
+                 preview: PreviewStore | None = None,
                  events: Callable[[str, dict], None] | None = None) -> None:
         if recognizer not in ("roi", "full"):
             raise ValueError(f"未知 recognizer：{recognizer}")
@@ -1207,6 +1256,10 @@ class LiveProcessor:
         # None = 不产生事件（单测/只跑识别时零开销）。回调自身必须吞异常，
         # 这里再包一层 _publish()，保证日志/看板永远不能拖垮 OCR。
         self.events = events
+        # 工作台控制面：control 只控制「点击开关」，preview 只存最新帧引用。
+        # 都为 None 时（CLI/单测默认）零开销，不改变任何识别口径。
+        self.control = control
+        self.preview = preview
 
         # 跨帧牌面稳定闸：board 只前进、hero 只接受 0/2 张、新读数 2 帧确认。
         # doubt_window > 0 时，带疑点的读数改走「疑惑帧」时间窗仲裁。
@@ -1330,6 +1383,7 @@ class LiveProcessor:
         frame_id = f"live_e{packet.epoch}_{packet.seq:06d}_{t:07.2f}s"
         # 只存引用，不拷贝也不编码：点击时按文字定位按钮要用同一帧。
         self._last_image = packet.image
+        self._publish_preview(packet, t, frame_id)
         # 疑惑帧环形缓冲只存数组引用，不逐帧编码；异常时才落盘。
         if self._frame_ring is not None:
             self._frame_ring.append((packet.seq, round(t, 2), frame_id,
@@ -1400,6 +1454,32 @@ class LiveProcessor:
         self._publish_frame(packet, t, frame_id, age, proc_ms, outcome,
                             cards, body)
         return outcome.kind
+
+    def _publish_preview(self, packet: FramePacket, t: float,
+                         frame_id: str) -> None:
+        """把最新已处理帧交给工作台预览；失败不影响识别。"""
+        if self.preview is None:
+            return
+        try:
+            self.preview.publish(packet.image, packet.seq,
+                                 frame_id=frame_id, t=t)
+        except Exception as exc:  # noqa: BLE001
+            self.log(f"[警告] 预览帧发布失败：{type(exc).__name__}: {exc}")
+
+    def reset_pending_clicks(self, enabled: bool = False) -> None:
+        """点击暂停时作废所有「待执行」的点击。
+
+        暂停的含义是「从这一刻起不要动鼠标」：已经排队的补点/重试必须一起
+        清掉，否则恢复前还会点出去；恢复后也不补旧决策（只在下一个新决策点
+        重新生成建议）。`enabled` 只为打印一句可追溯的日志。
+        """
+        if enabled:
+            return
+        self._pending_decision_key = None
+        self._deferred_click = None
+        self._click_retry = None
+        self.log("  [点击] 已暂停：作废待执行/补点/重试的点击，"
+                 "恢复后只对新决策点生效")
 
     # ── 事件出口（Web / 事件日志） ─────────────────────
 
@@ -2031,6 +2111,14 @@ class LiveProcessor:
         self.log(f"  [点击] 窗口尺寸变化，已重建按钮几何："
                  f"window={window.to_dict()}")
 
+    def _click_paused(self) -> bool:
+        """工作台是否把点击暂停了（没启用点击器时永远 False）。"""
+        control = self.control
+        if control is None:
+            return False
+        state = control.state()
+        return bool(state.get("available") and not state.get("enabled"))
+
     def _maybe_click(self, advice, *, state, allow_click: bool):
         """执行自动点击；未启用点击器时返回 None（JSONL 不出现 click 键）。
 
@@ -2039,6 +2127,11 @@ class LiveProcessor:
         """
         if self.clicker is None:
             return None
+        if self._click_paused():
+            self.click_skip_count += 1
+            return ClickResult("skipped",
+                               action=getattr(advice.option, "kind", None),
+                               reason="click_paused")
         matched = bool(advice.decision_key) \
             and advice.decision_key == self._pending_decision_key
         reason = self._click_skip_reason(
@@ -2099,6 +2192,9 @@ class LiveProcessor:
         pending = self._deferred_click
         if pending is None:
             return
+        if self._click_paused():
+            self._deferred_click = None
+            return
         if self.clock() >= pending.until:
             self._deferred_click = None
             self.log("  [点击] 补点窗口已过，放弃这条建议")
@@ -2157,6 +2253,9 @@ class LiveProcessor:
         """到点检查上一次点击：页面变了就收工，没变就再点一次。"""
         pending = self._click_retry
         if pending is None or state is None:
+            return
+        if self._click_paused():
+            self._click_retry = None
             return
         now = self.clock()
         if now < pending.next_at:
@@ -2878,6 +2977,13 @@ def build_parser() -> argparse.ArgumentParser:
                          "logs/live.states.jsonl → logs/live.events.jsonl）")
     ap.add_argument("--no-events", action="store_true",
                     help="不写结构化事件日志（看板仍可用）")
+    # ── 工作台控制面（默认全关：不加这些参数时行为和旧版完全一致） ──
+    ap.add_argument("--preview", action="store_true",
+                    help="开启 GET /api/preview.jpg（最新已处理帧，给工作台看）")
+    ap.add_argument("--control-token", default=None,
+                    help="POST /api/control/click 的校验 token；不设则控制面关闭")
+    ap.add_argument("--run-id", default=None,
+                    help="工作台运行 id（写进元数据和日志，便于对账）")
     ap.add_argument("--log-file", type=Path, default=None,
                     help="控制台文本落盘路径（默认由 --out 派生："
                          "logs/live.states.jsonl → logs/live.log）")
@@ -2960,6 +3066,12 @@ def _validate_args(ap: argparse.ArgumentParser, args) -> None:
         ap.error("--web-host 不能为空")
     if args.web_open and not args.web:
         ap.error("--web-open 需要开启 --web")
+    if args.preview and not args.web:
+        ap.error("--preview 依赖 Web 服务，需要同时开启 --web")
+    if args.control_token is not None and not args.web:
+        ap.error("--control-token 依赖 Web 服务，需要同时开启 --web")
+    if args.control_token is not None and len(str(args.control_token)) < 8:
+        ap.error("--control-token 至少 8 个字符（建议用随机串）")
     if args.no_events and args.events_out is not None:
         ap.error("--events-out 与 --no-events 不能同时使用")
     if args.no_log_file and args.log_file is not None:
@@ -3091,33 +3203,106 @@ def _build_runtime(ap: argparse.ArgumentParser, args, env_load) -> _Runtime:
     profile = Profile.load(args.profile)      # 配置非法时内部 sys.exit
     _log(f"[启动] profile={profile.path.name} 座位={len(profile.seats)}")
 
-    # Web 看板：只读展示，不提供点击/改配置的入口。端口被占用时只告警，
+    # Web 看板：只读展示。工作台额外挂 preview/meta/control 三个最小接口
+    # （`--preview` / `--control-token`），默认关闭。端口被占用时只告警，
     # 识别主链路照常跑（日志里仍能查到 URL 启动失败的原因）。
     web = None
+    preview = PreviewStore() if args.preview else None
+    # 点击控制面始终存在（看板显示状态用），但没开点击器时 available=False，
+    # 暂停/恢复都是 no-op。
+    control = LiveControl(available=bool(args.auto_click),
+                          dry_run=bool(args.clicker_dry_run))
+    meta_state: dict = {"processor": None,
+                        "window": _resolve_source_window(args.url)}
     session_meta = {
         "session_id": session_id,
+        "run_id": args.run_id,
         "started_at": started_wall,
         "profile": profile.path.name,
         "profile_path": str(profile.path),
+        "profile_sha256": _sha256_file(profile.path),
         "recognizer": args.recognizer,
         "test_mode": bool(args.test),
         "url": args.url,
+        "source_kind": _source_kind(args.url),
         "out": str(args.out),
         "events_out": str(events_path) if events_path else None,
         "log_file": str(console_log.path) if console_log is not None else None,
         "prompt_version": PROMPT_VERSION if args.ai_advice else None,
         "prompt_lang": PROMPT_LANGUAGE if args.ai_advice else None,
+        "preview": bool(args.preview),
+        "control": bool(args.control_token),
         "pid": os.getpid(),
     }
+
+    def live_meta() -> dict:
+        """工作台用的运行时元数据：几何口径全部复用 profile 自己的换算。"""
+        frame = preview.info() if preview is not None else {
+            "seq": 0, "frame_id": None, "width": 0, "height": 0,
+            "ts": None, "t": 0.0}
+        w, h = int(frame.get("width") or 0), int(frame.get("height") or 0)
+        processor = meta_state.get("processor")
+        stats: dict = dict(web.store.stats) if web is not None else {}
+        if processor is not None:
+            stats.update({
+                "processed": processor.processed,
+                "accepted": processor.accepted,
+                "records": processor.records,
+                "avg_proc_ms": round(processor.avg_proc_ms, 1),
+                "advice_count": processor.advice_count,
+                "advice_done": processor.advice_done,
+                "click_count": processor.click_count,
+                "click_skip_count": processor.click_skip_count,
+                "click_error_count": processor.click_error_count,
+                "click_defer_count": processor.click_defer_count,
+            })
+        return {
+            "run_id": args.run_id,
+            "session_id": session_id,
+            "started_at": started_wall,
+            "profile": {
+                "path": str(profile.path),
+                "name": profile.path.name,
+                "sha256": session_meta["profile_sha256"],
+                "reference_size": [int(v) for v in profile.reference_size],
+                "canvas": (list(profile.canvas)
+                           if profile.canvas is not None else None),
+                "hero_seat_id": profile.hero_seat_id,
+                "seats": len(profile.seats),
+            },
+            "source": {
+                "spec": args.url,
+                "kind": _source_kind(args.url),
+                "frame_size": [w, h] if w and h else None,
+                "content_rect": (list(profile.content_rect((w, h)))
+                                 if w and h else None),
+                "window": meta_state.get("window"),
+            },
+            "recognizer": args.recognizer,
+            "test_mode": bool(args.test),
+            "frame": frame,
+            "click": control.state(),
+            "stats": stats,
+            "layout": build_layout(profile),
+            "prompt_version": PROMPT_VERSION if args.ai_advice else None,
+            "ts": _iso_now(),
+        }
+
     if args.web:
         try:
             web = LiveWebServer(session=session_meta,
                                 layout=build_layout(profile),
                                 host=args.web_host, port=args.web_port,
-                                log=_log)
+                                log=_log,
+                                control=control,
+                                preview=preview,
+                                meta=live_meta,
+                                token=args.control_token,
+                                run_id=args.run_id)
             web.start()
             _log(f"[Web] 看板已启动：{web.url}"
-                 f"（只读；Ctrl-C 结束）")
+                 + ("（工作台预览已开启）" if preview is not None else
+                    "（只读；Ctrl-C 结束）"))
             if args.web_open:
                 webbrowser.open(web.url)
         except OSError as exc:
@@ -3504,8 +3689,13 @@ def _build_runtime(ap: argparse.ArgumentParser, args, env_load) -> _Runtime:
         incident_max=args.incident_max,
         card_confirm_frames=args.card_confirm_frames,
         card_doubt_window=args.card_doubt_window,
+        control=control, preview=preview,
         events=(publish if (event_log is not None or web is not None)
                 else None))
+
+    # 工作台「暂停点击」：开关一变就作废待执行/补点/重试的点击。
+    control.add_listener(processor.reset_pending_clicks)
+    meta_state["processor"] = processor
 
     # 动作区静止闸只用于 roi 路线：它的区域来自固定槽位；full 路线没有布局。
     settle_gate = (SettleGate(profile, settle=args.settle,

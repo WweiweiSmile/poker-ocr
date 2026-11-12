@@ -1,0 +1,46 @@
+{
+  "schema": 1,
+  "id": "example-wpk-mac",
+  "name": "示例 · WePoker Mac（窗口源）",
+  "profile": "config/table_wpk_mac.json",
+  "source": {
+    "kind": "window",
+    "spec": "window:title:WePoker-H5",
+    "label": "Edge · WePoker-H5"
+  },
+  "window": {
+    "spec": "title:WePoker-H5",
+    "expected_size": [
+      736,
+      838
+    ],
+    "pin": "manual"
+  },
+  "click": {
+    "enabled": true,
+    "mode": "profile_slots",
+    "dry_run": true,
+    "confirm": true,
+    "bet_slider": true,
+    "bet_slider_only": false
+  },
+  "recognizer": "roi",
+  "runtime": {
+    "initial_blinds": "1/2",
+    "every": 0.5,
+    "settle": 0.25,
+    "ai_advice": true,
+    "test": false,
+    "advanced": {}
+  },
+  "debug": {
+    "preview_fps": 3,
+    "screen_overlay": true,
+    "overlay_groups": [
+      "buttons",
+      "cards"
+    ]
+  },
+  "created_at": "2026-11-12T19:22:07+08:00",
+  "updated_at": "2026-11-12T19:22:07+08:00"
+}

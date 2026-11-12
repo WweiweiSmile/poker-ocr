@@ -36,6 +36,21 @@ curl -X POST http://localhost:8000/ocr/table -F "file=@table.jpg"
 }
 ```
 
+## 工作台（推荐入口，`:8030`）
+
+工作区 = 一次启动所需的全部配方：profile、视频源、窗口、点击、运行参数、调试开关。
+工作台负责**新建/复制工作区 → 启动前体检 → 启动 live 子进程 → 实时预览 + ROI → 暂停点击 → 标定（改 profile 并自动重启）→ 屏幕浮层 → 运行历史/manifest**。
+
+```bash
+nv -m poker_ocr.workbench            # http://127.0.0.1:8030
+nv -m poker_ocr.workbench --open     # 启动后打开浏览器
+```
+
+- 只绑 `127.0.0.1`；写操作带 token + Origin 同源校验。
+- 工作区在 `workspaces/*.json`，运行产物在 `runs/<时间>-<工作区>/`（manifest 里有配置哈希、窗口 rect、退出码、统计）。
+- live 仍可用 CLI；工作台只是多了预览/控制端点（`--preview` / `--control-token`）。
+- 设计与实现：[docs/工作台-需求与设计-2026-11-12.md](docs/工作台-需求与设计-2026-11-12.md)、[docs/工作台-实现说明.md](docs/工作台-实现说明.md)。
+
 ## 实时推流识别
 
 默认直接读 **OBS 虚拟摄像头**（`--url cam:auto`，同一台 Mac 延迟最低）；也可以

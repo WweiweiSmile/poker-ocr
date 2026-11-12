@@ -10,16 +10,19 @@ from __future__ import annotations
 
 import json
 import sys
+import urllib.error
 import urllib.request
 from pathlib import Path
 from types import SimpleNamespace
+
+import numpy as np
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from poker_ocr.live import build_parser  # noqa: E402
 from poker_ocr.live_web import (  # noqa: E402
-    LiveWebServer, LiveWebStore, build_layout,
+    LiveControl, LiveWebServer, LiveWebStore, PreviewStore, build_layout,
 )
 
 FAILS: list[str] = []
@@ -171,11 +174,96 @@ def test_http_snapshot_static_and_sse() -> None:
         server.close()
 
 
+def test_meta_preview_and_click_control() -> None:
+    """工作台最小控制面：meta / preview.jpg / control/click（token 校验）。"""
+    control = LiveControl(available=True, dry_run=True)
+    seen: list[bool] = []
+    control.add_listener(seen.append)
+    preview = PreviewStore()
+
+    def meta() -> dict:
+        return {"run_id": "r-1", "session_id": "s-1", "frame": preview.info(),
+                "profile": {"sha256": "abc"}, "click": control.state()}
+
+    server = LiveWebServer(session={"session_id": "s-1"}, layout={}, port=0,
+                           control=control, preview=preview, meta=meta,
+                           token="tok-123456", run_id="r-1")
+    server.start()
+    try:
+        base = server.url
+        got = json.loads(urllib.request.urlopen(base + "/api/meta",
+                                                timeout=3).read())
+        check(got["run_id"] == "r-1" and got["frame"]["seq"] == 0,
+              f"meta 应可读：{got}")
+        state = json.loads(urllib.request.urlopen(
+            base + "/api/control/state", timeout=3).read())
+        check(state["available"] and state["enabled"] and not state["paused"],
+              f"控制状态：{state}")
+
+        # 没有 token：403，且不改状态
+        req = urllib.request.Request(
+            base + "/api/control/click", data=b'{"enabled": false}',
+            method="POST", headers={"Content-Type": "application/json"})
+        try:
+            urllib.request.urlopen(req, timeout=3)
+            check(False, "无 token 的控制请求必须被拒绝")
+        except urllib.error.HTTPError as exc:
+            check(exc.code == 403, f"无 token 应 403：{exc.code}")
+        check(control.state()["enabled"], "被拒请求不能改状态")
+
+        # 带 token：暂停成功，监听器收到 False
+        req = urllib.request.Request(
+            base + "/api/control/click", data=b'{"enabled": false}',
+            method="POST",
+            headers={"Content-Type": "application/json",
+                     "X-Workbench-Token": "tok-123456"})
+        res = json.loads(urllib.request.urlopen(req, timeout=3).read())
+        check(res["ok"] and res["paused"], f"暂停结果：{res}")
+        check(seen == [False], f"监听器应收到 False：{seen}")
+        snap = json.loads(urllib.request.urlopen(
+            base + "/api/snapshot", timeout=3).read())
+        check(snap["control"]["paused"], "快照应带控制状态")
+        check(any(e["type"] == "control" for e in snap["events"]),
+              "事件流应有 control 事件")
+
+        # 还没处理过帧：预览 503
+        try:
+            urllib.request.urlopen(base + "/api/preview.jpg", timeout=3)
+            check(False, "没有帧时预览应 503")
+        except urllib.error.HTTPError as exc:
+            check(exc.code == 503, f"无帧预览应 503：{exc.code}")
+
+        preview.publish(np.zeros((60, 80, 3), dtype=np.uint8), 7,
+                        frame_id="f7", t=1.25)
+        with urllib.request.urlopen(base + "/api/preview.jpg?w=40",
+                                    timeout=3) as resp:
+            small = resp.read()
+            check(resp.headers.get("X-Frame-Seq") == "7",
+                  "预览应带帧序号")
+        with urllib.request.urlopen(base + "/api/preview.jpg?full=1",
+                                    timeout=3) as resp:
+            full = resp.read()
+        check(small[:2] == b"\xff\xd8", "预览应是 JPEG")
+        check(len(full) > len(small), "full 应比缩略图大")
+        got = json.loads(urllib.request.urlopen(base + "/api/meta",
+                                                timeout=3).read())
+        check(got["frame"]["width"] == 80 and got["frame"]["seq"] == 7,
+              f"meta 帧信息：{got['frame']}")
+
+        # 未启用点击器：暂停是 no-op，不假装成功
+        unavailable = LiveControl(available=False)
+        res = unavailable.set_click_enabled(False)
+        check(not res["ok"] and not res["available"], f"no-op：{res}")
+    finally:
+        server.close()
+
+
 def main() -> int:
     tests = [test_cli_defaults, test_layout_uses_name_slot_centers,
              test_store_tracks_frames_advice_hands,
         test_cards_event_updates_table_without_a_state_record,
-             test_http_snapshot_static_and_sse]
+             test_http_snapshot_static_and_sse,
+             test_meta_preview_and_click_control]
     print("── 实时 Web 看板 ──────────────────────────────")
     for t in tests:
         before = len(FAILS)

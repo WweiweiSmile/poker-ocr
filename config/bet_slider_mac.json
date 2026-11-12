@@ -49,5 +49,10 @@
   "_round_note": "客户端滑杆只能落在整数 BB（实测 1.33BB 目标在 1↔2 之间来回、最后振荡失败）。drag 模式先把 AI 的 1/3 池等小数目标取到最近整数 BB（1.33→1），和客户端自己的 1/3 预设一致；0 = 不取整（老 UI wheel 模式保持原样）。",
   "_allin_note": "主动全下：一直拖/滚到顶部气泡出现 ALLIN / 全下 字样，连续两次读到才点确定。**不用「额度不再变化」猜顶端** —— 拖不动/手柄找错时额度同样不变，那种情况必须报错并关掉滑杆。",
   "_click_note": "所有按钮点击都在圆盘内随机取点：半径 = 原半径 × 70%（点击范围 ≈ 49% 的按钮面积），和 clicker 的圆钮采样同口径。",
-  "_schema_note": "本文件的键会在启动时逐个校验（类型/范围/枚举），写错直接报错退出，不会静默退化成别的行为。新增键必须同时加到 poker_ocr/bet_slider.py 的 SliderSettings.from_config。"
+  "_schema_note": "本文件的键会在启动时逐个校验（类型/范围/枚举），写错直接报错退出，不会静默退化成别的行为。新增键必须同时加到 poker_ocr/bet_slider.py 的 SliderSettings.from_config。",
+  "drag_step_fraction": 1.0,
+  "drag_fine_min_px": 2.0,
+  "drag_no_change_gain": 1.6,
+  "accept_ratio": 0.0,
+  "_drag_curve_note": "金额越大 px/BB 越小：drag_fine_min_px 是靠近目标时的细拖距；accept_ratio=0 表示绝不近似落注（>0 时才在尽力后接受最近可达额，且不会一进区间就停）。"
 }

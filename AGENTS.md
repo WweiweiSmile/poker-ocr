@@ -12,6 +12,7 @@
 
 德州扑克牌桌画面 → 可落库的牌局事实 + 可执行的 AI 建议。
 两条链路：实时（`poker_ocr.live`，服务 `api.py:8000`）、沉淀复盘（`replay-console:8010` + MySQL）。
+日常入口是**工作台**（`poker_ocr.workbench`，`:8030`）：工作区/体检/启动 live/预览/标定/浮层。
 （GTO 离线跑批已于 2026-11-05 整体移除。）
 范围 / 弃牌率的数字现在只住在 `poker_ocr/tables/`（v0 手调 / v1 推导，**默认 v0**）。
 
@@ -47,6 +48,7 @@
 
 ```bash
 nv tests/run_all.py                              # 全量测试（分层，先快后慢）
+nv -m poker_ocr.workbench                        # 工作台 :8030（推荐入口）
 nv -m uvicorn api:app --port 8000                # 单图识别服务
 nv -m poker_ocr.live --profile config/table_wpk_live.json \
     --initial-blinds 1/2 --out logs/live.states.jsonl          # 实时链路 + Web 看板 :8020

@@ -696,7 +696,11 @@ def find_windows(query: str, *, field: str = "any") -> list[WindowInfo]:
 
 
 def resolve_window_info(spec) -> WindowInfo | None:
-    """按 index/title/owner 找窗口；坐标/dict/front 返回 None（没有 window_id）。"""
+    """按 id/index/title/owner 找窗口；坐标/dict/front 返回 None（没有 window_id）。
+
+    `id:N` 是 CoreGraphics 的 window_id：标签页标题变化、窗口重排都不影响，
+    只要窗口没关。工作台优先用它，避免 `title:WePoker-H5` 在切标签后失效。
+    """
     if isinstance(spec, WindowInfo):
         return spec
     if isinstance(spec, WindowRect) or isinstance(spec, Mapping):
@@ -704,6 +708,18 @@ def resolve_window_info(spec) -> WindowInfo | None:
     text = str(spec).strip()
     if not text or text.lower() == "front":
         return None
+    if text.lower().startswith("id:"):
+        raw = text.split(":", 1)[1].strip()
+        try:
+            window_id = int(raw)
+        except ValueError:
+            raise ValueError(f"window id 必须是数字，收到 {raw!r}") from None
+        for win in list_windows():
+            if win.window_id == window_id:
+                return win
+        raise ValueError(
+            f"没找到 window id={window_id}（窗口已关闭或浏览器重启过）；"
+            "用 --list-windows 重新选")
     if text.lower().startswith("index:") or text.startswith("#"):
         raw = text.split(":", 1)[1] if ":" in text else text[1:]
         idx = int(raw)
@@ -826,7 +842,18 @@ class SliderSettings:
     drag_px_per_bb: float = 6.0    # 初始估计；第一次拖动后按实测更新
     drag_min_px: float = 6.0       # 单次拖动的最小像素，防抖
     drag_max_px: float = 120.0     # 单次拖动的最大像素
-    drag_steps: int = 8            # 拖动过程中的 move 事件数（H5 要看到中间移动）
+    # 每次最多走剩余额的比例。1.0 = 一次拖满（线性滑杆最省步数）；
+    # 0.5 = 每次最多走一半，适合斜率估不准/过冲严重的机器。
+    drag_step_fraction: float = 1.0
+    # 金额越大，每 BB 的屏幕像素越少；预测步长 < drag_min_px 时用这个细步长，
+    # 否则 6px 的最小拖距在 1–2px/BB 的区间会直接跨过目标。
+    drag_fine_min_px: float = 2.0
+    # 拖了但额度不动：下一步把 px/BB 估大一点（而不是永远用同一个太小的步长）。
+    drag_no_change_gain: float = 1.6
+    # 精确目标尽力后仍差一点时的相对容忍（0 = 关闭，默认绝不近似落注）。
+    # 只在「已经尝试到极限、当前值就是最接近的」时才用；不会一进区间就停。
+    accept_ratio: float = 0.0
+    drag_steps: int = 8            # 拖动过程中的 move 次数（H5 要看到中间移动）
     drag_step_ms: int = 12
     drag_hold_ms: int = 80         # 按下后先停一下再拖（H5 要「按住拖动」）
     # 客户端滑杆的可达粒度（BB）：AI 给的 1/3 池常是 1.33BB，而滑杆只能落在
@@ -881,6 +908,19 @@ class SliderSettings:
              f"drag_steps 至少为 2：{self.drag_steps}")
         need(math.isfinite(self.round_to_bb) and self.round_to_bb >= 0,
              f"round_to_bb 必须 ≥ 0：{self.round_to_bb}")
+        need(math.isfinite(self.drag_step_fraction)
+             and 0 < self.drag_step_fraction <= 1,
+             f"drag_step_fraction 必须在 (0, 1]：{self.drag_step_fraction}")
+        need(math.isfinite(self.drag_fine_min_px)
+             and 0 < self.drag_fine_min_px <= self.drag_min_px,
+             f"drag_fine_min_px 必须在 (0, drag_min_px]："
+             f"{self.drag_fine_min_px}")
+        need(math.isfinite(self.drag_no_change_gain)
+             and self.drag_no_change_gain >= 1,
+             f"drag_no_change_gain 必须 ≥ 1：{self.drag_no_change_gain}")
+        need(math.isfinite(self.accept_ratio)
+             and 0 <= self.accept_ratio <= 0.2,
+             f"accept_ratio 必须在 0–0.2：{self.accept_ratio}")
         need(isinstance(self.close_slot, str) and bool(self.close_slot.strip()),
              f"close_slot 不能为空：{self.close_slot!r}")
 
@@ -964,6 +1004,10 @@ class SliderSettings:
             drag_px_per_bb=pick_float("drag_px_per_bb"),
             drag_min_px=pick_float("drag_min_px"),
             drag_max_px=pick_float("drag_max_px"),
+            drag_step_fraction=pick_float("drag_step_fraction"),
+            drag_fine_min_px=pick_float("drag_fine_min_px"),
+            drag_no_change_gain=pick_float("drag_no_change_gain"),
+            accept_ratio=pick_float("accept_ratio"),
             drag_steps=pick_int("drag_steps"),
             drag_step_ms=pick_int("drag_step_ms"),
             drag_hold_ms=pick_int("drag_hold_ms"),
@@ -1330,6 +1374,8 @@ class BetSliderController:
             px_per_bb = max(0.5, float(self.settings.drag_px_per_bb))
             no_change = 0
             recent: list[float] = []
+            best_amount = amount
+            best_error = abs(amount - target)
             for _ in range(max(1, self.settings.max_steps)):
                 self._check_deadline(deadline)
                 if abs(amount - target) <= self.settings.tolerance_bb:
@@ -1337,10 +1383,22 @@ class BetSliderController:
                 diff = target - amount
                 before = amount
                 if control == "drag":
-                    dy = -diff * px_per_bb
-                    mag = min(max(self.settings.drag_min_px, abs(dy)),
-                              self.settings.drag_max_px)
-                    dy = mag if dy >= 0 else -mag
+                    # ① 按剩余额的比例收缩步长（不一次拖满）；
+                    # ② 预测像素 < drag_min_px 时用细步长——金额越大，
+                    #    px/BB 越小，固定 6px 的最小拖距会直接跨过目标。
+                    remaining = abs(diff)
+                    desired = (remaining if remaining <= 1.0
+                               else max(1.0, remaining
+                                        * self.settings.drag_step_fraction))
+                    desired = min(desired, remaining)
+                    predicted = desired * px_per_bb
+                    min_px = float(self.settings.drag_min_px)
+                    if predicted < min_px:
+                        min_px = min(min_px,
+                                     float(self.settings.drag_fine_min_px))
+                    mag = min(max(min_px, predicted),
+                              float(self.settings.drag_max_px))
+                    dy = -mag if diff > 0 else mag
                     self._drag_handle(dy)
                     result.drags += 1
                 else:
@@ -1371,35 +1429,71 @@ class BetSliderController:
                 if control == "drag":
                     self._log(f"[滑杆] 拖动 {dy:+.0f}px → {amount:g}BB"
                               f"（目标 {target:g}）")
-                if abs(amount - before) <= 1e-9:
+                delta_bb = amount - before
+                if abs(delta_bb) <= 1e-9:
                     no_change += 1
                     per_notch = None
+                    if control == "drag":
+                        # 太细的步长被 H5 忽略时，下一步估大一点。
+                        px_per_bb = min(120.0, px_per_bb
+                                        * float(self.settings.drag_no_change_gain))
                     if no_change >= max(1, self.settings.max_no_change):
+                        ratio = float(self.settings.accept_ratio)
+                        if (ratio > 0
+                                and abs(amount - target) <= target * ratio):
+                            # 客户端在该区间的最小步长跨不过去：已尽力，
+                            # 当前值在相对容忍内，交给兜底落注。
+                            break
                         raise BetSliderError(
                             f"amount_not_changing(at {amount:g}BB)")
                 else:
                     no_change = 0
                     if control == "drag":
-                        px_per_bb = max(0.2, abs(dy)
-                                        / max(1e-9, abs(amount - before)))
+                        # 局部斜率：非线性滑杆只信最近一次的 px/BB。
+                        observed = abs(dy) / max(1e-9, abs(delta_bb))
+                        px_per_bb = min(120.0, max(0.2, observed))
                     else:
-                        per_notch = abs(amount - before) / max(1, n)
+                        per_notch = abs(delta_bb) / max(1, n)
+                if abs(amount - target) < best_error - 1e-9:
+                    best_amount, best_error = amount, abs(amount - target)
                 recent.append(round(amount, 2))
                 if (len(recent) >= 4 and recent[-1] == recent[-3]
                         and recent[-2] == recent[-4]
                         and recent[-1] != recent[-2]
                         and abs(amount - target) > self.settings.tolerance_bb):
+                    ratio = float(self.settings.accept_ratio)
+                    if ratio > 0 and best_error <= target * ratio:
+                        # 已尽力、当前就在相对容忍内：交给循环后的
+                        # 「最近可达额」落注，不必再抖。
+                        break
                     raise BetSliderError(
                         f"amount_oscillating({recent[-2]:g}↔{recent[-1]:g})")
 
-            if abs(amount - target) > self.settings.tolerance_bb:
-                raise BetSliderError(
-                    f"target_unreachable(target={target:g}, final={amount:g})")
+            exact = abs(amount - target) <= self.settings.tolerance_bb
+            if not exact:
+                ratio = float(self.settings.accept_ratio)
+                # 只有尽力之后、且当前就是最接近的值时才允许相对容忍；
+                # 不会「一进 5% 区间就停」——那会从下方系统性少下注。
+                approx_ok = (ratio > 0
+                             and best_error <= target * ratio
+                             and abs(amount - target) <= target * ratio)
+                if approx_ok:
+                    self._log(
+                        f"[滑杆] 目标 {target:g}BB 尽力后为 {amount:g}BB"
+                        f"（相对误差 {abs(amount - target) / target * 100:.1f}%"
+                        f"，accept_ratio={ratio:g}），按最近可达额落注")
+                    result.evidence["accepted_approx"] = {
+                        "target": target, "actual": amount,
+                        "ratio": ratio, "best": best_amount}
+                else:
+                    raise BetSliderError(
+                        f"target_unreachable(target={target:g}, final={amount:g})")
 
-            # 目标额已到位，才允许落注。
+            # 目标额已到位（或按最近的近似值放行），才允许落注。
+            final_actual = amount
             state = self._confirm_slider()
             result.status = "set"
-            result.final_bb = target
+            result.final_bb = final_actual
             result.evidence = {**result.evidence,
                                "slider": state.to_dict(),
                                "control": control,

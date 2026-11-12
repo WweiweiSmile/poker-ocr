@@ -20,12 +20,16 @@ from __future__ import annotations
 import json
 import queue
 import threading
+import time
 from collections import deque
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
+
+import cv2
+import numpy as np
 
 WEB_ROOT = Path(__file__).resolve().parent / "web" / "live"
 MAX_ADVICES = 30
@@ -157,7 +161,139 @@ def _feed_item(event_id: int, kind: str, payload: dict) -> dict:
     elif kind == "click":
         keep.update({"hand_id": payload.get("hand_id"),
                      "click": payload.get("click")})
+    elif kind == "control":
+        for key in ("enabled", "available", "paused", "reason", "source"):
+            if key in payload:
+                keep[key] = payload[key]
     return {"id": event_id, "type": kind, "ts": _now(), "summary": keep}
+
+
+class LiveControl:
+    """工作台 → live 的最小控制面：目前只有「暂停/恢复自动点击」。
+
+    只存开关和原因，不碰鼠标；真正的语义（作废待执行点击、恢复后不补点）
+    由 `LiveProcessor` 在监听器里实现。没有启用点击器时 `available=False`，
+    暂停/恢复都是 no-op —— 看板会显示「未启用点击」，而不是假装暂停成功。
+    """
+
+    def __init__(self, *, available: bool, dry_run: bool = False,
+                 enabled: bool = True, reason: str | None = None) -> None:
+        self._lock = threading.Lock()
+        self._listeners: list[Callable[[bool], None]] = []
+        self.available = bool(available)
+        self.dry_run = bool(dry_run)
+        self._enabled = bool(enabled) if self.available else False
+        self._reason = reason
+        self.changed_at = _now()
+
+    def add_listener(self, fn: Callable[[bool], None]) -> None:
+        with self._lock:
+            self._listeners.append(fn)
+
+    def state(self) -> dict:
+        with self._lock:
+            return {
+                "available": self.available,
+                "enabled": self._enabled if self.available else False,
+                "paused": bool(self.available and not self._enabled),
+                "dry_run": self.dry_run,
+                "reason": self._reason,
+                "changed_at": self.changed_at,
+            }
+
+    def set_click_enabled(self, enabled: bool, reason: str | None = None, *,
+                          source: str = "workbench") -> dict:
+        """设置点击开关；返回新状态。未启用点击器时不改变任何东西。"""
+        if not self.available:
+            return {**self.state(), "ok": False,
+                    "detail": "本次运行未启用自动点击"}
+        with self._lock:
+            changed = bool(enabled) != self._enabled
+            self._enabled = bool(enabled)
+            self._reason = None if enabled else (reason or "workbench")
+            if changed:
+                self.changed_at = _now()
+            listeners = list(self._listeners) if changed else []
+        # 监听器在锁外调用：它可能要清理处理器状态，不能和状态读取互相等。
+        for fn in listeners:
+            try:
+                fn(self._enabled)
+            except Exception:  # noqa: BLE001 — 控制面故障不能反噬识别
+                pass
+        return {**self.state(), "ok": True, "source": source}
+
+
+class PreviewStore:
+    """只保留最新**已处理**帧的邮箱，JPEG 编码在 HTTP 线程里做。
+
+    主循环每帧只做一次数组引用赋值；编码/缩放都在读请求的线程里，慢客户端
+    最多拖慢自己，不会占住 OCR 主循环。
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._image: np.ndarray | None = None
+        self._seq = 0
+        self._frame_id: str | None = None
+        self._t = 0.0
+        self._ts = _now()
+        self._cache: dict[tuple[int, int], bytes] = {}
+
+    def publish(self, image: np.ndarray, seq: int, *,
+                frame_id: str | None = None, t: float = 0.0) -> None:
+        with self._lock:
+            self._image = image
+            self._seq = int(seq)
+            self._frame_id = frame_id
+            self._t = float(t)
+            self._ts = _now()
+            self._cache.clear()
+
+    def info(self) -> dict:
+        with self._lock:
+            img = self._image
+            return {
+                "seq": self._seq,
+                "frame_id": self._frame_id,
+                "t": self._t,
+                "ts": self._ts,
+                "width": int(img.shape[1]) if img is not None else 0,
+                "height": int(img.shape[0]) if img is not None else 0,
+            }
+
+    def latest(self) -> tuple[np.ndarray | None, int]:
+        with self._lock:
+            return self._image, self._seq
+
+    def jpeg(self, width: int = 0, quality: int = 85) -> tuple[bytes | None, int]:
+        # 只在锁内取引用/缓存，缩放和编码放在锁外：编码 10–20ms，不能挡住
+        # 主循环的 publish（设计 §6.1「编码在 HTTP 线程」）。
+        with self._lock:
+            img = self._image
+            seq = self._seq
+            cache_key = (seq, int(width))
+            cached = self._cache.get(cache_key)
+        if img is None:
+            return None, seq
+        if cached is not None:
+            return cached, seq
+        frame = img
+        if width and width > 0 and img.shape[1] > width:
+            scale = width / float(img.shape[1])
+            size = (int(width), max(1, int(round(img.shape[0] * scale))))
+            frame = cv2.resize(img, size, interpolation=cv2.INTER_AREA)
+        ok, buf = cv2.imencode(
+            ".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), int(quality)])
+        if not ok:
+            return None, seq
+        data = bytes(buf.tobytes())
+        with self._lock:
+            if self._seq == seq:                 # 期间来了新帧就不缓存旧图
+                self._cache[cache_key] = data
+                if len(self._cache) > 4:
+                    self._cache.clear()
+                    self._cache[cache_key] = data
+        return data, seq
 
 
 class LiveWebStore:
@@ -185,6 +321,7 @@ class LiveWebStore:
         self.cards: dict | None = None
         self.pending: dict | None = None
         self.current_advice: dict | None = None
+        self.control: dict | None = None
         self.advices: deque[dict] = deque(maxlen=MAX_ADVICES)
         self.hands: deque[dict] = deque(maxlen=MAX_HANDS)
         self.feed: deque[dict] = deque(maxlen=MAX_FEED)
@@ -273,6 +410,8 @@ class LiveWebStore:
             self.hands.appendleft(data)
         elif kind == "incident":
             self.stats["incidents"] = int(self.stats.get("incidents", 0)) + 1
+        elif kind == "control":
+            self.control = dict(data)
         elif kind == "session_end":
             self.ended_at = data.get("ended_at") or _now()
             summary = data.get("summary") or {}
@@ -309,6 +448,7 @@ class LiveWebStore:
                 "cards": self.cards,
                 "pending": self.pending,
                 "advice": self.current_advice,
+                "control": self.control,
                 "advices": list(self.advices),
                 "hands": list(self.hands),
                 "events": list(self.feed),
@@ -328,6 +468,32 @@ class _Handler(BaseHTTPRequestHandler):
     def _store(self) -> LiveWebStore:
         return self.server.store  # type: ignore[attr-defined]
 
+    @property
+    def _token(self) -> str | None:
+        return getattr(self.server, "token", None)
+
+    def _authorized(self) -> bool:
+        """控制/预览校验：本地 + 可选 token + Origin 同源。
+
+        只靠「绑 127.0.0.1」不够：本机浏览器里的任意网页都能 POST 到
+        localhost。工作台会带 `X-Workbench-Token`；没配 token 时控制面关闭。
+        """
+        expected = self._token
+        if not expected:
+            return False
+        got = self.headers.get("X-Workbench-Token") or ""
+        if got != expected:
+            return False
+        origin = (self.headers.get("Origin") or "").strip()
+        if origin:
+            host = self.headers.get("Host") or ""
+            if urlsplit(origin).netloc and urlsplit(origin).netloc != host:
+                return False
+        return True
+
+    def _query(self) -> dict[str, list[str]]:
+        return parse_qs(urlsplit(self.path).query)
+
     def do_GET(self) -> None:  # noqa: N802
         path = urlsplit(self.path).path
         if path == "/api/events":
@@ -337,15 +503,90 @@ class _Handler(BaseHTTPRequestHandler):
             self._json(self._store.snapshot())
             return
         if path == "/api/health":
-            self._json({"ok": True, "ts": _now()})
+            self._json({"ok": True, "ts": _now(),
+                        "run_id": getattr(self.server, "run_id", None)})
+            return
+        if path == "/api/meta":
+            meta = getattr(self.server, "meta", None)
+            self._json(meta() if callable(meta) else {})
+            return
+        if path == "/api/control/state":
+            control = getattr(self.server, "control", None)
+            self._json(control.state() if control is not None else {
+                "available": False, "enabled": False, "paused": False,
+                "reason": "未启用控制面"})
+            return
+        if path == "/api/preview.jpg":
+            self._preview()
             return
         self._static(path)
 
+    def do_POST(self) -> None:  # noqa: N802
+        path = urlsplit(self.path).path
+        if path != "/api/control/click":
+            self.send_error(404)
+            return
+        if not self._authorized():
+            self._json({"ok": False, "detail": "缺少或错误的 X-Workbench-Token"},
+                       status=403)
+            return
+        control = getattr(self.server, "control", None)
+        if control is None:
+            self._json({"ok": False, "detail": "本次运行没有控制面"}, status=404)
+            return
+        try:
+            length = min(int(self.headers.get("Content-Length") or 0), 4096)
+            raw = self.rfile.read(length) if length else b"{}"
+            body = json.loads(raw.decode("utf-8") or "{}")
+        except (ValueError, UnicodeDecodeError):
+            self._json({"ok": False, "detail": "请求体不是合法 JSON"}, status=400)
+            return
+        if not isinstance(body, dict) or not isinstance(body.get("enabled"), bool):
+            self._json({"ok": False, "detail": "需要 {\"enabled\": true|false}"},
+                       status=400)
+            return
+        state = control.set_click_enabled(
+            body["enabled"], body.get("reason"),
+            source=str(body.get("source") or "workbench"))
+        # 事件流/事件日志同步记一条，方便事后把「暂停」和点击时间线对齐。
+        try:
+            self._store.publish("control", dict(state))
+        except Exception:  # noqa: BLE001
+            pass
+        self._json(state)
+
+    def _preview(self) -> None:
+        preview = getattr(self.server, "preview", None)
+        if preview is None:
+            self.send_error(404)
+            return
+        q = self._query()
+        try:
+            width = 0 if q.get("full", ["0"])[0] in ("1", "true") else int(
+                (q.get("w") or ["960"])[0])
+        except ValueError:
+            width = 960
+        width = max(0, min(width, 4096))
+        data, seq = preview.jpeg(width=width)
+        if data is None:
+            self._json({"ok": False, "detail": "还没有处理过的帧"}, status=503)
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "image/jpeg")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Frame-Seq", str(seq))
+        self.end_headers()
+        try:
+            self.wfile.write(data)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
     # ── 响应 ────────────────────────────────────────────
-    def _json(self, payload: dict) -> None:
+    def _json(self, payload: dict, status: int = 200) -> None:
         body = json.dumps(payload, ensure_ascii=False,
                           separators=(",", ":")).encode("utf-8")
-        self.send_response(200)
+        self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
@@ -417,15 +658,35 @@ class _Server(ThreadingHTTPServer):
 
 
 class LiveWebServer:
-    """把 `LiveWebStore` 挂到一个本地 HTTP 端口上。"""
+    """把 `LiveWebStore` 挂到一个本地 HTTP 端口上。
+
+    `control` / `preview` / `meta` 是给工作台的最小控制面（只绑本机、
+    控制请求校验 token）；都不传时行为和旧看板完全一致。
+    """
 
     def __init__(self, *, session: dict, layout: dict,
                  host: str = "127.0.0.1", port: int = 8020,
-                 log: Callable[[str], None] | None = None) -> None:
+                 log: Callable[[str], None] | None = None,
+                 control: LiveControl | None = None,
+                 preview: PreviewStore | None = None,
+                 meta: Callable[[], dict] | None = None,
+                 token: str | None = None,
+                 run_id: str | None = None) -> None:
         self.store = LiveWebStore(session=session, layout=layout)
+        self.control = control
+        self.preview = preview
+        self.meta = meta
+        self.token = token
+        self.run_id = run_id
         self._log = log or (lambda _msg: None)
         self._httpd = _Server((host, port), _Handler)
         self._httpd.store = self.store  # type: ignore[attr-defined]
+        # 处理线程通过 server 属性取这些对象：保持 handler 无状态。
+        self._httpd.control = control  # type: ignore[attr-defined]
+        self._httpd.preview = preview  # type: ignore[attr-defined]
+        self._httpd.meta = meta  # type: ignore[attr-defined]
+        self._httpd.token = token  # type: ignore[attr-defined]
+        self._httpd.run_id = run_id  # type: ignore[attr-defined]
         self._thread = threading.Thread(target=self._httpd.serve_forever,
                                         name="live-web", daemon=True)
 

@@ -68,11 +68,12 @@ PY
 nv tools/bet_slider.py --list-windows --json
 ```
 
-### 1.5 三种窗口写法（`--url` 和 `--bet-slider-window` 通用）
+### 1.5 四种窗口写法（`--url` 和 `--bet-slider-window` 通用）
 
 | 写法 | 例子 | 说明 |
 |---|---|---|
-| `index:N` | `index:2` | 用 CoreGraphics 的窗口 id，**被别的窗口盖住也能截到**；窗口增删后索引会变 |
+| `id:N` | `id:2354` | CoreGraphics 的 window_id，**标签页标题变化不影响**；窗口关闭/浏览器重启后会变 |
+| `index:N` | `index:2` | 按枚举顺序取窗口，**被别的窗口盖住也能截到**；窗口增删后索引会变 |
 | `title:...` | `title:WePoker-H5` | 按当前标签页标题匹配；切标签会失效 |
 | `x,y,w,h` | `0,33,736,838` | 直接按屏幕矩形截（`screencapture -R`）；**被遮挡会截到上层窗口**，点击也要求窗口在最前 |
 
@@ -378,6 +379,7 @@ nv tools/click_marks.py --window "title:WePoker-H5" --url "title:WePoker-H5" --e
 | 点击没反应 | 游戏窗口不在最前（点击按屏幕坐标发）；截图不受遮挡但点击受 |
 | `--bet-slider` 报缺窗口坐标 | 必须给 `--bet-slider-window`（或 `config/bet_slider_mac.json` 里填 `window`） |
 | 滑杆打不开/金额不动 | 先跑 3.3 的手势验证；`drag_hold_ms` 80→120、`drag_max_px` 120→60 再试 |
+| 高位金额到不了/来回抖 | 金额越大 px/BB 越小：把 `drag_fine_min_px` 2→1（客户端认 1px 时）、`drag_step_fraction` 1.0→0.5；确认网格不可达再开 `accept_ratio` 0.02–0.05（默认 0，绝不近似落注） |
 | 看板端口被占 | `--web-port 8021`（只告警不阻塞识别） |
 | 想重看某手 | Ctrl-C 结束；JSONL / 事件日志 / `data/hand_outbox` 都在 `logs/` 与 `data/` 下 |
 
