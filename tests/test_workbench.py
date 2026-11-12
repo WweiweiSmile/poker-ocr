@@ -904,6 +904,8 @@ def test_resize_script_sets_size_before_position() -> None:
                                     736, 838)
     check(script.index("set size of w") < script.index("set position of w"),
           "应先 resize 再 set position（避免 resize 把位置重置）")
+    check("starts with" in script,
+          "System Events 的 Edge 窗口名带「 - Microsoft Edge」后缀，应按前缀匹配")
 
 
 def test_service_start_requires_force_on_warn() -> None:

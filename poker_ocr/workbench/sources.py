@@ -338,15 +338,17 @@ set targetY to @Y@
 set resized to false
 tell application "System Events"
   repeat with proc in (every process)
-    try
-      if name of proc is "@OWNER@" then
-        repeat with w in (every window of proc)
-          try
+    if name of proc is "@OWNER@" then
+      repeat with w in (every window of proc)
+        try
             set nm to (name of w)
             set pos to (position of w)
             set nx to item 1 of pos
             set ny to item 2 of pos
-            set nameHit to (nm is targetName)
+            set nameHit to false
+            if targetName is not "" then
+              set nameHit to (nm is targetName) or (nm starts with (targetName & " - "))
+            end if
             set posHit to ((nx > targetX - 3) and (nx < targetX + 3) and (ny > targetY - 3) and (ny < targetY + 3))
             if nameHit or posHit then
               set size of w to {@W@, @H@}
@@ -354,10 +356,11 @@ tell application "System Events"
               set resized to true
               exit repeat
             end if
-          end try
-        end repeat
-      end if
-    end try
+        on error errMsg number errNum
+          if errNum is -25211 or errMsg contains "assistive" then error errMsg number errNum
+        end try
+      end repeat
+    end if
     if resized then exit repeat
   end repeat
 end tell
@@ -538,21 +541,38 @@ def screen_recording_ok() -> tuple[bool | None, str]:
 
 
 def accessibility_ok() -> tuple[bool | None, str]:
-    """辅助功能权限：`System Events` 的 `UI elements enabled`。"""
+    """辅助功能权限：实际读一次窗口列表。
+
+    `System Events` 的 `UI elements enabled` 只说明系统 AX 打开，**不代表
+    当前进程被信任**：实测它会返回 true，但读取窗口仍报 -25211
+    「osascript 不允许辅助访问」。这里直接 count 一个进程的窗口来验证。
+    """
     if sys.platform != "darwin":
         return None, "非 macOS，跳过"
-    try:
-        proc = subprocess.run(
-            ["osascript", "-e",
-             'tell application "System Events" to get UI elements enabled'],
-            capture_output=True, text=True, timeout=10)
-        out = (proc.stdout or "").strip().lower()
-        if proc.returncode == 0 and out in ("true", "1", "yes"):
-            return True, "已授权辅助功能"
-        return False, ("未授权辅助功能（系统设置 → 隐私与安全性 → 辅助功能，"
-                       "勾上运行工作台的终端）")
-    except Exception as exc:  # noqa: BLE001
-        return False, f"{type(exc).__name__}: {exc}"
+    scripts = (
+        'tell application "System Events" to tell '
+        '(first process whose name is "Finder") to count windows',
+        'tell application "System Events" to tell '
+        '(first process whose frontmost is true) to count windows',
+    )
+    last = "无法访问窗口"
+    for script in scripts:
+        try:
+            proc = subprocess.run(["osascript", "-e", script],
+                                  capture_output=True, text=True, timeout=10)
+        except Exception as exc:  # noqa: BLE001
+            return False, f"{type(exc).__name__}: {exc}"
+        detail = (proc.stderr or proc.stdout or "").strip()
+        if proc.returncode == 0:
+            return True, "可读取窗口（辅助功能已授权）"
+        last = detail or last
+        if (("assistive" in detail) or ("辅助访问" in detail)
+                or ("not allowed" in detail) or ("-25211" in detail)):
+            return False, ("未授权辅助功能（系统设置 → 隐私与安全性 → 辅助功能，"
+                           "勾上运行工作台的终端，完全退出后重开）")
+        if "-1728" in detail or "invalid index" in detail or "无效的索引" in detail:
+            return True, "可读取窗口（没有窗口可枚举）"
+    return False, (f"读取窗口失败：{last}（系统设置 → 隐私与安全性 → 辅助功能）")
 
 
 def automation_ok() -> tuple[bool | None, str]:
