@@ -469,6 +469,7 @@ class FakeCache:
 
     def __init__(self) -> None:
         self.pinned: set[str] = set()
+        self.invalidated: set[str] = set()
 
     def is_pinned(self, key: str) -> bool:
         return key in self.pinned
@@ -477,11 +478,30 @@ class FakeCache:
         self.pinned.add(key)
         return True
 
+    def invalidate(self, key: str) -> None:
+        self.invalidated.add(key)
+        self.pinned.discard(key)
+
     def unpin(self, key: str) -> None:
         self.pinned.discard(key)
 
     def unpin_all(self) -> None:
         self.pinned.clear()
+
+
+def test_bad_bet_invalidates_roi_cache() -> None:
+    """一次 bet 误读被缓存复用会毁掉整条街：质量闸报错后必须作废那一块。"""
+    rows = {sid: dict(vals) for sid, vals in BASE.items()}
+    rows["upR"] = {**rows["upR"], "bet": "1BB8"}   # 带数字尾巴 → 解析失败
+    with stub_env():
+        s = new_stream()
+        s.stream.cache = FakeCache()
+        out = feed(s, make_frame(rows=rows, hero_turn=True))
+        check(out.kind == "discard" and any(
+            e.startswith("bet:upR") for e in out.errors),
+            f"应因 bet:upR 丢帧：{out.kind} {out.errors}")
+        check("upR.bet" in s.stream.cache.invalidated,
+              f"应作废 upR.bet：{s.stream.cache.invalidated}")
 
 
 def test_hand_boundaries_from_cards_and_board() -> None:
@@ -920,6 +940,7 @@ def main() -> int:
         test_all_in_badge_disappearance_ends_hand,
         test_all_in_badge_disappears_during_hero_turn_is_not_hand_end,
         test_all_in_badge_end_waits_for_river,
+        test_bad_bet_invalidates_roi_cache,
         test_hand_boundaries_from_cards_and_board,
         test_slow_fields_pinned_until_hand_switch,
         test_name_pin_expires_so_action_badges_can_be_read,

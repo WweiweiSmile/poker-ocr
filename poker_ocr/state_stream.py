@@ -241,6 +241,19 @@ class StateStream:
         # 「总底池」间隙帧单独计数：它们不是识别失败（见 pot_idle）。
         self.idle_frames = 0
 
+    def _invalidate_bad_rois(self, errors) -> None:
+        cache = getattr(self.stream, "cache", None)
+        if cache is None:
+            return
+        for err in errors or ():
+            prefix, _, sid = str(err).partition(":")
+            if not sid:
+                continue
+            if prefix == "bet":
+                cache.invalidate(f"{sid}.bet")
+            elif prefix in ("stack", "chip"):
+                cache.invalidate(f"{sid}.chip")
+
     # ─────────────────────────── 主流程 ───────────────────────────
 
     def ingest(self, img: np.ndarray, frame_id: str, t: float,
@@ -470,6 +483,11 @@ class StateStream:
         self._track_vanished(state)
 
         if not state.ok:
+            # 一块偶发误读会被 ROI 缓存按「画面没变」一直复用，导致整条街
+            # 都丢帧（2026-11-12 实盘：upR 的 bet 读成 1BB0，缓存挂住后
+            # 连续丢 150 帧，hero 轮到的建议一直不出来）。发现质量闸报某个
+            # 座位字段坏，就作废那一块，下一帧强制重读。
+            self._invalidate_bad_rois(state.errors)
             if state.pot_idle:
                 # 「总底池」不是读数坏：这手已经收池，这一帧是手牌间隙。
                 # 单独计数、不进「丢弃原因」，也不喂给手牌追踪（pot 是 None）。

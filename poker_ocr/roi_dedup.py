@@ -320,6 +320,18 @@ class RoiDedupCache:
         self._pinned.add(key)
         return True
 
+    def invalidate(self, key: str) -> None:
+        """丢掉一块的读数/hash，下一帧必须重新 OCR。
+
+        质量闸报 `bet:<seat>` / `stack:<seat>` 时用：一次偶发误读会被缓存
+        按「画面没变」一直复用，整条街都丢帧；必须显式作废这一块。
+        """
+        self._read.pop(key, None)
+        self._hash.pop(key, None)
+        self._gray.pop(key, None)
+        self._strict.discard(key)
+        self._pinned.discard(key)
+
     def unpin(self, key: str) -> None:
         """解钉一块，下一帧重新 hash（像素没变时仍命中缓存，不跑 rec）。
 

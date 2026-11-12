@@ -29,6 +29,11 @@ _ZERO_GLYPHS = frozenset({"0", "０", "。", "o", "O", "〇"})
 # 有没有单位是**硬门槛**：`入池27%`、`胜率15%`、`200`、`88.` 都能被这个正则
 # 匹出数字来，但都没有单位 —— 没有单位就没有「这是 BB 金额」的证据，一律不采信。
 _AMOUNT_RE = re.compile(r"^[^0-9]*(\d+(?:\.\d+)?)\s*(BB|B)?[^0-9]{0,3}$")
+# OCR 会把单位后的 O 读成数字 0：`1BB0` / `0.5BB0`。旧正则的尾巴只允许非数字，
+# 于是整块被拒成「不是金额形状」，质量闸丢帧。只放宽**单位后紧跟的 0/O**，
+# 不放宽「1BB8」这类真实数字融合。
+_AMOUNT_TRAILING_ZERO_RE = re.compile(
+    r"^[^0-9]*(\d+(?:\.\d+)?)\s*(BB|B)\s*[0O]{1,2}$")
 
 
 @dataclass
@@ -95,6 +100,8 @@ def parse_amount(text: str | None) -> Amount:
         return Amount(t, 0.0, None, zero_no_unit=True)
 
     m = _AMOUNT_RE.match(t)
+    if not m:
+        m = _AMOUNT_TRAILING_ZERO_RE.match(t)
     if not m:
         return Amount(t, None, None, error="不是金额形状")
     num, unit = m.group(1), m.group(2)

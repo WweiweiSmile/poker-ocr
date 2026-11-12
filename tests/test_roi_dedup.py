@@ -304,6 +304,21 @@ def test_pinned_key_ignores_pixel_changes_until_unpinned() -> None:
     check(not cache2.pin("nobody"), "没有读数时 pin 应返回 False")
 
 
+def test_invalidate_forces_reread() -> None:
+    """质量闸报 bet/stack 读坏时要能作废一块，否则错读会被缓存复用整条街。"""
+    profile = Profile.load(WPK)
+    img = make_marked()
+    engine = StubEngine(build_table(profile))
+    stream = RoiStream(profile, engine, with_dealer=False)
+    stream.read(img, frame_id="f1")
+    calls = len(engine.crops)
+    stream.cache.invalidate("hero.bet")
+    frame2 = stream.read(img, frame_id="f2")
+    check(len(engine.crops) > calls, "invalidate 后 hero.bet 应重跑 rec")
+    check(not frame2.seat("hero").fields["bet"].reused,
+          "作废的那块不能标成复用")
+
+
 def test_unpin_single_key_restores_reread() -> None:
     """unpin(key) 只解一块：名字到期复查动作徽章，盲注仍整手钉住。
 
@@ -415,6 +430,7 @@ def main() -> int:
         test_photo_noise_is_not_treated_as_uncertain_text,
         test_low_score_read_cannot_be_pinned,
         test_pinned_key_ignores_pixel_changes_until_unpinned,
+        test_invalidate_forces_reread,
         test_unpin_single_key_restores_reread,
         test_mad_eps_defaults_to_0_2,
         test_resolution_change_invalidates_the_cache,
