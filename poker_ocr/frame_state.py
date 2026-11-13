@@ -85,6 +85,13 @@ class PlayerState:
     # 离桌逻辑覆盖，这个字段始终保留 tracker 的当前结论，供 StateStream 比对
     # 后修复 roster。
     name_tracked: str | None = None
+    # ── 弃牌诊断（落库用，不影响判定）──
+    # `fold` 是「图标 + 文案」合并后的结论，事后看不出是哪条判据错了
+    # （2026-11-13 #20：126 条亮牌落在 inferred fold 的座位上）。
+    # 这里保留**原始读数**，由 hand_track 在补 fold 时快照进手牌记录。
+    fold_icon: bool | None = None    # 头像底角手牌图标：True=有/False=没有/None=没读到
+    fold_text: str | None = None     # 头像中间文案的原始读数（「弃牌」/「等待中」…）
+    fold_text_score: float | None = None
 
     @property
     def seat_state(self) -> str:
@@ -434,8 +441,10 @@ def _build_players(ctx: BuildContext):
         # 它只说明「没被发牌」，所以下面还要过一道「在局证据优先」：已经弃牌/
         # 全下/亮牌/还挂着手牌图标的人，这一手显然有牌，不能被转场文案推翻。
         wait_kind = waiting_badge(avatar_text, avatar_score)
-        fold_text = (is_fold_badge(avatar_text, avatar_score)
-                     if (sid in avatar_reads and not shown_here) else None)
+        # 注意：这里只是「文案是不是弃牌」的判定，和 PlayerState 里留档的
+        # 原始 `fold_text`（头像文案本身）不是一回事，故另起名字。
+        fold_badge = (is_fold_badge(avatar_text, avatar_score)
+                      if (sid in avatar_reads and not shown_here) else None)
         # 弃牌 = 头像底角的红色手牌图标消失 **且** 头像中间出现「弃牌」。
         # 两个条件缺一不可：
         #   · 只看图标（没图标=弃牌）会在换手残留/遮挡/压缩时把在池玩家判成
@@ -446,9 +455,9 @@ def _build_players(ctx: BuildContext):
         fold = None
         if icon is True:
             fold = False
-        elif icon is False and fold_text is True:
+        elif icon is False and fold_badge is True:
             fold = True
-        elif sid == frame.hero_seat_id and fold_text is True:
+        elif sid == frame.hero_seat_id and fold_badge is True:
             # hero 头像从不挂手牌图标，没有条件 1，只能用「弃牌」二字。
             fold = True
         if shown_here:
@@ -717,6 +726,13 @@ def _build_players(ctx: BuildContext):
             name_score=name_score if (action is None and name_text) else 0.0,
             # 离桌座位的 tracker 结论属于**下一手**的占用者，不能写进这一手
             name_tracked=None if left_here else tracked,
+            # 弃牌判据的原始读数：`fold` 合并了图标与文案，这里原样留证。
+            fold_icon=icon,
+            fold_text=((avatar_text or "").strip() or None
+                       if sid in avatar_reads else None),
+            fold_text_score=(avatar_score
+                             if (sid in avatar_reads
+                                 and (avatar_text or "").strip()) else None),
         ))
 
     in_hand = [p for p in players if p.in_hand]

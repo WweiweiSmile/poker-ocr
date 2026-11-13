@@ -26,9 +26,11 @@ from poker_ocr.hand_track import (  # noqa: E402
     ActionRecord, HandSnapshot, LiveHandTracker, OpponentSnapshot, StreetRecord,
 )
 from poker_ocr.opponent_profile import (  # noqa: E402
-    CLASSIFIER_VERSION, HandObservation, OpponentRead, OpponentStats, ProfileStore,
+    CLASSIFIER_VERSION, SHOWDOWN_DROP_BOARD_TOO_SHORT, SHOWDOWN_DROP_CARD_COUNT,
+    SHOWDOWN_DROP_SEAT_FOLDED, SHOWDOWN_DROP_SEAT_INACTIVE,
+    HandObservation, OpponentRead, OpponentStats, ProfileStore,
     classify, normalize_name, observations_from_hand,
-    pool_key_from_blinds,
+    pool_key_from_blinds, showdown_reads,
 )
 from poker_ocr.parse import Blinds  # noqa: E402
 
@@ -49,10 +51,13 @@ def player(seat_id: str, *, name: str | None = None, position: str | None = None
            stack: float | None = 100.0, bet: float | None = 0.0,
            action: str | None = None, fold: bool | None = None,
            in_hand: bool = True, all_in: bool = False,
-           status: str = "playing") -> PlayerState:
+           status: str = "playing",
+           fold_icon: bool | None = None, fold_text: str | None = None,
+           fold_text_score: float | None = None) -> PlayerState:
     return PlayerState(seat_id=seat_id, name=name, position=position, stack=stack,
                        bet=bet, action=action, fold=fold, in_hand=in_hand,
-                       all_in=all_in, status=status)
+                       all_in=all_in, status=status, fold_icon=fold_icon,
+                       fold_text=fold_text, fold_text_score=fold_text_score)
 
 
 def state(*players: PlayerState, pot: float = 3.0, pbs: float = 3.0,
@@ -194,6 +199,56 @@ def test_fold_and_check_are_inferred_at_street_end() -> None:
           f"转牌手末应补 A/hero 过牌：{turn_acts}")
     check(all(x.get("inferred") for x in turn_acts),
           f"补出来的动作应标 inferred：{turn_acts}")
+
+
+def test_inferred_fold_carries_evidence_snapshot() -> None:
+    """#20：补出 fold 时落一份「换街帧的证据快照」。
+
+    126 条亮牌落在已弃牌座位上，事后无法区分是「图标没读到」还是「头像
+    文案读错」——因为落库只有 inferred=True。快照只加诊断字段，不改变
+    补不补 fold 的判定。
+    """
+    tr = LiveHandTracker(confirm_frames=1)
+    pre = state(
+        player("hero", name="我", position="BTN", stack=100.0),
+        player("a", name="A", position="SB", bet=0.5, stack=99.5),
+        player("b", name="B", position="BB", bet=1.0, stack=99.0),
+        player("c", name="C", position="CO", stack=100.0),
+        pot=1.5, pbs=0.0)
+    feed(tr, pre, ["Ah", "Kd"], [])
+    flop = state(
+        player("hero", name="我", position="BTN", stack=100.0),
+        player("a", name="A", position="SB", stack=99.5),
+        player("b", name="B", position="BB", stack=99.0, fold=True,
+               status="folded", fold_icon=False, fold_text="弃牌",
+               fold_text_score=0.9),
+        player("c", name="C", position="CO", stack=100.0),
+        pot=1.5, pbs=1.5, dealer="a")
+    feed(tr, flop, ["Ah", "Kd"], ["Ks", "7d", "2c"])
+    tr.finish_current()
+    hand = tr.take_finished()
+    check(hand is not None, "应产出结束手牌")
+
+    acts = [a for s in hand["streets"] for a in s["actions"]]
+    fold = next(a for a in acts
+                if a["seat_id"] == "b" and a["action"] == "fold")
+    ev = fold.get("evidence")
+    check(isinstance(ev, dict), f"inferred fold 应带证据快照：{fold}")
+    if isinstance(ev, dict):
+        check(ev.get("status") == "folded" and ev.get("in_hand") is True,
+              f"快照应记录该座位的 status/in_hand：{ev}")
+        check(ev.get("fold_icon") is False and ev.get("fold_text") == "弃牌"
+              and ev.get("fold_text_score") == 0.9,
+              f"快照应记录头像图标/文案原始读数：{ev}")
+        check(ev.get("name_read") is True and ev.get("stack_read") is True,
+              f"快照应记录名字/筹码是否读到：{ev}")
+        check(ev.get("shown") is False,
+              f"快照应记录该帧该座位不在 shows：{ev}")
+        check(ev.get("frame_id") == "f", f"快照应带换街帧 id：{ev}")
+    # 补出来的 check 不是弃牌证据，不写这个键
+    checks = [a for a in acts if a["action"] == "check" and a.get("inferred")]
+    check(checks and all("evidence" not in a for a in checks),
+          f"inferred check 不应带 fold 证据：{checks}")
 
 
 def test_no_fold_inferred_when_action_badge_recorded() -> None:
@@ -429,6 +484,165 @@ def test_observations_from_hand() -> None:
     c = obs["短码"]
     check(c.preflop_opp and not c.vpip and not c.saw_flop,
           f"翻前弃牌的人应有机会但无 VPIP、没看翻牌：{c}")
+
+
+# ──────────────── 摊牌证据准入（clean 闸门，#20） ────────────────
+
+def _gate_hand() -> dict:
+    """a 干净亮牌；b 翻牌弃牌后仍读到两张亮牌（#20 那 126 条的同型）。"""
+    return make_hand(
+        board=("Ad", "As", "Qc", "Kc", "8d"),
+        preflop=[act("a", "raise", 8.0, name="芒果与西米", position="BTN"),
+                 act("b", "call", 8.0, name="好运常在ok", position="SB"),
+                 act("hero", "call", 8.0, is_hero=True)],
+        flop=[act("a", "bet", 10.0, name="芒果与西米"),
+              act("b", "fold", None, name="好运常在ok")],
+        turn=[act("a", "check", None)],
+        river=[act("a", "check", None)],
+        shows=[{"seat_id": "a", "cards": ["Kd", "Qs"]},
+               {"seat_id": "b", "cards": ["Jd", "Js"]}],
+    )
+
+
+def _gate_on() -> None:
+    """测试自己钉住前置条件，不依赖调用方 shell 里导出的环境变量。"""
+    import os
+    os.environ["SHOWDOWN_GATE_ENABLED"] = "1"
+
+
+def _gate_off():
+    """临时关闸门，返回恢复函数。"""
+    import os
+    old = os.environ.get("SHOWDOWN_GATE_ENABLED")
+    os.environ["SHOWDOWN_GATE_ENABLED"] = "0"
+
+    def restore() -> None:
+        if old is None:
+            os.environ.pop("SHOWDOWN_GATE_ENABLED", None)
+        else:
+            os.environ["SHOWDOWN_GATE_ENABLED"] = old
+    return restore
+
+
+def test_showdown_gate_drops_folded_seat() -> None:
+    _gate_on()
+    """已弃牌座位的两张亮牌不进牌型族 / 摊牌率分母，reason=seat_folded。"""
+    obs = {o.display_name: o for o in observations_from_hand(_gate_hand())}
+    b = obs["好运常在ok"]
+    check(b.showdown_category is None,
+          f"已弃牌座位不能进牌型族分类：{b}")
+    check(b.showdown_drop_reason == SHOWDOWN_DROP_SEAT_FOLDED,
+          f"reason 应为 seat_folded：{b.showdown_drop_reason!r}")
+    a = obs["芒果与西米"]
+    check(a.showdown_category == 2 and a.showdown_drop_reason is None,
+          f"无 fold 的历史亮牌应正常通过：{a}")
+
+    # 聚合能按 reason 计数，且能落盘/读回
+    stats = OpponentStats(key="b")
+    stats.add(b)
+    check(stats.showdowns == 0, f"被剔除的亮牌不能进摊牌率分母：{stats.showdowns}")
+    check(stats.showdown_drops.get(SHOWDOWN_DROP_SEAT_FOLDED) == 1.0,
+          f"应按 reason 计数：{stats.showdown_drops}")
+    raw = stats.to_dict()
+    check(raw.get("showdown_drops", {}).get(SHOWDOWN_DROP_SEAT_FOLDED) == 1.0,
+          f"to_dict 应带 reason 计数：{raw.get('showdown_drops')}")
+    back = OpponentStats.from_dict("b", raw)
+    check(back.showdown_drops == stats.showdown_drops,
+          f"from_dict 应读回 reason 计数：{back.showdown_drops}")
+
+
+def test_showdown_gate_card_count_and_board() -> None:
+    _gate_on()
+    """1 张亮牌 → card_count；牌面 <3 → board_too_short；顺序稳定。"""
+    one = make_hand(
+        board=("Ad", "As", "Qc"),
+        preflop=[act("a", "raise", 8.0, name="芒果与西米", position="BTN"),
+                 act("c", "fold", None, name="短码", position="CO")],
+        flop=[act("a", "bet", 10.0, name="芒果与西米")],
+        shows=[{"seat_id": "c", "cards": ["Jd"]}],
+    )
+    c = next(o for o in observations_from_hand(one) if o.display_name == "短码")
+    check(c.showdown_category is None and
+          c.showdown_drop_reason == SHOWDOWN_DROP_CARD_COUNT,
+          f"1 张牌应 card_count（即使他也弃过牌）：{c.showdown_drop_reason!r}")
+
+    short = make_hand(
+        board=("Ad", "As"),
+        preflop=[act("a", "raise", 8.0, name="芒果与西米", position="BTN"),
+                 act("hero", "call", 8.0, is_hero=True)],
+        shows=[{"seat_id": "a", "cards": ["Kd", "Qs"]}],
+    )
+    a = next(o for o in observations_from_hand(short)
+             if o.display_name == "芒果与西米")
+    check(a.showdown_category is None and
+          a.showdown_drop_reason == SHOWDOWN_DROP_BOARD_TOO_SHORT,
+          f"牌面 <3 应 board_too_short：{a.showdown_drop_reason!r}")
+
+
+def test_showdown_gate_seat_inactive_last_street() -> None:
+    _gate_on()
+    """亮牌座位不在最后一街的在局集合里（且没 fold 记录）→ 剔除。"""
+    hand = make_hand(
+        board=("Ad", "As", "Qc", "Kc", "8d"),
+        preflop=[act("a", "raise", 8.0, name="芒果与西米", position="BTN"),
+                 act("b", "call", 8.0, name="好运常在ok", position="SB")],
+        flop=[act("a", "bet", 10.0, name="芒果与西米")],
+        turn=[act("a", "check", None)],
+        river=[act("a", "check", None)],
+        street_active={"preflop": ["hero", "a", "b"], "flop": ["a"],
+                       "turn": ["a"], "river": ["a"]},
+        shows=[{"seat_id": "a", "cards": ["Kd", "Qs"]},
+               {"seat_id": "b", "cards": ["Jd", "Js"]}],
+    )
+    obs = {o.display_name: o for o in observations_from_hand(hand)}
+    b = obs["好运常在ok"]
+    check(b.showdown_category is None and
+          b.showdown_drop_reason == SHOWDOWN_DROP_SEAT_INACTIVE,
+          f"不在最后一街在局集合应剔除：{b.showdown_drop_reason!r}")
+
+
+def test_showdown_gate_can_be_disabled() -> None:
+    _gate_on()
+    """闸门整体关闭时，行为回到 #20 之前（只看 2 张牌 + 牌面 ≥3）。"""
+    restore = _gate_off()
+    try:
+        obs = {o.display_name: o for o in observations_from_hand(_gate_hand())}
+    finally:
+        restore()
+    b = obs["好运常在ok"]
+    check(b.showdown_category is not None and b.showdown_drop_reason is None,
+          f"关闸后已弃牌座位的亮牌应照旧计入：{b}")
+    check(b.showdown_category == 2,
+          f"JJ + AAQK8 应判两对：{b.showdown_category}")
+    # 1 张牌在关闸后仍然不算摊牌（#20 之前就是这样）
+    one = make_hand(
+        board=("Ad", "As", "Qc"),
+        preflop=[act("a", "raise", 8.0, name="芒果与西米", position="BTN"),
+                 act("c", "fold", None, name="短码", position="CO")],
+        flop=[act("a", "bet", 10.0, name="芒果与西米")],
+        shows=[{"seat_id": "c", "cards": ["Jd"]}],
+    )
+    restore = _gate_off()
+    try:
+        c = next(o for o in observations_from_hand(one)
+                 if o.display_name == "短码")
+    finally:
+        restore()
+    check(c.showdown_category is None and
+          c.showdown_drop_reason == SHOWDOWN_DROP_CARD_COUNT,
+          f"关闸后 1 张牌仍不算摊牌：{c.showdown_drop_reason!r}")
+
+
+def test_showdown_reads_reports_every_reason() -> None:
+    _gate_on()
+    """`showdown_reads` 是审计/规格共用的单一判定入口，含被剔除的条目。"""
+    reads = {r.seat_id: r for r in showdown_reads(_gate_hand())}
+    check(set(reads) == {"a", "b"}, f"应覆盖所有亮牌座位：{set(reads)}")
+    check(reads["a"].clean and reads["a"].category == 2,
+          f"a 应 clean：{reads['a']}")
+    check(not reads["b"].clean and
+          reads["b"].reason == SHOWDOWN_DROP_SEAT_FOLDED,
+          f"b 应被剔除并带 reason：{reads['b']}")
 
 
 # ─────────────────────────── 分类与门控 ───────────────────────────
@@ -1349,6 +1563,12 @@ def run() -> int:
         test_street_actions_are_reordered_chronologically,
         test_limp_and_cbet_defence_observations,
         test_fold_to_three_bet_and_missing_fold_inference,
+        test_inferred_fold_carries_evidence_snapshot,
+        test_showdown_gate_drops_folded_seat,
+        test_showdown_gate_card_count_and_board,
+        test_showdown_gate_seat_inactive_last_street,
+        test_showdown_gate_can_be_disabled,
+        test_showdown_reads_reports_every_reason,
         test_population_prior_shrinkage,
         test_facing_bet_by_street,
         test_name_lexicon_source_and_alias_merge,

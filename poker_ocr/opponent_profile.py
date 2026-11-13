@@ -330,6 +330,8 @@ class HandObservation:
     bet_sizes: tuple[float, ...] = ()
     showdown_category: int | None = None
     aggressive_showdown: bool = False
+    # 亮牌被 clean 闸门剔除时的稳定 reason（#20）；clean 时 None。
+    showdown_drop_reason: str | None = None
     inferred_ratio: float = 0.0
     # 爆炸底池：人人交固定前注，没有翻前行动。`passive_entry=True` 表示这一手
     # 只有强制前注、没有主动入池，不计入 VPIP 分母（VPIP 只统计主动入池）。
@@ -599,36 +601,141 @@ def _bet_size_ratios(hand: Mapping, seat_id: str) -> tuple[float, ...]:
     return tuple(sizes)
 
 
-def _showdown(hand: Mapping, seat_id: str,
-              board: Sequence[str]) -> tuple[int | None, bool]:
-    """摊牌牌型 + 摊牌前是否主动下注/加注。只有完整两张亮牌才算摊牌。"""
-    cards = None
+# ───────────── 摊牌证据准入（clean 闸门，#20） ─────────────
+# 2026-11-13 #20：126 条亮牌落在「同一手最后已弃牌」的座位上，摊牌牌型
+# 分布与摊牌率因此被污染。闸门只做**消费侧**过滤：落库的 fold 一条不动
+# （历史 126 条也不回填），所有拿亮牌当证据的入口都从这里取判定。
+#
+# reason code 是稳定字符串：画像聚合、审计脚本、图 #10 的「证据准入闸门」
+# 规格共用这一处，不要各判一遍。
+SHOWDOWN_DROP_CARD_COUNT = "card_count"
+SHOWDOWN_DROP_BOARD_TOO_SHORT = "board_too_short"
+SHOWDOWN_DROP_SEAT_FOLDED = "seat_folded"
+SHOWDOWN_DROP_SEAT_INACTIVE = "seat_inactive_last_street"
+SHOWDOWN_DROP_EVALUATE_FAILED = "evaluate_failed"
+SHOWDOWN_DROP_REASONS = (
+    SHOWDOWN_DROP_CARD_COUNT,
+    SHOWDOWN_DROP_BOARD_TOO_SHORT,
+    SHOWDOWN_DROP_SEAT_FOLDED,
+    SHOWDOWN_DROP_SEAT_INACTIVE,
+    SHOWDOWN_DROP_EVALUATE_FAILED,
+)
+# 默认开启；设成 0/false/off/no 可整体关闭，用于和旧口径对比复跑。
+SHOWDOWN_GATE_ENV = "SHOWDOWN_GATE_ENABLED"
+
+
+def showdown_gate_enabled(env: Mapping[str, str] | None = None) -> bool:
+    source = os.environ if env is None else env
+    raw = str(source.get(SHOWDOWN_GATE_ENV, "1")).strip().lower()
+    return raw not in ("0", "false", "off", "no")
+
+
+@dataclass(frozen=True)
+class ShowdownRead:
+    """一条亮牌的证据判定；`clean=True` 才能进牌型族 / 摊牌率分母。"""
+
+    seat_id: str
+    cards: tuple[str, ...] = ()
+    category: int | None = None
+    aggressive: bool = False
+    reason: str | None = None
+
+    @property
+    def clean(self) -> bool:
+        return self.reason is None
+
+
+def _showdown_cards(hand: Mapping, seat_id: str) -> list[str]:
     for show in hand.get("shows") or []:
         if isinstance(show, Mapping) and str(show.get("seat_id")) == seat_id:
-            cards = [str(c) for c in (show.get("cards") or [])]
-            break
-    if not cards or len(cards) != 2 or len(board) < 3:
-        return None, False
+            return [str(c) for c in (show.get("cards") or [])]
+    return []
+
+
+def _last_street(hand: Mapping) -> str | None:
+    return next((st for st in reversed(_STREET_ORDER) if _has_street(hand, st)),
+                None)
+
+
+def _last_action_by_seat(hand: Mapping) -> dict[str, str]:
+    """每个座位在本手记录里的最后一个动作（按记录顺序，后者覆盖前者）。"""
+    last: dict[str, str] = {}
+    for street in hand.get("streets") or []:
+        for action in street.get("actions") or []:
+            if not isinstance(action, Mapping):
+                continue
+            seat = str(action.get("seat_id") or "")
+            kind = action.get("action")
+            if seat and kind:
+                last[seat] = str(kind)
+    return last
+
+
+def _evaluate_showdown(cards: Sequence[str],
+                       board: Sequence[str]) -> int | None:
     try:
         from .coach import evaluate, parse_cards
-        category, _ = evaluate(parse_cards("".join(cards + list(board[:5]))))
+        category, _ = evaluate(parse_cards(
+            "".join(list(cards) + list(board[:5]))))
     except (ValueError, TypeError):
-        return None, False
-    aggressive = False
+        return None
+    return int(category)
+
+
+def _showdown_aggressive(hand: Mapping, seat_id: str) -> bool:
     for street in _POSTFLOP:
-        for action in (hand.get("streets") or []):
-            if str(action.get("street")) != street:
+        for rec in hand.get("streets") or []:
+            if str(rec.get("street")) != street:
                 continue
-            for act in action.get("actions") or []:
+            for act in rec.get("actions") or []:
                 if (str(act.get("seat_id")) == seat_id
                         and act.get("action") in ("bet", "raise")):
-                    aggressive = True
-                    break
-            if aggressive:
-                break
-        if aggressive:
-            break
-    return category, aggressive
+                    return True
+    return False
+
+
+def showdown_read(hand: Mapping, seat_id: str,
+                  board: Sequence[str]) -> ShowdownRead:
+    """亮牌的证据判定：先判 clean，再评牌型。
+
+    判定顺序固定（审计脚本按 reason 计数依赖它）：
+    card_count → board_too_short → seat_folded → seat_inactive_last_street
+    → evaluate_failed。
+
+    闸门默认开启；`SHOWDOWN_GATE_ENABLED=0/false/off/no` 整体关闭，只跳过
+    座位判据（回到 #20 之前「2 张牌 + 牌面 ≥3」的口径），1 张牌始终不算。
+    """
+    seat = str(seat_id)
+    cards = tuple(_showdown_cards(hand, seat))
+    if len(cards) != 2:
+        return ShowdownRead(seat, cards, reason=SHOWDOWN_DROP_CARD_COUNT)
+    board = [str(c) for c in board]
+    if len(board) < 3:
+        return ShowdownRead(seat, cards, reason=SHOWDOWN_DROP_BOARD_TOO_SHORT)
+    if showdown_gate_enabled():
+        if _last_action_by_seat(hand).get(seat) == "fold":
+            return ShowdownRead(seat, cards, reason=SHOWDOWN_DROP_SEAT_FOLDED)
+        last = _last_street(hand)
+        active = _street_active(hand).get(last) if last else None
+        if active and seat not in active:
+            return ShowdownRead(seat, cards,
+                                reason=SHOWDOWN_DROP_SEAT_INACTIVE)
+    category = _evaluate_showdown(cards, board)
+    if category is None:
+        return ShowdownRead(seat, cards, reason=SHOWDOWN_DROP_EVALUATE_FAILED)
+    return ShowdownRead(seat, cards, category=category,
+                        aggressive=_showdown_aggressive(hand, seat))
+
+
+def showdown_reads(hand: Mapping) -> list[ShowdownRead]:
+    """一手牌里每条亮牌的证据判定（含被剔除的），供审计/聚合按 reason 计数。"""
+    board = [str(c) for c in (hand.get("board") or [])]
+    out: list[ShowdownRead] = []
+    for show in hand.get("shows") or []:
+        if isinstance(show, Mapping) and show.get("seat_id"):
+            out.append(showdown_read(hand, str(show["seat_id"]), board))
+    return out
+
 
 
 def _bomb_pot_entry(hand: Mapping,
@@ -697,6 +804,9 @@ def observations_from_hand(hand: Mapping, *,
     if not bomb_pot and not preflop_actions:
         return []
     board = [str(c) for c in (hand.get("board") or [])]
+    # 只有真在 `shows` 里的座位才谈得上「亮牌证据」；没亮牌的座位不是被剔除。
+    show_seats = {str(s["seat_id"]) for s in (hand.get("shows") or [])
+                  if isinstance(s, Mapping) and s.get("seat_id")}
     session = str(hand.get("session") if hand.get("session") is not None else "")
     uid = hand_uid(hand)
     hand_pool = pool_key or pool_key_from_blinds(
@@ -820,7 +930,13 @@ def observations_from_hand(hand: Mapping, *,
         weight = (INFERRED_WEIGHT if inferred_ratio > INFERRED_DOWNWEIGHT
                   else 1.0)
 
-        category, aggressive_showdown = _showdown(hand, seat_id, board)
+        if seat_id in show_seats:
+            read = showdown_read(hand, seat_id, board)
+            category, aggressive_showdown = read.category, read.aggressive
+            showdown_drop_reason = read.reason
+        else:
+            category, aggressive_showdown, showdown_drop_reason = (
+                None, False, None)
         bet_sizes = _bet_size_ratios(hand, seat_id)
 
         # ── 位置开池：轮到我时前面没人主动入池（跟注/加注都算入池）──
@@ -1008,6 +1124,7 @@ def observations_from_hand(hand: Mapping, *,
             bet_sizes=bet_sizes,
             showdown_category=category,
             aggressive_showdown=aggressive_showdown,
+            showdown_drop_reason=showdown_drop_reason,
             inferred_ratio=round(inferred_ratio, 3),
             bomb_pot=bomb_pot,
             passive_entry=passive_entry,
@@ -1077,6 +1194,8 @@ class OpponentStats:
     showdowns: float = 0.0
     aggressive_showdowns: float = 0.0
     weak_aggressive_showdowns: float = 0.0
+    # 亮牌被 clean 闸门剔除的次数，按稳定 reason 计数（#20）。不进 showdowns。
+    showdown_drops: dict[str, float] = field(default_factory=dict)
     bomb_pot_hands: float = 0.0
     passive_entry_hands: float = 0.0
     # ── 位置开池与翻后线路（用户口径：要能看出「在哪个位置爱加注」和
@@ -1321,6 +1440,9 @@ class OpponentStats:
             self.bomb_pot_hands += 1.0
         if obs.passive_entry:
             self.passive_entry_hands += 1.0
+        if obs.showdown_drop_reason:
+            self.showdown_drops[obs.showdown_drop_reason] = (
+                self.showdown_drops.get(obs.showdown_drop_reason, 0.0) + w)
         if obs.showdown_category is not None:
             self.showdowns += w
             if obs.aggressive_showdown:
@@ -1354,6 +1476,8 @@ class OpponentStats:
             "showdowns": _num(self.showdowns),
             "aggressive_showdowns": _num(self.aggressive_showdowns),
             "weak_aggressive_showdowns": _num(self.weak_aggressive_showdowns),
+            "showdown_drops": {k: _num(v)
+                               for k, v in self.showdown_drops.items()},
             "bomb_pot_hands": _num(self.bomb_pot_hands),
             "passive_entry_hands": _num(self.passive_entry_hands),
             "open_opp": _num(self.open_opp),
@@ -1431,6 +1555,7 @@ class OpponentStats:
             showdowns=f("showdowns"),
             aggressive_showdowns=f("aggressive_showdowns"),
             weak_aggressive_showdowns=f("weak_aggressive_showdowns"),
+            showdown_drops=_bucket_map(raw.get("showdown_drops")),
             bomb_pot_hands=f("bomb_pot_hands"),
             passive_entry_hands=f("passive_entry_hands"),
             open_opp=f("open_opp"),
@@ -2090,6 +2215,9 @@ class ProfileStore:
         target.showdowns += old.showdowns
         target.aggressive_showdowns += old.aggressive_showdowns
         target.weak_aggressive_showdowns += old.weak_aggressive_showdowns
+        for reason, value in old.showdown_drops.items():
+            target.showdown_drops[reason] = (
+                target.showdown_drops.get(reason, 0.0) + value)
         target.bomb_pot_hands += old.bomb_pot_hands
         target.passive_entry_hands += old.passive_entry_hands
         target.open_opp += old.open_opp

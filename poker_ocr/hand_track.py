@@ -51,7 +51,7 @@
 from __future__ import annotations
 
 import copy
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, fields, replace
 from datetime import datetime
 from typing import Callable
 
@@ -167,6 +167,33 @@ def street_of_board(board_len: int) -> str | None:
 
 
 @dataclass(frozen=True)
+class FoldEvidence:
+    """补出 inferred fold 时，换街那一帧对这个座位的证据快照。
+
+    只用于复盘/诊断，**不参与任何判定**：落库的 inferred fold 不会因为
+    快照里 `fold=False` 而被撤销（那属于另一个 issue）。2026-11-13 #20：
+    126 条亮牌落在 inferred fold 的座位上，事后无法区分是图标没读到、
+    文案读错，还是人真的弃了牌 —— 这里把当时的原始读数留下来。
+    """
+
+    frame_id: str | None = None
+    status: str | None = None            # playing/folded/buying_in/away
+    in_hand: bool | None = None          # 该帧这个座位是否在局
+    fold_icon: bool | None = None        # 头像底角手牌图标原始读数
+    fold_text: str | None = None         # 头像中间文案原始读数
+    fold_text_score: float | None = None
+    action: str | None = None            # 名字槽读到的动作徽章
+    name_read: bool | None = None        # 这一帧名字是否读到
+    stack_read: bool | None = None       # 这一帧筹码是否读到
+    shown: bool | None = None            # 该帧这个座位是否在 shows
+
+    def to_dict(self) -> dict:
+        """只写读到的键：没读到 ≠ 读到了空值。"""
+        return {f.name: value for f in fields(self)
+                if (value := getattr(self, f.name)) is not None}
+
+
+@dataclass(frozen=True)
 class ActionRecord:
     """一条行动。amount 是**本街加到总额**（BB），读不到为 None。"""
 
@@ -183,6 +210,8 @@ class ActionRecord:
     # 由「本手中途离桌」补出的弃牌（内部标记，不落库）。弹窗/遮挡让状态层
     # 误判离桌、随后手牌图标恢复时，只撤销这一类 fold，不碰真实弃牌。
     left: bool = False
+    # 补出 inferred fold 时的证据快照（可选）。手末补全没有帧，留空。
+    evidence: FoldEvidence | None = None
 
     def label(self) -> str:
         if self.action == "check":
@@ -426,6 +455,8 @@ class LiveHandTracker:
         # seat_id → 首次看到这组亮牌时的手牌 id。亮牌会在屏幕上停留好几秒，
         # 跨过换手；没有这份映射会把上一手的亮牌也写进下一手。
         self._active_shows: dict[str, str] = {}
+        # 最后一帧被接受的状态：手末补 fold 时没有「下一街帧」，证据只能取它。
+        self._last_frame: FrameState | None = None
         # `finish_current()` 主动结束当前手后，等真正的新手信号再开新手。
         # 否则摊牌后的同一帧会被当成新手牌开头，把一手牌劈成两半。
         self._await_new_hand = False
@@ -462,6 +493,7 @@ class LiveHandTracker:
                 cards_warnings: tuple[str, ...] = (),
                 allow_advice: bool = True,
                 ) -> HandSnapshot | None:
+        self._last_frame = state
         """喂一帧被接受的状态；返回决策点快照或 None。
 
         调用方只应喂 `state.ok` 的帧 —— 带 errors 的帧里任何字段都可能是猜的。
@@ -510,7 +542,7 @@ class LiveHandTracker:
                 # 正常换手（不是 finish_current 主动收手）也要补全最后一街：
                 # 弃牌徽章漏读时，最后几帧的 active 差集就是全部证据。
                 self._finalize_street(self.hand, self.hand.street, None,
-                                      at_hand_end=True)
+                                      state=state, at_hand_end=True)
                 # 最后一街没有「下一街 pbs」可对账，手末自己核一遍底池账单
                 self._audit_street_account(self.hand)
                 self.last_finished = copy.deepcopy(self.hand)
@@ -761,7 +793,7 @@ class LiveHandTracker:
             return
         # 手末再补一次：河牌打完/全下摊牌时没有「下一街」可以触发街末补全。
         self._finalize_street(self.hand, self.hand.street, None,
-                              at_hand_end=True)
+                              state=self._last_frame, at_hand_end=True)
         # 最后一街的底池账单（没有下一街 pbs 可用，这里自己核）
         self._audit_street_account(self.hand)
         hand = copy.deepcopy(self.hand)
@@ -1347,7 +1379,8 @@ class LiveHandTracker:
             hand.actions.append(ActionRecord(
                 street=hand.street, seat_id=p.seat_id, name=p.name,
                 position=p.position, action="fold", is_hero=False,
-                inferred=True, left=True))
+                inferred=True, left=True,
+                evidence=self._fold_evidence(p.seat_id, state)))
             hand.last_index[(hand.street, p.seat_id)] = len(hand.actions) - 1
 
     def _revoke_left_folds(self, state: FrameState, hand: _LiveHand) -> None:
@@ -1807,6 +1840,30 @@ class LiveHandTracker:
             return shown.get("name"), shown.get("position")
         return None, None
 
+    def _fold_evidence(self, seat_id: str,
+                       state: FrameState | None) -> FoldEvidence | None:
+        """这个座位的证据快照；一帧都没有时不造证据。"""
+        if state is None:
+            return None
+        # `state.player()` 找不到时会抛 KeyError；这里要的是「没这个人」。
+        player = next((p for p in state.players if p.seat_id == seat_id), None)
+        shown = seat_id in self._active_shows
+        if player is None:
+            # 换街帧里这个座位整块没出现：只能记「不在 shows」。
+            return FoldEvidence(frame_id=state.frame_id, shown=shown)
+        return FoldEvidence(
+            frame_id=state.frame_id,
+            status=player.status,
+            in_hand=player.in_hand,
+            fold_icon=player.fold_icon,
+            fold_text=player.fold_text,
+            fold_text_score=player.fold_text_score,
+            action=player.action,
+            name_read=player.name is not None,
+            stack_read=player.stack is not None,
+            shown=shown,
+        )
+
     def _finalize_street(self, hand: _LiveHand, street: str,
                          current_active: set[str] | None,
                          *, state: FrameState | None = None,
@@ -1842,7 +1899,8 @@ class LiveHandTracker:
             hand.actions.append(ActionRecord(
                 street=street, seat_id=seat_id, name=name, position=position,
                 action="fold", is_hero=seat_id == hand.hero_seat_id,
-                inferred=True))
+                inferred=True,
+                evidence=self._fold_evidence(seat_id, state)))
             hand.last_index[(street, seat_id)] = len(hand.actions) - 1
 
         acts = hand.street_actions(street)
@@ -2194,7 +2252,8 @@ class LiveHandTracker:
         self.hand = None
         if hand is None:
             return None
-        self._finalize_street(hand, hand.street, None, at_hand_end=True)
+        self._finalize_street(hand, hand.street, None,
+                              state=self._last_frame, at_hand_end=True)
         return self._hand_dict(hand)
 
     def take_finished(self) -> dict | None:
@@ -2234,7 +2293,10 @@ class LiveHandTracker:
                          "amount": a.amount, "all_in": a.all_in,
                          "is_hero": a.is_hero,
                          # 只在补出来时写这个键：正常手牌的落库内容保持原样
-                         **({"inferred": True} if a.inferred else {})}
+                         **({"inferred": True} if a.inferred else {}),
+                         # 补 fold 的证据快照；旧记录没有这个键，读回不报错
+                         **({"evidence": a.evidence.to_dict()}
+                            if a.evidence else {})}
                         for a in rec.actions
                     ],
                 }

@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -96,9 +97,36 @@ def test_impossible_bet_is_ignored_even_if_fold_unknown() -> None:
           f"20.5 > 本街总下注 16.5，不能推成加注：{sb_actions}")
 
 
+def test_hand_end_inferred_fold_carries_evidence() -> None:
+    """手末没有「下一街帧」时补出的 fold 也要带证据快照（#20 验收 1）。"""
+    tracker = LiveHandTracker(confirm_frames=1)
+    tracker.observe(build_state(sb_fold=False), ["7c", "7s"], [])
+    # SB 整个人从在局集合里消失，但弃牌徽章没读到：只能靠手末差集补。
+    gone = replace(build_state(sb_fold=False), frame_id="sb-gone",
+                   players_in_hand=4,
+                   players=[p for p in build_state(sb_fold=False).players
+                            if p.seat_id != "sb"])
+    tracker.observe(gone, ["7c", "7s"], [])
+    tracker.finish_current()
+    hand = tracker.take_finished()
+    check(hand is not None, "应产出已结束手牌")
+    fold = next((a for s in hand.get("streets") or []
+                 for a in s.get("actions") or []
+                 if a.get("seat_id") == "sb" and a.get("action") == "fold"),
+                None)
+    check(fold is not None, f"手末应补出 SB 的 fold：{hand.get('streets')}")
+    if fold is None:
+        return
+    check(fold.get("inferred") is True, f"应为 inferred fold：{fold}")
+    ev = fold.get("evidence")
+    check(isinstance(ev, dict) and ev.get("frame_id") == "sb-gone",
+          f"证据应取最后一帧：{ev}")
+
+
 def main() -> int:
     tests = [test_folded_seat_bet_is_not_a_raise,
-             test_impossible_bet_is_ignored_even_if_fold_unknown]
+             test_impossible_bet_is_ignored_even_if_fold_unknown,
+             test_hand_end_inferred_fold_carries_evidence]
     print("── 已弃牌座位的残留下注 ──────────────────────")
     for t in tests:
         before = len(FAILS)

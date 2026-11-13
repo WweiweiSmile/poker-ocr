@@ -35,6 +35,7 @@ if str(TOOLS) not in sys.path:
 
 from export_live_hands import load_hands  # noqa: E402
 from poker_ocr.coach import evaluate, parse_cards  # noqa: E402
+from poker_ocr.opponent_profile import showdown_reads  # noqa: E402
 
 DEFAULT_INPUT = Path("logs/live.states.jsonl")
 BUCKETS = ((0.0, 0.4), (0.4, 0.6), (0.6, 0.8), (0.8, 1.0001))
@@ -53,7 +54,10 @@ def _showdown_result(hand: dict) -> bool | None:
     """Hero 是否赢下摊牌；数据不齐返回 None（不猜）。"""
     hole = hand.get("hero_cards") or []
     board = hand.get("board") or []
-    shows = hand.get("shows") or []
+    # #20：先过 clean 闸门 —— 弃牌座位上的亮牌是串到下一手的残影。
+    clean = {r.seat_id for r in showdown_reads(hand) if r.clean}
+    shows = [s for s in hand.get("shows") or []
+             if str(s.get("seat_id") or "") in clean]
     if len(hole) != 2 or len(board) != 5 or not shows:
         return None
     hero = _hand_key([*hole, *board])

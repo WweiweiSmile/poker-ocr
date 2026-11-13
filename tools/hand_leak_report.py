@@ -28,9 +28,16 @@ from __future__ import annotations
 import argparse
 import json
 import statistics
+import sys
 from collections import Counter, defaultdict
 from itertools import combinations
 from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from poker_ocr.opponent_profile import showdown_reads  # noqa: E402
 
 DEFAULT = Path("logs/live.states.jsonl")
 RANKS = "23456789TJQKA"
@@ -50,6 +57,13 @@ def card(text):
     if rank not in RANKS or suit not in SUITS:
         return None
     return (RV[rank], suit)
+
+
+def clean_shows(hand):
+    """只留过了 clean 闸门的亮牌（#20）：弃牌座位上的亮牌是串手的残影。"""
+    clean = {r.seat_id for r in showdown_reads(hand) if r.clean}
+    return [s for s in hand.get("shows") or []
+            if str(s.get("seat_id") or "") in clean]
 
 
 def cards(items):
@@ -198,7 +212,7 @@ def build(hands):
             final=best_hand(hole + board) if len(board) == 5 else None,
             bomb=is_bomb(hand),
             shown=[best_hand(cards(s.get("cards")) + board)
-                   for s in hand.get("shows") or [] if len(board) == 5],
+                   for s in clean_shows(hand) if len(board) == 5],
             hand=hand))
     return rows
 

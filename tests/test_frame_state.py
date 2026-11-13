@@ -294,6 +294,28 @@ def test_fold_needs_icon_gone_and_text() -> None:
           "没给图标/文字的座位应保持未知")
 
 
+def test_raw_fold_reads_are_kept_for_diagnosis() -> None:
+    """`fold` 是合并结论；原始图标/文案读数要留下来给证据快照用。
+
+    2026-11-13 #20：inferred fold 落库时要带「补出时的证据」，事后才能
+    区分「图标没读到」和「头像文案读错」。只加诊断字段，判定不变。
+    """
+    rows = {k: dict(v) for k, v in BASE.items()}
+    rows["topR"] = {"name": "雷霆战吉", "chip": "176BB"}
+    s = build_state(make_frame(rows), PROFILE,
+                    card_icons={"topR": False},
+                    avatar_reads={"topR": ("弃牌", 0.9)})
+    p = s.player("topR")
+    check(p.fold is True, f"判定不变：{p.to_debug()}")
+    check(p.fold_icon is False, f"应保留原始图标读数：{p.fold_icon!r}")
+    check(p.fold_text == "弃牌" and p.fold_text_score == 0.9,
+          f"应保留头像文案原始读数：{p.fold_text!r}/{p.fold_text_score!r}")
+    # 没读到就没有证据，不能凭空造
+    check(s.player("lowL").fold_text is None
+          and s.player("lowL").fold_icon is None,
+          "没读到头像读数时诊断字段应为空")
+
+
 def test_missing_icon_alone_does_not_fold_a_bettor() -> None:
     """本街在下注的人，图标暂时缺失不能判弃；两个条件都满足才信（下注后弃牌）。
 
@@ -1045,6 +1067,7 @@ def main() -> int:
         test_waiting_badge_yields_to_in_hand_evidence,
         test_empty_seat_is_not_in_hand,
         test_fold_needs_icon_gone_and_text,
+        test_raw_fold_reads_are_kept_for_diagnosis,
         test_missing_icon_alone_does_not_fold_a_bettor,
         test_card_icon_overrides_fold_text,
         test_show_cards_do_not_clear_fold,

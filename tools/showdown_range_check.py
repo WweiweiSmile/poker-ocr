@@ -47,6 +47,7 @@ if str(ROOT) not in sys.path:
 
 from poker_ocr import field_ranges, range_flow, ranges, strategy_tables  # noqa: E402
 from poker_ocr.coach import evaluate, parse_cards  # noqa: E402
+from poker_ocr.opponent_profile import showdown_read  # noqa: E402
 from poker_ocr.hand_track import (  # noqa: E402
     ActionRecord, HandSnapshot, OpponentSnapshot, StreetRecord,
 )
@@ -250,9 +251,12 @@ def collect(limit: int = 0) -> tuple[list[Sample], dict]:
             continue
         for show in hand.get("shows") or ():
             cards = show.get("cards") or ()
-            if len(cards) != 2:
-                continue
             seat = str(show.get("seat_id") or "")
+            # #20：亮牌先过 clean 闸门，弃牌座位上的亮牌是串手的残影。
+            read = showdown_read(hand, seat, list(snap.board))
+            if read.reason:
+                stats[f"gated_{read.reason}"] += 1
+                continue
             spec = next((s for s in field.specs if s.seat_id == seat), None)
             if spec is None or not spec.prior_id:
                 stats["seat_not_modeled"] += 1
