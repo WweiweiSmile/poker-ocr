@@ -75,6 +75,11 @@ ACTION_TYPES = ("check", "call", "bet", "raise", "fold")
 
 AGGRESSIVE = ("bet", "raise")
 
+# 行动的证据来源：名称区徽章 / 头像弃牌 / 注额差反推 / 街末账本补全。
+# `inferred` 只是「来源是推断」的派生标记，落库以 `source` 为准。
+ACTION_SOURCES = ("badge", "avatar_fold", "bet_delta", "ledger")
+INFERRED_SOURCES = ("bet_delta", "ledger")
+
 
 def preflop_aggressive(actions) -> list[ActionRecord]:
     """翻前真正的加注动作（按时间顺序）。
@@ -112,6 +117,11 @@ DECISION_TO_CALL_TOLERANCE = 0.25
 # 全下要连续几帧确认才写进 all_ins。摊牌亮牌/牌背会让 OCR 单帧误判成
 # All-in；单帧就记会把「只秀一张 K」的玩家写成全下。
 ALL_IN_CONFIRM_FRAMES = 2
+
+# 头像弃牌要连续几帧确认才写进行动线。头像判据本身已经是「图标消失 +
+# 弃牌文案」双条件，但压缩/动画仍会单帧闪一下「弃牌」。单帧不提交，
+# 但记录位置与证据仍取第一次看到的那一帧。
+AVATAR_FOLD_CONFIRM_FRAMES = 2
 
 # `finish_current()` / 换手之后等新手信号的上限帧数。超过就强制开新手：
 # 牌背/弹窗可能让 hero 手牌和庄位连续读不到，不能无限等下去。
@@ -193,6 +203,23 @@ class FoldEvidence:
                 if (value := getattr(self, f.name)) is not None}
 
 
+@dataclass
+class _FoldPending:
+    """已看到、还没凑够确认帧数的头像弃牌。
+
+    `index` 是第一次看到时 `hand.actions` 的长度：确认后按这个位置插入，
+    弃牌就落在「第一次观测到它」的两个动作之间，而不是街末。
+    """
+
+    street: str
+    index: int
+    count: int
+    frame_id: str | None
+    name: str | None
+    position: str | None
+    evidence: FoldEvidence | None
+
+
 @dataclass(frozen=True)
 class ActionRecord:
     """一条行动。amount 是**本街加到总额**（BB），读不到为 None。"""
@@ -212,6 +239,25 @@ class ActionRecord:
     left: bool = False
     # 补出 inferred fold 时的证据快照（可选）。手末补全没有帧，留空。
     evidence: FoldEvidence | None = None
+    # 这条行动的证据来源（见 ACTION_SOURCES）。现场链路必须显式给；
+    # 旧构造器只传 inferred 时按 inferred 反推，外部调用方不受影响。
+    source: str = ""
+    # 顺序无法确定（同帧同额、街末补全等）。#27 开始置真。
+    order_unknown: bool = False
+
+    def __post_init__(self) -> None:
+        source = self.source or ("ledger" if self.inferred else "badge")
+        if source not in ACTION_SOURCES:
+            raise ValueError(f"unknown action source {source!r}; "
+                             f"expected one of {ACTION_SOURCES}")
+        object.__setattr__(self, "source", source)
+        # inferred 是 source 的别名：只有推断来源才算 inferred
+        object.__setattr__(self, "inferred", source in INFERRED_SOURCES)
+
+    @classmethod
+    def make(cls, *, source: str, **kwargs) -> "ActionRecord":
+        """现场链路唯一构造入口：source 必填，inferred 由 source 推出。"""
+        return cls(source=source, **kwargs)
 
     def label(self) -> str:
         if self.action == "check":
@@ -442,6 +488,8 @@ class LiveHandTracker:
         self.advised: set[tuple] = set()
         # 最近一次投出去的决策点的「局面」：见 _same_decision_spot
         self._advised_spot: tuple | None = None
+        # 已看到、还没凑够 AVATAR_FOLD_CONFIRM_FRAMES 帧的头像弃牌。
+        self._fold_pending: dict[str, _FoldPending] = {}
         # 上一帧的 hero 手牌 / 在局人数，用来判换手（后者不是桌型座位数）
         self._prev_hero_cards: tuple[str, ...] = ()
         self._prev_in_hand = 0
@@ -659,6 +707,8 @@ class LiveHandTracker:
         # inferred fold（名字/位置沿用离桌前），让 AI 在当前街的行动线里就能
         # 看到「这家已经弃牌」。状态层误判恢复时由上一步精确撤销。
         self._record_left_folds(state, hand)
+        # 头像弃牌：两帧确认后按第一次看到的时刻插进行动线（不是街末）。
+        self._record_avatar_folds(state, hand)
         # 横幅之外的第二个判据：翻前无动作 + 人均正好是客户端前注水位
         # （爆炸底池的强制前注）。放在动作记录之后，避免把本帧刚到的下注
         # 误判成前注；还要连续 BOMB_CONFIRM_FRAMES 帧都成立才钉，单帧抖动不算。
@@ -1055,6 +1105,8 @@ class LiveHandTracker:
                     board_len: int, board: tuple[str, ...]) -> None:
         self.hand_seq += 1
         self._all_in_streak.clear()
+        # 上一手没确认完的弃牌不能带进新手。
+        self._fold_pending.clear()
         street = street_of_board(board_len) or PREFLOP
         hero = self._hero(state)
         roster_rows = self._roster_for_id(state)
@@ -1210,6 +1262,26 @@ class LiveHandTracker:
 
     # ─────────────────────────── 行动 ───────────────────────────
 
+    @staticmethod
+    def _forced_preflop_level(hand: _LiveHand, p: PlayerState) -> float:
+        """翻前每座「不算行动」的强制投入上限（盲注 + 前注）。
+
+        盲注/前注是发牌时就落进底池的钱，不是自愿行动。开手帧的 pill 若还没
+        渲染出来，基线读成 0，之后 SB 的 0.5、BB 的 1.0、炸弹池的 5BB 到账
+        都会被反推成一次 call —— #25 要堵的就是这条。真实徽章不经过这里。
+        """
+        if hand.street != PREFLOP or hand.blinds is None:
+            return 0.0
+        blind = {"SB": hand.blinds.sb,
+                 "BB": hand.blinds.bb}.get(p.position or "", 0.0)
+        ante = hand.blinds.ante or 0.0
+        if hand.bomb_pot or ante >= BOMB_ANTE_BB:
+            # 炸弹池：每人强制前注；有的桌同时挂盲注，pill 会把两者加在一起。
+            return blind + ante
+        # 普通小前注不进 pill（`_total_invested` 单独加它），这里不要重复扣，
+        # 否则 SB 补到 1.0 的真实 call 会被当成强制投入吞掉。
+        return blind
+
     def _record_actions(self, state: FrameState, hand: _LiveHand) -> None:
         """把这一帧里每座的徽章翻成行动记录，并去掉重复帧。
 
@@ -1263,7 +1335,8 @@ class LiveHandTracker:
                 if (prev is not None and prev.action == p.action
                         and prev.amount is None):
                     continue                 # 同一条徽章的重复帧
-                hand.actions.append(ActionRecord(
+                hand.actions.append(ActionRecord.make(
+                    source="badge",
                     street=hand.street, seat_id=p.seat_id, name=p.name,
                     position=p.position, action=p.action, amount=None,
                     all_in=p.all_in, is_hero=p.seat_id == hero_seat))
@@ -1300,6 +1373,11 @@ class LiveHandTracker:
                 known = hand.baseline.get(key, 0.0)
                 if bet <= known + 1e-9:
                     continue
+                forced = self._forced_preflop_level(hand, p)
+                if bet <= forced + 1e-9:
+                    # 盲注/炸弹前注到账，不是行动：只更新基线，不写记录。
+                    hand.baseline[key] = bet
+                    continue
                 if bet > level + 1e-9:
                     # 翻前的第一个激进动作也记 raise（盲注不是「下注」）
                     action = "bet" if (hand.street != PREFLOP and level <= 1e-9) \
@@ -1316,10 +1394,14 @@ class LiveHandTracker:
                     for a in hand.actions[last + 1:])
                 if not raised_since:
                     # 只是下注 pill 后更新了（徽章先出现、金额后到）
-                    hand.actions[last] = ActionRecord(
-                        street=prev.street, seat_id=prev.seat_id, name=prev.name,
-                        position=prev.position, action=prev.action,
-                        amount=p.bet, all_in=prev.all_in or p.all_in,
+                    hand.actions[last] = ActionRecord.make(
+                        source=prev.source,
+                        order_unknown=prev.order_unknown,
+                        left=prev.left, evidence=prev.evidence,
+                        street=prev.street, seat_id=prev.seat_id,
+                        name=prev.name, position=prev.position,
+                        action=prev.action, amount=p.bet,
+                        all_in=prev.all_in or p.all_in,
                         is_hero=prev.is_hero)
                     hand.baseline[key] = bet
                     hand.baseline_unknown.discard(key)
@@ -1332,7 +1414,10 @@ class LiveHandTracker:
             if (p.seat_id == hero_seat and not amount
                     and action in ("bet", "raise", "call")):
                 amount = hand.hero_street_bet.get(hand.street) or amount
-            record = ActionRecord(
+            # 动作类型从徽章来就记 badge，从下注额反推就记 bet_delta。
+            source = "badge" if p.action is not None else "bet_delta"
+            record = ActionRecord.make(
+                source=source,
                 street=hand.street,
                 seat_id=p.seat_id,
                 name=p.name,
@@ -1363,6 +1448,82 @@ class LiveHandTracker:
                 hand.level.get(hand.street, 0.0), recovered)
             hand.level_unknown.discard(hand.street)
 
+    def _record_avatar_folds(self, state: FrameState, hand: _LiveHand) -> None:
+        """头像弃牌：连续 `AVATAR_FOLD_CONFIRM_FRAMES` 帧才提交。
+
+        提交时**位置与证据取第一次看到的那一帧**：`_FoldPending.index` 是
+        当时的 `hand.actions` 长度，插入后弃牌落在它前后的两个动作之间。
+        中途离桌（`left`）交给 `_record_left_folds` 的 ledger 记录；全下
+        的人不可能弃牌；已经有过 fold 记录的座位不重复提交。
+        """
+        folded = {a.seat_id for a in hand.actions if a.action == "fold"}
+        for p in state.players:
+            if (p.left or p.seat_id in folded or p.seat_id in hand.all_ins):
+                self._fold_pending.pop(p.seat_id, None)
+                continue
+            if p.fold is not True:
+                # 只认「连续」：中间任何一帧不是弃牌，候选就作废。
+                self._fold_pending.pop(p.seat_id, None)
+                continue
+            pending = self._fold_pending.get(p.seat_id)
+            if pending is None:
+                self._fold_pending[p.seat_id] = _FoldPending(
+                    street=hand.street, index=len(hand.actions), count=1,
+                    frame_id=state.frame_id, name=p.name, position=p.position,
+                    evidence=self._fold_evidence(p.seat_id, state))
+                continue
+            if state.frame_id == pending.frame_id:
+                # 同一帧被重复喂进来（take_current 会复用最后一帧），不算新证据。
+                continue
+            pending.count += 1
+            if pending.count >= AVATAR_FOLD_CONFIRM_FRAMES:
+                self._commit_fold(hand, p, pending)
+
+    def _commit_fold(self, hand: _LiveHand, p: PlayerState,
+                     pending: _FoldPending) -> None:
+        """把确认过的头像弃牌插到第一次观测到的位置。"""
+        self._fold_pending.pop(p.seat_id, None)
+        index = min(max(pending.index, 0), len(hand.actions))
+        hand.actions.insert(index, ActionRecord.make(
+            source="avatar_fold",
+            street=pending.street, seat_id=p.seat_id,
+            name=pending.name or p.name,
+            position=pending.position or p.position,
+            action="fold", is_hero=p.seat_id == hand.hero_seat_id,
+            evidence=pending.evidence))
+        self._reindex(hand)
+
+    def _settle_pending_folds(self, hand: _LiveHand, street: str,
+                              state: FrameState | None) -> None:
+        """街末把「只差最后一帧」的候选确认掉，确认不了的交给 ledger 补全。
+
+        换街帧本身可能就是第 2 帧：上一街最后一帧第一次看到弃牌，这一帧
+        头像仍然是弃牌。这里用这一帧的读数补上确认，位置仍按第一次观测。
+        同一帧（take_current 复用）不算新证据，直接作废——单帧不提交。
+        """
+        for seat_id, pending in list(self._fold_pending.items()):
+            if pending.street != street:
+                continue
+            player = (next((p for p in state.players
+                            if p.seat_id == seat_id), None)
+                      if state is not None else None)
+            if (player is not None and player.fold is True
+                    and not player.left and seat_id not in hand.all_ins
+                    and state is not None
+                    and state.frame_id != pending.frame_id):
+                pending.count += 1
+                if pending.count >= AVATAR_FOLD_CONFIRM_FRAMES:
+                    self._commit_fold(hand, player, pending)
+                    continue
+            self._fold_pending.pop(seat_id, None)
+
+    @staticmethod
+    def _reindex(hand: _LiveHand) -> None:
+        """动作被插入/删除后重建 `(street, seat_id) → 最后一条` 索引。"""
+        hand.last_index = {}
+        for i, a in enumerate(hand.actions):
+            hand.last_index[(a.street, a.seat_id)] = i
+
     def _record_left_folds(self, state: FrameState, hand: _LiveHand) -> None:
         """中途离桌 = 已经弃牌：补一条 inferred fold，保留名字/位置。
 
@@ -1376,11 +1537,11 @@ class LiveHandTracker:
                 continue
             if p.seat_id == hand.hero_seat_id or p.seat_id in hand.all_ins:
                 continue
-            hand.actions.append(ActionRecord(
+            hand.actions.append(ActionRecord.make(
+                source="ledger",
                 street=hand.street, seat_id=p.seat_id, name=p.name,
                 position=p.position, action="fold", is_hero=False,
-                inferred=True, left=True,
-                evidence=self._fold_evidence(p.seat_id, state)))
+                left=True, evidence=self._fold_evidence(p.seat_id, state)))
             hand.last_index[(hand.street, p.seat_id)] = len(hand.actions) - 1
 
     def _revoke_left_folds(self, state: FrameState, hand: _LiveHand) -> None:
@@ -1394,14 +1555,18 @@ class LiveHandTracker:
         revived = {p.seat_id for p in state.players if not p.left}
         if not revived:
             return
-        kept = [a for a in hand.actions
+        before = hand.actions
+        kept = [a for a in before
                 if not (a.left and a.seat_id in revived)]
-        if len(kept) == len(hand.actions):
+        if len(kept) == len(before):
             return
+        # 插入位置以「第一次观测时的下标」记着，删掉前面的记录后要一起挪。
+        for pending in self._fold_pending.values():
+            pending.index -= sum(1 for i, a in enumerate(before)
+                                 if i < pending.index and a.left
+                                 and a.seat_id in revived)
         hand.actions = kept
-        hand.last_index = {}
-        for i, a in enumerate(hand.actions):
-            hand.last_index[(a.street, a.seat_id)] = i
+        self._reindex(hand)
 
     # ─────────────────────────── 街末对账 ───────────────────────────
 
@@ -1784,11 +1949,12 @@ class LiveHandTracker:
         """把补出来的动作按发生顺序追加到这一街，并标 inferred。"""
         for p, action, amount in items:
             name, position = self._seat_info(hand, p.seat_id, state)
-            hand.actions.append(ActionRecord(
+            hand.actions.append(ActionRecord.make(
+                source="ledger",
                 street=street, seat_id=p.seat_id, name=name or p.name,
                 position=position or p.position, action=action,
                 amount=amount, all_in=p.all_in,
-                is_hero=p.seat_id == state.hero_seat_id, inferred=True))
+                is_hero=p.seat_id == state.hero_seat_id))
             hand.last_index[(street, p.seat_id)] = len(hand.actions) - 1
             hand.baseline[(street, p.seat_id)] = amount
 
@@ -1891,15 +2057,19 @@ class LiveHandTracker:
             hand.finalized_streets.add(street)
             return
         current = set(hand.active if current_active is None else current_active)
+        # 头像弃牌只差最后一帧的：换街帧本身就是第 2 帧时在这里补确认。
+        # 必须在算 recorded_folds 之前，否则下面会再补一条 ledger fold。
+        self._settle_pending_folds(hand, street, state)
+        acts = hand.street_actions(street)
         recorded_folds = {a.seat_id for a in acts if a.action == "fold"}
 
         # ① 弃牌：街初在局、街末不在局、又没有 fold 记录的座位。
         for seat_id in sorted(start - current - recorded_folds):
             name, position = self._seat_info(hand, seat_id, state)
-            hand.actions.append(ActionRecord(
+            hand.actions.append(ActionRecord.make(
+                source="ledger",
                 street=street, seat_id=seat_id, name=name, position=position,
                 action="fold", is_hero=seat_id == hand.hero_seat_id,
-                inferred=True,
                 evidence=self._fold_evidence(seat_id, state)))
             hand.last_index[(street, seat_id)] = len(hand.actions) - 1
 
@@ -1913,10 +2083,11 @@ class LiveHandTracker:
         if not aggressive and not (at_hand_end and street == PREFLOP):
             for seat_id in sorted((start & current) - acted - all_in):
                 name, position = self._seat_info(hand, seat_id, state)
-                hand.actions.append(ActionRecord(
+                hand.actions.append(ActionRecord.make(
+                    source="ledger",
                     street=street, seat_id=seat_id, name=name,
                     position=position, action="check",
-                    is_hero=seat_id == hand.hero_seat_id, inferred=True))
+                    is_hero=seat_id == hand.hero_seat_id))
                 hand.last_index[(street, seat_id)] = len(hand.actions) - 1
         hand.finalized_streets.add(street)
 
@@ -2292,6 +2463,9 @@ class LiveHandTracker:
                          "position": a.position, "action": a.action,
                          "amount": a.amount, "all_in": a.all_in,
                          "is_hero": a.is_hero,
+                         # 证据来源与顺序确定性（#22）。旧消费者忽略即可。
+                         "source": a.source,
+                         "order_unknown": a.order_unknown,
                          # 只在补出来时写这个键：正常手牌的落库内容保持原样
                          **({"inferred": True} if a.inferred else {}),
                          # 补 fold 的证据快照；旧记录没有这个键，读回不报错

@@ -38,7 +38,7 @@ from .dealer import DealerResult, build_detector
 from .frame_state import FrameState, NameTracker, build_state, signature
 from .name_lexicon import NameLexicon
 from .parse import (
-    Blinds, is_all_in_badge, parse_action, parse_blinds, waiting_badge,
+    Blinds, is_all_in_badge, looks_like_badge, parse_blinds, waiting_badge,
 )
 from .ocr import OcrEngine
 from .profile import Profile
@@ -883,7 +883,7 @@ class StateStream:
             read = seat_roi.fields.get("name")
             if (read is not None and read.text
                     and read.score >= NAME_PIN_MIN_SCORE
-                    and parse_action(read.text) is None
+                    and not looks_like_badge(read.text)
                     # 名字还没被稳定器确认就先别钉：钉住 = 这一帧不再重读，
                     # 错读就没有任何纠正机会了（2026-11-01 那次整手牌都错）。
                     # 代价是每个座位每手多读 ≤ confirm 帧（≈12ms/块）。

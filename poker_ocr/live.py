@@ -1574,6 +1574,8 @@ class LiveProcessor:
             "all_in": bool(getattr(a, "all_in", False)),
             "is_hero": bool(getattr(a, "is_hero", False)),
             "inferred": bool(getattr(a, "inferred", False)),
+            "source": getattr(a, "source", None),
+            "order_unknown": bool(getattr(a, "order_unknown", False)),
         } for a in actions[-max_actions:]]
         return {
             "hand_id": getattr(hand, "hand_id", None),

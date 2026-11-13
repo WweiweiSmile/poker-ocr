@@ -39,6 +39,9 @@
     test_workbench  工作台：schema/体检/子进程/标定写入/HTTP（全注入假实现）
     test_hand_recognition_audit 手牌识别倒查评分/导出（纯逻辑）
     test_hand_track_folded_bet 已弃牌座位的残留下注不能推成 3-bet（纯逻辑）
+    test_action_source 行动记录的证据源与顺序标记（纯逻辑）
+    test_avatar_fold 头像弃牌两帧确认/首次观测位置/街末不重复（纯逻辑）
+    test_blinds 盲注基线/注额差来源/全弃到 BB/炸弹池不补假动作（纯逻辑）
     test_hero_cards_after_fold 弃牌后 hero 手牌不许再被改写（纯逻辑）
     test_full_table 全图 OCR/座位聚类/D 庄位/位置（需要 table-8p.jpg）
     test_runtime_profile 全图标定 → runtime profile → ROI 回读（需要 table-8p.jpg）
@@ -76,6 +79,9 @@ SUITES = ["test_positions.py", "test_env.py", "test_coach.py",
           "test_live_log.py", "test_live_web.py", "test_live_events.py",
           "test_workbench.py",
           "test_hand_recognition_audit.py", "test_hand_track_folded_bet.py",
+          "test_action_source.py",
+          "test_avatar_fold.py",
+          "test_blinds.py",
           "test_hero_cards_after_fold.py",
           "test_full_table.py",
           "test_runtime_profile.py", "test_stable_cards.py",

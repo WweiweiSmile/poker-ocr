@@ -120,6 +120,42 @@ def test_action_badge_keeps_sticky_name() -> None:
     check(s.player("lowL").action == "call", "动作应识别为 call")
 
 
+def test_noisy_action_badge_keeps_name_and_records_action() -> None:
+    """读残徽章（`下注法` / `跟注海`）是动作，不是名字；旧名字不能被覆盖。"""
+    rows = {k: dict(v) for k, v in BASE.items()}
+    rows["lowL"]["name"] = "下注法"
+    s = build_state(make_frame(rows), PROFILE, prev_names={"lowL": "YKY"})
+    lowl = s.player("lowL")
+    check(lowl.action == "bet", f"下注法 应识别为 bet，实际 {lowl.action!r}")
+    check(lowl.name == "YKY", f"名字应沿用 YKY，实际 {lowl.name!r}")
+    rows["lowL"]["name"] = "跟注海"
+    s = build_state(make_frame(rows), PROFILE, prev_names={"lowL": "YKY"})
+    lowl = s.player("lowL")
+    check(lowl.action == "call", f"跟注海 应识别为 call，实际 {lowl.action!r}")
+    check(lowl.name == "YKY", f"名字应沿用 YKY，实际 {lowl.name!r}")
+
+
+def test_bare_badge_char_never_becomes_name_or_action() -> None:
+    """裸单字 `下` 既不是动作，也不能把已有名字覆盖成 `下`。"""
+    rows = {k: dict(v) for k, v in BASE.items()}
+    rows["lowL"]["name"] = "下"
+    s = build_state(make_frame(rows), PROFILE, prev_names={"lowL": "YKY"})
+    lowl = s.player("lowL")
+    check(lowl.action is None, f"裸单字不该成动作，实际 {lowl.action!r}")
+    check(lowl.name == "YKY", f"名字应沿用 YKY，实际 {lowl.name!r}")
+
+
+def test_fold_word_in_name_slot_is_not_a_fold() -> None:
+    """名字区「弃牌」不产出 fold；头像弃牌仍照常（另测）。"""
+    rows = {k: dict(v) for k, v in BASE.items()}
+    rows["lowL"]["name"] = "弃牌"
+    s = build_state(make_frame(rows), PROFILE, prev_names={"lowL": "YKY"})
+    lowl = s.player("lowL")
+    check(lowl.action is None, f"名字区弃牌不该成动作，实际 {lowl.action!r}")
+    check(lowl.fold is not True, f"名字区弃牌不该判弃，实际 {lowl.fold!r}")
+    check(lowl.name == "YKY", f"名字应沿用 YKY，实际 {lowl.name!r}")
+
+
 def test_idle_zero_player_is_not_in_hand() -> None:
     """筹码 0、本街没下注、没动作 → 不在这一手（正在带入/离桌）。"""
     rows = {k: dict(v) for k, v in BASE.items()}
@@ -1057,6 +1093,9 @@ def main() -> int:
     tests = [
         test_full_state,
         test_action_badge_keeps_sticky_name,
+        test_noisy_action_badge_keeps_name_and_records_action,
+        test_bare_badge_char_never_becomes_name_or_action,
+        test_fold_word_in_name_slot_is_not_a_fold,
         test_idle_zero_player_is_not_in_hand,
         test_roster_seat_defaults_in_hand_when_unreadable,
         test_roster_zero_idle_is_not_waiting,

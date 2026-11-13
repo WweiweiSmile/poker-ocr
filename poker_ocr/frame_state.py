@@ -34,7 +34,8 @@ import re
 from dataclasses import dataclass, field as dc_field
 
 from .parse import (
-    Amount, Blinds, NameTracker, is_all_in_badge, is_fold_badge, names_similar,
+    Amount, Blinds, NameTracker, is_all_in_badge, is_fold_badge,
+    looks_like_badge, names_similar,
     parse_action, parse_amount, parse_blinds, parse_chip_loose, parse_equity,
     parse_percent, sticky_name, waiting_badge,
 )
@@ -430,8 +431,11 @@ def _build_players(ctx: BuildContext):
         chip_raw = frame.text("chip", sid)
         bet_raw = frame.text("bet", sid)
 
-        # 动作徽章会盖住名字：先认徽章，再决定这块文本是不是名字
+        # 动作徽章会盖住名字：先认徽章，再决定这块文本是不是名字。
+        # 读残（`下注法` / `廣加注` / `跟注海` / 裸 `下`）也要算徽章，否则
+        # 残片会被当成名字写进稳定器，玩家名变成 `跟` / `加` / `下`（#23）。
         action = parse_action(name_raw)
+        name_is_badge = looks_like_badge(name_raw)
         icon = icons.get(sid)
         shown_here = sid in shown
         avatar_text, avatar_score = avatar_reads.get(sid, ("", 0.0))
@@ -527,10 +531,12 @@ def _build_players(ctx: BuildContext):
         # ROI 缓存钉住：人走了它还是返回旧名字，拿它当在场证据会让空座
         # 永远判在场。所以锁定的座位只看筹码/下注/图标等当前帧证据；
         # 名字由 roster 兜底沿用，不影响显示。
-        name_text = (name_raw or "").strip()
+        name_text = ("" if name_is_badge
+                     else (name_raw or "").strip())
         name_is_evidence = bool(name_text and action is None and sid not in roster)
         present = bool(
             name_is_evidence
+            or name_is_badge
             or action is not None
             or stack is not None
             or (bet or 0) > 0

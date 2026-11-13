@@ -197,6 +197,7 @@ def parse_blinds(text: str | None,
 # ─────────────────────────── 动作 / 名字 ───────────────────────────
 
 # app 直接渲染的动作徽章（画在名字位置，会把名字盖住）。词汇表从真机收齐。
+# **弃牌只在头像上**：名字区读到「弃牌」不是动作，见 parse_action。
 ACTION_WORDS: dict[str, str] = {
     "让牌": "check",
     "跟注": "call",
@@ -204,6 +205,20 @@ ACTION_WORDS: dict[str, str] = {
     "加注": "raise",
     "弃牌": "fold",
 }
+
+# 名字槽能产出的动作类型（#23）。弃牌不在此列：头像弃牌走 is_fold_badge。
+_NAME_ACTION_WORDS: tuple[tuple[str, str], ...] = (
+    ("让牌", "check"), ("跟注", "call"), ("下注", "bet"), ("加注", "raise"))
+
+# OCR 读残的常见形态：`下注法`、`跟注海`、`廣加注`、`跟注法`。徽章是两字词，
+# 前后多/少一个字仍按「含这个词」认；但**裸单字绝不单独成动作**。
+_BADGE_NOISE = " \t\r\n\u3000·・.。,，;；:：!！?？'\"“”‘’()（）[]【】<>《》_-—~～"
+_BADGE_CHARS = frozenset("下加跟让注牌弃奔")
+
+
+def _clean_badge_text(text: str | None) -> str:
+    """去掉首尾空白与标点噪声；不动中间的字，避免把 `跟 注` 之外的读残洗掉。"""
+    return (text or "").strip().strip(_BADGE_NOISE)
 
 # 「弃牌」徽章画在**头像**上。实测 rec 会把它系统性读成形近字：
 # `弃牌` → `奔牌` / `奔脚` / `奔摊` / `奔雄`（分数 0.5–0.94）。
@@ -215,9 +230,39 @@ _FOLD_RE = re.compile(r"^(?:已)?[弃奔](?:[牌脚摊雄权])?[#＃!！。.·]?
 
 
 def parse_action(name_text: str | None) -> str | None:
-    """名字槽的文本如果是动作徽章，返回英文动作；否则 None。"""
-    t = (name_text or "").strip()
-    return ACTION_WORDS.get(t)
+    """名字槽的文本如果是动作徽章，返回英文动作；否则 None。
+
+    徽章会被 OCR 读残（`下注法` / `廣加注` / `跟注海`），所以按「含徽章词」
+    认，词出现得越靠前越优先。三条硬边界：
+      · 裸单字（`下`/`加`/`跟`/`让`/`注`）一律不认 —— 单字是名字残片的重灾区；
+      · **名字区永不产出 fold** —— 弃牌只认头像（is_fold_badge）；
+      · 只认这四类动作，`弃牌`/`奔牌` 之类留给头像路径。
+    """
+    t = _clean_badge_text(name_text)
+    if not t or len(t) == 1:
+        return None
+    hits = [(t.find(word), action) for word, action in _NAME_ACTION_WORDS
+            if word in t]
+    return min(hits)[1] if hits else None
+
+
+def looks_like_badge(text: str | None) -> bool:
+    """名字槽这段文本是不是徽章（含读残），用来保护玩家名字。
+
+    比 parse_action 宽：只要像徽章残片就算 —— 裸单字（`下`/`加`/`跟`/`让`/
+    `注`/`牌`/`弃`/`奔`）和含弃牌痕迹的短文本都算。名字更新与名单钉住都要
+    跳过这些帧，否则玩家名会被写成 `跟` / `加` / `下`（#23）。
+    """
+    t = _clean_badge_text(text)
+    if not t:
+        return False
+    if parse_action(t) is not None:
+        return True
+    if len(t) == 1:
+        return t in _BADGE_CHARS
+    if _FOLD_RE.match(t):
+        return True
+    return any(word in t for word, _ in _NAME_ACTION_WORDS)
 
 
 def is_fold_badge(avatar_text: str | None, score: float = 0.0,

@@ -17,9 +17,9 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from poker_ocr.parse import (  # noqa: E402
-    NameTracker, is_all_in_badge, is_fold_badge, names_similar, parse_action,
-    parse_amount, parse_blinds, parse_chip_loose, parse_equity, parse_percent,
-    sticky_name, waiting_badge,
+    NameTracker, is_all_in_badge, is_fold_badge, looks_like_badge,
+    names_similar, parse_action, parse_amount, parse_blinds, parse_chip_loose,
+    parse_equity, parse_percent, sticky_name, waiting_badge,
 )
 
 FAILS: list[str] = []
@@ -173,11 +173,33 @@ def test_blinds_rejects_bad_ratio() -> None:
 
 def test_actions() -> None:
     want = {"让牌": "check", "跟注": "call", "下注": "bet",
-            "加注": "raise", "弃牌": "fold"}
+            "加注": "raise"}
     for text, action in want.items():
         check(parse_action(text) == action, f"{text!r} 应映射到 {action}")
     for text in ("gggamel", "YKY", "一只猫ii", "", None):
         check(parse_action(text) is None, f"{text!r} 不该被当成动作")
+
+
+def test_action_badge_tolerates_ocr_fragments() -> None:
+    """真机读残：`下注法` / `廣加注` / `跟注海` / `跟注法` 仍要认出动作。
+
+    名字区**永不产出弃牌**：`弃牌` 留给头像路径（is_fold_badge）。
+    """
+    want = {"下注法": "bet", "廣加注": "raise", "跟注海": "call",
+            "跟注法": "call", "让牌..": "check", "  加注  ": "raise"}
+    for text, action in want.items():
+        check(parse_action(text) == action,
+              f"读残 {text!r} 应映射到 {action}，实际 {parse_action(text)}")
+    check(parse_action("弃牌") is None, "名字区「弃牌」不应产出 fold")
+    check(parse_action("奔牌") is None, "名字区弃牌形近字不应产出 fold")
+    # 裸单字一律拒绝
+    for text in ("下", "加", "跟", "让", "注", "牌", "弃", "奔", "下.", " 加 "):
+        check(parse_action(text) is None, f"裸单字 {text!r} 不该成动作")
+    check(looks_like_badge("下") and looks_like_badge("跟")
+          and looks_like_badge("弃牌") and looks_like_badge("下注法"),
+          "读残与裸单字都应被名字保护识别为徽章")
+    check(not looks_like_badge("YKY") and not looks_like_badge("鱼"),
+          "正常名字不应被当成徽章")
 
 
 def test_fold_badge_is_best_effort() -> None:
