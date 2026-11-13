@@ -363,6 +363,16 @@ ROI 路线只裁固定槽位、只跑 rec，不跑全图检测，是实时链路
   2026-11-11 20:33 实盘：T9o 弃牌的建议正好落在 `stack:topL` 被丢的那一帧，
   旧行为直接 `frame_not_clickable` 吞掉，hero 只能等超时。
   真实点击需要 macOS「辅助功能」权限，且客户端要保持在最前。
+  **点击在独立工作线程里执行**（`poker_ocr/click_worker.py`，2026-11-13）：
+  安全闸全部在主线程同步判完，只有「驱动鼠标」那一段交给执行器；建议**先**
+  publish/打印，**再**动手（以前是先点完才打建议，滑杆一慢就是「建议迟迟
+  不出来」）。异步时结果晚到，写一条独立的 `click` 事件（`advice` 行不再带
+  `click` 键），看板把这条并进当前建议。`click` 里的三个额度字段口径固定：
+  `target_bb` = **AI 建议额**（所有动作都一样）、`plan_bb` = **计划落注额**
+  （滑杆取整后的数 / 快捷档位的档位额 / 全下的顶端额）、`final_bb` = **实际
+  落注额**（近似落注/档位替代时可能与建议差 1BB 左右）。点击在途期间主循环**让路**：不识别、不算
+  丢弃 —— 滑杆会盖住公共牌第三张，继续 OCR 只会读出「board 2 张」的假警报。
+  单测/离线回放默认用 `InlineClickExecutor`，语义与改造前完全一致。
 - **自定义下注额（`--bet-slider`）**：web 端**长按**主按钮会打开竖向滑杆，
   顶部气泡显示「加注到多少 BB」；**新 UI 要按住橙色额度手柄上下拖**才能改额
   （滚轮无效，实测 2026-11-10 滚 3 次数值不动），拖到目标 BB 再点『确定』落注。
@@ -385,10 +395,16 @@ ROI 路线只裁固定槽位、只跑 rec，不跑全图检测，是实时链路
   （`drag_no_change_gain`，默认 1.6），而不是原地重复。`drag_step_fraction`
   （默认 1.0）可降到 0.5 让每次只走一半，适合斜率估不准/过冲多的机器。
   **5% 容忍只用于「选快捷档位」**（见上段 `clicker.preset_tolerance`），不是滑杆
-  闭环的到点判据。滑杆闭环默认 `tolerance_bb=0.01`、`accept_ratio=0.0`：到不了
-  目标绝不近似落注。若确认目标在高位因客户端网格/最小步长不可达，可把
-  `accept_ratio` 设为 0.02–0.05：只在**已经尽力逼近、当前值就是最接近值**时
-  才接受，不会「从下方一进 5% 区间就停」——那会系统性少下注。
+  闭环的到点判据。滑杆闭环有两组判据：
+  ① 精确到点 —— `tolerance_bb=0.01`，读回额等于目标；
+  ② **只许多、不许少**的允许区间（2026-11-13 起 WPK-Mac 用这组）：
+  `accept_overshoot_ratio`（默认 0，建议 0.05）+ `accept_overshoot_min_bb`
+  （默认 1.0）→ 区间 `[target, max(target*(1+r), target+min_bb)]`，上限按
+  `round_to_bb` **向上**取整：27BB → 27–29BB、10BB → 10–11BB。低侧恒等于
+  target —— 落得比建议小 = 自己把下注尺度降了一档（老键 `accept_ratio` 的对称
+  容忍已删除，配置里再出现会直接报错）。**额度一进这个区间就落注**，不等软截止、
+  也不为了把精确值拖出来再多烧一步（每步 ~0.93s）；`accept_overshoot_ratio=0`
+  时区间退化成 `[target, target]`，等于只接受精确值。
   下单前先做 5% 判定：推荐额与 1/3、1/2、2/3、1、1.2 五个快捷档位的实际
   目标额相对误差 ≤5% 时**直接点快捷档位**（快、稳）；超过 5% 才长按走滑杆。
   阈值住在 `clicker.preset_tolerance`（默认 0.05）。**`--bet-slider-only`**
@@ -980,9 +996,12 @@ nv -m poker_ocr.live --no-fold
           "elapsed_ms":95}}
 ```
 
-滑杆路径（`--bet-slider`）的 `click` 形状不同：`mapping="bet_slider"`，
-带 `target_bb` 和 `detail.slider`（起止额 / 拖动次数或滚动格数 / 最终读数 /
-是否读到 ALLIN）；失败时 `status="error"`，不会点确定，只点右侧空白毛毡关掉滑杆。
+快捷档位与 allin 路径的 `click` 也带额度：`target_bb` = AI 建议额，
+`plan_bb` = `final_bb` = 实际点的档位额 / 全下顶端额（档位是「在 5% 内」的
+替代，复盘要能看出 27 → 26.5 这种差）。滑杆路径（`--bet-slider`）的 `click`
+形状不同：`mapping="bet_slider"`，带 `target_bb`/`plan_bb`/`final_bb` 和
+`detail.slider`（起止额 / 拖动次数或滚动格数 / 最终读数 / 是否读到 ALLIN）；
+失败时 `status="error"`，不会点确定，只点右侧空白毛毡关掉滑杆。
 
 | 字段 | 含义 |
 |---|---|
@@ -994,7 +1013,7 @@ nv -m poker_ocr.live --no-fold
 | `skill_codes` | 兼容字段，恒为空数组（旧技能库已删除） |
 | `error` | 仅 `fallback` 时出现，说明原因 |
 | `duration_ms` | 模型调用耗时（后台，不影响采样） |
-| `click` | 自动点击结果（仅 `--auto-click`）：`status / steps / mapping / reason` |
+| `click` | 自动点击结果（仅 `--auto-click`）：`status / steps / mapping / reason`，有金额的动作另带 `target_bb`（建议额）/ `plan_bb`（计划额）/ `final_bb`（实际额） |
 
 ### 6.6 `hand`
 

@@ -379,7 +379,7 @@ nv tools/click_marks.py --window "title:WePoker-H5" --url "title:WePoker-H5" --e
 | 点击没反应 | 游戏窗口不在最前（点击按屏幕坐标发）；截图不受遮挡但点击受 |
 | `--bet-slider` 报缺窗口坐标 | 必须给 `--bet-slider-window`（或 `config/bet_slider_mac.json` 里填 `window`） |
 | 滑杆打不开/金额不动 | 先跑 3.3 的手势验证；`drag_hold_ms` 80→120、`drag_max_px` 120→60 再试 |
-| 高位金额到不了/来回抖 | 金额越大 px/BB 越小：把 `drag_fine_min_px` 2→1（客户端认 1px 时）、`drag_step_fraction` 1.0→0.5；确认网格不可达再开 `accept_ratio` 0.02–0.05（默认 0，绝不近似落注） |
+| 高位金额到不了/来回抖 | 金额越大 px/BB 越小：把 `drag_fine_min_px` 2→1（客户端认 1px 时）、`drag_step_fraction` 1.0→0.5；确认网格不可达再开 `accept_overshoot_ratio` 0.05 + `accept_overshoot_min_bb` 1.0（只许多不许少：27BB → 27–29BB；默认 0，绝不近似落注） |
 | 看板端口被占 | `--web-port 8021`（只告警不阻塞识别） |
 | 想重看某手 | Ctrl-C 结束；JSONL / 事件日志 / `data/hand_outbox` 都在 `logs/` 与 `data/` 下 |
 

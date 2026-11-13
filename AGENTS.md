@@ -75,3 +75,17 @@ nv tools/export_strategy_tables.py --check        # JSON↔代码逐值一致
 - ❌ 新增配置项不带校验（在 `profile.py` 里 fail fast，不要静默默认）。
 - ❌ 改策略数字去动 `.py`（它们在 `poker_ocr/tables/*.json`）；❌ 把 `STRATEGY_TABLES_PROFILE` 写进 `.env`（import 时读，`.env` 后加载 → 静默不生效）。
 - ❌ 复活 `gto/`（2026-11-05 已整体移除）。
+
+## Agent skills
+
+### Issue tracker
+
+GitHub Issues on `WweiweiSmile/poker-ocr`, driven by the `gh` CLI（`gh` 必须已安装且 `gh auth status` 通过）。See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+五角色默认词汇，标签串与角色名相同（`needs-triage` / `needs-info` / `ready-for-agent` / `ready-for-human` / `wontfix`）；`/wayfinder` 另用 `wayfinder:map` 与 `wayfinder:<research|prototype|grilling|task>`。See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+single-context — 一个仓库共用根目录 `GLOSSARY.md` + `docs/adr/`。See `docs/agents/domain.md`.

@@ -49,3 +49,14 @@ data/hand_outbox/
 # Archify 的浏览器证据（截图 + 回执；deliver 出来的 html/json 照常入库）
 docs/archify/*.visual-check.*
 docs/archify/*.png
+
+# 工作台的本地窗口状态（window id / pinned_rect 因机器而异；README 与
+# example-wpk-mac.json 是可提交的模板）
+workspaces/*.json
+!workspaces/example-wpk-mac.json
+
+# 识别诊断用的截图（一次性排查产物，本地留着看，不进库）
+reports/
+
+# 一次性运维脚本（含本机路径，按需提交前先脱敏）
+scripts/wizard-*.sh
