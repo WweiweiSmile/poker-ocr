@@ -22,8 +22,9 @@ sys.path.insert(0, str(ROOT))
 from poker_ocr.advice import Advice, Option  # noqa: E402
 from poker_ocr.bet_slider import (  # noqa: E402
     BetSliderController, BetSliderState, SliderSettings, WindowMapper,
-    WindowRect, clicker_config_from_profile, parse_amount, parse_fraction,
-    plan_slider, read_preset_enabled, read_slider, resolve_window,
+    WindowRect, accept_bounds, clicker_config_from_profile, parse_amount,
+    parse_fraction, plan_slider, read_preset_enabled, read_slider,
+    resolve_window,
 )
 from poker_ocr.clicker import (  # noqa: E402
     Clicker, ClickerConfig, Rect, plan_clicks,
@@ -735,27 +736,42 @@ def _mk_quantized(table, **settings):
     return controller, backend
 
 
-def test_accept_ratio_uses_nearest_not_first_band() -> None:
-    """网格不可达时才启用相对容忍；只看最近可达，不会停在更低的一侧。"""
+def test_accept_overshoot_takes_reachable_above_target() -> None:
+    """高侧容忍只在「网格跨不过去」时生效；只往多了取，绝不向低的 14 妥协。"""
     table = DragTable(amount=7.0, low=7.0, high=21.0, allin=False)
-    controller, _ = _mk_quantized(table, accept_ratio=0.05)
+    controller, _ = _mk_quantized(table, accept_overshoot_ratio=0.05)
     result = controller.set_amount(20.0)
     check(result.status == "set", f"应 set，实际 {result.to_dict()}")
     check(table.confirmed == 21.0,
-          f"应选最近可达 21（+5%），而不是 14，实际 {table.confirmed}")
+          f"应选可达的 21（在 +5% 内），而不是 14，实际 {table.confirmed}")
     check(result.evidence.get("accepted_approx") is not None,
           f"应记录近似落注证据：{result.evidence}")
 
     table2 = DragTable(amount=7.0, low=7.0, high=21.0, allin=False)
-    controller2, _ = _mk_quantized(table2)      # accept_ratio=0
+    controller2, _ = _mk_quantized(table2)      # 默认 ratio=0
     result2 = controller2.set_amount(20.0)
     check(result2.status == "error" and table2.confirmed is None,
           f"默认不允许近似落注：{result2.to_dict()}")
 
 
-def test_accept_ratio_is_off_by_default() -> None:
+def test_accept_overshoot_never_goes_below_target() -> None:
+    """低侧恒等于 target：可达值全在目标下方时宁可报错，绝不落小注。"""
+    table = DragTable(amount=7.0, low=7.0, high=14.0, allin=False)
+    controller, _ = _mk_quantized(table, accept_overshoot_ratio=0.2,
+                                  accept_overshoot_min_bb=1.0)
+    result = controller.set_amount(20.0)
+    check(result.status == "error" and table.confirmed is None,
+          f"可达值 14 低于目标 20，必须报错而不是落 14：{result.to_dict()}")
+    check("target_unreachable" in (result.error or "")
+          or "amount_" in (result.error or ""),
+          f"错误应说明不可达，实际 {result.error}")
+
+
+def test_accept_overshoot_is_off_by_default() -> None:
     settings = SliderSettings()
-    check(settings.accept_ratio == 0.0, "默认绝不近似落注")
+    check(settings.accept_overshoot_ratio == 0.0, "默认绝不近似落注")
+    check(accept_bounds(27.0, settings) == (27.0, 27.0),
+          "默认区间应退化成只接受精确值")
     check(settings.drag_fine_min_px < settings.drag_min_px,
           "细步长应小于常规最小拖距")
     try:
@@ -764,6 +780,16 @@ def test_accept_ratio_is_off_by_default() -> None:
         pass
     else:
         check(False, "drag_fine_min_px 大于 drag_min_px 应报错")
+    # 删除的对称容忍键：老 profile 里残留必须报错，不能静默忽略
+    for key in ("accept_ratio",):
+        try:
+            SliderSettings.from_config({key: 0.05},
+                                       source="legacy.json")
+        except ValueError as exc:
+            check("accept_ratio" in str(exc) and "已删除" in str(exc),
+                  f"{key} 的报错应说清已删除，实际：{exc}")
+        else:
+            check(False, f"{key} 已删除，from_config 应报错")
 
 
 def test_drag_unreachable_does_not_confirm_and_closes_outside() -> None:
@@ -875,6 +901,90 @@ def test_settings_reject_bad_config() -> None:
             check(False, f"{bad} 应该报错（不能静默默认）")
 
 
+# ─────────────── 近似落注：只许多、不许少（2026-11-12 实盘） ───────────────
+
+def test_accept_bounds_never_below_target() -> None:
+    """允许区间 = [目标, 目标*1.05]；不足 1BB 的余量按 1BB 算并向上取整。
+
+    27BB 的 3-bet：27*1.05 = 28.35，0.35 不满足 1BB 按 1BB 算 → 27–29BB 都算
+    到位；但**26BB 不在区间里** —— 下注偏小等于自己把尺度降了一档。
+    """
+    s = SliderSettings(accept_overshoot_ratio=0.05,
+                       accept_overshoot_min_bb=1.0, round_to_bb=1.0)
+    check(accept_bounds(27.0, s) == (27.0, 29.0),
+          f"27BB 应为 27–29，实际 {accept_bounds(27.0, s)}")
+    check(accept_bounds(10.0, s) == (10.0, 11.0),
+          f"10BB 应为 10–11，实际 {accept_bounds(10.0, s)}")
+    check(accept_bounds(100.0, s) == (100.0, 105.0),
+          f"100BB 应为 100–105，实际 {accept_bounds(100.0, s)}")
+
+    # 默认（两个 ratio 都是 0）：退化成只接受精确值
+    off = SliderSettings()
+    check(accept_bounds(27.0, off) == (27.0, 27.0),
+          f"默认应只接受精确值，实际 {accept_bounds(27.0, off)}")
+
+
+class EvenGridDragBackend(NonlinearGridDragBackend):
+    """客户端在这一段只落偶数 BB：27BB 目标只可能出现 26 / 28 两档。"""
+
+    def __init__(self, table, confirm_xy, close_xy) -> None:
+        super().__init__(table, confirm_xy, close_xy, grid=2.0)
+
+
+def _mk_even(table, **settings):
+    mapper = WindowMapper(PROFILE, WindowRect(0, 0, 734, 833))
+    backend = EvenGridDragBackend(
+        table, mapper.point(PROFILE.global_slots["hero_bet_confirm"]),
+        mapper.point(PROFILE.global_slots["hero_bet_close"]))
+    cfg = SliderSettings(hold_ms=0, click_ms=0, scroll_interval_ms=0,
+                         settle_ms=0, poll_ms=1, control="drag", **settings)
+    controller = BetSliderController(
+        PROFILE, backend, lambda: np.zeros((10, 10, 3), np.uint8), mapper, cfg,
+        reader=_reader_for(table), sleep=lambda _s: None,
+        handle_locator=lambda _img: (0.5, 0.75))
+    return controller, backend
+
+
+def test_plateau_between_two_values_lands_above_target() -> None:
+    """27BB 目标、客户端只有 26/28 两档：要落在 28（不许落 26），且不再拖死。
+
+    2026-11-12 21:23 实盘：8 次拖动在 26↔28 之间来回，最后 H5 自己把滑杆关掉
+    （slider_closed_during_scroll，9.04s），一分钱没落。
+    """
+    table = DragTable(amount=17.0, low=17.0, high=90.0, allin=False)
+    controller, _ = _mk_even(table, round_to_bb=1.0, max_steps=6,
+                             accept_overshoot_ratio=0.05,
+                             accept_overshoot_min_bb=1.0)
+    result = controller.set_amount(27.0)
+    check(result.status == "set", f"应落注，实际 {result.to_dict()}")
+    check(table.confirmed is not None and table.confirmed >= 27.0,
+          f"只许多不许少：应落 ≥27，实际 {table.confirmed}")
+    check(table.confirmed in (28.0, 29.0),
+          f"两档里只能选 28，实际 {table.confirmed}")
+    check(result.steps <= 6, f"应早停，实际走了 {result.steps} 步")
+
+
+def test_below_target_is_never_accepted() -> None:
+    """只能到 26（低于目标 27）：宁可报错不落注，也不落一个更小的 3-bet。"""
+    table = DragTable(amount=17.0, low=17.0, high=26.0, allin=False)
+    controller, _ = _mk_even(table, round_to_bb=1.0, max_steps=6,
+                             accept_overshoot_ratio=0.05,
+                             accept_overshoot_min_bb=1.0)
+    result = controller.set_amount(27.0)
+    check(result.status == "error", f"低于目标不该落注，实际 {result.to_dict()}")
+    check(table.confirmed is None, f"绝不能落一个更小的注，实际 {table.confirmed}")
+    check(table.cancelled, f"失败后应点右侧空白关掉滑杆，实际 {table.cancelled}")
+
+
+def test_overshoot_off_keeps_exact_only() -> None:
+    """不打开 accept_overshoot_* 时行为不变：26/28 两档、目标 27 → 报错不落注。"""
+    table = DragTable(amount=17.0, low=17.0, high=90.0, allin=False)
+    controller, _ = _mk_even(table, round_to_bb=1.0, max_steps=6)
+    result = controller.set_amount(27.0)
+    check(result.status == "error", f"默认应报错，实际 {result.to_dict()}")
+    check(table.confirmed is None, f"默认绝不近似落注，实际 {table.confirmed}")
+
+
 def main() -> int:
     tests = [
         test_parse_amount, test_parse_fraction, test_plan_direction,
@@ -898,12 +1008,17 @@ def main() -> int:
         test_allin_needs_two_consecutive_reads,
         test_drag_reaches_target_and_confirms, test_drag_overshoot_then_corrects,
         test_drag_nonlinear_high_amount_reaches_target,
-        test_accept_ratio_uses_nearest_not_first_band,
-        test_accept_ratio_is_off_by_default,
+        test_accept_overshoot_takes_reachable_above_target,
+        test_accept_overshoot_never_goes_below_target,
+        test_accept_overshoot_is_off_by_default,
         test_drag_unreachable_does_not_confirm_and_closes_outside,
         test_drag_handle_missing_closes_outside, test_drag_all_in_stops_at_top,
         test_drag_all_in_stuck_does_not_confirm,
         test_drag_rounds_target_to_client_grid,
+        test_accept_bounds_never_below_target,
+        test_plateau_between_two_values_lands_above_target,
+        test_below_target_is_never_accepted,
+        test_overshoot_off_keeps_exact_only,
     ]
     for t in tests:
         before = len(FAILS)

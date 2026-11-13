@@ -850,9 +850,16 @@ class SliderSettings:
     drag_fine_min_px: float = 2.0
     # 拖了但额度不动：下一步把 px/BB 估大一点（而不是永远用同一个太小的步长）。
     drag_no_change_gain: float = 1.6
-    # 精确目标尽力后仍差一点时的相对容忍（0 = 关闭，默认绝不近似落注）。
-    # 只在「已经尝试到极限、当前值就是最接近的」时才用；不会一进区间就停。
-    accept_ratio: float = 0.0
+    # 近似落注的**上限**：只许多、不许少。下注偏小等于自己把下注尺度降了
+    # （27BB 的 3-bet 落成 26 就不是 3 倍了），所以低侧**恒等于 target**。
+    #   允许区间 = [target, max(target*(1+ratio), target+min_bb)]，
+    # 上限再按 round_to_bb **向上**取整到客户端网格：27BB + 5% = 28.35，
+    # 客户端只能落整数 BB，就把 0.35 当 1BB 算 → 27–29BB 都算到位。
+    # 一进区间就落注，不再为了精确值多烧一步（每步 ~0.93s）。
+    # 0 = 关闭（只接受精确值，和旧行为一致）。老键 `accept_ratio` 已删除：
+    # 那个对称容忍会让下注偏小，配置里再出现会直接报错（见 from_config）。
+    accept_overshoot_ratio: float = 0.0
+    accept_overshoot_min_bb: float = 1.0
     drag_steps: int = 8            # 拖动过程中的 move 次数（H5 要看到中间移动）
     drag_step_ms: int = 12
     drag_hold_ms: int = 80         # 按下后先停一下再拖（H5 要「按住拖动」）
@@ -918,9 +925,14 @@ class SliderSettings:
         need(math.isfinite(self.drag_no_change_gain)
              and self.drag_no_change_gain >= 1,
              f"drag_no_change_gain 必须 ≥ 1：{self.drag_no_change_gain}")
-        need(math.isfinite(self.accept_ratio)
-             and 0 <= self.accept_ratio <= 0.2,
-             f"accept_ratio 必须在 0–0.2：{self.accept_ratio}")
+        need(math.isfinite(self.accept_overshoot_ratio)
+             and 0 <= self.accept_overshoot_ratio <= 0.2,
+             f"accept_overshoot_ratio 必须在 0–0.2："
+             f"{self.accept_overshoot_ratio}")
+        need(math.isfinite(self.accept_overshoot_min_bb)
+             and self.accept_overshoot_min_bb >= 0,
+             f"accept_overshoot_min_bb 必须 ≥ 0："
+             f"{self.accept_overshoot_min_bb}")
         need(isinstance(self.close_slot, str) and bool(self.close_slot.strip()),
              f"close_slot 不能为空：{self.close_slot!r}")
 
@@ -937,6 +949,14 @@ class SliderSettings:
         raw = raw if isinstance(raw, Mapping) else {}
         base = cls()
         where = f"（{source}）" if source is not None else ""
+        if "accept_ratio" in raw:
+            # 2026-11-13 删除：对称容忍会让下注**偏小**（落得比建议少 =
+            # 自己把下注尺度降了一档）。老 profile 里残留这个键必须报错，
+            # 不能静默忽略——否则操作者以为容忍还开着。
+            raise ValueError(
+                f"accept_ratio 已删除（低侧恒等于 target，只许多、不许少）"
+                f"{where}：{raw['accept_ratio']!r}；"
+                f"请改用 accept_overshoot_ratio / accept_overshoot_min_bb")
 
         def pick_int(key: str) -> int:
             if key not in raw:
@@ -1007,7 +1027,8 @@ class SliderSettings:
             drag_step_fraction=pick_float("drag_step_fraction"),
             drag_fine_min_px=pick_float("drag_fine_min_px"),
             drag_no_change_gain=pick_float("drag_no_change_gain"),
-            accept_ratio=pick_float("accept_ratio"),
+            accept_overshoot_ratio=pick_float("accept_overshoot_ratio"),
+            accept_overshoot_min_bb=pick_float("accept_overshoot_min_bb"),
             drag_steps=pick_int("drag_steps"),
             drag_step_ms=pick_int("drag_step_ms"),
             drag_hold_ms=pick_int("drag_hold_ms"),
@@ -1062,6 +1083,42 @@ def plan_slider(current_bb: float | None, target_bb: float,
     notches = max(1, int(math.ceil(abs(diff) / max(0.01, notch_bb))))
     return {"direction": 1 if diff > 0 else -1,
             "estimated_notches": notches, "reason": "estimate_only"}
+
+
+def accept_bounds(target: float, settings: "SliderSettings | None" = None,
+                  *, round_to_bb: float | None = None) -> tuple[float, float]:
+    """近似落注的允许区间：**只许多、不许少**。
+
+    = `[target, max(target*(1+overshoot_ratio), target+overshoot_min_bb)]`
+
+    低侧**永远**是 target：下注偏小 = 自己把下注尺度降了一档，27BB 的 3-bet
+    落成 26 就不是 3 倍了。这里没有「对称容忍」这种口径——老键 `accept_ratio`
+    已删除，配置里残留会 fail fast（见 `SliderSettings.from_config`）。
+    高侧的上限按客户端粒度**向上**取整：27BB + 5% = 28.35，客户端只能落整数
+    BB，0.35 不满足 1BB 就按 1BB 算 → 27–29BB 都算到位；10BB + 5% = 10.5，
+    不足 1BB 按 1BB 算 → 10–11BB。
+
+    `accept_overshoot_ratio` 为 0 时高侧也等于 target，区间退化成
+    `[target, target]`，等于「只接受精确值」。
+    """
+    target = float(target)
+    if settings is None:
+        ratio_high = 0.0
+        min_bb = 0.0
+        grid = float(round_to_bb or 0.0)
+    else:
+        ratio_high = max(0.0, float(settings.accept_overshoot_ratio))
+        min_bb = max(0.0, float(settings.accept_overshoot_min_bb))
+        grid = float(round_to_bb if round_to_bb is not None
+                     else settings.round_to_bb or 0.0)
+    low = target
+    if ratio_high <= 0:
+        high = target
+    else:
+        high = max(target * (1.0 + ratio_high), target + min_bb)
+    if grid > 0:
+        high = math.ceil(high / grid - 1e-9) * grid
+    return low, max(low, high)
 
 
 class BetSliderController:
@@ -1373,12 +1430,37 @@ class BetSliderController:
             per_notch: float | None = None
             px_per_bb = max(0.5, float(self.settings.drag_px_per_bb))
             no_change = 0
+            # 细步长（drag_fine_min_px）拖了却没反应 → 下一步必须回到
+            # drag_min_px 以上，别在同一个太小的步长上连撞两次（实测会白烧
+            # 2×0.93s，正好把 27BB 那种高位目标顶到超时）。
+            stuck_fine = False
             recent: list[float] = []
             best_amount = amount
             best_error = abs(amount - target)
+            # 可接受的落注区间（只许多、不许少）。上下限先算好，循环里每一步
+            # 都拿它判断「是继续逼近，还是已经到位」。
+            low, high = accept_bounds(target, self.settings)
+            result.evidence["accept_bounds"] = [round(low, 2), round(high, 2)]
+            approx_reason: str | None = None
             for _ in range(max(1, self.settings.max_steps)):
-                self._check_deadline(deadline)
+                try:
+                    self._check_deadline(deadline)
+                except BetSliderError:
+                    # 时间用完：当前额度若已经落在允许区间里，就按它落注 ——
+                    # 「已经能用的额度」不该因为超时被扔掉（只多 1BB 的近似
+                    # 远好过一个都不下）。
+                    if low - 1e-9 <= amount <= high + 1e-9:
+                        approx_reason = "deadline"
+                        break
+                    raise
                 if abs(amount - target) <= self.settings.tolerance_bb:
+                    break
+                # **符合就下注**：额度一进允许区间就落注，不等「软截止」、
+                # 也不为了把精确值拖出来再多烧一步（每步 ~0.93s）。
+                # 允许区间本来就是「可以接受的落注额」（只许多、不许少），
+                # 多等一步只是把动作推得更晚。
+                if low - 1e-9 <= amount <= high + 1e-9:
+                    approx_reason = "window"
                     break
                 diff = target - amount
                 before = amount
@@ -1393,7 +1475,7 @@ class BetSliderController:
                     desired = min(desired, remaining)
                     predicted = desired * px_per_bb
                     min_px = float(self.settings.drag_min_px)
-                    if predicted < min_px:
+                    if predicted < min_px and not stuck_fine:
                         min_px = min(min_px,
                                      float(self.settings.drag_fine_min_px))
                     mag = min(max(min_px, predicted),
@@ -1430,24 +1512,26 @@ class BetSliderController:
                     self._log(f"[滑杆] 拖动 {dy:+.0f}px → {amount:g}BB"
                               f"（目标 {target:g}）")
                 delta_bb = amount - before
+                in_window = low - 1e-9 <= amount <= high + 1e-9
                 if abs(delta_bb) <= 1e-9:
                     no_change += 1
                     per_notch = None
                     if control == "drag":
-                        # 太细的步长被 H5 忽略时，下一步估大一点。
+                        # 太细的步长被 H5 忽略时，下一步估大一点，并停用细步长。
                         px_per_bb = min(120.0, px_per_bb
                                         * float(self.settings.drag_no_change_gain))
+                        stuck_fine = True
                     if no_change >= max(1, self.settings.max_no_change):
-                        ratio = float(self.settings.accept_ratio)
-                        if (ratio > 0
-                                and abs(amount - target) <= target * ratio):
+                        if in_window:
                             # 客户端在该区间的最小步长跨不过去：已尽力，
-                            # 当前值在相对容忍内，交给兜底落注。
+                            # 当前值落在允许区间里，落注。
+                            approx_reason = "no_change"
                             break
                         raise BetSliderError(
                             f"amount_not_changing(at {amount:g}BB)")
                 else:
                     no_change = 0
+                    stuck_fine = False
                     if control == "drag":
                         # 局部斜率：非线性滑杆只信最近一次的 px/BB。
                         observed = abs(dy) / max(1e-9, abs(delta_bb))
@@ -1456,38 +1540,53 @@ class BetSliderController:
                         per_notch = abs(delta_bb) / max(1, n)
                 if abs(amount - target) < best_error - 1e-9:
                     best_amount, best_error = amount, abs(amount - target)
+                prev_amount = recent[-1] if recent else None
                 recent.append(round(amount, 2))
-                if (len(recent) >= 4 and recent[-1] == recent[-3]
-                        and recent[-2] == recent[-4]
-                        and recent[-1] != recent[-2]
+                # 客户端在这一段只有两档（2026-11-12 实测 26↔28，目标 27）：
+                # 最近三步只落在两个相邻值上，就是「粒度跨不过去」。
+                # 旧判据要求严格 A,B,A,B 四步交替，`26,26,28,28` 这种永远不
+                # 命中，于是一路拖到 H5 自己把滑杆关掉（21:23，9.04s，
+                # slider_closed_during_scroll）。
+                # ① 一步从目标下方跨到上方、且步长本身很小（≤ 目标的 10%）
+                #    = 这就是客户端在这一段的粒度；当前值在允许区间里就落注。
+                #    27BB 目标：26 → 28 一跳正好是这一档的 2BB 网格。
+                if (in_window and prev_amount is not None
+                        and prev_amount < target <= amount
+                        and abs(amount - prev_amount)
+                        <= max(1.0, target * 0.1)):
+                    result.evidence["observed_step_bb"] = abs(amount - prev_amount)
+                    approx_reason = "crossed"
+                    break
+                tail = recent[-3:]
+                if (len(tail) == 3 and len(set(tail)) == 2
                         and abs(amount - target) > self.settings.tolerance_bb):
-                    ratio = float(self.settings.accept_ratio)
-                    if ratio > 0 and best_error <= target * ratio:
-                        # 已尽力、当前就在相对容忍内：交给循环后的
-                        # 「最近可达额」落注，不必再抖。
-                        break
-                    raise BetSliderError(
-                        f"amount_oscillating({recent[-2]:g}↔{recent[-1]:g})")
+                    gap = abs(max(tail) - min(tail))
+                    if gap <= max(1.0, target * 0.1):
+                        result.evidence["observed_step_bb"] = gap
+                        if in_window:
+                            approx_reason = "plateau"
+                            break
+                        # 落在目标下方（下注偏小）：继续拖，不能停在小的那一侧
+                    elif not in_window:
+                        # 两档差得太远（真振荡，如目标 4 在 2↔5）：停手。
+                        raise BetSliderError(
+                            f"amount_oscillating({min(tail):g}↔{max(tail):g})")
 
             exact = abs(amount - target) <= self.settings.tolerance_bb
+            in_window = low - 1e-9 <= amount <= high + 1e-9
+            if not exact and not in_window:
+                raise BetSliderError(
+                    f"target_unreachable(target={target:g}, final={amount:g})")
             if not exact:
-                ratio = float(self.settings.accept_ratio)
-                # 只有尽力之后、且当前就是最接近的值时才允许相对容忍；
-                # 不会「一进 5% 区间就停」——那会从下方系统性少下注。
-                approx_ok = (ratio > 0
-                             and best_error <= target * ratio
-                             and abs(amount - target) <= target * ratio)
-                if approx_ok:
-                    self._log(
-                        f"[滑杆] 目标 {target:g}BB 尽力后为 {amount:g}BB"
-                        f"（相对误差 {abs(amount - target) / target * 100:.1f}%"
-                        f"，accept_ratio={ratio:g}），按最近可达额落注")
-                    result.evidence["accepted_approx"] = {
-                        "target": target, "actual": amount,
-                        "ratio": ratio, "best": best_amount}
-                else:
-                    raise BetSliderError(
-                        f"target_unreachable(target={target:g}, final={amount:g})")
+                reason = approx_reason or "steps_exhausted"
+                self._log(
+                    f"[滑杆] 目标 {target:g}BB 实际落注 {amount:g}BB"
+                    f"（允许 {low:g}–{high:g}BB，只许多不许少；{reason}）")
+                result.evidence["accepted_approx"] = {
+                    "target": target, "actual": amount,
+                    "low": low, "high": high, "reason": reason,
+                    "observed_step_bb": result.evidence.get("observed_step_bb"),
+                    "best": best_amount}
 
             # 目标额已到位（或按最近的近似值放行），才允许落注。
             final_actual = amount

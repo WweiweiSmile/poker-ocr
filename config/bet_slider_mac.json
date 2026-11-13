@@ -12,9 +12,9 @@
   "settle_ms": 180,
   "poll_ms": 100,
   "open_timeout_ms": 1500,
-  "total_timeout_ms": 8000,
-  "_total_timeout_note": "整个闭环（打开→改额→确认）的总时限。客户端回合通常只有 10–15s，max_steps × 每步（截图+settle+拖动）能轻松超过它；超时直接报 slider_timeout 并点右侧空白关掉，不在中途落注。",
-  "max_steps": 80,
+  "total_timeout_ms": 5000,
+  "_total_timeout_note": "整个闭环（打开→改额→确认）的总时限。真实约束是**客户端留给我们的回合只剩 15s**（超过就自动过牌/弃牌）；这里刻意只给 5s 上限 + max_steps=3，是为了让用户等得更短（实测「打开+确认」~2.1s，每拖一步 +0.93s），不是算力上限。5000ms 覆盖 3 步，配合「一进允许区间就落注」通常 1–2 步就收口。超时那一刻若当前额度已在允许区间就按它落注（软截止），否则报 slider_timeout 并点右侧空白关掉，不在中途落注。点击已移到工作线程（2026-11-13），这段时间主循环只是让路、不再被阻塞。",
+  "max_steps": 3,
   "max_no_change": 3,
   "scroll_batch_max": 5,
   "tolerance_bb": 0.01,
@@ -36,7 +36,7 @@
   "control": "drag",
   "_control_note": "改额方式：`drag` = 按住橙色额度手柄上下拖（2026-11-10 新 UI；滚轮完全无效，实测滚 3 次数值不动）；`wheel` = 老 UI 滚轮，保留兼容。写别的值启动即报错。",
   "drag_px_per_bb": 6.0,
-  "_drag_note": "拖动闭环：第一次拖 drag_min_px 起步，读回金额后按实测换算 px/BB，后面按差值拖；手柄位置随额度移动，所以每次拖前都用颜色重新找。拖过目标会反向拖回来，只有读回金额等于目标（±tolerance_bb）才点确定。",
+  "_drag_note": "拖动闭环：第一次拖 drag_min_px 起步，读回金额后按实测换算 px/BB，后面按差值拖；手柄位置随额度移动，所以每次拖前都用颜色重新找。拖过目标会反向拖回来；读回金额落在允许区间（[建议额, 建议额×1.05] 向上取整到 round_to_bb）就点确定 —— 不为了凑精确值多烧一步。",
   "drag_min_px": 6.0,
   "drag_max_px": 120.0,
   "drag_steps": 8,
@@ -53,6 +53,7 @@
   "drag_step_fraction": 1.0,
   "drag_fine_min_px": 2.0,
   "drag_no_change_gain": 1.6,
-  "accept_ratio": 0.0,
-  "_drag_curve_note": "金额越大 px/BB 越小：drag_fine_min_px 是靠近目标时的细拖距；accept_ratio=0 表示绝不近似落注（>0 时才在尽力后接受最近可达额，且不会一进区间就停）。"
+  "accept_overshoot_ratio": 0.05,
+  "accept_overshoot_min_bb": 1.0,
+  "_drag_curve_note": "金额越大 px/BB 越小：drag_fine_min_px 是靠近目标时的细拖距。近似落注的区间只许多、不许少：低侧**恒等于建议额**（老键 accept_ratio 已删除，写进配置会直接报错 —— 落得比建议小等于自己把下注尺度降了一档），高侧 accept_overshoot_ratio=0.05 + accept_overshoot_min_bb=1.0，上限再按 round_to_bb 向上取整 —— 27BB 目标 → 27*1.05=28.35，0.35 不足 1BB 按 1BB 算 → 27–29BB 都算到位。ratio 为 0 时退化成只接受精确值。**额度一进这个区间就落注**，不等软截止、也不为凑精确值多拖一步（2026-11-13 起）。"
 }
