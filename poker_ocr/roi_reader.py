@@ -211,6 +211,19 @@ class RoiFrame:
             read = self.seat(seat_id).fields.get(key)
         return read.text if read else ""
 
+    def parts(self, key: str, seat_id: str | None = None) -> list[tuple[str, float]]:
+        """这块 ROI 的**逐框**读数 `[(text, score)]`。
+
+        `text()` 把多框直接拼起来（`"1BB"+"8"` → `"1BB8"`），金额解析失败时
+        还可以逐个框再试一次：筹码图标/杂字常常是独立一框，金额本身在另一框。
+        单框时只有一项，和 `text()` 等价。
+        """
+        if seat_id is None:
+            read = self.globals.get(key)
+        else:
+            read = self.seat(seat_id).fields.get(key)
+        return list(read.parts) if read else []
+
     @property
     def ms_total(self) -> float:
         return self.ms_roi + self.ms_dealer

@@ -39,6 +39,13 @@ AMOUNT_OK = {
     "O0.5BB": 0.5, "C1BB": 1.0, "1BBO": 1.0, "50.5BB": 50.5,
     # 2026-11-12: OCR 把单位后的 O 读成数字 0，整条街的 bet 都被拒 → 丢帧
     "1BB0": 1.0, "0.5BB0": 0.5, "1BB00": 1.0,
+    # 2026-11-12 实盘：下注 pill 右侧的**筹码图标**被读成数字贴在金额后面
+    # （`5.5BB` → `55BBO`、`1BB` → `1BB8`），整块被拒 → 整帧丢弃。
+    # 数字清洗：认到单位为止，两侧 ≤3/≤2 个字当图标噪声丢掉。
+    "55BB0": 55.0, "1BB8": 1.0, "100BB5": 100.0, "c100BB": 100.0,
+    "12BB88": 12.0, " 1BB◎ ": 1.0,
+    # 带小数点的必须原样保留：清洗只裁图标，不动点
+    "5.5BB0": 5.5, "5.5BB8": 5.5, "14.5BBO": 14.5, "c24.5BB": 24.5,
 }
 AMOUNT_REJECT = [
     "对子", "葫芦", "两对", "我", "利东的",          # 摊牌标签 / 名字
@@ -61,6 +68,29 @@ def test_amount_rejects_noise_without_unit() -> None:
     for text in AMOUNT_REJECT:
         a = parse_amount(text)
         check(not a.ok, f"{text!r} 不该被解析成金额，实际 {a.value!r}")
+
+
+def test_amount_digits_cleaned_from_chip_icon() -> None:
+    """清洗掉的是**两侧的图标读数**，不是把数字串猜成别的值。"""
+    a = parse_amount("55BB0")
+    check(a.ok and a.value == 55.0, f"55BB0 应得 55，实际 {a.to_debug()}")
+    check(a.tail_noise == "0", f"应记录被丢掉的尾巴，实际 {a.tail_noise!r}")
+
+    a = parse_amount("1BB8")
+    check(a.ok and a.value == 1.0 and a.tail_noise == "8",
+          f"1BB8 应得 1（尾巴是筹码图标），实际 {a.to_debug()}")
+
+    a = parse_amount("c100BB")
+    check(a.ok and a.value == 100.0, f"c100BB 应得 100，实际 {a.to_debug()}")
+
+    # 干净文本不该被标成「清洗过」
+    a = parse_amount("6.5BB")
+    check(a.ok and a.tail_noise is None,
+          f"干净文本不该有 tail_noise，实际 {a.to_debug()}")
+
+    # 尾巴太长（不可能是图标）仍然拒绝：`1BBOOO8` 不是金额
+    a = parse_amount("1BBOOO8")
+    check(not a.ok, f"尾巴过长不该硬洗出金额，实际 {a.to_debug()}")
 
 
 def test_amount_zero_glyphs() -> None:

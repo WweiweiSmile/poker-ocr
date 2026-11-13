@@ -490,9 +490,13 @@ class FakeCache:
 
 
 def test_bad_bet_invalidates_roi_cache() -> None:
-    """一次 bet 误读被缓存复用会毁掉整条街：质量闸报错后必须作废那一块。"""
+    """一次 bet 误读被缓存复用会毁掉整条街：质量闸报错后必须作废那一块。
+
+    用「图标 + 杂字太长」的文本：短尾巴（`1BB8`）从 2026-11-12 起会被
+    数字清洗成 1BB，不再是解析失败 —— 这条测的是**缓存作废**，不是解析边界。
+    """
     rows = {sid: dict(vals) for sid, vals in BASE.items()}
-    rows["upR"] = {**rows["upR"], "bet": "1BB8"}   # 带数字尾巴 → 解析失败
+    rows["upR"] = {**rows["upR"], "bet": "1BBOOO8"}   # 洗不掉的乱码 → 解析失败
     with stub_env():
         s = new_stream()
         s.stream.cache = FakeCache()

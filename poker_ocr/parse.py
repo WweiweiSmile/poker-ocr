@@ -35,6 +35,18 @@ _AMOUNT_RE = re.compile(r"^[^0-9]*(\d+(?:\.\d+)?)\s*(BB|B)?[^0-9]{0,3}$")
 _AMOUNT_TRAILING_ZERO_RE = re.compile(
     r"^[^0-9]*(\d+(?:\.\d+)?)\s*(BB|B)\s*[0O]{1,2}$")
 
+# 数字清洗：下注 pill 两侧的**筹码图标**会被 rec 读成数字贴在金额上 ——
+# `55BB0`（尾巴 0）、`1BB8`（尾巴 8）、`26.5BB`（前导 2 是图标）。
+# 前两条正则要求「单位后是非数字（≤3）」或「单位后是 0/O（≤2）」，遇到
+# `1BB8` 这种就把整块拒成「不是金额形状」→ 质量闸丢整帧。2026-11-12 实盘：
+# upR 的 `5.5BB` 读成 `55BBO`，一场 36 帧被这个闸拦掉。
+#
+# 这里只做**清洗**：认到单位为止，前导字符（≤3）和单位后尾巴（≤2）都丢掉。
+# 不猜小数点、不猜倍率 —— 55BB 就是 55BB，是不是真值交给下游的
+# 「下注 > 底池」闸去判，别在这一层编数字。
+_AMOUNT_CORE_RE = re.compile(r"^[^0-9]{0,3}(\d+(?:\.\d+)?)\s*(BB|B)")
+_AMOUNT_TAIL_NOISE_MAX = 2
+
 
 @dataclass
 class Amount:
@@ -43,6 +55,9 @@ class Amount:
     unit: str | None
     zero_no_unit: bool = False
     error: str | None = None
+    # 清洗掉的尾巴（单位后面的筹码图标/误读字符）。有值说明这个数是从
+    # `55BB0` 这类带噪声的文本里洗出来的，统计时能单独数一遍。
+    tail_noise: str | None = None
 
     @property
     def ok(self) -> bool:
@@ -54,6 +69,8 @@ class Amount:
             d["unit"] = self.unit
         if self.zero_no_unit:
             d["zero_no_unit"] = True
+        if self.tail_noise:
+            d["tail_noise"] = self.tail_noise
         if self.error:
             d["error"] = self.error
         return d
@@ -103,6 +120,12 @@ def parse_amount(text: str | None) -> Amount:
     if not m:
         m = _AMOUNT_TRAILING_ZERO_RE.match(t)
     if not m:
+        # ③ 数字清洗：两侧的筹码图标读数丢掉，只留「数字 + 单位」。
+        core = _AMOUNT_CORE_RE.match(t)
+        tail = t[core.end():] if core else ""
+        if core and len(tail) <= _AMOUNT_TAIL_NOISE_MAX:
+            return Amount(t, float(core.group(1)), core.group(2).upper(),
+                          tail_noise=tail or None)
         return Amount(t, None, None, error="不是金额形状")
     num, unit = m.group(1), m.group(2)
     if unit is None:

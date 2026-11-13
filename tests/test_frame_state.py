@@ -934,6 +934,103 @@ def test_roster_left_seat_keeps_position_and_folds() -> None:
           f"离桌不该再要求筹码/下注：{s.errors}")
 
 
+# ───────────── 下注 pill 旁的筹码图标（2026-11-12 实盘） ─────────────
+
+def test_bet_with_chip_icon_tail_is_cleaned_not_dropped() -> None:
+    """筹码图标被读成数字贴在金额后面（`1BB8`）：清洗出 1，帧不丢。
+
+    2026-11-12 实盘 upR：pill「5.5BB」+ 右侧筹码 → `55BBO` / `1BB8`，
+    整块被拒成「不是金额形状」→ `bet:upR` → 整帧丢弃（21:50 场 36 帧）。
+    """
+    rows = {k: dict(v) for k, v in BASE.items()}
+    rows["topR"]["bet"] = "1BB8"
+    s = state(rows)
+    check(s.ok, f"筹码图标噪声不该丢整帧，实际 errors={s.errors}")
+    top_r = s.player("topR")
+    check(top_r.bet == 1.0, f"topR 下注应为 1，实际 {top_r.bet}")
+    check(any("清洗" in n for n in top_r.notes),
+          f"应在 notes 里写明清洗过，实际 {top_r.notes}")
+
+
+def test_bet_from_separate_amount_box() -> None:
+    """整块文本拼坏了（`1BB` + `O88`），但金额单独一框 → 逐框重试要能取出来。"""
+    rows = {k: dict(v) for k, v in BASE.items()}
+    frame = make_frame(rows)
+    frame.seat("topR").fields["bet"] = RoiRead(
+        "x", (0, 0, 10, 10), parts=[("1BB", 0.92), ("O88", 0.41)])
+    s = build_state(frame, PROFILE)
+    check(s.ok, f"多框重试不该丢整帧，实际 errors={s.errors}")
+    top_r = s.player("topR")
+    check(top_r.bet == 1.0, f"应从金额框取到 1，实际 {top_r.bet}")
+    check(any("多框" in n for n in top_r.notes),
+          f"应在 notes 里写明取了哪一框，实际 {top_r.notes}")
+
+
+def test_bet_with_chip_leading_digit_still_drops() -> None:
+    """前导数字融合（`46.5BB` 实为 6.5BB）不猜值：超出底池就按未知处理。
+
+    这条守住「宁可丢/降级，也不编数字」：清洗只裁图标尾巴，不猜小数点。
+    """
+    rows = {k: dict(v) for k, v in BASE.items()}
+    rows["topR"]["bet"] = "46.5BB"   # 筹码被读成前导 4：46.5 > 底池 38
+    s = state(rows)
+    top_r = s.player("topR")
+    check(top_r.bet is None and top_r.bet_unknown,
+          f"下注 > 底池应降级成未知，实际 {top_r.to_debug()}")
+    check("topR" in tuple(s.bet_warnings),
+          f"应记进 bet_warnings，实际 {s.bet_warnings}")
+
+
+def test_bet_gt_street_total_degrades_not_drops() -> None:
+    """一家人不可能下超过本街总额：降级成未知 + 警告，**不丢整帧**。
+
+    底池 38 / 本街总额 33.5：读成 34 不超过底池（`bet > pot` 漏过去），但已经
+    超过全场本街投入之和 —— 几何不可能。2026-11-13 用户裁定：一个座位读坏
+    不该把整桌的筹码/底池/动作一起作废，所以与 `bet > pot` 同口径降级，
+    由 `live.py` 跳过这一手的建议/点击。
+    """
+    rows = {k: dict(v) for k, v in BASE.items()}
+    rows["upR"]["bet"] = "34BB"
+    s = state(rows)
+    check(s.ok, f"降级不该丢整帧，实际 errors={s.errors}")
+    up_r = s.player("upR")
+    check(up_r.bet is None and up_r.bet_unknown,
+          f"应降级成未知，实际 {up_r.to_debug()}")
+    check("upR" in tuple(s.bet_warnings),
+          f"应记进 bet_warnings，实际 {s.bet_warnings}")
+    check(any("本街总额" in n for n in up_r.notes),
+          f"notes 应写明读到多少、超过多少，实际 {up_r.notes}")
+
+
+def test_decimal_point_lost_is_not_repaired() -> None:
+    """`5.5BB` 被读成 `55BB`：不猜小数点、不按 ÷10 修，只降级。
+
+    以前这里会把 55 修回 5.5（按本街总额反推）。但那是猜数字：猜对了多一手，
+    猜错了就是一个 10 倍的 to_call。现在口径是「金额只清洗两侧噪声」，
+    不可能的量级按未知处理。
+    """
+    rows = {k: dict(v) for k, v in BASE.items()}
+    rows["topR"]["bet"] = "55BB0"
+    s = state(rows)
+    check(s.ok, f"降级不该丢整帧，实际 errors={s.errors}")
+    top_r = s.player("topR")
+    check(top_r.bet is None and top_r.bet_unknown,
+          f"不该猜出 5.5，应降级成未知，实际 {top_r.bet}")
+    check("topR" in tuple(s.bet_warnings),
+          f"应记进 bet_warnings，实际 {s.bet_warnings}")
+
+
+def test_decimal_repair_refuses_non_grid_value() -> None:
+    """36 → 3.6 也不猜：不管落不落在 0.5BB 网格上，都不做量级反推。"""
+    rows = {k: dict(v) for k, v in BASE.items()}
+    rows["topR"]["bet"] = "36BB"
+    s = state(rows)
+    check(s.ok, f"降级不该丢整帧，实际 errors={s.errors}")
+    top_r = s.player("topR")
+    check(top_r.bet is None and top_r.bet_unknown,
+          f"36 不该被修成 3.6，应降级成未知，实际 {top_r.bet}")
+
+
 def main() -> int:
     tests = [
         test_full_state,
@@ -964,6 +1061,12 @@ def main() -> int:
         test_absent_seat_keeps_name_memory,
         test_name_diagnostics_are_recorded,
         test_leaving_seat_does_not_keep_old_name,
+        test_bet_with_chip_icon_tail_is_cleaned_not_dropped,
+        test_bet_from_separate_amount_box,
+        test_bet_with_chip_leading_digit_still_drops,
+        test_bet_gt_street_total_degrades_not_drops,
+        test_decimal_point_lost_is_not_repaired,
+        test_decimal_repair_refuses_non_grid_value,
         test_missing_dealer,
         test_pot_label_without_number,
         test_unreadable_bet_is_an_error,

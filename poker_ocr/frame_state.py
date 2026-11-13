@@ -12,9 +12,15 @@
   · **后手筹码**是筹码胶囊上的值（玩家下注后会减少），不是「带入」。
   · **本街下注**取每个座位的下注 pill；没有 pill = 0。注意它和
     `pot − pot_before_street` 是同一个量，后者用于交叉校验。
-    **下注读到大于底池 = 不可能**（底池就是全场投入之和）：这一位降级成
-    `bet=None` / `bet_unknown=True` 并记进 `bet_warnings`，**不丢整帧** ——
-    单座一个坏字段不该把别人的筹码/底池/动作一起作废（见下面的质量闸）。
+    **下注读到大于底池、或大于本街总额 = 不可能**（底池就是全场投入之和）：
+    这一位降级成 `bet=None` / `bet_unknown=True` 并记进 `bet_warnings`，
+    **不丢整帧** —— 单座一个坏字段不该把别人的筹码/底池/动作一起作废
+    （见下面的质量闸）。降级时 `to_call` 依赖的最大下注不可信，改由调用方
+    （`live.py`）跳过这一手的建议/点击，而不是让整帧消失。
+  · **金额只做两侧清洗，不猜数字**：`5.5BB` 被读成 `55BB` 这种「小数点丢了」
+    的量级错误**不修**（不猜小数点、不猜倍率，见 `parse.parse_amount`），
+    交给上面那条几何闸降级成未知。清洗只裁掉贴在金额两侧的图标噪声
+    （`1BB8` → `1`），不改动数字本身。
   · **盲注**解析失败时可以继承上一帧（`blinds.source = "carried"`）—— 盲注只在
     升级时变，而那条横幅经常被「All-in 全场禁言中…」盖住；继承比丢帧合理。
     但**底池不能继承**（每手/每街都在变）。
@@ -191,6 +197,35 @@ class FrameState:
 
 def _r(v: float | None, nd: int = 2) -> float | None:
     return None if v is None else round(v, nd)
+
+
+# 2026-11-13 起不再有「小数点量级修复」：曾经想按几何上限把 `55` 反推回
+# `5.5`，但那是在猜数字——猜对了多 1 手，猜错了就是一个 10 倍的 to_call。
+# 现在金额只做两侧噪声清洗（见 `_parse_amount_slot` 与 `parse.parse_amount`），
+# 量级不可能时按未知降级，交给调用方跳过这一手建议。
+
+
+def _parse_amount_slot(frame: RoiFrame, key: str,
+                       seat_id: str) -> tuple[Amount, str | None]:
+    """先按整块文本解析金额；失败再**逐框**试一次。
+
+    下注 pill 两侧的筹码图标常被 rec 拆成单独一框，`text()` 会把它拼进金额
+    （`1BB` + `8` → `1BB8`），整块解析失败就把整帧丢掉。逐框重试能把金额
+    单独取出来；返回 `(amount, 命中的那一框原文)`，命中的框写进 notes 便于复盘。
+    """
+    raw = frame.text(key, seat_id)
+    amount = parse_amount(raw)
+    if amount.ok:
+        return amount, None
+    for text, _score in frame.parts(key, seat_id):
+        if not text or text == raw:
+            continue
+        cand = parse_amount(text)
+        # 必须带单位：单独一框的 `0`/`8` 是筹码图标，不是金额。
+        if cand.ok and cand.unit:
+            return Amount(raw, cand.value, cand.unit,
+                          tail_noise=cand.tail_noise), text
+    return amount, None
 
 
 # ── 爆炸底池横幅 ──────────────────────────────────────────────
@@ -450,7 +485,7 @@ def _build_players(ctx: BuildContext):
             if loose is not None:
                 chip = Amount(chip_raw, loose, "?", error=None)
                 chip_loose = True
-        bet_a: Amount = parse_amount(bet_raw)
+        bet_a, bet_part_raw = _parse_amount_slot(frame, "bet", sid)
         bet_loose = False
         if lenient_chips and bet_raw.strip() and not bet_a.ok and bet_equity is None:
             loose = parse_chip_loose(bet_raw)
@@ -609,12 +644,19 @@ def _build_players(ctx: BuildContext):
             notes.append(f"chip: 宽松解析 {chip_raw!r} → {chip.value}")
         elif chip_raw.strip() and not chip.ok and not all_in:
             notes.append(f"chip: {chip.error}")
-        if bet_loose:
-            notes.append(f"bet: 宽松解析 {bet_raw!r} → {bet_a.value}")
-        elif bet_label:
+        if bet_label:
             # 不是金额的 UI 文本（促销按钮/动作徽章）落在 bet 槽：按 0 处理，
             # 但留一条 note 方便查「这块 ROI 又被谁占了」。
             notes.append(f"bet: 标签文本 {bet_raw!r} → 本街 0")
+        elif bet_loose:
+            notes.append(f"bet: 宽松解析 {bet_raw!r} → {bet_a.value}")
+        elif bet_part_raw is not None:
+            notes.append(f"bet: 多框，取金额框 {bet_part_raw!r}"
+                         f"（整块 {bet_raw!r}）")
+        elif bet_a.tail_noise:
+            # 数字清洗：单位后面那串是筹码图标/误读字符，已经丢掉。
+            notes.append(f"bet: 清洗 {bet_raw!r} → {bet_a.value:g}BB"
+                         f"（丢掉 {bet_a.tail_noise!r}）")
         elif bet_raw.strip() and not bet_a.ok and not all_in:
             notes.append(f"bet: {bet_a.error}")
         if equity is not None:
@@ -796,6 +838,7 @@ def _quality_gate(ctx: BuildContext, in_hand: list[PlayerState],
         # 底池、动作徽章仍然是有效的** —— 只把它降级成未知，不能整帧丢掉。
         # 2026-11-08 实盘：topL 一位读坏，连续丢 52 / 95 帧，下手牌
         # 8.8s / 22s 才开始识别（换手识别「慢」的真正原因）。
+        dropped_bet = False
         if p.bet is not None and pot is not None and p.bet > pot + 1e-6:
             if pot_trusted:
                 p.notes.append(f"bet {p.bet:g} > pot {pot:g}，按未知处理")
@@ -804,8 +847,24 @@ def _quality_gate(ctx: BuildContext, in_hand: list[PlayerState],
                 bet_warnings.append(p.seat_id)
             else:
                 # 底池自己就可疑（0/比前注总额还小）：这时分不清是 bet 还是
-                # pot 读坏，照旧整帧丢弃。
+                # pot 读坏，照旧整帧丢弃。整帧都要丢，就别再改写原读数 ——
+                # 排障时要能看到「当时到底读到了什么」。
                 errors.append(f"bet_gt_pot:{p.seat_id}")
+                dropped_bet = True
+        # **单个座位的下注不可能超过本街总额**（本街总额 = 全场本街投入之和）。
+        # 2026-11-12 实盘见过 bet 槽左侧的筹码图标被读成前导数字（6.5BB →
+        # 26.5BB / 55BB），只要底池够大，上面那条 `bet > pot` 就漏得过去。
+        # 口径与 `bet > pot` 一致：**降级成未知、记警告、不丢整帧**
+        # （2026-11-13 用户裁定「降级，并给出错误日志」）。以前这里报错丢帧，
+        # 一个座位读坏会把整桌的筹码/底池/动作一起作废。
+        # 不再尝试 ÷10/÷100 把它「修」回 5.5BB —— 那是猜数字。
+        if (not dropped_bet and p.bet is not None and street_total is not None
+                and p.bet > street_total + 1e-6):
+            p.notes.append(
+                f"bet {p.bet:g} > 本街总额 {street_total:g}，按未知处理")
+            p.bet = None
+            p.bet_unknown = True
+            bet_warnings.append(p.seat_id)
         if p.bet is None and not p.all_in and not p.bet_unknown and not showdown:
             errors.append(f"bet:{p.seat_id}")
     return errors, bet_warnings, street_total, pbs
