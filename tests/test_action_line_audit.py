@@ -54,8 +54,11 @@ def test_summarize_splits_by_source() -> None:
     check(s["sources"].get("ledger") == 2, f"ledger 应为 2：{s['sources']}")
     check(s["inferred_by_source"].get("ledger") == 2,
           f"ledger 推断应为 2：{s['inferred_by_source']}")
-    check(s["folds"] == 1 and s["fold_inferred"] == 1,
-          f"弃牌推断应为 1：{s}")
+    check(s["folds"] == 1 and s["fold_inferred"] == 0,
+          f"街末不在局弃牌不算漏抓：{s}")
+    check(s["fold_exit"] == 1, f"街末不在局弃牌应为 1：{s}")
+    check(s["inferred_effective"] == 1,
+          f"剔除离局弃牌后推断应为 1：{s}")
     check(s["order_unknown"] == 1, f"顺序未知应为 1：{s}")
 
 

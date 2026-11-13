@@ -160,6 +160,7 @@ def summarize(hands: list[dict]) -> dict:
     inferred_by_source: Counter[str] = Counter()
     folds = 0
     fold_inferred = 0
+    fold_exit = 0
     order_unknown = 0
     for hand in hands:
         for street in hand.get("streets") or []:
@@ -172,20 +173,29 @@ def summarize(hands: list[dict]) -> dict:
                     inferred_by_source[source] += 1
                 if a.get("action") == "fold":
                     folds += 1
-                    if a.get("inferred") or source in INFERRED_SOURCES:
+                    # 街末「人已不在局」的弃牌按口径算观测，不算漏抓；
+                    # 这类记录目前仍是 source=ledger，所以单列统计。
+                    if source == "ledger":
+                        fold_exit += 1
+                    elif a.get("inferred") or source in INFERRED_SOURCES:
                         fold_inferred += 1
                 if a.get("order_unknown"):
                     order_unknown += 1
     blind = blind_misrecords(hands)
+    inferred_effective = inferred - fold_exit
     return {
         "hands": len(hands),
         "actions": total,
         "inferred": inferred,
         "inferred_ratio": (inferred / total) if total else 0.0,
+        "inferred_effective": inferred_effective,
+        "inferred_ratio_effective": ((inferred_effective / total)
+                                     if total else 0.0),
         "sources": dict(sources),
         "inferred_by_source": dict(inferred_by_source),
         "folds": folds,
         "fold_inferred": fold_inferred,
+        "fold_exit": fold_exit,
         "order_unknown": order_unknown,
         "blind_misrecords": blind,
     }
@@ -205,8 +215,9 @@ def hand_rows(hands: list[dict]) -> list[dict]:
             "actions": len(acts),
             "inferred": inferred,
             "fold_inferred": sum(1 for a in folds
-                                 if a.get("inferred")
-                                 or a.get("source") in INFERRED_SOURCES),
+                                 if a.get("source") != "ledger"
+                                 and (a.get("inferred")
+                                      or a.get("source") in INFERRED_SOURCES)),
             "blind": sum(1 for m in blind_misrecords([hand])),
             "order_unknown": sum(1 for a in acts if a.get("order_unknown")),
         })
@@ -216,11 +227,14 @@ def hand_rows(hands: list[dict]) -> list[dict]:
 def print_report(summary: dict, rows: list[dict], *, show_hands: bool) -> None:
     print(f"回放手牌：{summary['hands']}")
     print(f"行动记录：{summary['actions']}（推断 {summary['inferred']}，"
-          f"{summary['inferred_ratio']:.1%}）")
+          f"{summary['inferred_ratio']:.1%}；剔除街末不在局弃牌后 "
+          f"{summary['inferred_effective']}，"
+          f"{summary['inferred_ratio_effective']:.1%}）")
     print("按来源：" + "，".join(
         f"{s}={summary['sources'].get(s, 0)}"
         f"（推断 {summary['inferred_by_source'].get(s, 0)}）" for s in SOURCES))
-    print(f"弃牌：{summary['folds']}（推断 {summary['fold_inferred']}）")
+    print(f"弃牌：{summary['folds']}（漏抓 {summary['fold_inferred']}，"
+          f"街末不在局 {summary['fold_exit']}）")
     print(f"顺序未知：{summary['order_unknown']}")
     blind = summary["blind_misrecords"]
     print(f"盲注误记：{len(blind)}")
