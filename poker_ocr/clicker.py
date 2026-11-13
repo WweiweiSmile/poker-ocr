@@ -378,7 +378,16 @@ class ClickResult:
     reason: str | None = None
     error: str | None = None
     elapsed_ms: int = 0
+    # **建议额**：AI 让下的量（`options.py` 给的 amount）。所有动作同一个口径，
+    # 复盘时「模型建议多少」只认这一个字段 —— 快捷档位、滑杆、全下的实际落点
+    # 都可能不同，混在 target_bb 里会让「建议 27 / 实际 26」变成「建议 26」。
     target_bb: float | None = None
+    # **计划落注额**：真正准备点的那个数（滑杆取整后的 27、快捷档位的 26、
+    # 全下的顶端额度）。没走到「选额」这一步（fold/call/被跳过）就是 None。
+    plan_bb: float | None = None
+    # **实际落注额**：屏幕上真落下去的那个数。近似落注时可能比建议多 1BB
+    # 左右（只许多、不许少），复盘要能一眼看出「建议多少 / 实际多少」。
+    final_bb: float | None = None
     detail: dict | None = None       # 滑杆等非按钮路径的明细
 
     def to_dict(self) -> dict:
@@ -397,10 +406,27 @@ class ClickResult:
             out["error"] = self.error
         if self.target_bb is not None:
             out["target_bb"] = self.target_bb
+        if self.plan_bb is not None:
+            out["plan_bb"] = self.plan_bb
+        if self.final_bb is not None:
+            out["final_bb"] = self.final_bb
         if self.detail:
             out["detail"] = self.detail
         out["elapsed_ms"] = self.elapsed_ms
         return out
+
+
+def _amount_fields(option, *, plan_bb: float | None = None,
+                   final_bb: float | None = None) -> dict:
+    """`ClickResult` 三个额度字段的统一口径：建议额 / 计划额 / 实际额。
+
+    建议额来自 `option.amount`，**所有动作**都是它（包括快捷档位：档位是执行
+    手段，不是模型的意思）。`plan_bb`/`final_bb` 只有「选了额再点」的路径才有
+    值 —— 快捷档位、滑杆、全下；fold/call 与提前返回的跳过不编数字。
+    """
+    return {"target_bb": getattr(option, "amount", None),
+            "plan_bb": plan_bb, "final_bb": final_bb}
+
 
 
 def choose_preset(
@@ -792,7 +818,9 @@ class Clicker:
                       outcome.status, "error")
         return ClickResult(
             status, action=option.kind, mapping="bet_slider",
-            target_bb=option.amount,
+            **_amount_fields(option,
+                             plan_bb=getattr(outcome, "target_bb", None),
+                             final_bb=getattr(outcome, "final_bb", None)),
             reason=("bet_slider" if status in ("clicked", "dry_run")
                     else (outcome.reason or "bet_slider")),
             error=outcome.error,
@@ -818,9 +846,11 @@ class Clicker:
             status = {"set": "clicked", "dry_run": "dry_run",
                       "skipped": "skipped", "error": "error"}.get(
                           outcome.status, "error")
+            allin_bb = getattr(outcome, "final_bb", None)
             return ClickResult(
                 status, action="allin", mapping="bet_slider",
-                target_bb=outcome.final_bb,
+                **_amount_fields(option, plan_bb=allin_bb,
+                                 final_bb=allin_bb),
                 reason=("bet_slider_allin" if status in ("clicked", "dry_run")
                         else (outcome.reason or "bet_slider_allin")),
                 error=outcome.error,
@@ -873,7 +903,8 @@ class Clicker:
             return ClickResult(
                 "skipped", action=plan.action, preset=plan.preset,
                 mapping=plan.mapping, steps=plan.steps,
-                reason=plan.skip_reason, target_bb=plan.target_bb,
+                reason=plan.skip_reason,
+                **_amount_fields(option, plan_bb=plan.target_bb),
                 elapsed_ms=int((self._clock() - started) * 1000))
         if not plan.steps:
             return ClickResult("skipped", action=plan.action,
@@ -887,14 +918,14 @@ class Clicker:
                 return ClickResult("error", action=plan.action, preset=plan.preset,
                                    mapping=plan.mapping, steps=plan.steps,
                                    error=f"{type(exc).__name__}: {exc}",
-                                   target_bb=plan.target_bb,
+                                   **_amount_fields(option, plan_bb=plan.target_bb),
                                    elapsed_ms=int((self._clock() - started) * 1000))
             if not allowed:
                 return ClickResult(
                     "error", action=plan.action, preset=plan.preset,
                     mapping=plan.mapping, steps=plan.steps,
                     error="accessibility_permission_denied",
-                    target_bb=plan.target_bb,
+                    **_amount_fields(option, plan_bb=plan.target_bb),
                     elapsed_ms=int((self._clock() - started) * 1000))
 
         down_at: tuple[float, float] | None = None
@@ -921,11 +952,13 @@ class Clicker:
             return ClickResult("error", action=plan.action, preset=plan.preset,
                                mapping=plan.mapping, steps=plan.steps,
                                error=f"{type(exc).__name__}: {exc}",
-                               target_bb=plan.target_bb,
+                               **_amount_fields(option, plan_bb=plan.target_bb),
                                elapsed_ms=int((self._clock() - started) * 1000))
 
         return ClickResult(
             "dry_run" if self.dry_run else "clicked",
             action=plan.action, preset=plan.preset, mapping=plan.mapping,
-            steps=plan.steps, target_bb=plan.target_bb,
+            steps=plan.steps,
+            **_amount_fields(option, plan_bb=plan.target_bb,
+                             final_bb=plan.target_bb),
             elapsed_ms=int((self._clock() - started) * 1000))

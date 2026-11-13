@@ -44,6 +44,7 @@ import argparse
 import hashlib
 import json
 import os
+import queue
 import signal
 import subprocess
 import sys
@@ -67,6 +68,7 @@ from .cards import (DEFAULT_CARD_SLOTS, DEFAULT_DOUBT_WINDOW, CardsResult,
 from .action_buttons import find_action_buttons
 from .bet_slider import (BetSliderController, SliderSettings, WindowCapture,
                          WindowMapper, clicker_config_from_profile)
+from .click_worker import InlineClickExecutor, ThreadClickExecutor
 from .clicker import (DEFAULT_CONFIG_PATH as DEFAULT_CLICKER_CONFIG,
                       CGEventBackend, Clicker, ClickerConfig,
                       ClickerConfigError, ClickerUnavailable, ClickResult,
@@ -394,6 +396,25 @@ class FramePacket:
     epoch: int               # 第几次成功连上 RTSP（从 1 开始）
     grab_mono: float         # read() 返回时的 monotonic 时间
     image: np.ndarray        # BGR
+
+
+@dataclass
+class _ClickJob:
+    """一次已经通过安全闸、交给执行器去跑的点击。
+
+    `record` 是这条建议在 JSONL 里的 dict：异步执行时结果晚到，靠它把
+    `click` 补进同一个对象（手牌记录会一起带上）。
+    """
+
+    advice: object
+    targets: dict | None
+    record: dict | None = None
+    submitted: float = 0.0
+    # 点击那一刻的画面状态：0.5s 后拿它的动作指纹判「动作是否生效」。
+    state: object = None
+    # 结果是否要单独落一条 `click` 事件：异步执行时才需要（advice 那一行
+    # 已经在点击之前写出去了）；同步执行时结果直接写进 advice 行的 click 键。
+    write_event: bool = False
 
 
 @dataclass
@@ -1137,6 +1158,7 @@ class LiveProcessor:
                  record_without_hero: bool = False,
                  advice_runner: AdviceRunner | None = None,
                  clicker: Clicker | None = None,
+                 click_executor=None,
                  confirm_click: bool = False,
                  confirm_timeout: float = 6.0,
                  min_advice_confidence: float = 0.0,
@@ -1191,6 +1213,12 @@ class LiveProcessor:
         # 桌面自动点击：None = 不点击（默认）。点击器自己负责映射与随机坐标，
         # processor 只负责判断「这条建议是不是当前决策点、现在还能不能点」。
         self.clicker = clicker
+        # 点击在哪个线程跑。默认 Inline：与改造前逐字节一致（测试/离线/回放）；
+        # live 的 main() 会装配 ThreadClickExecutor，把 2–6s 的滑杆闭环挪出主循环。
+        self.click_executor = click_executor or InlineClickExecutor()
+        self._click_jobs: queue.Queue = queue.Queue()   # 工作线程 → 主循环
+        self._click_inflight: _ClickJob | None = None
+        self._click_wait_second = 0
         # 默认不询问（保持程序化调用/单测的旧行为）；CLI 默认开启询问，
         # 只有显式 `--no-confirm` 才直接执行。自动点击关闭时该开关无意义。
         self.confirm_click = bool(confirm_click)
@@ -1292,6 +1320,9 @@ class LiveProcessor:
         self._skip_logged: dict[str, tuple[tuple, float]] = {}
         self._board_anomaly_hinted = False
         self.cards_unreliable_skips = 0
+        # 下注读数被几何闸降级成未知：节流打印的「错误日志」状态 + 计数
+        self._last_bet_degrade: tuple[tuple, float] | None = None
+        self.bet_degrade_count = 0
 
         # 质量闸丢帧的观测状态：同一类原因节流打印，每类最多存一帧样本。
         self._gate_sig: tuple[str, ...] | None = None
@@ -1682,8 +1713,13 @@ class LiveProcessor:
             self.drain_advice(state=outcome.state, allow_click=False)
 
         if outcome.state is None or not outcome.state.ok:
+            self._poll_click_results(state=outcome.state)
             self.drain_advice(state=outcome.state, allow_click=False)
             return
+        # 先把已经完成的点击结果收回来（异步执行时它在工作线程里跑完）。
+        # 放在最前面：结果一到就能落盘、挂「动作是否生效」的确认，不必等
+        # 下一条建议。
+        self._poll_click_results(state=outcome.state)
         # 上一次动作如果 0.5s 后画面还没变，在这里补点一次。放在 observe 之前：
         # 用刚识别出的帧判断，不受这一帧是否产生新决策点影响。
         self._service_click_retry(outcome.state)
@@ -1696,6 +1732,11 @@ class LiveProcessor:
         # 手牌追踪照常吃（别的字段都是好的），但**不给 AI 建议** ——
         # to_call 依赖最大下注，静默少算一位就会点错金额。
         bet_warnings = tuple(getattr(outcome.state, "bet_warnings", ()) or ())
+        # 降级不是静默的：以前 `bet > 本街总额` 直接报错丢整帧，日志里只有
+        # 一行「丢弃一帧 errors=[...]」；现在帧保留、只丢这一个字段，所以
+        # 必须显式打一行警告，否则「这手为什么没建议」无从追查。
+        if bet_warnings:
+            self._log_bet_degraded(outcome.state, bet_warnings)
         # 上一次建议因为「这一帧不能点」被挂起：画面恢复了就补点。
         self._service_deferred_click(
             outcome.state, allow_click=cards_reliable and not bet_warnings)
@@ -1924,6 +1965,32 @@ class LiveProcessor:
         self.log(f"  [建议] 跳过：牌面不可靠（{reason}）")
         return True
 
+    def _log_bet_degraded(self, state, seats: tuple[str, ...]) -> bool:
+        """有座位下注被几何闸降级成未知 → 打一行**警告**（按手/街/座位节流）。
+
+        这是「降级」而不是「丢帧」之后的错误日志：帧仍然进手牌记录，但
+        `to_call` 依赖的最大下注不可信，这一手不给建议、不自动点击。
+        具体读到了什么（`55 > 本街总额 33.5`）写在 `FrameState` 的座位
+        `notes` 里，这里把它原样带出来 —— 猜错 10 倍的金额必须留痕。
+        """
+        hand = getattr(self.hand_tracker, "hand", None)
+        key = (getattr(hand, "hand_id", None),
+               getattr(hand, "street", None), tuple(seats))
+        now = self.clock()
+        last = self._last_bet_degrade
+        if last is not None and last[0] == key and now - last[1] < 5.0:
+            return False
+        self._last_bet_degrade = (key, now)
+        self.bet_degrade_count += 1
+        detail = "；".join(
+            f"{p.seat_id}: {n}" for p in getattr(state, "players", ())
+            if p.seat_id in seats for n in p.notes if "按未知处理" in n)
+        if not detail:
+            detail = f"{'/'.join(seats[:4])} 的下注超出几何上限"
+        self.log(f"  [警告] 下注读数不可信，按未知处理：{detail}")
+        self.log("         → 这一手不给建议、不自动点击（to_call 依赖最大下注）")
+        return True
+
     def _log_bet_skip(self, state, seats: tuple[str, ...]) -> bool:
         """有座位下注读到不可能的值 → 跳过建议：按手牌/街节流打印一次。
 
@@ -1933,8 +2000,9 @@ class LiveProcessor:
         hand = getattr(self.hand_tracker, "hand", None)
         key = (getattr(hand, "hand_id", None), getattr(hand, "street", None))
         who = "/".join(seats[:4]) or "未知座位"
-        return self._note_skip("bet_unreadable",
-                               f"下注读数不可信（{who} 的下注 > 底池）", key)
+        return self._note_skip(
+            "bet_unreadable",
+            f"下注读数不可信（{who} 的下注 > 底池 或 > 本街总额）", key)
 
     def _note_skip(self, reason: str, detail: str, key: tuple) -> bool:
         """同一手同一街同一原因的「跳过建议」只打一行、只发一条事件。"""
@@ -1982,21 +2050,24 @@ class LiveProcessor:
         if self.advice_runner is not None:
             for advice in self.advice_runner.poll():
                 data = advice.to_dict()
-                click = self._maybe_click(
-                    advice, state=state,
-                    allow_click=allow_click and not final)
-                if click is not None:
-                    data["click"] = click.to_dict()
                 self._hand_advice.setdefault(data["hand_id"], []).append(data)
                 self.advice_done += 1
                 self._last_advice = advice
-                self.writer.write({"type": "advice", "ts": _iso_now(), **data})
+                # **先给结论，再动手**：点击（尤其滑杆）要 2–6s，以前是先点完
+                # 才 publish/log，用户看到建议时动作已经跑完或正在跑，体感就是
+                # 「建议迟迟不出来、出来了又慢半拍」（2026-11-12 21:23 实测
+                # 模型 1.3s、端到端 11.5s）。
                 # 看板拿到的是**同一份** data（含 prompt_system/user、facts、
                 # raw_response），所以展示的提示词与模型实际收到的一字不差。
                 self._publish("advice", dict(data))
                 self._log_advice(advice)
-                if click is not None:
-                    self._log_click(click)
+                # 结果由 _apply_click_result 落盘（同步路径当场补进 data["click"]，
+                # 异步路径下一帧写一条 `click` 事件）。先把这一行 advice 写出去，
+                # 点击结果晚到也不会顶着主循环。
+                self._maybe_click(
+                    advice, state=state,
+                    allow_click=allow_click and not final, record=data)
+                self.writer.write({"type": "advice", "ts": _iso_now(), **data})
 
         if self.hand_tracker is None:
             return
@@ -2119,40 +2190,131 @@ class LiveProcessor:
         state = control.state()
         return bool(state.get("available") and not state.get("enabled"))
 
-    def _maybe_click(self, advice, *, state, allow_click: bool):
+    def _maybe_click(self, advice, *, state, allow_click: bool,
+                     record: dict | None = None):
         """执行自动点击；未启用点击器时返回 None（JSONL 不出现 click 键）。
 
         `confirm_click=True` 时，安全闸全部通过后还要在终端等一次 y/n；
         用户拒绝会返回 `skipped/user_rejected`，不会触碰鼠标。
+
+        `record` 是这条建议要落盘的那份 dict：点击结果（尤其异步执行的）
+        要补回同一个对象，手牌记录才会一起带上。
+
+        返回：`ClickResult`（跳过 / 内联执行完）或 `None`（已交给工作线程，
+        结果由 `_poll_click_results` 在下一帧落盘）。**所有安全闸都在这里
+        同步跑完**，工作线程只负责驱动鼠标。
         """
         if self.clicker is None:
             return None
         if self._click_paused():
-            self.click_skip_count += 1
-            return ClickResult("skipped",
-                               action=getattr(advice.option, "kind", None),
-                               reason="click_paused")
+            result = ClickResult("skipped",
+                                 action=getattr(advice.option, "kind", None),
+                                 reason="click_paused")
+            self._apply_click_result(advice, result, state=state, record=record)
+            return result
         matched = bool(advice.decision_key) \
             and advice.decision_key == self._pending_decision_key
         reason = self._click_skip_reason(
             advice, state=state, allow_click=allow_click)
-        deferred = False
-        if reason is None:
-            if self.confirm_click and not self._confirm_click(advice):
-                result = ClickResult("skipped", action=advice.option.kind,
-                                     reason="user_rejected")
-            else:
-                self._sync_click_window()
-                result = self.clicker.run(advice,
-                                          targets=self._locate_click_targets())
-        else:
+        if reason is not None:
             result = ClickResult("skipped", action=advice.option.kind,
                                  reason=reason)
+            self._apply_click_result(advice, result, state=state,
+                                     record=record)
             # 这一帧不能点不等于这条建议作废：牌面/下注读数抖一下、或者整帧
             # 被质量闸丢掉，下一帧就恢复正常。记下来补点，别把建议吞掉。
             if reason in DEFER_CLICK_REASONS and matched:
+                # **不许清决策点**：`_service_click_retry` 用
+                # `_pending_decision_key` 判断「这条挂起的建议是不是还针对
+                # 同一个决策点」，清了它就等于下一帧立刻判定「决策点已变，
+                # 取消补点」，挂起机制永远不生效（2026-11-11 20:33 T9o 那手
+                # 就是这么把建议静默吞掉的）。
                 self._defer_click(advice, reason)
-                deferred = True
+            elif matched:
+                self._pending_decision_key = None
+            return result
+
+        if self.confirm_click and not self._confirm_click(advice):
+            result = ClickResult("skipped", action=advice.option.kind,
+                                 reason="user_rejected")
+            self._apply_click_result(advice, result, state=state, record=record)
+            if matched:
+                self._pending_decision_key = None
+            return result
+
+        # 安全闸全部过了：只有「驱动鼠标」这一段交给执行器。
+        self._sync_click_window()
+        job = _ClickJob(advice=advice, targets=self._locate_click_targets(),
+                        record=record, submitted=self.clock(), state=state,
+                        write_event=not self.click_executor.inline)
+        self._click_inflight = job
+        self.click_executor.submit(lambda: self._run_click_job(job))
+        if matched:
+            # 已经在执行了：立刻清决策点，别让下一帧重复 submit。
+            self._pending_decision_key = None
+        if self.click_executor.inline:
+            results = self._poll_click_results(state=state)
+            return results[-1] if results else None
+        return None
+
+    # ── 点击执行器 ────────────────────────────────────────────
+    @property
+    def click_in_flight(self) -> bool:
+        """鼠标正在被驱动（滑杆打开着）。主循环据此暂停识别。"""
+        return (self._click_inflight is not None
+                or bool(getattr(self.click_executor, "busy", False)))
+
+    def _run_click_job(self, job: _ClickJob) -> None:
+        """工作线程里跑：只驱动鼠标，任何异常都封成 ClickResult 交回主线程。"""
+        try:
+            result = self.clicker.run(job.advice, targets=job.targets) \
+                if self.clicker is not None \
+                else ClickResult("error", reason="clicker_missing")
+        except Exception as exc:        # noqa: BLE001 — 不能让工作线程死掉
+            result = ClickResult(
+                "error", action=getattr(job.advice.option, "kind", None),
+                error=f"{type(exc).__name__}: {exc}")
+        self._click_jobs.put((job, result))
+
+    def _poll_click_results(self, *, state=None) -> list:
+        """主线程取回已完成的点击结果并落盘（同步执行时当场就有一个）。"""
+        results: list = []
+        while True:
+            try:
+                job, result = self._click_jobs.get_nowait()
+            except queue.Empty:
+                break
+            if self._click_inflight is job:
+                self._click_inflight = None
+            self._apply_click_result(
+                job.advice, result,
+                state=(job.state if job.state is not None else state),
+                record=job.record, write_event=job.write_event)
+            results.append(result)
+        return results
+
+    def log_click_wait(self) -> None:
+        """点击在途时每秒打一行心跳，让「这段时间在干嘛」在时间线上可见。"""
+        if not self.click_in_flight:
+            self._click_wait_second = 0
+            return
+        job = self._click_inflight
+        if job is None:
+            return
+        age = self.clock() - getattr(job, "submitted", self.clock())
+        second = int(age)
+        if second < 1 or second == self._click_wait_second:
+            return
+        self._click_wait_second = second
+        action = getattr(job.advice.option, "kind", "?")
+        self.log(f"  [点击] {action} 执行中… {second}s（滑杆期间不识别画面）")
+
+    def _apply_click_result(self, advice, result, *, state=None,
+                            record: dict | None = None,
+                            write_event: bool = False) -> None:
+        """把一次点击结果记到统计/JSONL/看板（同步与异步共用）。"""
+        if record is not None:
+            record["click"] = result.to_dict()
         if result.status in ("clicked", "dry_run"):
             self.click_count += 1
             if advice.decision_key:
@@ -2167,11 +2329,22 @@ class LiveProcessor:
             self.click_error_count += 1
         else:
             self.click_skip_count += 1
-        # 只清掉「这条建议对应的决策点」；晚到的旧建议不能把新决策点清掉。
-        # 挂了补点的建议要留着 —— 下一帧还要用它判「还是同一个决策点」。
-        if matched and not deferred:
-            self._pending_decision_key = None
-        return result
+        self._log_click(result)
+        if not write_event or result.status == "skipped":
+            # 同步执行时结果已经写进 advice 行的 `click`；跳过的事件不单独落盘
+            # （否则每条被跳过的建议都会多一行）。
+            return
+        payload = {
+            "type": "click",
+            "ts": _iso_now(),
+            "hand_id": getattr(advice, "hand_id", None),
+            "decision_key": list(advice.decision_key or ()),
+            **result.to_dict(),
+        }
+        self.writer.write(payload)
+        # 看板：advice 先到、click 后到，前端把它并进当前建议（live_web 已支持）。
+        self._publish("click", {"hand_id": payload["hand_id"],
+                                "click": result.to_dict()})
 
     def _defer_click(self, advice, reason: str) -> None:
         """记住一条「这一帧不能点、下一帧补点」的建议。
@@ -2216,6 +2389,10 @@ class LiveProcessor:
         result = self._maybe_click(pending.advice, state=state,
                                    allow_click=True)
         if result is None:
+            # 异步执行器：已经 submit 出去了。补点算成功，落到统计里；
+            # 这次点击的明细由结果回到主线程时写的那条 `click` 事件承载。
+            if self.click_in_flight:
+                self.click_defer_count += 1
             self._deferred_click = None
             return
         if result.status in ("clicked", "dry_run"):
@@ -2375,7 +2552,7 @@ class LiveProcessor:
                             f"{ev.get('snapped_to_bb', result.target_bb):g}BB）")
             self.log(
                 f"  [点击] {prefix} {result.action} [bet_slider]："
-                f"目标 {result.target_bb}BB，实际 {detail.get('final_bb')}BB，"
+                f"建议 {result.target_bb}BB，实际 {detail.get('final_bb')}BB，"
                 f"{changed}")
             return
         points = " → ".join(
@@ -2383,7 +2560,14 @@ class LiveProcessor:
         mapping = (f" [{result.mapping}]"
                    if result.mapping in ("direct", "nearest", "within_5pct")
                    else "")
-        self.log(f"  [点击] {prefix} {result.action}{mapping}：{points}")
+        # 快捷档位/全下也把额度打出来：档位是 27→26.5 这种「在 5% 内」的替代，
+        # 只打按钮名的话，复盘看不出实际落了多少。
+        amounts = ""
+        if result.final_bb is not None:
+            amounts = f"（建议 {result.target_bb}BB → 实际 {result.final_bb}BB）"
+        elif result.target_bb is not None:
+            amounts = f"（建议 {result.target_bb}BB）"
+        self.log(f"  [点击] {prefix} {result.action}{mapping}：{points}{amounts}")
 
     def _write_hand(self, hand: dict, *, partial: bool) -> None:
         """写一条手牌记忆：完整行动线 + 这一手给出过的全部建议。
@@ -2775,6 +2959,7 @@ class LiveProcessor:
 
     def summary(self) -> dict:
         extra = {"cards_unreliable_skips": self.cards_unreliable_skips,
+                 "bet_degrade_count": self.bet_degrade_count,
                  "hands_skipped_no_hero": self.hands_skipped_no_hero}
         if self.profile_store is not None:
             extra["hands_profiled"] = self.profile_updates
@@ -3675,7 +3860,12 @@ def _build_runtime(ap: argparse.ArgumentParser, args, env_load) -> _Runtime:
         dump_dir=args.dump_frames, quiet=args.quiet,
         hand_tracker=hand_tracker, advice_runner=advice_runner,
         record_without_hero=args.record_without_hero,
-        clicker=clicker, confirm_click=not args.no_confirm,
+        clicker=clicker,
+        # 点击（尤其滑杆）要 2–6s：放工作线程跑，主循环在途期间让路。
+        # 没启用自动点击时不需要线程（Inline 语义与改造前一致）。
+        click_executor=(ThreadClickExecutor() if clicker is not None
+                        else None),
+        confirm_click=not args.no_confirm,
         confirm_timeout=args.confirm_timeout,
         min_advice_confidence=args.min_advice_confidence,
         cross_check_mode=args.cross_check,
@@ -3766,6 +3956,7 @@ def _run_live(args, rt: _Runtime) -> int:
             "advice_count": processor.advice_count,
             "advice_done": processor.advice_done,
             "cards_unreliable_skips": processor.cards_unreliable_skips,
+            "bet_degrade_count": processor.bet_degrade_count,
         })
 
     last_seq = -1
@@ -3893,6 +4084,18 @@ def _run_live(args, rt: _Runtime) -> int:
                 last_seq = packet.seq
                 continue
 
+            # 自动点击正握着鼠标（滑杆打开着）时先不识别：滑杆轨道/气泡会
+            # 盖住公共牌第三张，继续 OCR 只会读出「board 2 张」的假警报。
+            # 这几帧**不算丢弃** —— 它们只是让给了点击，画面回来立刻恢复。
+            if processor.click_in_flight:
+                # 先把已经跑完的点击结果收回来：不收的话 _click_inflight 永远是
+                # 真，主循环会一直让路（死锁）。收完再判一次要不要继续让路。
+                processor._poll_click_results()
+                if processor.click_in_flight:
+                    last_seq = packet.seq
+                    processor.log_click_wait()
+                    continue
+
             result = processor.handle(packet)
             last_seq = packet.seq
 
@@ -3912,6 +4115,13 @@ def _run_live(args, rt: _Runtime) -> int:
         if advice_runner is not None:
             advice_runner.close()
             processor.drain_advice(final=True)
+        # 点击线程最后收尾：在途的那一下不等（鼠标动作已经发出去了），
+        # 只把已经回来的结果落盘，别让 session_end 之后还有 write。
+        processor._poll_click_results()
+        try:
+            processor.click_executor.close()
+        except Exception:            # noqa: BLE001 — 收尾失败不能影响退出
+            pass
         if ingest_worker is not None:
             ingest_worker.stop()
 

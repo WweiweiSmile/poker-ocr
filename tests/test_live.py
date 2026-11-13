@@ -1972,6 +1972,42 @@ def test_deferred_click_dropped_when_decision_changed() -> None:
     check(proc._deferred_click is None, "应清掉挂起")
 
 
+def test_bet_degrade_logs_warning_and_counts() -> None:
+    """`bet > 本街总额` 降级之后必须留痕：一行警告 + 计数，且节流。
+
+    以前这条闸是报错丢整帧，日志里只有「丢弃一帧」；现在帧保留、只丢这个
+    字段，所以「这手为什么没建议」必须能从日志里追到 —— 而且要把读到的
+    原始数字（55 vs 本街总额 33.5）带出来，猜错 10 倍的金额不能静默。
+    """
+    now = [100.0]
+    logs: list[str] = []
+    proc = live.LiveProcessor(StubStateStream(), StubWriter(), quiet=True,
+                              log=logs.append, clock=lambda: now[0])
+    state = SimpleNamespace(players=[
+        SimpleNamespace(seat_id="topL",
+                        notes=["bet 55 > 本街总额 33.5，按未知处理"])])
+    check(proc._log_bet_degraded(state, ("topL",)) is True,
+          "首次降级应打日志")
+    joined = "\n".join(logs)
+    check("下注读数不可信" in joined and "本街总额 33.5" in joined,
+          f"日志应带原始读数与上限：{logs}")
+    check("不给建议" in joined, f"日志应说清后果：{logs}")
+    check(proc.bet_degrade_count == 1,
+          f"应计数一次，实际 {proc.bet_degrade_count}")
+
+    now[0] += 1.0
+    check(proc._log_bet_degraded(state, ("topL",)) is False,
+          "同一手同一街 5s 内应节流")
+    check(proc.bet_degrade_count == 1,
+          f"节流时不该继续计数，实际 {proc.bet_degrade_count}")
+
+    now[0] += 10.0
+    check(proc._log_bet_degraded(state, ("topL",)) is True,
+          "超过节流窗口应再打一次")
+    check(proc.bet_degrade_count == 2,
+          f"应计数两次，实际 {proc.bet_degrade_count}")
+
+
 def test_auto_click_off_preserves_advice_shape() -> None:
     advice = _click_advice()
     writer = StubWriter()
@@ -2498,6 +2534,160 @@ def test_snapshot_keeps_empty_streets() -> None:
           f"中途接管的第一街应是 flop：{[r.street for r in tr2.hand.snapshot()]}")
 
 
+# ───────────── 点击移出主循环（2026-11-13） ─────────────
+
+class DeferredClickExecutor:
+    """手动 flush 的执行器：模拟工作线程，用来断言「点击不挡主循环」。"""
+
+    inline = False
+
+    def __init__(self) -> None:
+        self.jobs: list = []
+        self._busy = False
+
+    @property
+    def busy(self) -> bool:
+        return self._busy
+
+    def submit(self, fn) -> None:
+        self.jobs.append(fn)
+        self._busy = True
+
+    def flush(self) -> None:
+        while self.jobs:
+            self.jobs.pop(0)()
+        self._busy = False
+
+    def close(self) -> None:
+        self.jobs.clear()
+        self._busy = False
+
+
+class OrderClicker(FakeClicker):
+    """在 run() 里记下「点击发生时已经发布过哪些事件」。"""
+
+    def __init__(self, events: list, **kw) -> None:
+        super().__init__(**kw)
+        self.events = events
+        self.events_at_call: list = []
+
+    def run(self, advice, *, targets=None):
+        self.events_at_call.append(list(self.events))
+        return super().run(advice, targets=targets)
+
+
+def _click_proc(advice, clicker, *, events=None, click_executor=None):
+    writer = StubWriter()
+    tracker = SimpleNamespace(
+        hand=SimpleNamespace(hand_id="h1"),
+        take_finished=lambda: None, take_current=lambda: None)
+    proc = LiveProcessor(
+        StubStateStream(), writer, quiet=True, hand_tracker=tracker,
+        clicker=clicker, click_executor=click_executor,
+        advice_runner=OneShotRunner([advice]),
+        events=((lambda kind, payload: events.append(kind))
+                if events is not None else None),
+        log=lambda *_: None)
+    proc._pending_decision_key = advice.decision_key
+    return proc, writer
+
+
+def test_advice_published_before_click() -> None:
+    """建议先发布/打印，再驱动鼠标 —— 否则用户看到建议时动作已经在跑了。
+
+    2026-11-12 21:23 实盘：模型 1.3s，端到端 11.5s，`[建议:模型]` 那一行
+    要等滑杆失败（6.7s 后）才打出来。
+    """
+    events: list = []
+    clicker = OrderClicker(events)
+    advice = _click_advice()
+    proc, _ = _click_proc(advice, clicker, events=events)
+    proc.drain_advice(state=click_state(), allow_click=True)
+    check(len(clicker.calls) == 1, f"应点击一次：{clicker.calls}")
+    check(clicker.events_at_call and clicker.events_at_call[0][:1] == ["advice"],
+          f"点击发生时 advice 必须已经发布过，实际 {clicker.events_at_call}")
+    check(events and events[0] == "advice",
+          f"第一条事件应是 advice，实际 {events}")
+
+
+def test_async_click_does_not_block_drain() -> None:
+    """异步执行器：drain_advice 立刻返回，点击在工作线程里跑，结果后补。"""
+    clicker = FakeClicker()
+    executor = DeferredClickExecutor()
+    advice = _click_advice()
+    proc, writer = _click_proc(advice, clicker, click_executor=executor)
+
+    proc.drain_advice(state=click_state(), allow_click=True)
+    check(clicker.calls == [], f"异步执行器下 drain 不该把点击跑完：{clicker.calls}")
+    check(proc.click_in_flight, "点击在途时 click_in_flight 必须为真")
+    advice_row = writer.rows[0]
+    check(advice_row.get("type") == "advice" and "click" not in advice_row,
+          f"advice 行应在点击前落盘（无 click 键）：{advice_row}")
+    check(not [r for r in writer.rows if r.get("type") == "click"],
+          f"结果没回来不该有 click 行：{writer.rows}")
+
+    executor.flush()
+    proc._poll_click_results(state=click_state())
+    check(not proc.click_in_flight, "结果收回后 click_in_flight 应为假")
+    rows = [r for r in writer.rows if r.get("type") == "click"]
+    check(len(rows) == 1 and rows[0]["status"] == "clicked",
+          f"应补一条 click 事件：{writer.rows}")
+    check(proc.click_count == 1, f"点击计数应 +1，实际 {proc.click_count}")
+    # 建议那份 dict 也要补上 click：换手时写 hand 记录会一起带上
+    check(advice.to_dict() is not None, "advice 仍可用")
+
+
+def test_async_click_result_lands_in_hand_record() -> None:
+    """异步结果晚到，也要补进建议 dict —— 手牌记录才不会丢「实际点了什么」。"""
+    clicker = FakeClicker()
+    executor = DeferredClickExecutor()
+    advice = _click_advice()
+    proc, _ = _click_proc(advice, clicker, click_executor=executor)
+    proc.drain_advice(state=click_state(), allow_click=True)
+    executor.flush()
+    proc._poll_click_results(state=click_state())
+    advices = proc._hand_advice.get("h1") or []
+    check(bool(advices), f"建议应挂到手牌记忆：{proc._hand_advice}")
+    check(advices[0].get("click", {}).get("status") == "clicked",
+          f"手牌记录里的建议应带上 click：{advices[0]}")
+
+
+def test_thread_click_executor_runs_job() -> None:
+    """真线程执行器：任务被跑到，跑完 busy 归 False。"""
+    import threading as _th
+    from poker_ocr.click_worker import ThreadClickExecutor
+    done = _th.Event()
+    ex = ThreadClickExecutor(name="t-click")
+    ex.submit(done.set)
+    check(done.wait(2.0), "线程执行器应把任务跑起来")
+    for _ in range(100):
+        if not ex.busy:
+            break
+        _th.Event().wait(0.01)
+    check(not ex.busy, "任务跑完后 busy 应归 False")
+    ex.close()
+
+
+def test_click_poll_clears_inflight_without_state() -> None:
+    """主循环让路时也要能收结果：不带 state 也能清掉在途标记并挂上重试。
+
+    （循环里必须「先 poll 再判 click_in_flight」，否则 `_click_inflight`
+    永远清不掉 —— 主循环会一直让路，等于死锁。）
+    """
+    clicker = FakeClicker()
+    executor = DeferredClickExecutor()
+    advice = _click_advice()
+    proc, _ = _click_proc(advice, clicker, click_executor=executor)
+    proc.drain_advice(state=click_state(), allow_click=True)
+    check(proc.click_in_flight, "提交后应在途")
+    executor.flush()
+    proc._poll_click_results()             # 主循环就是这么收的（不带 state）
+    check(not proc.click_in_flight, "收完结果必须不再让路")
+    check(proc.click_count == 1, f"点击计数应 +1，实际 {proc.click_count}")
+    check(proc._click_retry is not None,
+          "按钮点击应挂上「动作是否生效」确认（指纹取点击那一刻的状态）")
+
+
 def main() -> int:
     tests = [
         test_defaults_are_no_throttle_and_instant_turn,
@@ -2569,6 +2759,19 @@ def main() -> int:
         test_auto_click_allows_fallback_when_configured,
         test_auto_click_skips_duplicate_and_stale_hand,
         test_auto_click_skips_unreliable_frame,
+        test_advice_published_before_click,
+        test_async_click_does_not_block_drain,
+        test_async_click_result_lands_in_hand_record,
+        test_click_poll_clears_inflight_without_state,
+        test_thread_click_executor_runs_job,
+        # 下面 3 条 2026-11-13 之前**从未注册**（只写在文件里，pytest 也看不见）：
+        # 其中补点那两条正好盖住 2026-11-11 20:33 静默吞建议的 bug。
+        test_table_stats_for_active_skips_folded_and_counts_hero,
+        test_auto_click_skips_low_confidence,
+        test_auto_click_blocks_severe_cross_check,
+        test_deferred_click_fires_when_frame_recovers,
+        test_deferred_click_dropped_when_decision_changed,
+        test_bet_degrade_logs_warning_and_counts,
         test_auto_click_off_preserves_advice_shape,
         test_auto_click_counts_errors,
         test_auto_click_retries_after_half_second_if_unchanged,

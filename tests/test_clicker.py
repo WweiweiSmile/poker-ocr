@@ -399,6 +399,47 @@ def test_clicker_routes_allin_to_slider_top() -> None:
     check(r.target_bb == 68.0, f"target 应为最终 68，实际 {r.target_bb}")
 
 
+def test_click_amounts_split_advice_plan_final() -> None:
+    """三个额度字段分工固定：target_bb=建议额、plan_bb=计划额、final_bb=实际额。
+
+    以前的 `target_bb` 一条路径一个意思（滑杆=建议额、档位=档位额），
+    复盘「建议 27 / 实际 26.5」会被读成「建议 26.5」。
+    """
+    class FakeSlider:
+        def preset_enabled(self, _preset_id):
+            return True
+
+        def set_amount(self, _target):
+            return SimpleNamespace(
+                status="set", error=None, reason="bet_slider",
+                target_bb=27.0, final_bb=28.0,
+                to_dict=lambda: {"status": "set", "target_bb": 27.0,
+                                 "final_bb": 28.0})
+
+    # ① 滑杆：建议 27、客户端取整后计划 27、实际落 28（+5% 内）
+    clicker = Clicker(cfg_all(), FakeBackend(), bet_slider=FakeSlider())
+    r = clicker.run(adv(Option("raise", "Raise 27", "raise", 27.0)))
+    check((r.target_bb, r.plan_bb, r.final_bb) == (27.0, 27.0, 28.0),
+          f"滑杆三额应为 27/27/28，实际 {r.to_dict()}")
+
+    # ② 快捷档位：建议 26.8，档位 27（5% 内）→ 计划=实际=27
+    clicker2 = Clicker(cfg_all(), FakeBackend(), bet_slider=FakeSlider())
+    r2 = clicker2.run(adv(Option("raise", "Raise 26.8", "raise", 26.8),
+                          {"raise-1": 27.0}))
+    check(r2.mapping == "within_5pct",
+          f"应命中档位，实际 {r2.to_dict()}")
+    check((r2.target_bb, r2.plan_bb, r2.final_bb) == (26.8, 27.0, 27.0),
+          f"档位三额应为 26.8/27/27，实际 {r2.to_dict()}")
+    check(r2.to_dict().get("plan_bb") == 27.0,
+          f"to_dict 应输出 plan_bb，实际 {r2.to_dict()}")
+
+    # ③ 跟注没有「选额」这一步：只有建议额，不编计划/实际
+    clicker3 = Clicker(cfg_all(), FakeBackend())
+    r3 = clicker3.run(adv(Option("call", "Call 3", "call", 3.0)))
+    check(r3.plan_bb is None and r3.final_bb is None,
+          f"跟注不该有计划/实际额，实际 {r3.to_dict()}")
+
+
 def test_clicker_allin_call_stays_on_call_button() -> None:
     """别人下注 > 后手时 kind=call（跟全下），走右侧 call 按钮，不碰滑杆。"""
     class FakeSlider:
@@ -608,6 +649,7 @@ def main() -> int:
         test_slider_used_when_preset_state_unknown,
         test_force_slider_skips_presets,
         test_clicker_routes_allin_to_slider_top,
+        test_click_amounts_split_advice_plan_final,
         test_clicker_allin_call_stays_on_call_button,
         test_choose_preset_nearest_preflop,
         test_choose_preset_tie_breaks_by_order,
