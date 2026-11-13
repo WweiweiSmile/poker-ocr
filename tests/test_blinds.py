@@ -128,6 +128,32 @@ def test_bomb_ante_posts_are_not_actions() -> None:
           f"BTN 只应有真实加注：{btn}")
 
 
+def test_blind_badge_at_blind_level_is_not_an_action() -> None:
+    """徽章把盲注本身读成 call/raise 时，不能落成行动；真实补注仍要记。"""
+    tracker = LiveHandTracker(confirm_frames=1)
+    tracker.observe(state("f1", bets={"sb": 0.5, "bb": 1.0}), ["7c", "7s"], [])
+    tracker.observe(state("f2", bets={"sb": 0.5, "bb": 1.0},
+                          actions={"sb": (0.5, "raise")}), ["7c", "7s"], [])
+    tracker.observe(state("f3", bets={"sb": 0.5, "bb": 1.0},
+                          actions={"bb": (1.0, "call")}), ["7c", "7s"], [])
+    for i in range(2):
+        tracker.observe(state(f"f{4 + i}", bets={"sb": 1.0, "bb": 1.0},
+                              actions={"sb": (1.0, "call")}), ["7c", "7s"], [])
+    hand = tracker.take_current()
+    check(hand is not None, "应产出当前手牌")
+    if hand is None:
+        return
+    sb_rows = seat_actions(hand, "sb")
+    check([a["action"] for a in sb_rows] == ["call"],
+          f"SB 只应有补到 1.0 的真实跟注：{sb_rows}")
+    if sb_rows:
+        check(sb_rows[0].get("amount") == 1.0,
+              f"SB 跟注金额应为 1.0：{sb_rows[0]}")
+    bb_rows = seat_actions(hand, "bb")
+    check(not any(a["action"] in ("call", "bet", "raise") for a in bb_rows),
+          f"BB 的盲注不能被写成行动：{bb_rows}")
+
+
 def test_all_fold_to_bb_has_no_check() -> None:
     tracker = LiveHandTracker(confirm_frames=1)
     folded = ("hero", "sb", "btn", "utg")
@@ -175,6 +201,7 @@ def test_flop_bet_delta_keeps_source_and_total() -> None:
 def main() -> int:
     tests = [test_blinds_rendered_late_are_not_actions,
              test_sb_complete_is_a_real_call,
+             test_blind_badge_at_blind_level_is_not_an_action,
              test_bomb_ante_posts_are_not_actions,
              test_all_fold_to_bb_has_no_check,
              test_flop_bet_delta_keeps_source_and_total]

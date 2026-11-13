@@ -76,5 +76,9 @@ from __future__ import annotations
 # 仲裁 #5 为池子先验开豁免；画像段标题去掉已删除的「全场统计」；输出契约
 # 不再自带一份与数据质量段不一致的硬缺口枚举；多人池空气默认动作对齐；
 # 上一街 plan 回喂；confidence 从「可选」改为「建议给」。
-PROMPT_VERSION = "lean-zh-2026-11-11.1"
+# 2026-11-13.1：行动线语义改为「证据驱动 + 街末最小补全」（#22–#28）——
+# 每条行动带 source（badge/avatar_fold/bet_delta/ledger）与 order_unknown，
+# 弃牌按首次观测进入行动线，盲注只做基线。提示词模板本身未改，所以
+# golden 的模板哈希不变；bump 版本是为了让复盘/A-B 能区分行动线口径。
+PROMPT_VERSION = "lean-zh-2026-11-13.1"
 PROMPT_LANGUAGE = "zh"

@@ -84,7 +84,7 @@ def test_two_frames_place_fold_between_actions() -> None:
                     ["7c", "7s"], [])
     tracker.observe(state("f2", folded=("btn",)), ["7c", "7s"], [])
     tracker.observe(state("f3", folded=("btn",),
-                          actions={"bb": (1.0, "call")}),
+                          actions={"bb": (2.0, "raise")}, bets={"bb": 2.0}),
                     ["7c", "7s"], [])
     hand = tracker.take_current()
     check(hand is not None, "应产出当前手牌")
@@ -104,8 +104,8 @@ def test_two_frames_place_fold_between_actions() -> None:
           f"证据应取第一次看到的帧 f2：{fold}")
     order = [(a["seat_id"], a["action"]) for a in rows
              if (a["seat_id"], a["action"]) in {
-                 ("utg", "call"), ("btn", "fold"), ("bb", "call")}]
-    check(order == [("utg", "call"), ("btn", "fold"), ("bb", "call")],
+                 ("utg", "call"), ("btn", "fold"), ("bb", "raise")}]
+    check(order == [("utg", "call"), ("btn", "fold"), ("bb", "raise")],
           f"弃牌应落在第一次观测的位置：{order}")
 
 

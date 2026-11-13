@@ -221,6 +221,26 @@ class _FoldPending:
 
 
 @dataclass(frozen=True)
+class _PendingSeat:
+    """街末待行动集合的一行：谁、按什么顺序、还欠多少。
+
+    只服务街末补全与诊断，不参与逐帧判定 —— 不做完整回合状态机。
+    `owes` 是「本街还差多少才到水位」，`unknown` 表示这一座的投入不可信
+    （下注读坏或本街水位不可信），欠多少无从判断。
+    """
+
+    seat_id: str
+    position: str | None
+    invested: float
+    owes: float
+    in_hand: bool
+    folded: bool
+    all_in: bool
+    acted: bool
+    unknown: bool
+
+
+@dataclass(frozen=True)
 class ActionRecord:
     """一条行动。amount 是**本街加到总额**（BB），读不到为 None。"""
 
@@ -490,6 +510,10 @@ class LiveHandTracker:
         self._advised_spot: tuple | None = None
         # 已看到、还没凑够 AVATAR_FOLD_CONFIRM_FRAMES 帧的头像弃牌。
         self._fold_pending: dict[str, _FoldPending] = {}
+        # 换街首帧还挂在名字槽里的旧徽章：seat_id → (street, 徽章词, 换街帧的
+        # 下注额)。同一徽章、下注额又没变，就还是上一街的残影，不能记成
+        # 新街的一次新动作；等徽章变化或该座下注额变化再认。
+        self._stale_badges: dict[str, tuple[str, str, float]] = {}
         # 上一帧的 hero 手牌 / 在局人数，用来判换手（后者不是桌型座位数）
         self._prev_hero_cards: tuple[str, ...] = ()
         self._prev_in_hand = 0
@@ -678,6 +702,21 @@ class LiveHandTracker:
             # current_active 是这一帧（新街）的在局集合，差集就是旧街上
             # 已经弃牌、但徽章一帧都没抓到的人。
             self._finalize_street(hand, hand.street, current_active, state=state)
+            # 换街帧上，名字槽里可能还留着上一街的徽章（动作行/横幅还没刷新）。
+            # 旧徽章 = 该座上一街最后一条记录的动作词；只有同词、且下注额
+            # 没变，才当成残影（见 _record_actions 的 stale 判断）。不能拿
+            # 这一帧自己的徽章当基准 —— 那会把真正的翻牌第一动作也吞掉。
+            last_words: dict[str, str] = {}
+            for a in hand.actions:
+                # 只看真观测到的徽章；街末补出来的 ledger 不是屏幕上残留的
+                # 徽章，不能拿来当旧徽章基准。
+                if a.street == hand.street and a.source != "ledger":
+                    last_words[a.seat_id] = a.action
+            self._stale_badges = {
+                p.seat_id: (street, p.action, 0.0)
+                for p in state.players
+                if p.action is not None
+                and last_words.get(p.seat_id) == p.action}
             hand.street = street
             hand.pot_start.setdefault(street, state.pot_before_street)
             hand.street_start_active.setdefault(street, set(current_active))
@@ -1107,6 +1146,7 @@ class LiveHandTracker:
         self._all_in_streak.clear()
         # 上一手没确认完的弃牌不能带进新手。
         self._fold_pending.clear()
+        self._stale_badges.clear()
         street = street_of_board(board_len) or PREFLOP
         hero = self._hero(state)
         roster_rows = self._roster_for_id(state)
@@ -1305,6 +1345,9 @@ class LiveHandTracker:
         hand.baseline_unknown = {(s, sid) for (s, sid) in hand.baseline_unknown
                                  if s == hand.street}
         level = hand.level.get(hand.street, 0.0)
+        # 这一帧新追加的记录下标。收尾时用来找「同帧同额同类型」的动作：
+        # 它们的先后只是排序函数的稳定次序，没有观测证据，要标 order_unknown。
+        new_indices: list[int] = []
 
         # 按本街下注额升序处理：同一帧里读到的多个行动，下注额小的多半先发生
         # （跟注额 = 当前水位，加注额更高）。额相同则先处理带激进徽章的
@@ -1319,6 +1362,9 @@ class LiveHandTracker:
                 continue
             if p.action is not None and p.action not in ACTION_TYPES:
                 continue
+            if p.action is None:
+                # 徽章消失：上一街的残影已经翻篇，之后同词再出现算新观测。
+                self._stale_badges.pop(p.seat_id, None)
 
             key = (hand.street, p.seat_id)
             last = hand.last_index.get(key)
@@ -1340,6 +1386,7 @@ class LiveHandTracker:
                     street=hand.street, seat_id=p.seat_id, name=p.name,
                     position=p.position, action=p.action, amount=None,
                     all_in=p.all_in, is_hero=p.seat_id == hero_seat))
+                new_indices.append(len(hand.actions) - 1)
                 hand.last_index[key] = len(hand.actions) - 1
                 continue
 
@@ -1385,6 +1432,27 @@ class LiveHandTracker:
                 else:
                     action = "call"
 
+            # 盲注位的强制投入不是行动：徽章偶尔把盲注本身读成 call/raise
+            # （SB 0.5 / BB 1.0）。真实补注（SB 到 1.0、BB 到 9.0）高于强制
+            # 水位，不受影响；这一条只拦「注额还在盲注线上」的徽章读数。
+            if (hand.street == PREFLOP and p.action is not None
+                    and action in ("call", "bet", "raise") and bet > 0):
+                forced = self._forced_preflop_level(hand, p)
+                if bet <= forced + 1e-9:
+                    hand.baseline[key] = bet
+                    continue
+
+            # 换街首帧的旧徽章：同一徽章、下注额又没变，只是上一街残影。
+            # 等徽章变化或该座下注额变化再认（见换街处的 _stale_badges）。
+            if p.action is not None:
+                guard = self._stale_badges.get(p.seat_id)
+                if guard is not None:
+                    if (guard[0] != hand.street or guard[1] != p.action
+                            or bet > guard[2] + 1e-9):
+                        self._stale_badges.pop(p.seat_id, None)
+                    else:
+                        continue
+
             if prev is not None and prev.action == action:
                 if bet <= prev_amount + 1e-9:
                     continue                 # 同一个徽章的重复帧
@@ -1414,6 +1482,22 @@ class LiveHandTracker:
             if (p.seat_id == hero_seat and not amount
                     and action in ("bet", "raise", "call")):
                 amount = hand.hero_street_bet.get(hand.street) or amount
+            # 盲注位的强制投入不是行动：徽章偶尔把盲注本身读成 call/raise
+            # （SB 0.5 / BB 1.0）。hero 没有下注 pill，这里用反解金额再判
+            # 一次；真实补注（SB 到 1.0）与真实加注（2.0+）都在盲注线上方。
+            if (hand.street == PREFLOP and p.position in ("SB", "BB")
+                    and action in ("call", "bet", "raise")
+                    and amount is not None and amount > 0):
+                forced = self._forced_preflop_level(hand, p)
+                if (action in ("bet", "raise")
+                        and amount <= forced + 1e-9):
+                    hand.baseline[key] = bet
+                    continue
+                if (action == "call"
+                        and amount <= forced + 1e-9
+                        and (p.position == "BB" or amount < forced - 1e-9)):
+                    hand.baseline[key] = bet
+                    continue
             # 动作类型从徽章来就记 badge，从下注额反推就记 bet_delta。
             source = "badge" if p.action is not None else "bet_delta"
             record = ActionRecord.make(
@@ -1428,6 +1512,7 @@ class LiveHandTracker:
                 is_hero=p.seat_id == hero_seat,
             )
             hand.actions.append(record)
+            new_indices.append(len(hand.actions) - 1)
             hand.last_index[key] = len(hand.actions) - 1
             hand.baseline[key] = bet
             hand.baseline_unknown.discard(key)
@@ -1435,6 +1520,19 @@ class LiveHandTracker:
             level_amount = amount if amount is not None else bet
             if action in AGGRESSIVE and level_amount > level:
                 level = level_amount
+
+        # 同帧、同额、同类型（典型：两个跟注）：处理次序只是按注额排序的
+        # 稳定次序，谁先谁后没有证据。标 order_unknown，复盘不能把顺序当真。
+        ties: dict[tuple[str, float], list[int]] = {}
+        for i in new_indices:
+            a = hand.actions[i]
+            if a.amount is not None:
+                ties.setdefault((a.action, round(a.amount, 6)), []).append(i)
+        for idxs in ties.values():
+            if len(idxs) < 2:
+                continue
+            for i in idxs:
+                hand.actions[i] = replace(hand.actions[i], order_unknown=True)
 
         hand.level[hand.street] = level
         if not unknown_now and hand.street in hand.level_unknown:
@@ -1858,8 +1956,12 @@ class LiveHandTracker:
             key=lambda item: self._action_rank(item[0]))
         owed = [(p, d) for p, d in owed if d > 1e-9]
         if owed and abs(sum(d for _, d in owed) - missing) <= RECONCILE_TOLERANCE:
-            self._append_inferred(hand, street, state,
-                                  [(p, "call", level) for p, _ in owed])
+            fills = []
+            for p, _ in owed:
+                if not self._fill_amount_instead(hand, street, p.seat_id, level):
+                    fills.append((p, "call", level))
+            if fills:
+                self._append_inferred(hand, street, state, fills)
             return
 
         # ② 单次加注：底池反解最终水位，再按行动顺序补加注 + 跟注
@@ -1942,6 +2044,25 @@ class LiveHandTracker:
         items += [(p, "call", final) for p in ring[1:]
                   if known.get(p.seat_id, 0.0) < final - RECONCILE_TOLERANCE]
         self._append_inferred(hand, street, state, items)
+
+    def _fill_amount_instead(self, hand: _LiveHand, street: str,
+                             seat_id: str, amount: float) -> bool:
+        """该座这一街已经有动作、只是金额没读到：补金额，不再追加一条。
+
+        典型是徽章先到、下注 pill 还没渲染（`call None`），换街对账时又按
+        底池差额补了一次 `call 5.5`，同一座同一街出现两条动作。
+        """
+        idx = hand.last_index.get((street, seat_id))
+        if idx is None:
+            return False
+        act = hand.actions[idx]
+        if act.action in ("check", "fold"):
+            return False
+        if act.amount is not None and act.amount > 1e-9:
+            return False
+        hand.actions[idx] = replace(act, amount=round(amount, 2))
+        hand.baseline[(street, seat_id)] = amount
+        return True
 
     def _append_inferred(self, hand: _LiveHand, street: str,
                          state: FrameState,
@@ -2030,6 +2151,57 @@ class LiveHandTracker:
             shown=shown,
         )
 
+    def _pending_seats(self, hand: _LiveHand, street: str,
+                       current_active: set[str] | None,
+                       state: FrameState | None = None) -> list[_PendingSeat]:
+        """街末待行动集合：在局者按位置排序，标出谁已行动、谁还欠多少。
+
+        只做街末补全与诊断用：位置顺序取开手位置（`_seat_info`），水位取
+        `hand.level`，每座投入取盲注基线 + 已记录动作 + 当前下注 + hero 反解。
+        `owes` 为 0 表示已配平；`unknown` 表示投入不可信，不参与补全。
+        """
+        start = set(hand.street_start_active.get(street) or ())
+        current = set(hand.active if current_active is None else current_active)
+        acts = hand.street_actions(street)
+        level = hand.level.get(street, 0.0)
+        known = self._street_known(hand, street, None)
+        # 弃牌要看整手，不只看本街：街末 finalize 拿到的 `current` 可能来自
+        # 一幅还没更新弃牌状态的帧（手末尤其常见），翻前/翻牌已弃的座位会
+        # 被当成「还在局」，于是在转牌被补出假过牌。
+        folded = {a.seat_id for a in hand.actions if a.action == "fold"}
+        acted = {a.seat_id for a in acts}
+        all_in = set(hand.all_ins) | {a.seat_id for a in acts if a.all_in}
+        unknown = {sid for (s, sid) in hand.baseline_unknown if s == street}
+        level_unknown = street in hand.level_unknown
+        out: list[_PendingSeat] = []
+        for seat_id in start | current:
+            is_folded = seat_id in folded or seat_id not in current
+            in_hand = seat_id in current and not is_folded
+            is_unknown = seat_id in unknown or level_unknown
+            invested = known.get(seat_id, 0.0)
+            owes = 0.0
+            if (in_hand and not is_folded and seat_id not in all_in
+                    and not is_unknown):
+                owes = max(0.0, round(level - invested, 2))
+                if owes <= RECONCILE_TOLERANCE:
+                    owes = 0.0
+            _, position = self._seat_info(hand, seat_id, state)
+            out.append(_PendingSeat(
+                seat_id=seat_id, position=position, invested=invested,
+                owes=owes, in_hand=in_hand, folded=is_folded,
+                all_in=seat_id in all_in, acted=seat_id in acted,
+                unknown=is_unknown))
+        out.sort(key=self._pending_sort_key)
+        return out
+
+    @staticmethod
+    def _pending_sort_key(p: _PendingSeat) -> tuple[int, str]:
+        """按位置顺序排；位置读不到时退化为 seat_id 稳定序。"""
+        try:
+            return (ACTION_ORDER.index(p.position or ""), p.seat_id)
+        except ValueError:
+            return (len(ACTION_ORDER), p.seat_id)
+
     def _finalize_street(self, hand: _LiveHand, street: str,
                          current_active: set[str] | None,
                          *, state: FrameState | None = None,
@@ -2064,32 +2236,104 @@ class LiveHandTracker:
         recorded_folds = {a.seat_id for a in acts if a.action == "fold"}
 
         # ① 弃牌：街初在局、街末不在局、又没有 fold 记录的座位。
-        for seat_id in sorted(start - current - recorded_folds):
-            name, position = self._seat_info(hand, seat_id, state)
+        #    按待行动集合的位置顺序补，不再按 seat_id 字典序。
+        for p in self._pending_seats(hand, street, current, state):
+            if p.in_hand or p.seat_id not in start:
+                continue
+            if p.seat_id in recorded_folds:
+                continue
+            name, position = self._seat_info(hand, p.seat_id, state)
             hand.actions.append(ActionRecord.make(
                 source="ledger",
-                street=street, seat_id=seat_id, name=name, position=position,
-                action="fold", is_hero=seat_id == hand.hero_seat_id,
-                evidence=self._fold_evidence(seat_id, state)))
-            hand.last_index[(street, seat_id)] = len(hand.actions) - 1
+                street=street, seat_id=p.seat_id, name=name, position=position,
+                action="fold", is_hero=p.seat_id == hand.hero_seat_id,
+                # 街末只看到「人没了」：弃牌具体发生在哪一次下注之前/之后
+                # 没有观测证据，统一标顺序未知，位置顺序只用于稳定展示。
+                order_unknown=True,
+                evidence=self._fold_evidence(p.seat_id, state)))
+            hand.last_index[(street, p.seat_id)] = len(hand.actions) - 1
 
+        # ② 跟注唯一解：手末最后一街没有「下一街 pbs」可用，`_reconcile_street`
+        #    覆盖不到；只有底池账单正好等于各座欠额之和时才补，账单对不上就
+        #    宁可留缺口。
+        if at_hand_end:
+            self._complete_calls(hand, street, current, state)
+
+        pending = self._pending_seats(hand, street, current, state)
         acts = hand.street_actions(street)
-        acted = {a.seat_id for a in acts}
-        all_in = set(hand.all_ins) | {a.seat_id for a in acts if a.all_in}
         aggressive = any(a.action in AGGRESSIVE for a in acts)
 
-        # ② 过牌：街末仍在局、这一街完全没动作、没有全下，且没有人下注。
+        # ③ 未配平：还欠动作或投入未知的座位只进诊断，不补成别的动作，
+        #    也不补过牌 —— 街末补全只在「在局的人都能对上水位」时成立。
+        unmatched = [p for p in pending
+                     if p.in_hand and not p.all_in
+                     and (p.unknown or p.owes > 1e-9)]
+        if unmatched:
+            detail = "，".join(
+                f"{p.seat_id}/{p.position or '?'}"
+                + ("（投入未知）" if p.unknown else f"（欠 {p.owes:.2f}BB）")
+                for p in unmatched)
+            self._note_data_warning(
+                hand, f"{street}: 未配平，以下座位仍欠动作：{detail}")
+
+        # ④ 过牌：仍在局、这一街完全没人下注、没有全下，且已配平。
         # 手末的翻前不补：所有人弃牌到 BB 时，BB 是直接收池，不是「过牌」。
-        if not aggressive and not (at_hand_end and street == PREFLOP):
-            for seat_id in sorted((start & current) - acted - all_in):
-                name, position = self._seat_info(hand, seat_id, state)
+        # 这一街已经有弃牌：多半是漏抓了下注，弃牌与过牌的先后无法从
+        # “人没了”唯一确定，过牌只补事实、顺序标未知。
+        had_folds = any(a.action == "fold" for a in acts)
+        if (not unmatched and not aggressive
+                and not (at_hand_end and street == PREFLOP)):
+            for p in pending:
+                if not p.in_hand or p.all_in or p.acted or p.unknown:
+                    continue
+                name, position = self._seat_info(hand, p.seat_id, state)
                 hand.actions.append(ActionRecord.make(
                     source="ledger",
-                    street=street, seat_id=seat_id, name=name,
+                    street=street, seat_id=p.seat_id, name=name,
                     position=position, action="check",
-                    is_hero=seat_id == hand.hero_seat_id))
-                hand.last_index[(street, seat_id)] = len(hand.actions) - 1
+                    order_unknown=p.position is None or had_folds,
+                    is_hero=p.seat_id == hand.hero_seat_id))
+                hand.last_index[(street, p.seat_id)] = len(hand.actions) - 1
         hand.finalized_streets.add(street)
+
+    def _complete_calls(self, hand: _LiveHand, street: str,
+                        current: set[str], state: FrameState | None = None) -> None:
+        """手末唯一解跟注：底池账单正好等于各座欠额之和时补到水位。
+
+        只在 `at_hand_end` 调用：换街路径由 `_reconcile_street` 用下一街
+        `pot_before_street` 处理。账单对不上（差的钱不等于欠的钱）说明还有
+        加注没抓到，补跟注会把水位记错，这里直接不补。
+        """
+        if street in hand.level_unknown:
+            return
+        pending = self._pending_seats(hand, street, current, state)
+        owed = [p for p in pending
+                if p.in_hand and not p.all_in and not p.unknown
+                and p.owes > 1e-9]
+        if not owed:
+            return
+        account = self._street_account(hand, street, hand.pot)
+        if account is None:
+            return
+        actual, known_sum = account
+        missing = round(actual - known_sum, 2)
+        if missing <= 1e-9:
+            return
+        if abs(sum(p.owes for p in owed) - missing) > RECONCILE_TOLERANCE:
+            return
+        level = hand.level.get(street, 0.0)
+        for p in owed:
+            if self._fill_amount_instead(hand, street, p.seat_id, level):
+                continue
+            name, position = self._seat_info(hand, p.seat_id, state)
+            hand.actions.append(ActionRecord.make(
+                source="ledger",
+                street=street, seat_id=p.seat_id, name=name,
+                position=position, action="call", amount=level,
+                order_unknown=p.position is None or position is None,
+                is_hero=p.seat_id == hand.hero_seat_id))
+            hand.last_index[(street, p.seat_id)] = len(hand.actions) - 1
+            hand.baseline[(street, p.seat_id)] = level
 
     @staticmethod
     def _action_rank(p: PlayerState) -> int:
@@ -2433,7 +2677,39 @@ class LiveHandTracker:
         self.last_finished = None
         return self._hand_dict(hand) if hand is not None else None
 
+    @staticmethod
+    def _drop_blind_posts(hand: _LiveHand) -> None:
+        """去掉翻前落在盲注线上的 call/bet/raise —— 那其实是盲注本身。
+
+        徽章偶尔把盲注读成「跟注/加注」，街末对账也可能把 BB 的 1BB 补成
+        一条 call。真实补注（SB 到 1.0）与真实加注（2.0+）都在盲注线上方，
+        不会误伤。盲注只做基线，不做行动（#25/#28）。
+        """
+        if hand.blinds is None:
+            return
+        ante = hand.blinds.ante or 0.0
+        forced_ante = ante if (hand.bomb_pot or ante >= BOMB_ANTE_BB) else 0.0
+        kept: list[ActionRecord] = []
+        dropped = False
+        for a in hand.actions:
+            if (a.street == PREFLOP and a.position in ("SB", "BB")
+                    and a.action in ("call", "bet", "raise")
+                    and a.amount is not None):
+                blind = (hand.blinds.sb if a.position == "SB"
+                         else hand.blinds.bb)
+                if a.amount <= blind + forced_ante + 1e-9:
+                    dropped = True
+                    continue
+            kept.append(a)
+        if not dropped:
+            return
+        hand.actions[:] = kept
+        hand.last_index = {}
+        for i, a in enumerate(hand.actions):
+            hand.last_index[(a.street, a.seat_id)] = i
+
     def _hand_dict(self, hand: _LiveHand) -> dict:
+        self._drop_blind_posts(hand)
         names = hand.seat_names
 
         def latest(seat_id: str | None, name: str | None) -> str | None:
