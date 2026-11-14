@@ -98,7 +98,10 @@ SUITES = ["test_positions.py", "test_env.py", "test_coach.py",
           "test_ground_truth.py",
           "test_build_sft_dataset.py",
           "test_preflop_ranges.py", "test_cards.py",
-          "test_card_replay.py", "test_extract.py", "test_api.py"]
+          "test_card_replay.py", "test_extract.py", "test_api.py",
+          # 规格 #33（范围推导收尾）新增套件：逐票追加，不删
+          "test_range_trace.py", "test_range_table_diff.py",
+          "test_prompt_refs.py", "test_hand_action_stack.py"]
 
 
 def main() -> int:
