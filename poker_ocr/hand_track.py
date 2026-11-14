@@ -1483,7 +1483,15 @@ class LiveHandTracker:
                     for a in hand.actions[last + 1:])
                 if not raised_since:
                     # 只是下注 pill 后更新了（徽章先出现、金额后到）
-                    observed = self._observed_stack(p)
+                    # 只有「本来就是观测到的徽章」这条才配后手读数：反推出来的
+                    # bet_delta 记录再补一个帧读数，就变成「推断的行动 + 观测的
+                    # 筹码」混血，读端会当成真观测（#35 / 审查 P1）。
+                    if prev.source == "badge":
+                        observed = self._observed_stack(p)
+                        stack_after = (observed if observed is not None
+                                       else prev.stack_after)
+                    else:
+                        stack_after = None
                     hand.actions[last] = ActionRecord.make(
                         source=prev.source,
                         order_unknown=prev.order_unknown,
@@ -1493,9 +1501,7 @@ class LiveHandTracker:
                         action=prev.action, amount=p.bet,
                         all_in=prev.all_in or p.all_in,
                         is_hero=prev.is_hero,
-                        # 后一帧离「行动后」更近，优先用它的读数
-                        stack_after=(observed if observed is not None
-                                     else prev.stack_after))
+                        stack_after=stack_after)
                     hand.baseline[key] = bet
                     hand.baseline_unknown.discard(key)
                     continue

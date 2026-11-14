@@ -228,8 +228,11 @@ def _behind(seat: str, observed: dict[str, tuple[float, float]],
     if action is None:
         return None
     own = action_stack(action)
-    if own is None or amount is None:
+    if own is None:
         return None
+    if amount is None:
+        # check 不带金额：这一动没投钱，观测到的后手就是行动前的后手。
+        return own
     return own + (amount - before)
 
 

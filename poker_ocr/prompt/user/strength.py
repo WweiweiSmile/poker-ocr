@@ -125,8 +125,20 @@ def render_hand_strength_zh(sit: Situation) -> list[str]:
                 lines.append(fact("能打败你的牌型（理论上）："
                                   + "、".join(stronger),
                                   kind="derived"))
-        lines.append(fact(f"听牌：{_draws_zh(gt)}", "ground_truth.draws",
-                          values=[_draws_zh(gt)]))
+        draws_text = _draws_zh(gt)
+        draw_refs = []
+        if gt.draws.flush_draw:
+            draw_refs.append({"ns": "facts",
+                              "path": "ground_truth.draws.flush",
+                              "text": "同花听牌"})
+        if gt.draws.straight_draw:
+            draw_refs.append({"ns": "facts",
+                              "path": "ground_truth.draws.straight",
+                              "text": "顺听牌"})
+        # 没有听牌时这行是「听牌：无」，没有可指向的标量（draws 是对象）；
+        # 指向整个 draws 会与行内文本对不上（审查 P1）。
+        lines.append(fact(f"听牌：{draws_text}", *draw_refs,
+                          kind="fact" if draw_refs else "derived"))
         if sit.hand_playing_class == "combo":
             lines.append("牌况分类：成牌+听花/听顺；该分类不代表听牌强度或下注许可")
         if gt.draws.overcard_outs:

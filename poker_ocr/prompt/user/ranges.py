@@ -199,6 +199,24 @@ def _range_cap_zh(edge, actual_opponents: int, behind_any: float,
     return fact(text, *refs, kind="fact")
 
 
+def _seat_ref(opponents, edge) -> dict | None:
+    """座位行 → 该座位在 facts 里的位置/座位 ref（文本必须落在行内）。"""
+    index = _edge_index(opponents, edge)
+    if index < 0:
+        return None
+    position = getattr(edge, "position", "") or ""
+    if position:
+        return {"ns": "facts",
+                "path": f"hand_ranges.opponents[{index}].position",
+                "text": position}
+    seat = getattr(edge, "seat_id", "") or ""
+    if not seat:
+        return None
+    return {"ns": "facts",
+            "path": f"hand_ranges.opponents[{index}].seat",
+            "text": seat}
+
+
 def _range_label(edge) -> str:
     """`BTN [check]` → `BTN 过牌范围`；内部 range id / combo 数不进 prompt。"""
     position = edge.position or edge.seat_id
@@ -258,11 +276,10 @@ def render_ranges_zh(sit: Situation) -> list[str]:
              and not getattr(o, "events", ())]
     if stale:
         names = "、".join(o.position or o.seat_id for o in stale)
-        stale_refs = [{"ns": "facts",
-                       "path": f"hand_ranges.opponents[{_edge_index(hr.opponents, o)}].mode",
-                       "text": o.position or o.seat_id}
-                      for o in stale
-                      if _edge_index(hr.opponents, o) >= 0]
+        # 文案写的是「哪个座位」，ref 就要落到那个字段上；指向 `.mode` 时
+        # 解析出来是 "unacted"，与行内文本对不上（审查 P1）。
+        stale_refs = [_seat_ref(hr.opponents, o) for o in stale]
+        stale_refs = [ref for ref in stale_refs if ref is not None]
         lines.append(fact(f"- 本街还没有动作的座位：{names}"
                           "（范围沿用翻前先验，不是已过牌；"
                           "不代表整条街没人下注）",
@@ -327,14 +344,14 @@ def render_ranges_zh(sit: Situation) -> list[str]:
             names[zh] = max(names.get(zh, 0.0), group.share)
         ranked = sorted(names.items(), key=lambda kv: -kv[1])[:4]
         if ranked:
+            # 这行把多家对手的 beaten_by 合并、再翻成中文牌型，行内文本不对应
+            # 任何一个 facts 标量：按契约只标 derived，不硬造 ref（审查 P1）。
             lines.append(fact("- 赢你的：" + "、".join(
-                name for name, _ in ranked),
-                "hand_ranges.opponents", values=[ranked[0][0]]))
+                name for name, _ in ranked), kind="derived"))
     if beat and any(getattr(e, "composition", None) for e in shown):
         names = dict.fromkeys(_range_group_zh(g.name) for g in beat)
         lines.append(fact("- 你赢的：" + "、".join(list(names)[:4]),
-                          "hand_ranges.opponents",
-                          values=[list(names)[0]]))
+                          kind="derived"))
 
     # 只在「面对全下」时给警告：这是最容易被当前成牌强度带偏的节点。
     jammers = [e for e in shown
@@ -395,10 +412,8 @@ def render_ranges_zh(sit: Situation) -> list[str]:
                           "hand_ranges.random_opponents",
                           values=[f"其余 {random_fill} 家"]))
     elif modeled < actual:
+        # 两个数分别是「对手数组长度」和「在局人数」，都不是能直接被行文本
+        # 命中的标量：标 derived，不挂 ref（审查 P1）。
         lines.append(fact(f"- 建模 {modeled} 家，实际 {actual} 家；"
-                          "未建模对手未计入范围权益",
-                          {"ns": "facts", "path": "hand_ranges.opponents",
-                           "text": f"建模 {modeled} 家"},
-                          {"ns": "facts", "path": "opponents_in_hand",
-                           "text": f"实际 {actual} 家"}))
+                          "未建模对手未计入范围权益", kind="derived"))
     return lines

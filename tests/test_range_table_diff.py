@@ -559,6 +559,55 @@ def test_ten_board_record_rebuild() -> None:
     check(payload["board"] == "10s7c2d", f"牌面应原样回传：{payload['board']}")
 
 
+def test_relative_file_path() -> None:
+    """相对路径的 --file 也要能跑：子进程 cwd 是仓库根，父进程必须先解析。
+
+    审查 P1：不解析时两版子进程都 FileNotFoundError，报告会假称「重建失败」。
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        trace = Path(tmp) / "live.range.jsonl"
+        _real_trace(trace)
+        if not trace.is_file():
+            check(False, "夹具没写出来，跳过相对路径")
+            return
+        proc = subprocess.run(
+            [sys.executable, str(ROOT / "tools" / "range_table_diff.py"),
+             "--file", "live.range.jsonl", "--json", "--hand", "104"],
+            cwd=tmp, capture_output=True, text=True)
+        check(proc.returncode in (0, 2),
+              f"相对路径应正常退出（0/2），实得 {proc.returncode}："
+              f"{(proc.stderr or '')[-800:]}")
+        if proc.returncode not in (0, 2):
+            return
+        report = json.loads(proc.stdout)
+        check(report["summary"].get("rebuild_failures") == 0,
+              f"不该有重建失败：{report['summary']}")
+        check(str(report["source"]["file"]).startswith("/"),
+              f"报告里的文件应是绝对路径：{report['source']['file']}")
+
+
+def test_decision_key_backfills_filters() -> None:
+    """只给 --decision-key 时，报告 filters 要回填解析出的 hand/street。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        trace = Path(tmp) / "live.range.jsonl"
+        _real_trace(trace)
+        if not trace.is_file():
+            check(False, "夹具没写出来，跳过 filters 回填")
+            return
+        proc = subprocess.run(
+            [sys.executable, str(ROOT / "tools" / "range_table_diff.py"),
+             "--file", str(trace), "--json", "--decision-key", "104:flop"],
+            cwd=str(ROOT), capture_output=True, text=True)
+        if proc.returncode not in (0, 2):
+            check(False, f"CLI 失败：{(proc.stderr or '')[-500:]}")
+            return
+        report = json.loads(proc.stdout)
+        check(report["filters"]["hand"] == 104,
+              f"filters.hand 应回填 104：{report['filters']}")
+        check(report["filters"]["street"] == "flop",
+              f"filters.street 应回填 flop：{report['filters']}")
+
+
 def test_cli_smoke() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         trace = Path(tmp) / "live.range.jsonl"
@@ -620,6 +669,8 @@ def main() -> int:
     test_rebuild_matches_recorded()
     test_ten_cards_parse()
     test_ten_board_record_rebuild()
+    test_relative_file_path()
+    test_decision_key_backfills_filters()
     test_cli_smoke()
 
     if FAILS:

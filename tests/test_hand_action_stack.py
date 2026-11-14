@@ -165,6 +165,32 @@ def test_all_in_zero_stack_is_kept() -> None:
               f"全下后手 0 是真事实，实际 {sb_actions[0].get('stack')!r}")
 
 
+def test_badge_amount_late_keeps_inferred_action_null() -> None:
+    """bet_delta 的记录后来补上徽章金额，也不能顺带把观测筹码写进去。
+
+    这是审查 P1：那支分支保留 `source=prev.source`，若同时写 stack_after，
+    就会产出 "source":"bet_delta" + "stack":194.0 + inferred 的混血记录。
+    """
+    hand = _run([
+        _state("f1", hero=(100.0, 0.0, None), sb=(200.0, 0.5, None),
+               bb=(200.0, 1.0, None), pot=1.5, street_bet_total=1.0),
+        # 徽章没出来，从下注额反推成 bet 3（source=bet_delta）
+        _state("f2", hero=(100.0, 0.0, None), sb=(197.0, 3.0, None),
+               bb=(200.0, 1.0, None), pot=4.5, street_bet_total=3.0),
+        # 徽章出现、金额抬到 6：走「同一动作金额后补」分支
+        _state("f3", hero=(100.0, 0.0, None), sb=(194.0, 6.0, "raise"),
+               bb=(200.0, 1.0, None), pot=7.5, street_bet_total=6.0),
+    ])
+    sb_actions = _by_seat(hand or {}, "sb")
+    check(len(sb_actions) == 1, f"SB 应只有一条行动，实际 {sb_actions}")
+    if sb_actions:
+        action = sb_actions[0]
+        check(action.get("source") == "bet_delta",
+              f"来源仍是反推，实际 {action.get('source')!r}")
+        check(action.get("stack") is None,
+              f"反推记录补金额后仍不得带观测筹码，实际 {action.get('stack')!r}")
+
+
 def test_inferred_action_has_no_stack() -> None:
     # 徽章没读到，从下注额反推成加注（source=bet_delta）：行动本身不是观测，
     # 后手一律 null —— 即使这一帧筹码读到了。
@@ -274,6 +300,30 @@ def test_replay_never_falls_back_to_99() -> None:
               f"缺筹码时 spr 必须是 None，不能回落 99，实际 {step.event.spr!r}")
         check(step.spr_missing == "no_stack",
               f"缺筹码应标 spr_missing=no_stack，实际 {step.spr_missing!r}")
+
+
+def test_check_first_action_uses_own_stack() -> None:
+    """某座本手第一动是 check（amount=None）时，也要用本帧观测算 SPR（审查 P1）。"""
+    hand = {
+        "type": "hand", "hand_id": "replay-check", "session": 1,
+        "blinds": {"sb": 0.5, "bb": 1.0, "ante": 0.0},
+        "board": ["Jc", "8d", "Kd"], "hero_cards": ["As", "Th"],
+        "hero_position": "BTN", "table_size": 2, "hero_seat_id": "hero",
+        "hero_stack_bb": 100.0, "pot": 7.5,
+        "streets": [{"street": "flop", "pot_start": 7.5, "actions": [
+            {"seat_id": "upR", "name": "V", "position": "BB",
+             "action": "check", "amount": None, "all_in": False,
+             "is_hero": False, "source": "badge", "stack": 90.0},
+        ]}],
+    }
+    steps = replay_hand(hand)
+    check(len(steps) == 1, f"应重放出 1 个决策点，实际 {len(steps)}")
+    if steps:
+        step = steps[0]
+        check(step.spr_missing is None,
+              f"check 自带观测后手，不该标缺数据，实际 {step.spr_missing!r}")
+        check(_close(step.event.spr, 90.0 / 7.5),
+              f"SPR 应为 90/7.5=12.0，实际 {step.event.spr!r}")
 
 
 def test_replay_marks_missing_pot() -> None:

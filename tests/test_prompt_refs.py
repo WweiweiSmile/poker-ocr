@@ -126,6 +126,11 @@ def test_fact_paths_resolve_and_text_is_substring() -> None:
                 value = _resolve(facts, item["path"])
                 check(value is not None,
                       f"facts 路径解析不到：{item['path']}")
+                # 审查 P1：path 指到数组/对象时，行内文本对不上那个值。
+                # 事实行必须落在标量上；合并/翻译出来的行应标 derived。
+                check(not isinstance(value, (list, dict)),
+                      f"{ref['section']}:{ref['line']} 的 facts 路径"
+                      f"指向结构而不是标量：{item['path']}")
 
 
 def test_refs_survive_without_range_trace() -> None:

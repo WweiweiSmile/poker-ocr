@@ -978,8 +978,12 @@ def _spawn(*, profile: str, source: Path, hand, street, decision_key,
     if lenient:
         cmd += ["--lenient"]
     env = dict(os.environ, STRATEGY_TABLES_PROFILE=profile)
-    proc = subprocess.run(cmd, env=env, cwd=str(ROOT),
-                          capture_output=True, text=True)
+    try:
+        proc = subprocess.run(cmd, env=env, cwd=str(ROOT),
+                              capture_output=True, text=True, timeout=120)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"{profile} 版子进程 120s 没跑完"
+                           "（trace 文件太大或这手特别重）")
     if proc.returncode != 0:
         tail = (proc.stderr or proc.stdout or "").strip()[-2000:]
         raise RuntimeError(
@@ -989,13 +993,27 @@ def _spawn(*, profile: str, source: Path, hand, street, decision_key,
     return json.loads(out.read_text(encoding="utf-8"))
 
 
+def _filters(args) -> dict:
+    """`--decision-key` 里可能携带 hand/street，报告要把实际生效的过滤条件写全。"""
+    try:
+        key_hand, key_street, _actions = _parse_decision_key(args.decision_key)
+    except ValueError:
+        key_hand, key_street = None, None
+    return {"hand": args.hand if args.hand is not None else key_hand,
+            "street": args.street or key_street,
+            "decision_key": args.decision_key}
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     if args.worker:
         return _worker(args)
 
+    # 子进程的 cwd 固定成仓库根，所以相对路径必须在父进程里先解析成绝对路径，
+    # 否则子进程按仓库根找不到文件、报告会假称「重建失败」（审查 P1）。
     try:
-        source = Path(args.file) if args.file else default_source()
+        source = (Path(args.file).expanduser().resolve() if args.file
+                  else default_source())
         loaded = load_records(source, hand=args.hand, street=args.street,
                               decision_key=args.decision_key,
                               lenient=args.lenient)
@@ -1032,8 +1050,7 @@ def main(argv: list[str] | None = None) -> int:
         source={"file": loaded["file"], "lines": loaded["lines"],
                 "status_ok": loaded["status_ok"],
                 "bad_lines": loaded["bad_lines"]},
-        filters={"hand": args.hand, "street": args.street,
-                 "decision_key": args.decision_key},
+        filters=_filters(args),
         top_n=max(int(args.top), 1))
     if args.json:
         print(json.dumps(report, ensure_ascii=False, indent=2))
