@@ -483,6 +483,26 @@
     return best;
   }
 
+  /* 「提示词 →」：优先跳到范围段第一行，没有范围段就跳弱点段；trace 只用于 deep 下钻。 */
+  function promptFocus(advice, rec) {
+    var refs = (advice && advice.prompt_refs) || [];
+    var hit = null;
+    for (var i = 0; i < refs.length; i++) {
+      if (refs[i].section === "ranges") { hit = refs[i]; break; }
+    }
+    if (!hit) {
+      for (var j = 0; j < refs.length; j++) {
+        if (refs[j].section === "exploit") { hit = refs[j]; break; }
+      }
+    }
+    if (!hit) return null;
+    var trace = null;
+    if (rec && (rec.seats || rec.hero_equity)) {
+      trace = { seats: rec.seats || [], hero_equity: rec.hero_equity };
+    }
+    return { section: hit.section, line: hit.line, abs: hit.abs, trace: trace };
+  }
+
   function adviceBar(hand, rec) {
     var box = el("div", "rt-advice");
     var advice = adviceFor(hand, rec);
@@ -496,7 +516,7 @@
       head.append(meta);
       var jump = el("button", "btn btn-small rt-advice-jump", "提示词 →");
       jump.type = "button";
-      jump.addEventListener("click", function () { openPrompt(advice); });
+      jump.addEventListener("click", function () { openPrompt(advice, promptFocus(advice, rec)); });
       head.append(jump);
     } else {
       head.append(el("div", "rt-advice-label", "没有对应的建议记录"));
