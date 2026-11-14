@@ -97,6 +97,7 @@ AdviceRunner（后台线程，绝不阻塞 OCR 主循环）
 Advice ──┬─ Clicker                 建议落到客户端按钮（macOS CoreGraphics）
          ├─ JsonlWriter             logs/live.states.jsonl（即时 flush）
          ├─ LiveEventLog            logs/live.events.jsonl（帧级诊断索引）
+         ├─ RangeTrace              logs/live.range.jsonl（范围推导，按天切分）
          ├─ LiveWebServer           :8020 看板（SSE，只读）
          └─ HandOutbox              一手一文件 → 异步进手牌库
 ```
@@ -130,6 +131,7 @@ STRATEGY_TABLES_PROFILE=hand-tuned|sourced
 range_flow.py / fold_equity.py  ──读表──►  范围似然 · 条件弃牌率 · 尺寸弹性
         │
         ├─ tools/strategy_table_diff.py    v0/v1 在真实决策点上的数值差
+        ├─ tools/range_table_diff.py      换一版表重算同一决策点并 diff（#36）
         ├─ tools/fold_curve_probe.py       实测聚合弃牌率曲线（价格口径已单测）
         └─ tools/showdown_range_check.py   摊牌反核范围构成 + PIT 校准
 ```
@@ -199,6 +201,7 @@ poker_ocr.workbench :8030
 | `board_range.py` | 牌面连接度 × 翻前先验 → 动作条件范围（**legacy 旧路径**，按街一次过滤；live 不读，只有离线工具用） |
 | `range_flow.py` | 范围事件模型：按动作顺序连乘，成牌档按牌面百分位（**新路径**） |
 | `hand_vs_ranges.py` | 手牌 vs 范围：精确 `behind` + MC 权益 |
+| `range_trace.py` | 范围推导 trace：每决策点一条 v1.2 记录（先验身份 / 逐事件宽度 / 最终构成），按天切分、fail open |
 | `hand_strength.py` | 纯判定层：`size` / `equity_tier` / `kind` / `summary_en`（**只服务离线审计**，live 传 `include_strength=False` 不渲染） |
 | `fold_equity.py` | 逐座位条件弃牌率与各尺寸盈亏平衡（数字来自 `tables/fold_equity.json`） |
 | `strategy_tables.py` | 策略表加载器：profile → 变体，缺变体回落 v0 并标记 `fell_back` |
@@ -267,6 +270,26 @@ advice / hand / incident / session_end`。`frame` 每帧一条，带 `hand_id` /
 四个键；旧消费者忽略即可。控制台文本另存为 `logs/live.log`（去 ANSI、加
 墙钟时间）。详细 schema 与排查流程见
 [docs/实时Web看板与日志排查-2026-11-05.md](docs/实时Web看板与日志排查-2026-11-05.md)。
+
+### 5.1.2 `logs/live.range.jsonl`（范围推导 trace，v1.2）
+
+一手一个决策点一条，**同样按天切成 `logs/live.range.jsonl.YYYYMMDD`**（留 14 天 /
+1 GB，超了只停写、不影响 live）。`--no-range-trace` 关闭；看板「范围推导」tab
+和 `tools/range_table_diff.py` 都从这里读。字段契约见
+[docs/范围推导-trace-字段契约-v1.md](docs/范围推导-trace-字段契约-v1.md)：
+先验四件套（`id`/`version`/`source`/表 `sha256`）、逐事件 `width_before/width_after`、
+`final`（宽度/有效宽度/峰值/combo 数/剔除计数）、`dead`、`decision_key`（与
+states 的 advice 行 join）。**这是另一份契约**：改它不动 `states.jsonl`。
+
+### 5.1.3 `hands/*.hands.json` 的行动字段（#35）
+
+`actions[]` 每条带 `stack`：**行动时该座位观测到的后手**（BB，与 `amount` 同单位）。
+读不到就是 `null`（从下注额反推的 `bet_delta`、盲注补记、以及旧归档一律 `null`；
+徽章稍后才补上金额也不改这条读数，`null` 不会被后来的帧「填」成观测），
+**绝不补 99/0，也不拿起始筹码反推**。
+消费端读到 `null` 必须显示「无筹码」并让 SPR 变成 `spr: null` + `spr_missing`，
+不得回落 `ActionEvent.spr=99` 的哨兵。`tools/hand_action_events.py` 负责
+「归档记录 → 逐决策 ActionEvent」，重放 SPR 走的就是它。
 
 ### 5.2 `api.py`（`:8000`）
 
@@ -379,6 +402,9 @@ nv tools/sync_hand_outbox.py
 nv -m poker_ocr.strategy_tables --profile sourced   # 生效 profile + 每张表来源/是否回落
 nv tools/export_strategy_tables.py --check          # JSON v0 ↔ 模块常数逐值相等
 nv tools/strategy_table_diff.py --tables            # 表级 v0/v1 对比
+nv tools/range_table_diff.py --file logs/live.range.jsonl.20261115 --hand 39 --json
+#   换一版 range_flow 表重算同一手并 diff：0 无差异 / 2 有差异 / 1 输入或重建失败
+#   默认读当天 logs/live.range.jsonl.YYYYMMDD；--street/--decision-key/--top 可再筛
 STRATEGY_TABLES_PROFILE=sourced nv -m poker_ocr.live ...
 
 ```
