@@ -170,7 +170,12 @@
   function boardChips(text) {
     var cards = [];
     var raw = String(text || "");
-    for (var i = 0; i + 1 < raw.length; i += 2) cards.push(raw.slice(i, i + 2));
+    // 牌面拼串里十是**三字符** `10s`（与 cards.py 的 RANKS 一致），不能一律按两位切。
+    for (var i = 0; i + 1 < raw.length;) {
+      var step = raw.slice(i, i + 2) === "10" ? 3 : 2;
+      cards.push(raw.slice(i, i + step));
+      i += step;
+    }
     return cardChips(cards);
   }
 

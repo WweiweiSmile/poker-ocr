@@ -95,14 +95,32 @@ _EPS = 1e-9
 # ─────────────────────────── 小工具 ───────────────────────────
 
 def _card(text: str) -> tuple[int, str] | None:
-    """'Ah' → (12, 'h')；认不出来返回 None（宁可漏，不猜）。"""
-    try:
-        rank, suit = str(text)[0].upper(), str(text)[1].lower()
-    except (IndexError, TypeError):
+    """'Ah' / '10s' → (点数下标, 'h'/'s')；认不出来返回 None（宁可漏，不猜）。
+
+    牌面文本里十是**三字符** `10s`（见 `poker_ocr/cards.py` 的 RANKS），不能按
+    固定两位切；这条在真实日志的牌面上天天出现（#37 端到端踩到）。
+    """
+    raw = str(text or "").strip()
+    if len(raw) < 2:
         return None
+    rank, suit = raw[:-1].upper(), raw[-1].lower()
+    if rank == "10":
+        rank = "T"
     if rank not in _RANK or suit not in "cdhs":
         return None
     return _RANK.index(rank), suit
+
+
+def _board_tokens(text: str) -> list[str]:
+    """牌面拼串 → 逐张：'Ks7c10d' → ['Ks', '7c', '10d']（十按三字符切）。"""
+    raw = str(text or "")
+    out: list[str] = []
+    i = 0
+    while i + 1 < len(raw):
+        step = 3 if raw[i:i + 2] == "10" else 2
+        out.append(raw[i:i + step])
+        i += step
+    return out
 
 
 def _cards(values) -> tuple[tuple[int, str], ...]:
@@ -328,11 +346,13 @@ def _rebuild_events(steps: list, board: str) -> tuple:
     """从 `steps[].event` 还原 ActionEvent 序列（契约 §3.3.2 是全字段）。
 
     记录里 step 只带 `street`、不带 `board`：按街取最终牌面的前 3/4/5 张，
-    与实时链路 `field_ranges.build_events` 逐位一致。`spr_before=null` 是
-    「拿不到筹码」的 99 哨兵，还原成 99.0。
+    与实时链路 `field_ranges.build_events` 逐位一致。牌面按张切，十（`10s`）
+    是三字符，不能按 `length*2` 截字符串。`spr_before=null` 是「拿不到筹码」的
+    99 哨兵，还原成 99.0。
     """
     from poker_ocr.range_flow import ActionEvent
 
+    tokens = _board_tokens(board)
     events = []
     for step in steps:
         event = step.get("event") or {}
@@ -341,7 +361,7 @@ def _rebuild_events(steps: list, board: str) -> tuple:
         spr = event.get("spr_before")
         events.append(ActionEvent(
             street=street,
-            board=str(board or "")[:length * 2],
+            board="".join(tokens[:length]),
             seat_id=str(event.get("actor") or ""),
             action=str(event.get("action") or ""),
             all_in=bool(event.get("all_in")),

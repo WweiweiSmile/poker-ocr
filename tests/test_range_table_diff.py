@@ -515,6 +515,50 @@ def test_rebuild_matches_recorded() -> None:
           f"先验四件套应对上：{seat['prior']}")
 
 
+def test_ten_cards_parse() -> None:
+    """牌面里的十是三字符 `10s`，不能按两位切（#37 端到端在真实牌面踩到）。"""
+    from tools.range_table_diff import _board_tokens, _card, _rebuild_events
+
+    check(_card("10s") == (8, "s"), f"_card('10s') 应解析成 (8, 's')：{_card('10s')}")
+    check(_card("Ah") == (12, "h"), f"_card('Ah') 应仍是 (12, 'h')：{_card('Ah')}")
+    check(_card("Xx") is None, "认不出的牌应返回 None")
+    check(_board_tokens("Ks7c10d") == ["Ks", "7c", "10d"],
+          f"十应按三字符切：{_board_tokens('Ks7c10d')}")
+    check(_board_tokens("Ks7c10d9h") == ["Ks", "7c", "10d", "9h"],
+          f"转牌同样：{_board_tokens('Ks7c10d9h')}")
+    events = _rebuild_events(
+        [{"street": "flop", "event": {"actor": "s1", "action": "bet",
+                                      "amount": 6.0}},
+         {"street": "turn", "event": {"actor": "s1", "action": "bet",
+                                      "amount": 12.0}}],
+        "Ks7c10d9h")
+    check(events[0].board == "Ks7c10d",
+          f"翻牌事件只看到 3 张：{events[0].board!r}")
+    check(events[1].board == "Ks7c10d9h",
+          f"转牌事件看到 4 张：{events[1].board!r}")
+
+
+def test_ten_board_record_rebuild() -> None:
+    """带十的真实记录整条重建不报错（牌面/死牌都按张切）。"""
+    from tools.range_table_diff import rebuild_record
+
+    with tempfile.TemporaryDirectory() as tmp:
+        trace = Path(tmp) / "live.range.jsonl"
+        record = _real_trace(trace)
+        if not record:
+            check(False, "夹具没造出来，跳过带十重建")
+            return
+    record = json.loads(json.dumps(record))
+    record["board"] = "10s7c2d"
+    record["dead"] = ["10h", "Qs"]
+    payload = rebuild_record(record)
+    check(payload["error"] is None, f"记录级不该报错：{payload['error']}")
+    seat = payload["seats"][0]
+    check(seat["error"] is None,
+          f"带十的牌面不该重建失败：{seat['error']}")
+    check(payload["board"] == "10s7c2d", f"牌面应原样回传：{payload['board']}")
+
+
 def test_cli_smoke() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         trace = Path(tmp) / "live.range.jsonl"
@@ -574,6 +618,8 @@ def main() -> int:
     test_compare_accepts_none_and_garbage()
     test_filters()
     test_rebuild_matches_recorded()
+    test_ten_cards_parse()
+    test_ten_board_record_rebuild()
     test_cli_smoke()
 
     if FAILS:

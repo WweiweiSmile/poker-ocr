@@ -190,8 +190,12 @@ def _range_cap_zh(edge, actual_opponents: int, behind_any: float,
                      "path": f"hand_ranges.opponents[{index}]"
                              ".composition.top_pair",
                      "text": f"顶对 {comp.top_pair:.0%}"})
-        refs.append({"ns": "facts", "path": "hand_ranges.behind_any",
-                     "text": f"至少一家领先你 {behind_any:.0%}"})
+        # 只有多头（>1 家）那支才渲染「至少一家领先你」；单家时这行说的是
+        # 「你领先 X%」，再挂 behind_any 的 text 就不在行内了（#37 真实
+        # 72 条 advice 复核抓到 2 处）。
+        if actual_opponents > 1:
+            refs.append({"ns": "facts", "path": "hand_ranges.behind_any",
+                         "text": f"至少一家领先你 {behind_any:.0%}"})
     return fact(text, *refs, kind="fact")
 
 
