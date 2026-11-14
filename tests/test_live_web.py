@@ -149,6 +149,14 @@ def test_http_snapshot_static_and_sse() -> None:
         check('class="dock-tab' in page, "右栏辅助信息应使用 tab 布局")
         js = urllib.request.urlopen(base + "/app.js", timeout=3).read().decode()
         check("EventSource" in js, "前端应通过 SSE 连接")
+        check("范围推导" in js and "RangeTab" in js,
+              "手牌详情应有第 5 个 tab「范围推导」")
+        tab_js = urllib.request.urlopen(base + "/range_tab.js",
+                                        timeout=3).read().decode()
+        check("window.RangeTab" in tab_js, "范围推导模块应可加载")
+        tab_css = urllib.request.urlopen(base + "/range_tab.css",
+                                         timeout=3).read().decode()
+        check(".rt-matrix" in tab_css, "范围推导样式应可加载")
 
         server.publish("frame", {"seq": 9, "kind": "record",
                                  "state": {"pot": 3}, "processed": 1})
@@ -258,12 +266,85 @@ def test_meta_preview_and_click_control() -> None:
         server.close()
 
 
+def test_range_api() -> None:
+    """GET /api/range：只读、一条记录带全部座位、非法参数不整页报错。"""
+    calls: list[tuple] = []
+
+    def query(hand, street=None, actions=None) -> dict:
+        calls.append((hand, street, actions))
+        if hand == 999:
+            return {"status": "missing"}
+        return {"status": "ok", "records": [{
+            "v": "live.range.v1.2", "status": "ok", "ts": "2026-11-13T21:00:00",
+            "hand": hand, "street": street or "flop", "decision_key": {
+                "hand": str(hand), "street": street or "flop",
+                "actions": actions if actions is not None else 7},
+            "seats": [{"seat": "s1", "path": "event_model", "steps": []}],
+        }]}
+
+    server = LiveWebServer(session={"session_id": "s-1"}, layout={}, port=0,
+                           range_query=query)
+    server.start()
+    try:
+        base = server.url
+        with urllib.request.urlopen(base + "/api/range?hand=104",
+                                    timeout=3) as resp:
+            got = json.loads(resp.read().decode("utf-8"))
+            check(resp.headers.get("Cache-Control") == "no-store",
+                  "trace 查询不许被缓存")
+        check(got["status"] == "ok", f"应回 ok：{got}")
+        check(len(got["records"]) == 1 and got["records"][0]["hand"] == 104,
+              f"应回这手牌的记录：{got}")
+        check(got["records"][0]["seats"][0]["seat"] == "s1",
+              "一条记录应自带全部座位（切座位不再请求）")
+        check(calls[-1] == (104, None, None), f"省略参数应传 None：{calls[-1]}")
+
+        got = json.loads(urllib.request.urlopen(
+            base + "/api/range?hand=104&street=turn&actions=12",
+            timeout=3).read())
+        check(calls[-1] == (104, "turn", 12), f"参数应透传：{calls[-1]}")
+
+        got = json.loads(urllib.request.urlopen(
+            base + "/api/range?hand=999", timeout=3).read())
+        check(got["status"] == "missing", f"没记录应回 missing：{got}")
+
+        # 非法参数：400，但不抛整页错误。
+        for bad in ("", "abc", "-1"):
+            try:
+                urllib.request.urlopen(base + "/api/range?hand=" + bad,
+                                       timeout=3)
+                check(False, f"hand={bad!r} 应被拒绝")
+            except urllib.error.HTTPError as exc:
+                check(exc.code == 400, f"hand={bad!r} 应 400：{exc.code}")
+                payload = json.loads(exc.read().decode("utf-8"))
+                check(payload["status"] == "missing",
+                      f"非法 hand 应回 missing 状态：{payload}")
+        got = json.loads(urllib.request.urlopen(
+            base + "/api/range?hand=104&street=&actions=x", timeout=3).read())
+        check(got["status"] == "ok", f"坏的 street/actions 应退化成省略：{got}")
+        check(calls[-1] == (104, None, None),
+              f"非法 street/actions 应传 None：{calls[-1]}")
+    finally:
+        server.close()
+
+    # 没有注入 range_query（比如工作台预览模式）：明确回 off，不 500。
+    server = LiveWebServer(session={"session_id": "s-2"}, layout={}, port=0)
+    server.start()
+    try:
+        got = json.loads(urllib.request.urlopen(
+            server.url + "/api/range?hand=1", timeout=3).read())
+        check(got["status"] == "off", f"没注入查询时应回 off：{got}")
+    finally:
+        server.close()
+
+
 def main() -> int:
     tests = [test_cli_defaults, test_layout_uses_name_slot_centers,
              test_store_tracks_frames_advice_hands,
         test_cards_event_updates_table_without_a_state_record,
              test_http_snapshot_static_and_sse,
-             test_meta_preview_and_click_control]
+             test_meta_preview_and_click_control,
+             test_range_api]
     print("── 实时 Web 看板 ──────────────────────────────")
     for t in tests:
         before = len(FAILS)

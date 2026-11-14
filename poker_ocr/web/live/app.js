@@ -843,6 +843,10 @@ function openHand(hand) {
 function closeModal() {
   state.modal = null;
   $("#modal").hidden = true;
+  // 关掉手牌详情时把范围推导的深链一起清掉，避免刷新又弹回来。
+  if (window.RangeTab && window.RangeTab.isRangeHash(location.hash)) {
+    history.replaceState(null, "", location.pathname + location.search);
+  }
 }
 
 function modalDef() {
@@ -863,7 +867,8 @@ function modalDef() {
     title: "手牌详情",
     sub: `${hand.hand_id || "—"} · ${(hand.hero_cards || []).join(" ") || "无手牌"} · ${(hand.board || []).join(" ") || "翻前"}`,
     tabs: [["overview", "概览"], ["actions", "行动线"], ["quality", "数据质量"],
-           ...(hand.advices?.length ? [["advices", `建议 ${hand.advices.length}`]] : [])],
+           ...(hand.advices?.length ? [["advices", `建议 ${hand.advices.length}`]] : []),
+           ["range", "范围推导"]],
     foot: `uid ${hand.uid || hand.hand_id || "—"} · 倒查：python tools/hand_recognition_audit.py --explain ${hand.hand_id || "<hand_id>"}`,
   };
 }
@@ -873,6 +878,9 @@ function renderModal() {
   const def = modalDef();
   if (!def) { modal.hidden = true; return; }
   modal.hidden = false;
+  // 「范围推导」右栏要并排热图与组合表，1100 px 的弹窗装不下；只放宽这一个 tab。
+  const card = modal.querySelector(".modal-card");
+  if (card) card.classList.toggle("is-wide", state.modal.kind === "hand" && state.modal.tab === "range");
   $("#modal-title").textContent = def.title;
   $("#modal-sub").textContent = def.sub;
   $("#modal-foot").textContent = def.foot;
@@ -935,6 +943,12 @@ function kvBlock(pairs) {
 }
 
 function renderHandBody(body, hand, tab) {
+  if (tab === "range") {
+    // 懒加载 /api/range：只读接口，切座位与切步都不再请求。
+    if (window.RangeTab) window.RangeTab.render(body, hand);
+    else body.append(preBlock("range_tab.js 没有加载，范围推导不可用。"));
+    return;
+  }
   if (tab === "overview") {
     const q = hand.data_quality || {};
     state.modal.copyText = JSON.stringify(hand, null, 2);
@@ -1007,6 +1021,10 @@ function hydrate(snapshot) {
   state.lastBoardKey = "";
   state.lastHeroCardsKey = "";
   renderAll();
+  // 带 #/range?hand=… 打开时，水合完手牌列表后再复原深链。
+  if (window.RangeTab && window.RangeTab.isRangeHash(location.hash)) {
+    window.RangeTab.restore();
+  }
 }
 
 function renderAll() {

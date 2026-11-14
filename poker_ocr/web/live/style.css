@@ -850,6 +850,8 @@ kbd {
 .modal-body .kv dt { color: var(--dim); }
 .modal-body .kv dd { margin: 0; color: var(--text); word-break: break-word; }
 .modal-foot { padding: 10px 18px; border-top: 1px solid var(--line); color: var(--dim); font-size: 11px; }
+/* 范围推导 tab：右栏要并排「热图 420 + 组合表」，1100 px 装不下两列。 */
+.modal-card.is-wide { width: min(1320px, 100%); max-height: min(92vh, 1150px); }
 
 .toast {
   position: fixed;
