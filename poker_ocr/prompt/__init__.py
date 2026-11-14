@@ -12,6 +12,7 @@
 对外入口只有两个：
 
     build_messages(sit) -> (system, user)
+    build_messages_refs(sit) -> (system, user, refs)   # 旁路，文本与上者相同
     build_system(sit)   -> system
     render_facts_zh(sit) -> user
 
@@ -23,13 +24,14 @@
 from __future__ import annotations
 
 from .system import build_system
-from .user import build_messages, render_facts_zh
+from .user import build_messages, build_messages_refs, render_facts_zh
 from .version import PROMPT_LANGUAGE, PROMPT_VERSION
 
 __all__ = [
     "PROMPT_LANGUAGE",
     "PROMPT_VERSION",
     "build_messages",
+    "build_messages_refs",
     "build_system",
     "render_facts_zh",
 ]

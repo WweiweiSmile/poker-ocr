@@ -135,6 +135,7 @@ situation ──build_messages(sit)──► (system, user)  ← 唯一的文本
 | `refs[].path` | `facts` 里是点路径（`a.b[0].c`）；`trace` 里是 `seats[i].*` / `hero_equity.*` / `params.*` |
 | `refs[].text` | 渲染后的字面量（`"≈2.0%"`、`"28.3%"`、`"三条 28%"`），UI 用它在该行内做子串高亮 |
 | `refs[].deep` | **可选**下钻链接，只能指向 `trace` |
+| `abs` | **实现补充**（v1 落地时新增）：该行在整段 prompt（`system` 或 `user`）里的 1-based 行号，由 `section` 段首 + 段内 `line` 算出。UI 跳行用它，避免每次都要按 section 名重新找段首；`line` 仍是段内行号，契约语义不变。 |
 
 ### 6.2 两个命名空间的职责（不要混）
 
@@ -176,6 +177,16 @@ situation ──build_messages(sit)──► (system, user)  ← 唯一的文本
 - ❌ 不做字符区间（文案微调即失效），只做行内子串匹配。
 - ❌ 不改 `live.range.jsonl` 的 v1 契约（那是范围推导契约，不是提示词契约）。
 - ❌ 不给 `derived` 行硬造 ref：程序结论（范围警告、跟注 EV）标 `derived`，refs 可空或只指向输入。
+
+### 6.6 实现备注（#34 落地时的偏差）
+
+落地后与上面契约的差异，全部是「让 UI 能跳行」和「不给 derived 硬造 ref」两件事，逐条记录：
+
+1. **每条 entry 多一个 `abs`**（见 6.1 末行）：`line` 仍是段内行号，`abs` 是整段 prompt 的行号；`prompt_refs` 按 `abs` 排序。
+2. **`最好五张`（§2 #3）的 facts 路径是 `ground_truth.detail`**：`detail` 是英文牌型描述（`"A-high straight"`），渲染的 `text` 是牌面串（`"Kh Ks Qh 7d 2c"`）。路径可解析、`text` 是行内子串（满足验收 3），但值语义不是同一个东西；想拿牌面串请直接用 `ground_truth.made.best_five`（facts 里没存，属已知缺口，未在本票扩契约）。
+3. **`derived` 行不给 refs**：`能打败你的牌型（理论上）`、`四二法则成牌率`、`跟注 EV`、`校准话术` 只标 `kind:"derived"`，`refs` 为空——契约 6.5 禁止硬造。`3 人池：实际 N 人…`（#10）、`options` 行、`翻前范围结论`、`本手 N 人` 这几条是程序算出的展示值，`refs` 只指向输入（`opponents_in_hand` / `options` / `range_verdict`），也标 `derived`。
+4. **facts 6.3 的落法**：`hand_ranges.opponents[i].label` 直接复用渲染用的 `_range_label(edge)`（UI 不用再拼）；`composition` 落 `{made, draw, air, two_pair_plus, top_pair}`；`beaten_by`/`ahead_groups` 只存 `{name, share}`；`fold_eq.shares` 存 `[[name, share], …]`（share 保留 4 位）、`fold_eq.scale` 保留 4 位；`opponent_reads` 存 `[{seat, type, conf, n, source}]`（`type` = archetype）；`hero_total_stack` = 后手 + 本街已下注。缺数据一律不写键。
+5. **system 段只包了两处**：`scenario:short_stack`、`scenario:multiway`（其余 system 段是静态规则，没有可挂的 facts）。
 
 ## 7. 验收（实现时必须逐条过）
 

@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+from ..refs import collecting, section
 from ..system import build_system
 from .action_line import render_action_line_zh
 from .attack import attack_signals, render_attack_zh
@@ -52,15 +53,18 @@ def render_facts_zh(sit) -> str:
         lines.extend(history)
 
     # ── 翻前信息 / 实时牌力 ──
-    preflop = render_preflop_zh(sit)
-    if preflop:
+    # 段包在 section() 里：收集器激活时行号才与段文本对得上（未激活是空操作）。
+    with section("preflop") as sec:
+        sec.extend(render_preflop_zh(sit))
+    if sec.lines:
         lines.append("")
-        lines.extend(preflop)
+        lines.extend(sec.lines)
 
-    strength = render_hand_strength_zh(sit)
-    if strength:
+    with section("strength") as sec:
+        sec.extend(render_hand_strength_zh(sit))
+    if sec.lines:
         lines.append("")
-        lines.extend(strength)
+        lines.extend(sec.lines)
 
     # 攻击块会给出本街弃牌率的单一裁决；有攻击块、或某个座位已经有
     # 「别开火」的反向证据时，逐座位的「可剥削」不再给第二个动作方向，
@@ -71,10 +75,11 @@ def render_facts_zh(sit) -> str:
 
     # ── 条件弃牌率（按本手线路）：攻击块已给裁决的节点不重复渲染 ──
     if not attack:
-        exploit = render_exploit_zh(sit)
-        if exploit:
+        with section("exploit") as sec:
+            sec.extend(render_exploit_zh(sit))
+        if sec.lines:
             lines.append("")
-            lines.extend(exploit)
+            lines.extend(sec.lines)
 
     # ── 逐座位画像：优先于全场统计；攻击块在场时只留描述性数据 ──
     profiles = render_profiles_zh(
@@ -106,10 +111,14 @@ def render_facts_zh(sit) -> str:
         lines.extend(attack)
 
     # ── 数据质量 + 可选动作 ──
+    with section("quality") as sec:
+        sec.extend(render_data_quality_zh(sit))
     lines.append("")
-    lines.extend(render_data_quality_zh(sit))
+    lines.extend(sec.lines)
+    with section("options") as sec:
+        sec.extend(render_options_zh(sit))
     lines.append("")
-    lines.extend(render_options_zh(sit))
+    lines.extend(sec.lines)
     return "\n".join(lines)
 
 
@@ -118,4 +127,16 @@ def build_messages(sit) -> tuple[str, str]:
     return build_system(sit), render_facts_zh(sit)
 
 
-__all__ = ["build_messages", "render_facts_zh"]
+def build_messages_refs(sit) -> tuple[str, str, list[dict]]:
+    """与 `build_messages` 同文本，另外返回行级 refs（spec #33 A 部分）。
+
+    唯一测试缝：`(system, user)` 必须与 `build_messages(sit)` 逐字节相等；
+    收集器是旁路（contextvar），未激活时 `fact()` 恒等返回。
+    """
+    with collecting() as collector:
+        system = build_system(sit)
+        user = render_facts_zh(sit)
+    return system, user, collector.finish(system, user)
+
+
+__all__ = ["build_messages", "build_messages_refs", "render_facts_zh"]
