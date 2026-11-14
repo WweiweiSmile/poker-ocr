@@ -3335,8 +3335,10 @@ def test_system_prompt_worst_case_stays_bounded() -> None:
                              all_in=True, is_hero=True),)),
             StreetRecord("river", 114.0, ())))
     system, user = build_messages(build_situation(point))
-    check(len(system) < 7000,
-          f"最坏局面 system 应 < 7000，实际 {len(system)}")
+    # 2026-11-14.1 起事实优先级第 3 层拆成 3a/3b/3c（摊牌证据 / 画像 / 池子先验），
+    # 最坏局面约 +60 字；上界从 7000 放到 7100，仍是同一量级的延迟预算。
+    check(len(system) < 7100,
+          f"最坏局面 system 应 < 7100，实际 {len(system)}")
     check(len(system) + len(user) < 10000,
           f"最坏局面 system+user 应 < 10000，实际 {len(system) + len(user)}")
 

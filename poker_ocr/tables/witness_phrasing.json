@@ -1,0 +1,55 @@
+{
+  "version": "witness-phrasing-2026-11-14a",
+  "prefix": "摊牌证据：",
+  "line": "他在{street}{position}{action}时亮过{family}（{count} 次）",
+  "pool_line": "这个池子在{street}的亮牌里{family}占 {pct}（{count} 次，本池）",
+  "street": {
+    "turn": "转牌",
+    "river": "河牌"
+  },
+  "position": {
+    "ip": "IP",
+    "oop": "OOP"
+  },
+  "action": {
+    "facing_bet": "面对下注",
+    "check": "过牌",
+    "bet": "主动下注",
+    "unknown": "行动不明"
+  },
+  "family": {
+    "weak_ace_top_pair": "弱A顶对",
+    "strong_ace_top_pair": "A顶对强踢",
+    "non_ace_top_pair": "非A顶对",
+    "overpair": "超对",
+    "middle_pair": "中等对子",
+    "small_pair": "小对子",
+    "air_high_card": "高张无对",
+    "suited_connector": "同花连张",
+    "busted_draw": "听牌破产",
+    "two_pair_plus": "两对+",
+    "set": "暗三",
+    "playing_board": "打牌面"
+  },
+  "forbidden": [
+    "经常",
+    "频繁",
+    "总是",
+    "往往",
+    "通常",
+    "一贯",
+    "老是",
+    "必然",
+    "一定",
+    "肯定",
+    "铁定",
+    "建议",
+    "应该",
+    "可以",
+    "必须",
+    "最好",
+    "对手有",
+    "对手拿着",
+    "他手里是"
+  ]
+}

@@ -1536,8 +1536,35 @@ def test_exploit_hints_do_not_contradict_each_other() -> None:
           f"低 c-bet 不能读成「基本没中」：{low_cbet}")
 
 
+def test_prompt_injects_witness_lines_after_tendencies() -> None:
+    """「摊牌证据：」行插在「打法：」之后、「可剥削」之前（#15 §14.1 / §14.8 第 6、12 条）。"""
+    point = _h8_point()
+    reads = (_read("midR", "芒果与西米", "maniac"),)
+    line = "摊牌证据：他在河牌IP过牌时亮过弱A顶对（1 次）"
+    with_w = render_facts_zh(build_situation(
+        point, opponent_reads=reads, witness_by_seat={"midR": [line]}))
+    without = render_facts_zh(build_situation(point, opponent_reads=reads))
+    body = f"  {line}"
+    check(body in with_w, f"应渲染摊牌证据行：\n{with_w}")
+    # 该座位没有可用的逐街出手数据，所以没有「打法：」行；以类型行与图例为锚。
+    i_type = with_w.index("- BTN 芒果与西米")
+    i_wit = with_w.index(body)
+    check(i_type < i_wit, f"摊牌证据应在座位类型行之后：\n{with_w}")
+    if "  打法：" in with_w:
+        check(with_w.index("  打法：") < i_wit, "摊牌证据应在打法之后")
+    if "可剥削" in with_w:
+        check(i_wit < with_w.index("可剥削"),
+              f"摊牌证据应在可剥削之前：\n{with_w}")
+    check(i_wit < with_w.index("（n=手数"), "摊牌证据应在图例之前")
+    check("摊牌证据" not in without, "无 witness 时不应出现该前缀")
+    empty = render_facts_zh(build_situation(
+        point, opponent_reads=reads, witness_by_seat={"midR": ()}))
+    check(empty == without, "空 witness 与不传必须逐字节相同")
+
+
 def run() -> int:
     tests = [
+        test_prompt_injects_witness_lines_after_tendencies,
         test_fold_and_check_are_inferred_at_street_end,
         test_no_fold_inferred_when_action_badge_recorded,
         test_bomb_pot_preflop_has_no_inferred_checks,

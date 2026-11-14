@@ -2048,6 +2048,9 @@ class ProfileStore:
         self._updates = 0
         self._last_save = 0.0
         self._saved_at: str | None = None
+        # profiles.json v2 的 witness 块（§3.1）。旧文件没有 = 没有证据，
+        # 不是错误；这里只读入与透传，窗口裁剪/整手替换属存储票（§5–§8）。
+        self._witness: dict = {}
 
     # ── 属性 ──
     @property
@@ -2114,6 +2117,9 @@ class ProfileStore:
         seen = [str(x) for x in (data.get("seen_hands") or [])]
         self.seen_hands = seen[-MAX_SEEN_HANDS:]
         self._seen = set(self.seen_hands)
+        # witness 缺失/类型不对一律当空：渲染层据此退化为「不出行」。
+        witness = data.get("witness")
+        self._witness = dict(witness) if isinstance(witness, Mapping) else {}
 
     def update_hand(self, hand: Mapping) -> list[HandObservation]:
         """解析一手牌并更新画像。同一 hand_uid 重复调用不会重复计数。"""
@@ -2460,6 +2466,12 @@ class ProfileStore:
             out[seat or str(name or "")] = self._read_for_stats(stats, seat)
         return out
 
+    def witness_payload(self) -> dict:
+        """profiles.json 的 witness 块（只读）；缺失 / 关闭 = 空 dict。"""
+        if not self.enabled:
+            return {}
+        return dict(self._witness)
+
     def read_one(self, name: str | None, *,
                  seat_id: str | None = None) -> OpponentRead:
         key = self._resolve_key(name)
@@ -2577,6 +2589,11 @@ class ProfileStore:
             "seat_keys": dict(self.seat_keys),
             "seen_hands": list(self.seen_hands[-MAX_SEEN_HANDS:]),
         }
+        if self._witness:
+            # 读到的 witness 块原样写回：不在这里裁剪（§6 的窗口规则属存储票），
+            # 但也绝不能因为升级 reader 就把已有数据写丢。
+            data["version"] = 2
+            data["witness"] = self._witness
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             tmp = self.path.with_suffix(self.path.suffix + ".tmp")
@@ -2685,7 +2702,9 @@ def render_reads_zh(reads: Iterable[OpponentRead],
                     *,
                     header: str = "## 对手画像（逐座位；优先于全场统计）",
                     include_exploit: bool = True,
-                    preserve_input_order: bool = False) -> list[str]:
+                    preserve_input_order: bool = False,
+                    witness_by_seat: "Mapping[str, Iterable[str]] | None" = None
+                    ) -> list[str]:
     """按座位渲染中文画像行，供中文 lean 事实块使用。
 
     `positions` 只含本手还在局的座位（seat_id → 位置）：不在其中（已弃牌）或
@@ -2728,6 +2747,12 @@ def render_reads_zh(reads: Iterable[OpponentRead],
         profile = render_tendencies_zh(read)
         if profile:
             lines.append(f"  打法：{profile}")
+        # 摊牌证据紧跟「打法：」：同一个座位「他怎么打」里最具体的一档。
+        # 文案、预算与版本校验都在 witness/render.py，这里只负责拼接。
+        if witness_by_seat:
+            for text in witness_by_seat.get(read.seat_id) or ():
+                if text:
+                    lines.append(f"  {text}")
         exploit = exploit_hint_zh(read)
         if exploit:
             if include_exploit:

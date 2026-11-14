@@ -12,7 +12,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Iterable
+from typing import TYPE_CHECKING, Iterable, Mapping
 
 from .coach import (
     BOARD_PLAY, MID_BOTTOM, OVERPAIR, STRONG_DRAW, STRONG_MADE, TPTK,
@@ -115,6 +115,10 @@ class Situation:
     # 本手在局对手的画像（按 seat_id 对回具体的人）。空 = 没有画像，
     # 行为退回 `.table_dy` / aggressive_table 的旧口径。
     opponent_reads: tuple[OpponentRead, ...] = ()
+    # 本手对手「亮过什么」（witness 投影，见 witness/render.py）：按 seat_id
+    # 存已经渲染好的「摊牌证据：…」行。空 = 没有可用证据，画像段不出这类行；
+    # 与 opponent_reads 同构，事实随 Situation 走，提示词层只拼接。
+    witness_by_seat: Mapping[str, tuple[str, ...]] = ()
     # 翻后决策的几何事实。由程序算、直接渲染进事实块：SPR 决定「顶对能不能
     # 打光」，位置/身后人数决定「能不能诈唬」，让模型自己推会推出两套口径。
     pot_type: str | None = None
@@ -307,7 +311,8 @@ def build_situation(snap: HandSnapshot,
                     opponent_reads: Iterable[OpponentRead] | None = None,
                     table_stats: "PooledStats | None" = None,
                     previous: "Advice | None" = None,
-                    include_strength: bool = True
+                    include_strength: bool = True,
+                    witness_by_seat: Mapping[str, Iterable[str]] | None = None
                     ) -> Situation:
     """把快照整理成一次决策的事实。
 
@@ -319,8 +324,14 @@ def build_situation(snap: HandSnapshot,
 
     `opponent_reads` 是 ProfileStore.read_for() 的结果（按本手 seat_id）。
     没有画像时 `aggressive_table` 仍是 fallback，行为不会退化。
+
+    `witness_by_seat` 是 witness/render.py 的输出（seat_id → 已渲染的行）；
+    空/缺失时画像段逐字节不变，也不写「暂无摊牌记录」这类占位（§14.5）。
     """
     reads = tuple(opponent_reads or ())
+    witness = {str(seat): tuple(str(text) for text in (lines or ()) if text)
+               for seat, lines in (witness_by_seat or {}).items()}
+    witness = {seat: lines for seat, lines in witness.items() if lines}
     read = _read(snap)
     warnings: list[str] = list(snap.warnings)
     if (snap.street == PREFLOP and not snap.actions_of(PREFLOP)
@@ -438,6 +449,7 @@ def build_situation(snap: HandSnapshot,
         aggressive_table=is_aggressive_table(table_dynamics),
         outs=read.outs if read else None,
         opponent_reads=reads,
+        witness_by_seat=witness,
         pot_type=pot_type(snap),
         spr=spr(snap),
         in_position=hero_in_position(snap),

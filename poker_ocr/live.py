@@ -188,6 +188,49 @@ def _table_stats_for_active(profile_store, opponents):
         current, total_players=len(active) + 1)
 
 
+def _witness_by_seat(profile_store, point) -> dict:
+    """本手「他亮过什么」→ {seat_id: (行…)}；任何缺失都退化为空。
+
+    只读：profiles.json 里没有 witness 块（旧文件）就没有证据，不猜。
+    座位按 Hero 下注后的行动顺序给（与 prompt/user/profiles.py 同源），
+    render_witness_lines 的预算耗尽时先丢更远的座位。
+    """
+    from .opponent_profile import normalize_name
+    from .positions import POSITIONS_BY_TABLE_SIZE
+    from .witness import render as witness_render
+
+    if not witness_render.enabled():
+        return {}
+    payload = getattr(profile_store, "witness_payload", None)
+    if payload is None:
+        return {}
+    data = payload() or {}
+    rows = data.get("rows") or ()
+    if not rows:
+        return {}
+    table_size = getattr(point, "table_size", 0) or 0
+    order = POSITIONS_BY_TABLE_SIZE.get(table_size, [])
+    hero_position = getattr(point, "hero_position", None)
+    if hero_position in order:
+        i = order.index(hero_position)
+        order = order[i + 1:] + order[:i]
+    rank = {position: i for i, position in enumerate(order)}
+    active = [o for o in getattr(point, "opponents", ())
+              if not getattr(o, "folded", False)]
+    active.sort(key=lambda o: rank.get(o.position or "", len(rank)))
+    seats: dict[str, str] = {}
+    for opp in active:
+        key = normalize_name(getattr(opp, "name", None))
+        if key:
+            seats[str(opp.seat_id)] = key
+    if not seats:
+        return {}
+    return witness_render.render_witness_lines(
+        rows, seats=seats,
+        hero_seat=getattr(point, "hero_seat_id", None),
+        version=data.get("version"))
+
+
 def _hand_done_text(hand: dict) -> str:
     """完整手牌落库提示文案：hand_id（JSONL 里按 id 能直接搜到）。
 
@@ -1866,6 +1909,17 @@ class LiveProcessor:
                         self.log(f"  [对手] 画像读取失败："
                                  f"{type(exc).__name__}: {exc}")
                         reads = {}
+                # 摊牌证据（witness 行）：只读画像文件里的投影，渲染成本手
+                # 座位的行；缺数据/版本失配都退化为空，不阻塞主链路。
+                witness_by_seat: dict = {}
+                if self.profile_store is not None:
+                    try:
+                        witness_by_seat = _witness_by_seat(
+                            self.profile_store, point)
+                    except Exception as exc:      # noqa: BLE001
+                        self.log(f"  [对手] 摊牌证据读取失败："
+                                 f"{type(exc).__name__}: {exc}")
+                        witness_by_seat = {}
                 # 当前**这一手还在局**的对手聚合，不是整个画像库，也不是
                 # 已弃牌的人。total_players 含 Hero，提示词才能说「3 人」。
                 table_stats = None
@@ -1887,7 +1941,8 @@ class LiveProcessor:
                         opponent_reads=reads.values(),
                         table_stats=table_stats,
                         previous=previous,
-                        include_strength=False)
+                        include_strength=False,
+                        witness_by_seat=witness_by_seat)
                 except Exception as exc:      # noqa: BLE001
                     self.log(f"  [建议] 局面构建失败：{type(exc).__name__}: {exc}")
                     return

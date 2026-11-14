@@ -36,7 +36,8 @@ def render_profiles_zh(sit, *, suppress_action_hints: bool = False) -> list[str]
         ordered_reads, active,
         header=header,
         include_exploit=not suppress_action_hints,
-        preserve_input_order=True)
+        preserve_input_order=True,
+        witness_by_seat=sit.witness_by_seat)
     # 桌况段删除后，「本手还有谁没有画像」只能在这里说。不列出来，模型会
     # 把「没出现画像行」当成「没有这个对手」。
     known = {read.seat_id for read in ordered_reads}
@@ -48,7 +49,7 @@ def render_profiles_zh(sit, *, suppress_action_hints: bool = False) -> list[str]
         lines.append(
             "（n=手数；置信=0–1 的可信度；≈=向人群先验收缩的估计值；"
             "（N 次）=该指标的机会数；暂定=样本不足只作参考；"
-            "推断%=动作中由视频补出的比例）")
+            "推断%=动作中由视频补出的比例；统计窗口=最近 5000 手）")
     else:
         # 一个画像都没有时也要有段头，否则「无画像：SB」会飘到上一段末尾。
         lines = [header, "（本手在局对手都没有可用画像）"]

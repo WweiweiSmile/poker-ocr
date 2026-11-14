@@ -80,5 +80,8 @@ from __future__ import annotations
 # 每条行动带 source（badge/avatar_fold/bet_delta/ledger）与 order_unknown，
 # 弃牌按首次观测进入行动线，盲注只做基线。提示词模板本身未改，所以
 # golden 的模板哈希不变；bump 版本是为了让复盘/A-B 能区分行动线口径。
-PROMPT_VERSION = "lean-zh-2026-11-13.1"
+# 2026-11-14.1：事实优先级第 3 层拆 3a/3b/3c——逐座位摊牌证据最具体。
+# 依据 #10 地图的 #15 决议（docs/摊牌-witness-数据契约-v1.md §14）；
+# 本次只改 system，user 事实块在 witness 数据落地前逐字节不变。
+PROMPT_VERSION = "lean-zh-2026-11-14.1"
 PROMPT_LANGUAGE = "zh"
