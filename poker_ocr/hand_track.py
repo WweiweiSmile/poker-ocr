@@ -2720,6 +2720,9 @@ class LiveHandTracker:
                   for row in hand.table_roster]
         out = {
             "hand_id": hand.hand_id,
+            # 本次 live 会话内的序号：range trace 的 hand 字段就是它，
+            # 看板据此把「范围推导」tab 的记录 join 到这手牌上（v1.2 新增）。
+            "hand_index": hand.hand_index,
             **({"table_signature": hand.table_signature}
                if hand.table_signature else {}),
             **({"table_roster": roster} if roster else {}),
