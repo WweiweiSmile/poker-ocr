@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:                       # 只在类型检查时引入，避免循环 import
     from ...options import Option
     from ...situation import Situation
+from ..refs import fact
 
 
 _GENERIC_OPTION_NOTES = {
@@ -67,5 +68,8 @@ def render_options_zh(sit: Situation) -> list[str]:
             if key in seen:
                 continue
             seen.add(key)
-        lines.append(f"- {option.id}｜{option.label}{_option_note(option)}")
+        # 选项是程序算出来的（derived）；facts 里存的是同一批 options。
+        lines.append(fact(f"- {option.id}｜{option.label}{_option_note(option)}",
+                          {"ns": "facts", "path": "options",
+                           "text": option.label}, kind="derived"))
     return lines

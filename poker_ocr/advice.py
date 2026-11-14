@@ -70,8 +70,8 @@ from .pot_math import (  # noqa: F401
 
 # ── 提示词 ──
 from .prompt import (  # noqa: F401
-    PROMPT_LANGUAGE, PROMPT_VERSION, build_messages, build_system,
-    render_facts_zh,
+    PROMPT_LANGUAGE, PROMPT_VERSION, build_messages, build_messages_refs,
+    build_system, render_facts_zh,
 )
 from .prompt.user.action_line import _fmt_actions_zh  # noqa: F401
 from .prompt.user.attack import render_attack_zh  # noqa: F401
@@ -593,6 +593,9 @@ class Advice:
     facts: dict = field(default_factory=dict)
     model_params: dict = field(default_factory=dict)
     captured_at: str | None = None
+    # 行级 prompt_refs（spec #33 A 部分）：每条提示词行的 section/line/来源。
+    # 空列表不写进 to_dict()；events 日志按 drop 表剔除（体积 ~3KB/决策）。
+    prompt_refs: list = field(default_factory=list)
     prompt_missing: bool = False
     prompt_missing_reason: str | None = None
 
@@ -646,6 +649,7 @@ class Advice:
             **({"reason_full": self.reason_full}
                if self.reason_full else {}),
             **({"facts": self.facts} if self.facts else {}),
+            **({"prompt_refs": self.prompt_refs} if self.prompt_refs else {}),
             **({"model_params": self.model_params}
                if self.model_params else {}),
             **({"captured_at": self.captured_at}
@@ -848,6 +852,27 @@ def _facts_snapshot(sit: Situation, options=None) -> dict:
         ),
         "options": [option.to_dict() for option in option_space],
     }
+    # 契约 §6.3：短码场景的 system 例外要用「本手总筹码」（后手 + 本街已下注）。
+    try:
+        from .pot_math import _hero_total_stack
+        total_stack = _hero_total_stack(snap)
+        if total_stack is not None:
+            facts["hero_total_stack"] = round(float(total_stack), 2)
+    except Exception:                            # noqa: BLE001  fail open
+        pass
+    # 契约 §6.3：对手画像摘要（不含倾向百分比，UI 只用来解释「为什么这么打」）。
+    reads = []
+    for read in getattr(sit, "opponent_reads", ()) or ():
+        try:
+            reads.append({"seat": read.seat_id,
+                          "type": read.archetype,
+                          "conf": round(float(read.confidence), 3),
+                          "n": read.n,
+                          "source": read.source})
+        except Exception:                        # noqa: BLE001  fail open
+            continue
+    if reads:
+        facts["opponent_reads"] = reads
     # 事实漂移 vs 模型漂移：没有这几个数，A/B 里动作变了只能猜。范围/条件
     # 弃牌率/牌面排名都是「当时模型看到的数」，一起留档。
     hr = getattr(sit, "hand_ranges", None)
@@ -858,13 +883,7 @@ def _facts_snapshot(sit: Situation, options=None) -> dict:
             "tie_any": round(hr.tie_any, 4),
             "samples": hr.samples,
             "random_opponents": getattr(hr, "random_opponents", 0),
-            "opponents": [
-                {"seat": e.seat_id, "position": e.position,
-                 "range": e.range_id,
-                 "width": round(e.eff_width_pct or e.width_pct, 2),
-                 "behind": round(e.behind, 4), "tie": round(e.tie, 4)}
-                for e in hr.opponents
-            ],
+            "opponents": [_opponent_facts(e) for e in hr.opponents],
         }
     fe = getattr(sit, "fold_eq", None)
     if fe is not None:
@@ -874,6 +893,9 @@ def _facts_snapshot(sit: Situation, options=None) -> dict:
                          if fe.observed is not None else None),
             "combos": fe.combos,
             "opponents": fe.opponents,
+            # 范围构成：`[[name, share], …]`，UI 的行内高亮要用原文。
+            "shares": [[name, round(share, 4)] for name, share in fe.shares],
+            "scale": round(fe.scale, 4),
             "lines": [
                 {"label": line.label, "size": line.size,
                  "fold_equity": round(line.fold_equity, 4),
@@ -898,6 +920,43 @@ def _facts_snapshot(sit: Situation, options=None) -> dict:
         }
     return {key: value for key, value in facts.items()
             if value not in (None, "", [], {})}
+
+
+def _opponent_facts(edge) -> dict:
+    """一条 `HandVsRanges` 对手边 → facts（契约 §6.3，全部 fail open）。"""
+    from .prompt.user.ranges import _range_label
+
+    try:
+        label = _range_label(edge)
+    except Exception:                            # noqa: BLE001
+        label = None
+    item = {
+        "seat": edge.seat_id,
+        "position": edge.position,
+        "range": edge.range_id,
+        "width": round(edge.eff_width_pct or edge.width_pct, 2),
+        "behind": round(edge.behind, 4),
+        "tie": round(edge.tie, 4),
+        "mode": edge.mode,
+    }
+    if label:
+        item["label"] = label
+    comp = getattr(edge, "composition", None)
+    if comp is not None:
+        item["composition"] = {
+            "made": round(float(comp.made_hand), 4),
+            "draw": round(float(comp.draw), 4),
+            "air": round(float(comp.air), 4),
+            "two_pair_plus": round(float(comp.two_pair_plus), 4),
+            "top_pair": round(float(comp.top_pair), 4),
+        }
+    for key, groups in (("beaten_by", getattr(edge, "beaten_by", ())),
+                        ("ahead_groups", getattr(edge, "ahead_groups", ()))):
+        rows = [{"name": g.name, "share": round(float(g.share), 4)}
+                for g in groups or ()]
+        if rows:
+            item[key] = rows
+    return item
 
 
 def _model_params(settings: AISettings | None) -> dict:
@@ -956,6 +1015,7 @@ def advise(sit: Situation, settings: AISettings | None,
         return (next((o for o in sit.options if o.id == oid), sit.options[0]),
                 reason, "fallback")
     prompt_holder: dict[str, str | None] = {}
+    refs_holder: dict[str, list] = {}
     raw_holder: dict[str, str | None] = {}
 
     def make(option: Option, reason: str, source: str,
@@ -998,6 +1058,7 @@ def advise(sit: Situation, settings: AISettings | None,
             response_sha256=_sha256_text(raw),
             reason_full=reason_full or reason,
             facts=_facts_snapshot(sit, options),
+            prompt_refs=list(refs_holder.get("refs") or ()),
             model_params=_model_params(settings),
             captured_at=datetime.now().astimezone().isoformat(timespec="seconds"),
             prompt_missing=prompt_missing,
@@ -1019,8 +1080,13 @@ def advise(sit: Situation, settings: AISettings | None,
                     prompt_missing=True,
                     prompt_missing_reason="abnormal_no_opponents")
 
-    system, user = (prompt_override if prompt_override
-                    else build_messages(sit))
+    if prompt_override:
+        # 存下来的旧提示词没有行级来源：refs 为空，看板退化成整段显示。
+        system, user = prompt_override
+        refs_holder["refs"] = []
+    else:
+        system, user, prompt_refs = build_messages_refs(sit)
+        refs_holder["refs"] = prompt_refs
     prompt_holder.update({
         "system": system,
         "user": user,

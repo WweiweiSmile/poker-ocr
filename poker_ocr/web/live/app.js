@@ -824,11 +824,146 @@ function promptTabs(advice) {
   return tabs;
 }
 
-function openPrompt(advice) {
+function openPrompt(advice, focus) {
   if (!advice) return;
   const tabs = promptTabs(advice);
-  state.modal = { kind: "prompt", payload: advice, tab: tabs[0]?.[0] || "facts" };
+  const section = focus && focus.section ? String(focus.section) : "";
+  const tab = section.startsWith("scenario:") ? "system"
+    : (section ? "user" : (tabs[0]?.[0] || "facts"));
+  state.modal = { kind: "prompt", payload: advice, tab, focus: focus || null };
   renderModal();
+}
+
+/* ── 行级 prompt_refs：按 section/line 跳行 + 行内高亮 ──
+   refs 为空（老记录、或那次调用没捕获到提示词）时退回整段 <pre>，不报错。 */
+
+function promptRefsFor(advice, tab) {
+  const refs = (advice && advice.prompt_refs) || [];
+  const wantSystem = tab === "system";
+  return refs.filter((ref) => String(ref.section || "").startsWith("scenario:") === wantSystem);
+}
+
+function firstPromptFocus(advice) {
+  const refs = (advice && advice.prompt_refs) || [];
+  if (!refs.length) return null;
+  const hit = refs.find((r) => !String(r.section || "").startsWith("scenario:")) || refs[0];
+  return { section: hit.section, line: hit.line, abs: hit.abs, trace: null };
+}
+
+function refValue(value) {
+  if (value === undefined || value === null) return "—";
+  if (typeof value === "object") return JSON.stringify(value);
+  return String(value);
+}
+
+/* `a.b[0].c` → 值；解析不到返回 undefined（不抛错）。 */
+function pathAt(root, path) {
+  let cur = root;
+  for (const part of String(path || "").split(".")) {
+    const m = part.match(/^([^\[]*)((?:\[\d+\])*)$/);
+    if (!m) return undefined;
+    if (m[1]) {
+      if (!cur || typeof cur !== "object") return undefined;
+      cur = cur[m[1]];
+    }
+    for (const index of m[2].match(/\d+/g) || []) {
+      if (!Array.isArray(cur)) return undefined;
+      cur = cur[Number(index)];
+    }
+  }
+  return cur;
+}
+
+/* deep 只指 trace；trace 缺失/--no-range-trace 时返回 undefined（只显示 facts）。 */
+function traceAt(trace, path, facts) {
+  if (!trace) return undefined;
+  const m = String(path || "").match(/^seats\[(\d+)\](.*)$/);
+  if (!m) return pathAt(trace, path);
+  let index = Number(m[1]);
+  const seats = trace.seats || [];
+  const opponents = (facts.hand_ranges || {}).opponents || [];
+  const want = opponents[index] && opponents[index].seat;
+  if (want && seats[index] && seats[index].seat !== want) {
+    const found = seats.findIndex((seat) => seat && seat.seat === want);
+    if (found < 0) return undefined;
+    index = found;
+  }
+  return pathAt({ seats }, `seats[${index}]${m[2]}`);
+}
+
+/* 行内高亮：把 refs[].text 的首次出现包成 <mark>（不重叠、不改文本）。 */
+function markSegments(line, texts) {
+  const out = [];
+  let rest = String(line || "");
+  const pending = (texts || []).filter(Boolean);
+  while (rest) {
+    let best = -1;
+    let bestText = "";
+    for (const text of pending) {
+      const at = rest.indexOf(text);
+      if (at >= 0 && (best < 0 || at < best)) { best = at; bestText = text; }
+    }
+    if (best < 0) { out.push(document.createTextNode(rest)); break; }
+    if (best > 0) out.push(document.createTextNode(rest.slice(0, best)));
+    out.push(h("mark", "prompt-mark", bestText));
+    pending.splice(pending.indexOf(bestText), 1);
+    rest = rest.slice(best + bestText.length);
+  }
+  if (!out.length) out.push(document.createTextNode(" "));
+  return out;
+}
+
+function promptFocusBar(ref, advice, focus) {
+  const facts = advice.facts || {};
+  const bits = [];
+  for (const item of ref.refs || []) {
+    if (item.ns !== "facts") continue;
+    bits.push(`${item.path} = ${refValue(pathAt(facts, item.path))}`);
+  }
+  if (!bits.length) return null;
+  const bar = h("div", "prompt-ref-bar");
+  bar.append(h("span", "prompt-ref-where", `${ref.section} · 第 ${ref.line} 行`));
+  bar.append(h("span", "prompt-ref-paths", bits.join("；")));
+  if (focus && focus.trace) {
+    const deep = (ref.refs || []).filter((r) => r.deep && r.deep.ns === "trace");
+    if (deep.length) {
+      const values = deep.map((r) => `${r.deep.path} = ${refValue(traceAt(focus.trace, r.deep.path, facts))}`);
+      bar.append(h("span", "prompt-ref-trace", "trace：" + values.join("；")));
+    }
+  }
+  return bar;
+}
+
+function renderPromptLines(body, text, refs, focus, advice) {
+  const lines = String(text || "").split("\n");
+  const byAbs = new Map();
+  for (const ref of refs) {
+    if (ref.abs) byAbs.set(Number(ref.abs), ref);
+  }
+  const wrap = h("div", "prompt-lines");
+  let target = null;
+  lines.forEach((line, index) => {
+    const ref = byAbs.get(index + 1);
+    const row = h("div", "prompt-line" + (ref ? " has-ref" : ""));
+    if (!ref) {
+      row.textContent = line === "" ? " " : line;
+      wrap.append(row);
+      return;
+    }
+    row.dataset.section = ref.section;
+    row.dataset.line = String(ref.line);
+    const texts = (ref.refs || []).map((item) => item.text).filter(Boolean);
+    row.append(...markSegments(line, texts));
+    const isFocus = focus && focus.section === ref.section
+      && Number(focus.line) === Number(ref.line);
+    if (isFocus) {
+      row.classList.add("prompt-line-focus");
+      target = row;
+    }
+    wrap.append(row);
+  });
+  body.append(wrap);
+  if (target) requestAnimationFrame(() => target.scrollIntoView({ block: "center" }));
 }
 
 function handAdvices(hand) {
@@ -916,6 +1051,19 @@ function renderPromptBody(body, a, tab) {
       body.append(h("div", "placeholder", "这次调用没有捕获到提示词。"));
       return;
     }
+    const refs = promptRefsFor(a, tab);
+    const focus = state.modal.focus;
+    if (refs.length) {
+      state.modal.copyText = text;
+      const hit = focus
+        ? refs.find((r) => r.section === focus.section && Number(r.line) === Number(focus.line))
+        : null;
+      const bar = hit ? promptFocusBar(hit, a, focus) : null;
+      if (bar) body.append(bar);
+      renderPromptLines(body, text, refs, focus, a);
+      return;
+    }
+    // 老记录/没有 refs：整段展示，行为与以前完全一致。
     body.append(preBlock(text));
     return;
   }
@@ -1232,7 +1380,7 @@ function bind() {
   document.querySelectorAll(".dock-tab").forEach((tab) => {
     tab.addEventListener("click", () => activateDock(tab.dataset.dock));
   });
-  $("#btn-prompt").addEventListener("click", () => openPrompt(state.advice));
+  $("#btn-prompt").addEventListener("click", () => openPrompt(state.advice, firstPromptFocus(state.advice)));
   $("#btn-copy-reason").addEventListener("click", () => {
     const a = state.advice;
     if (a) copyText(`${optionAction(a.option)}\n${a.reason || ""}`);
@@ -1249,7 +1397,10 @@ function bind() {
     if (event.key === "Escape") closeModal();
     if ((event.key === "p" || event.key === "P") && !event.metaKey && !event.ctrlKey
         && !["INPUT", "TEXTAREA"].includes(document.activeElement?.tagName)) {
-      if (state.advice) { event.preventDefault(); openPrompt(state.advice); }
+      if (state.advice) {
+        event.preventDefault();
+        openPrompt(state.advice, firstPromptFocus(state.advice));
+      }
     }
   });
   setInterval(updatePendingElapsed, 250);

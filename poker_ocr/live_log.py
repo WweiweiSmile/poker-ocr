@@ -47,7 +47,7 @@ _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 _DROP_BY_EVENT: dict[str, tuple[str, ...]] = {
     "frame": ("state", "hand"),
     "advice": ("prompt_system", "prompt_user", "raw_response",
-               "reason_full", "facts", "context"),
+               "reason_full", "facts", "context", "prompt_refs"),
     "hand": ("advices",),
 }
 
