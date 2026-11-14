@@ -23,6 +23,7 @@ from ..shared.labels import _PREFLOP_SHAPE_ZH
 
 if TYPE_CHECKING:                       # 只在类型检查时引入，避免循环 import
     from ...situation import Situation
+from ..refs import fact
 
 
 # 面对加注时还能继续的强牌：不管多人池多紧，这些牌都不该被范围结论劝退。
@@ -362,7 +363,10 @@ def render_preflop_zh(sit: Situation) -> list[str]:
     lines.append("翻前形态：" + ("、".join(shapes) if shapes else "未知"))
     lines.append("最后翻前加注者（PFR）：" + _pfr_label_zh(snap))
     if sit.range_verdict:
-        lines.append(f"翻前范围结论（程序建议）：{sit.range_verdict}")
+        # 结论是程序建议（derived），事实路径指向它的来源字段。
+        lines.append(fact(f"翻前范围结论（程序建议）：{sit.range_verdict}",
+                          "range_verdict", kind="derived",
+                          values=[sit.range_verdict]))
     lines.extend(_facing_raise_zh(sit))
     limpers = count_limpers(snap)
     if limpers:

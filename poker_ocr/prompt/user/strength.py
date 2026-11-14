@@ -18,6 +18,7 @@ from ...coach import (
 from ...ground_truth import card_text
 from ...hand_track import PREFLOP
 from ...pot_math import _can_act, call_amount, winnable_pot
+from ..refs import fact, section
 from ..shared.format import _fmt_num
 from ..shared.labels import _CATEGORY_EN_ZH, _RANK_ZH
 from .board import (
@@ -73,7 +74,7 @@ def render_hand_strength_zh(sit: Situation) -> list[str]:
         label = sit.hand_label
         if sit.hand_playing_class == "combo" and gt is not None:
             label = f"成牌+听花/听顺（{label}）｜{_draws_zh(gt)}"
-        lines.append(f"牌力：{label}")
+        lines.append(fact(f"牌力：{label}", "hand_label", values=[label]))
 
     if gt is not None:
         made = gt.made.name_cn
@@ -90,9 +91,11 @@ def render_hand_strength_zh(sit: Situation) -> list[str]:
                 made += "（未成牌）"
         elif sit.plays_board:
             made += "（打牌面）"
-        lines.append(f"当前牌型：{made}")
+        lines.append(fact(f"当前牌型：{made}", "ground_truth.made",
+                          values=[made]))
         best = " ".join(card_text(c) for c in gt.made.best_five)
-        lines.append(f"最好五张：{best}")
+        lines.append(fact(f"最好五张：{best}", "ground_truth.detail",
+                          values=[best]))
         if gt.hero_is_nuts:
             nuts = "是（没有任何对手持牌能打败你）"
             if gt.rank.tie_pct > 0:
@@ -103,7 +106,8 @@ def render_hand_strength_zh(sit: Situation) -> list[str]:
         else:
             nuts = ("否（指当前成牌；更大牌型存在，"
                     "但不代表对手一定持有）")
-        lines.append(f"坚果：{nuts}")
+        lines.append(fact(f"坚果：{nuts}", "ground_truth.nuts",
+                          values=[nuts]))
         if not gt.hero_is_nuts:
             stronger = []
             for beaten in gt.rank.beaten_by:
@@ -117,9 +121,12 @@ def render_hand_strength_zh(sit: Situation) -> list[str]:
                     name = _CATEGORY_EN_ZH.get(beaten.name, beaten.name)
                 stronger.append(name)
             if stronger:
-                lines.append("能打败你的牌型（理论上）："
-                             + "、".join(stronger))
-        lines.append(f"听牌：{_draws_zh(gt)}")
+                # 类别名来自硬编码词表，facts 里只有概率——只挂输入，不造值。
+                lines.append(fact("能打败你的牌型（理论上）："
+                                  + "、".join(stronger),
+                                  kind="derived"))
+        lines.append(fact(f"听牌：{_draws_zh(gt)}", "ground_truth.draws",
+                          values=[_draws_zh(gt)]))
         if sit.hand_playing_class == "combo":
             lines.append("牌况分类：成牌+听花/听顺；该分类不代表听牌强度或下注许可")
         if gt.draws.overcard_outs:
@@ -134,8 +141,10 @@ def render_hand_strength_zh(sit: Situation) -> list[str]:
             label = "反超成牌率" if overcard_only else "补牌成牌率"
             basis = ("按高张 outs 估，不是对范围的河牌胜率"
                      if overcard_only else "仅全下/无后续下注时可直接比门槛")
-            lines.append(f"{label}（四二法则，到河牌；{basis}）："
-                         f"{gt.draws.equity_pct:.0f}%")
+            # 四二法则是程序算式（outs×2/4），facts 里没有这个渲染值。
+            lines.append(fact(f"{label}（四二法则，到河牌；{basis}）："
+                              f"{gt.draws.equity_pct:.0f}%",
+                              kind="derived"))
 
     hr = sit.hand_ranges
     if hr is None and gt is not None:
@@ -146,7 +155,8 @@ def render_hand_strength_zh(sit: Situation) -> list[str]:
         else:
             behind += ("；这是当前五张被至少一家压过的概率，"
                        "不是输牌概率/权益")
-        lines.append(behind + "）")
+        lines.append(fact(behind + "）", "ground_truth.beat_at_least_pct",
+                          values=[f"{gt.rank.beat_at_least_pct:.1%}"]))
         if snap.to_call and snap.to_call > 0:
             lines.append("范围：不可用（只有随机牌下界，不能当对手范围；"
                          "按价格/线路/保守先验判断）")
@@ -185,7 +195,10 @@ def render_hand_strength_zh(sit: Situation) -> list[str]:
                 and total_players == actual_players):
             equity_note += (f"；公平份额 {fair_share:.1%}，"
                             f"权益是它的 {hr.equity / fair_share:.1f} 倍")
-        lines.append(f"对当前范围权益：{hr.equity:.0%}（{equity_note}）")
+        lines.append(fact(f"对当前范围权益：{hr.equity:.0%}（{equity_note}）",
+                          {"ns": "facts", "path": "hand_ranges.equity",
+                           "deep": {"ns": "trace", "path": "hero_equity.eq"}},
+                          values=[f"{hr.equity:.0%}"]))
         behind = f"当前成牌落后至少一家：{hr.behind_any:.1%}"
         extra = []
         if random_fill:
@@ -195,7 +208,11 @@ def render_hand_strength_zh(sit: Situation) -> list[str]:
         else:
             extra.append("当前五张被至少一家压过的概率，"
                          "不是输牌概率/权益")
-        lines.append(behind + "（" + "；".join(extra) + "）")
+        lines.append(fact(behind + "（" + "；".join(extra) + "）",
+                          {"ns": "facts", "path": "hand_ranges.behind_any",
+                           "deep": {"ns": "trace",
+                                    "path": "hero_equity.now.behind_any"}},
+                          values=[f"{hr.behind_any:.1%}"]))
         if actual_players == 2:
             pool_label = "单挑"
         elif actual_players == 3:
@@ -207,8 +224,17 @@ def render_hand_strength_zh(sit: Situation) -> list[str]:
         if random_fill:
             multiway += f" / 随机牌 {random_fill} 家"
         multiway += f" / 公平份额 {fair_share:.1%}"
-        lines.append(multiway)
-        lines.extend(render_ranges_zh(sit))
+        # 人数是 facts 的直接读数，公平份额是算式（derived）。
+        multiway_refs = [{"ns": "facts", "path": "opponents_in_hand",
+                          "text": f"实际 {actual_players} 人"}]
+        if random_fill:
+            multiway_refs.append({"ns": "facts",
+                                  "path": "hand_ranges.random_opponents",
+                                  "text": f"随机牌 {random_fill} 家"})
+        lines.append(fact(multiway, *multiway_refs, kind="derived"))
+        with section("ranges") as sec:
+            sec.extend(render_ranges_zh(sit))
+        lines.extend(sec.lines)
     elif gt is None and sit.equity_pct is not None and is_draw:
         lines.append("补牌成牌率（四二法则，到河牌；"
                      "仅全下/无后续下注时可直接比门槛）："
