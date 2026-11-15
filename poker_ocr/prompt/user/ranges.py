@@ -12,6 +12,8 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:                       # 只在类型检查时引入，避免循环 import
     from ...situation import Situation
 
+from ..refs import fact
+
 
 _RANGE_MODE_ZH = {
     "call": "跟注范围",
@@ -92,6 +94,17 @@ def _range_line_zh(events) -> str:
     return "→".join(tokens)
 
 
+def _edge_index(edges, edge) -> int:
+    """在 `hr.opponents` 里定位这条边（refs 的数组下标要跟 facts 对齐）。"""
+    for index, candidate in enumerate(edges):
+        if candidate is edge:
+            return index
+    try:
+        return list(edges).index(edge)
+    except ValueError:
+        return -1
+
+
 def _range_group_zh(name: str | None) -> str:
     key = (name or "").strip().lower()
     return _RANGE_GROUP_ZH.get(key, name or "未知")
@@ -143,7 +156,7 @@ def _trailing_checks(edge) -> int:
 
 
 def _range_cap_zh(edge, actual_opponents: int, behind_any: float,
-                  equity: float) -> str:
+                  equity: float, index: int = -1) -> str:
     """对手连续过牌后的「范围封顶」事实：强牌剩多少、单家/全场各是多少。
 
     这一段直接回答用户 2026-11-01 的漏：只看「权益 21%/32%」会把连续
@@ -167,7 +180,41 @@ def _range_cap_zh(edge, actual_opponents: int, behind_any: float,
         fair = 1.0 / (actual_opponents + 1)
         text += (f"；权益 {equity:.0%} 是公平份额 {fair:.1%} 的 "
                  f"{equity / fair:.1f} 倍")
-    return text
+    refs: list[dict] = []
+    if index >= 0:
+        refs.append({"ns": "facts",
+                     "path": f"hand_ranges.opponents[{index}]"
+                             ".composition.two_pair_plus",
+                     "text": f"两对+ {comp.two_pair_plus:.0%}"})
+        refs.append({"ns": "facts",
+                     "path": f"hand_ranges.opponents[{index}]"
+                             ".composition.top_pair",
+                     "text": f"顶对 {comp.top_pair:.0%}"})
+        # 只有多头（>1 家）那支才渲染「至少一家领先你」；单家时这行说的是
+        # 「你领先 X%」，再挂 behind_any 的 text 就不在行内了（#37 真实
+        # 72 条 advice 复核抓到 2 处）。
+        if actual_opponents > 1:
+            refs.append({"ns": "facts", "path": "hand_ranges.behind_any",
+                         "text": f"至少一家领先你 {behind_any:.0%}"})
+    return fact(text, *refs, kind="fact")
+
+
+def _seat_ref(opponents, edge) -> dict | None:
+    """座位行 → 该座位在 facts 里的位置/座位 ref（文本必须落在行内）。"""
+    index = _edge_index(opponents, edge)
+    if index < 0:
+        return None
+    position = getattr(edge, "position", "") or ""
+    if position:
+        return {"ns": "facts",
+                "path": f"hand_ranges.opponents[{index}].position",
+                "text": position}
+    seat = getattr(edge, "seat_id", "") or ""
+    if not seat:
+        return None
+    return {"ns": "facts",
+            "path": f"hand_ranges.opponents[{index}].seat",
+            "text": seat}
 
 
 def _range_label(edge) -> str:
@@ -205,7 +252,22 @@ def render_ranges_zh(sit: Situation) -> list[str]:
     ranges = "｜".join(f"{_range_label(o)} {width(o)}" for o in shown)
     if more:
         ranges += f"｜另有 {more} 家只计入权益"
-    lines = [f"范围：{ranges}" if ranges else "范围：全部按随机牌计入"]
+    # 每条宽度都能回到 facts 的 opponents[i].width；trace 只是下钻。
+    width_refs = []
+    for edge in shown:
+        index = _edge_index(hr.opponents, edge)
+        if index < 0:
+            continue
+        width_refs.append({
+            "ns": "facts",
+            "path": f"hand_ranges.opponents[{index}].width",
+            "text": width(edge),
+            "deep": {"ns": "trace",
+                     "path": f"seats[{index}].final.effective_width_pct"},
+        })
+    head = f"范围：{ranges}" if ranges else "范围：全部按随机牌计入"
+    lines = [fact(head, *width_refs,
+                  kind="fact" if width_refs else "derived")]
 
     # 「本街还没动作」只在**整手都没有翻后动作**时才提；事件模型下范围是
     # 上一街收窄后的状态，不是翻前先验。
@@ -214,17 +276,46 @@ def render_ranges_zh(sit: Situation) -> list[str]:
              and not getattr(o, "events", ())]
     if stale:
         names = "、".join(o.position or o.seat_id for o in stale)
-        lines.append(f"- 本街还没有动作的座位：{names}"
-                     "（范围沿用翻前先验，不是已过牌；不代表整条街没人下注）")
+        # 文案写的是「哪个座位」，ref 就要落到那个字段上；指向 `.mode` 时
+        # 解析出来是 "unacted"，与行内文本对不上（审查 P1）。
+        stale_refs = [_seat_ref(hr.opponents, o) for o in stale]
+        stale_refs = [ref for ref in stale_refs if ref is not None]
+        lines.append(fact(f"- 本街还没有动作的座位：{names}"
+                          "（范围沿用翻前先验，不是已过牌；"
+                          "不代表整条街没人下注）",
+                          *stale_refs))
 
     for edge in shown:
         composition = _composition_zh(edge)
         detail = composition + "；" if composition else ""
         position = edge.position or edge.seat_id
         lead = max(0.0, 1.0 - edge.behind - edge.tie)
-        lines.append(f"- {position}：{detail}对手成牌领先我 "
-                     f"{edge.behind:.1%}（平局 {edge.tie:.1%}；"
-                     f"你领先 {lead:.1%}）")
+        index = _edge_index(hr.opponents, edge)
+        refs: list[dict] = []
+        if index >= 0:
+            refs.append({
+                "ns": "facts",
+                "path": f"hand_ranges.opponents[{index}].behind",
+                "text": f"{edge.behind:.1%}",
+                "deep": {"ns": "trace", "path": f"seats[{index}].equity.behind"},
+            })
+            refs.append({
+                "ns": "facts",
+                "path": f"hand_ranges.opponents[{index}].tie",
+                "text": f"{edge.tie:.1%}",
+                "deep": {"ns": "trace", "path": f"seats[{index}].equity.tie"},
+            })
+            comp = getattr(edge, "composition", None)
+            if comp is not None:
+                refs.append({
+                    "ns": "facts",
+                    "path": f"hand_ranges.opponents[{index}].composition.made",
+                    "text": f"成牌 {comp.made_hand:.0%}",
+                })
+        lines.append(fact(f"- {position}：{detail}对手成牌领先我 "
+                          f"{edge.behind:.1%}（平局 {edge.tie:.1%}；"
+                          f"你领先 {lead:.1%}）",
+                          *refs))
 
     # 连续过牌是**强范围退场**的证据：把「两对+/顶对还剩多少」写成一行，
     # 并同时给出「单家领先」和「N 家至少一家领先」，避免模型把单家领先
@@ -233,7 +324,8 @@ def render_ranges_zh(sit: Situation) -> list[str]:
               and getattr(e, "composition", None) is not None]
     if capped:
         rep = max(capped, key=_trailing_checks)
-        lines.append(_range_cap_zh(rep, actual, hr.behind_any, hr.equity))
+        lines.append(_range_cap_zh(rep, actual, hr.behind_any, hr.equity,
+                                   _edge_index(hr.opponents, rep)))
 
     # 按牌型列「你赢的 / 赢你的」，只在事件模型给出分区时才写：旧路径的
     # ahead_groups 只有类别名，混进去会让模型把「类别」当成「范围比例」。
@@ -252,10 +344,14 @@ def render_ranges_zh(sit: Situation) -> list[str]:
             names[zh] = max(names.get(zh, 0.0), group.share)
         ranked = sorted(names.items(), key=lambda kv: -kv[1])[:4]
         if ranked:
-            lines.append("- 赢你的：" + "、".join(name for name, _ in ranked))
+            # 这行把多家对手的 beaten_by 合并、再翻成中文牌型，行内文本不对应
+            # 任何一个 facts 标量：按契约只标 derived，不硬造 ref（审查 P1）。
+            lines.append(fact("- 赢你的：" + "、".join(
+                name for name, _ in ranked), kind="derived"))
     if beat and any(getattr(e, "composition", None) for e in shown):
         names = dict.fromkeys(_range_group_zh(g.name) for g in beat)
-        lines.append("- 你赢的：" + "、".join(list(names)[:4]))
+        lines.append(fact("- 你赢的：" + "、".join(list(names)[:4]),
+                          kind="derived"))
 
     # 只在「面对全下」时给警告：这是最容易被当前成牌强度带偏的节点。
     jammers = [e for e in shown
@@ -266,30 +362,58 @@ def render_ranges_zh(sit: Situation) -> list[str]:
             # 只对**全下的人**说「你只赢诈唬」：还没行动的人范围宽是正常的，
             # 拿他的空气占比来算会让警告时有时无。
             # 用「空气」分区而不是三组里的 bluff：三组按牌型归属，底对不算诈唬。
-            air = max(e.composition.air for e in jammers)
-            behind = max(e.behind for e in jammers)
+            air_edge = max(jammers, key=lambda e: e.composition.air)
+            air = air_edge.composition.air
+            behind_edge = max(jammers, key=lambda e: e.behind)
+            behind = behind_edge.behind
             if behind >= 0.80:
+                # 警告本身是阈值判定（derived），数字仍然挂回输入边。
+                behind_ref = {
+                    "ns": "facts",
+                    "path": "hand_ranges.opponents"
+                            f"[{_edge_index(hr.opponents, behind_edge)}].behind",
+                    "text": f"{behind:.0%} 压过你",
+                }
+                air_ref = {
+                    "ns": "facts",
+                    "path": "hand_ranges.opponents"
+                            f"[{_edge_index(hr.opponents, air_edge)}]"
+                            ".composition.air",
+                    "text": f"{air:.0%} 的诈唬",
+                }
                 if air < 0.02:
-                    lines.append(
+                    lines.append(fact(
                         f"- 范围警告（程序建议）：河牌面对全下，这个范围里 {behind:.0%} 压过你，"
                         "几乎没有诈唬；不要拿「我现在有牌」当跟注理由，"
-                        "按权益和价格判断")
+                        "按权益和价格判断", behind_ref, kind="derived"))
                 else:
-                    lines.append(
+                    lines.append(fact(
                         f"- 范围警告（程序建议）：河牌面对全下，{behind:.0%} 压过你，"
                         f"你只能赢那 {air:.0%} 的诈唬；不要拿「我现在有牌」"
-                        "当跟注理由，按权益和价格判断")
+                        "当跟注理由，按权益和价格判断",
+                        behind_ref, air_ref, kind="derived"))
         else:
-            semi = max(e.composition.draw for e in jammers)
+            semi_edge = max(jammers, key=lambda e: e.composition.draw)
+            semi = semi_edge.composition.draw
             if semi >= 0.10:
-                lines.append(
+                lines.append(fact(
                     f"- 范围警告（程序建议）：全下范围里听牌约 {semi:.0%}，"
-                    "权益要按剩余牌发完算，不能只看「他现在还没成牌」")
+                    "权益要按剩余牌发完算，不能只看「他现在还没成牌」",
+                    {"ns": "facts",
+                     "path": "hand_ranges.opponents"
+                             f"[{_edge_index(hr.opponents, semi_edge)}]"
+                             ".composition.draw",
+                     "text": f"听牌约 {semi:.0%}"},
+                    kind="derived"))
 
     if random_fill:
-        lines.append(f"- 范围建模 {modeled} 家；其余 {random_fill} 家"
-                     "按随机牌计入权益，不展开逐家范围")
+        lines.append(fact(f"- 范围建模 {modeled} 家；其余 {random_fill} 家"
+                          "按随机牌计入权益，不展开逐家范围",
+                          "hand_ranges.random_opponents",
+                          values=[f"其余 {random_fill} 家"]))
     elif modeled < actual:
-        lines.append(f"- 建模 {modeled} 家，实际 {actual} 家；"
-                     "未建模对手未计入范围权益")
+        # 两个数分别是「对手数组长度」和「在局人数」，都不是能直接被行文本
+        # 命中的标量：标 derived，不挂 ref（审查 P1）。
+        lines.append(fact(f"- 建模 {modeled} 家，实际 {actual} 家；"
+                          "未建模对手未计入范围权益", kind="derived"))
     return lines

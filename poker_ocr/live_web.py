@@ -41,6 +41,8 @@ _STATIC = {
     "/index.html": ("index.html", "text/html; charset=utf-8"),
     "/app.js": ("app.js", "text/javascript; charset=utf-8"),
     "/style.css": ("style.css", "text/css; charset=utf-8"),
+    "/range_tab.js": ("range_tab.js", "text/javascript; charset=utf-8"),
+    "/range_tab.css": ("range_tab.css", "text/css; charset=utf-8"),
 }
 
 
@@ -516,6 +518,9 @@ class _Handler(BaseHTTPRequestHandler):
                 "available": False, "enabled": False, "paused": False,
                 "reason": "未启用控制面"})
             return
+        if path == "/api/range":
+            self._range()
+            return
         if path == "/api/preview.jpg":
             self._preview()
             return
@@ -554,6 +559,44 @@ class _Handler(BaseHTTPRequestHandler):
         except Exception:  # noqa: BLE001
             pass
         self._json(state)
+
+    def _range(self) -> None:
+        """`GET /api/range?hand=&street=&actions=`：只读一条 trace 记录。
+
+        看板的「范围推导」tab 用它懒加载；一条记录已含全部 seats，所以切座位/
+        切步不再回后端。handler 不认识 trace 模块，只调注入的 `range_query`。
+        """
+        query = self._query()
+        raw_hand = (query.get("hand") or [""])[0]
+        try:
+            hand = int(raw_hand)
+        except (TypeError, ValueError):
+            self._json({"status": "missing", "detail": "hand 必须是整数"}, status=400)
+            return
+        if hand <= 0:
+            # hand_index 从 1 开始；0/负数不可能是有效记录。
+            self._json({"status": "missing", "detail": "hand 必须是正整数"},
+                       status=400)
+            return
+        street = (query.get("street") or [""])[0] or None
+        actions: int | None = None
+        raw_actions = (query.get("actions") or [""])[0]
+        if raw_actions not in ("", None):
+            try:
+                actions = int(raw_actions)
+            except (TypeError, ValueError):
+                actions = None  # 非法值按「没给」处理，不整页报错
+        range_query = getattr(self.server, "range_query", None)
+        if not callable(range_query):
+            self._json({"status": "off"})
+            return
+        try:
+            payload = range_query(hand, street=street, actions=actions)
+        except Exception as exc:  # noqa: BLE001 — 只读接口不许拖垮 live
+            self._json({"status": "missing",
+                        "detail": f"{type(exc).__name__}: {exc}"})
+            return
+        self._json(payload if isinstance(payload, dict) else {"status": "missing"})
 
     def _preview(self) -> None:
         preview = getattr(self.server, "preview", None)
@@ -670,6 +713,7 @@ class LiveWebServer:
                  control: LiveControl | None = None,
                  preview: PreviewStore | None = None,
                  meta: Callable[[], dict] | None = None,
+                 range_query: Callable[..., dict] | None = None,
                  token: str | None = None,
                  run_id: str | None = None) -> None:
         self.store = LiveWebStore(session=session, layout=layout)
@@ -685,6 +729,7 @@ class LiveWebServer:
         self._httpd.control = control  # type: ignore[attr-defined]
         self._httpd.preview = preview  # type: ignore[attr-defined]
         self._httpd.meta = meta  # type: ignore[attr-defined]
+        self._httpd.range_query = range_query  # type: ignore[attr-defined]
         self._httpd.token = token  # type: ignore[attr-defined]
         self._httpd.run_id = run_id  # type: ignore[attr-defined]
         self._thread = threading.Thread(target=self._httpd.serve_forever,

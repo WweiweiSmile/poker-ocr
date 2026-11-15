@@ -61,6 +61,36 @@ def key_of_combo(combo: Combo) -> str:
     return f"{RANK_CHARS[hi[0]]}{RANK_CHARS[lo[0]]}{kind}"
 
 
+def key_index(key: str) -> int:
+    """169 键 → 热图平铺下标（row*13+col，非法键返回 -1）。
+
+    row / col 都按 "A K Q J T 9 8 7 6 5 4 3 2" 排：对子在对角线，同花取
+    row<col（行=高牌），非同花取 row>col（列=高牌）。只给渲染/落盘用，
+    不参与任何权重计算。
+    """
+    if not key:
+        return -1
+    high = RANK_CHARS.find(key[0])
+    if high < 0:
+        return -1
+    if len(key) == 2:
+        if key[1] != key[0]:
+            return -1
+        row = 12 - high
+        return row * 13 + row
+    if len(key) != 3 or key[2] not in "so":
+        return -1
+    low = RANK_CHARS.find(key[1])
+    if low < 0 or low == high:
+        return -1
+    row, col = 12 - high, 12 - low
+    if key[2] == "s":
+        # 同花在右上三角：行 = 高牌、列 = 低牌。
+        return row * 13 + col
+    # 非同花在左下三角：行 = 低牌、列 = 高牌（热图惯例，列是高牌）。
+    return (12 - low) * 13 + (12 - high)
+
+
 @lru_cache(maxsize=256)
 def combos_of_key(key: str) -> tuple[Combo, ...]:
     """169 键 → 具体 combo。非法键返回空元组（宁可漏，不误判）。"""

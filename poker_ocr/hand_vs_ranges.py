@@ -28,10 +28,10 @@ import random
 import threading
 import zlib
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Iterable, Sequence
 
-from . import board_range, field_ranges, range_flow, ranges
+from . import board_range, field_ranges, range_flow, range_trace, ranges
 from .coach import (
     CATEGORY_NAMES_EN, FLUSH, FULL_HOUSE, ONE_PAIR, QUADS, STRAIGHT,
     STRAIGHT_FLUSH, TRIPS, TWO_PAIR, evaluate, parse_cards,
@@ -113,6 +113,12 @@ class HandVsRanges:
     warnings: tuple[str, ...] = ()
     context: str = ""
     source: str = ""
+    # MC 的可复现信息。seed 落进 range trace，复盘能重放同一组抽样；
+    # cache_hit=True 表示这次是缓存命中、没有重跑 MC（trace 不重复落盘）。
+    seed: int = 0
+    samples_requested: int = 0
+    n_failed: int = 0
+    cache_hit: bool = False
 
     def render(self) -> str:
         lines: list[str] = ["## Hand vs ranges" + (f" ({self.context})" if self.context else "")]
@@ -552,7 +558,10 @@ def compute(hero, board, opponents: Sequence[Any], *, samples: int | None = None
                      seed_key, context, source, warnings, random_opponents)
     with _CACHE_LOCK:
         if key in _CACHE:
-            return _CACHE[key]
+            hit = _CACHE[key]
+            # 命中缓存时不能重跑 MC（那正是缓存存在的理由），但要能被
+            # trace/看板识别成「这不是一次新计算」。
+            return None if hit is None else replace(hit, cache_hit=True)
 
     seed = _seed(hero_text, board_text, edges, samples, seed_key,
                  random_opponents)
@@ -585,6 +594,9 @@ def compute(hero, board, opponents: Sequence[Any], *, samples: int | None = None
         warnings=tuple(all_warnings),
         context=context,
         source=source,
+        seed=seed,
+        samples_requested=samples,
+        n_failed=failed,
     )
     with _CACHE_LOCK:
         if len(_CACHE) >= _CACHE_MAX:
@@ -632,8 +644,104 @@ def lookup(sit: Any) -> HandVsRanges | None:
     """advice 的接线入口：快照 → 每对手范围 → 强度。任何异常都 fail open。"""
     try:
         return _lookup(sit)
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        # 契约 §2 的 reason:"error"：只记类型名，不落 traceback。
+        _emit_skipped(getattr(sit, "snap", sit), "error",
+                      warnings=(type(exc).__name__,))
         return None
+
+
+def _emit_skipped(snap: Any, reason: str, warnings: Iterable[str] = ()) -> None:
+    """前置条件挡下的决策点写一条 status:"skipped"（翻前除外）。"""
+    if not range_trace.enabled() or snap is None:
+        return
+    try:
+        range_trace.emit(range_trace.build_skipped(snap, reason,
+                                                   warnings=warnings))
+    except Exception:  # noqa: BLE001 —— 落盘永远 fail open
+        pass
+
+
+def _seat_equity(edge: Any, built: ranges.Range | None) -> dict | None:
+    """契约 §3.3 的 seats[].equity：精确比牌（method:"exact"）。"""
+    if edge is None:
+        return None
+    removed = 0
+    if built is not None:
+        removed = max(built.combo_count - edge.combos_after_removal, 0)
+    return {
+        "method": "exact",
+        "removed": removed,
+        "behind": round(edge.behind, 6),
+        "tie": round(edge.tie, 6),
+        "beaten_by": [{
+            "name": group.name,
+            "share": round(group.share, 6),
+            "combos": group.combos,
+            "examples": list(group.examples),
+        } for group in edge.beaten_by],
+        "ahead_groups": [{
+            "name": group.name,
+            "share": round(group.share, 6),
+            "combos": group.combos,
+        } for group in edge.ahead_groups],
+    }
+
+
+def _seat_trace(spec: Any, prior: ranges.Range, built: ranges.Range,
+                bucket: str, trail: dict | None,
+                archetype: str) -> dict:
+    """一家对手的 trace 块。trail 为 None ⇒ 走的是 board_range 旧口径。"""
+    if trail:
+        return {
+            "seat": spec.seat_id,
+            "pos": spec.position,
+            "archetype": archetype,
+            "path": "event_model",
+            "mode": spec.mode,
+            "bucket": bucket,
+            "prior": trail.get("prior") or range_flow.prior_payload(prior),
+            "steps": trail.get("steps") or [],
+            "final": trail.get("final"),
+            "detail_omitted": trail.get("detail_omitted") or [],
+            "equity": None,
+        }
+    return {
+        "seat": spec.seat_id,
+        "pos": spec.position,
+        "archetype": archetype,
+        "path": "board_range",
+        "mode": spec.mode,
+        "bucket": bucket,
+        "prior": range_flow.prior_payload(prior),
+        # 旧口径没有逐步留痕：一条街一次过滤，没有「第 k 个事件」可言。
+        "steps": [],
+        "final": range_flow.final_summary(built),
+        "detail_omitted": [],
+        "equity": None,
+    }
+
+
+def _hero_equity(result: HandVsRanges) -> dict:
+    """契约 §3.5 的容器。showdown/vs_random/draw 由 #5 的实现在后续票补。"""
+    eq = float(result.equity)
+    n = max(int(result.samples), 1)
+    sigma = math.sqrt(max(eq * (1.0 - eq), 0.0) / n)
+    return {
+        "method": "mc",
+        "samples_requested": result.samples_requested or result.samples,
+        "n_valid": result.samples,
+        "n_failed": result.n_failed,
+        "seed": result.seed,
+        "cache_hit": result.cache_hit,
+        "eq": round(eq, 6),
+        "sigma": round(sigma, 6),
+        "ci95": [round(eq - 1.96 * sigma, 6), round(eq + 1.96 * sigma, 6)],
+        "now": {
+            "behind_any": round(result.behind_any, 6),
+            "tie_any": round(result.tie_any, 6),
+        },
+    }
 
 
 def _archetypes(sit: Any) -> dict[str, str]:
@@ -648,15 +756,23 @@ def _archetypes(sit: Any) -> dict[str, str]:
 
 
 def _lookup(sit: Any) -> HandVsRanges | None:
-    if not enabled():
-        return None
     snap = getattr(sit, "snap", sit)
-    if snap.street == PREFLOP or len(snap.board) < 3:
+    if not enabled():
+        _emit_skipped(snap, "disabled")
+        return None
+    if snap.street == PREFLOP:
+        # 翻前不做范围计算；按 grilling 1A **不写**记录（写了会让看板分不清
+        # 「算了但很宽」和「没算」）。
+        return None
+    if len(snap.board) < 3:
+        _emit_skipped(snap, "board_short")
         return None
     if not snap.hero_cards:
+        _emit_skipped(snap, "no_hero_cards")
         return None
     field = field_ranges.resolve(snap)
     if not field.specs:
+        _emit_skipped(snap, "no_specs", warnings=field.warnings)
         return None
 
     board = "".join(snap.board[:5])
@@ -666,10 +782,14 @@ def _lookup(sit: Any) -> HandVsRanges | None:
         dead = set()
     archetypes = _archetypes(sit)
     use_events = range_flow.enabled()
+    tracing = range_trace.enabled()
 
     entries = []
     warnings = list(field.warnings)
     used_specs = []
+    traced: list[tuple[dict, ranges.Range | None]] = []
+    widest: dict = {}
+    widest_events = -1
     for spec in field.specs:
         if not spec.prior_id:
             continue
@@ -677,18 +797,25 @@ def _lookup(sit: Any) -> HandVsRanges | None:
         if prior is None:
             warnings.append(f"seat {spec.seat_id}: range {spec.prior_id} not found")
             continue
+        archetype = archetypes.get(spec.seat_id, "unknown")
         built = None
+        trail = None
         bucket = ""
         if use_events and spec.events:
-            built = range_flow.build_range(
-                prior, spec.events,
-                archetype=archetypes.get(spec.seat_id, "unknown"),
-                dead=dead)
+            if tracing:
+                # trace 路径**不读不写** _BUILD_CACHE：缓存键不含 detail 上限，
+                # 复用会把上一次的记录形状带出来（票 6 规格 §2）。
+                built, trail = range_flow.build_range_traced(
+                    prior, spec.events, archetype=archetype, dead=dead)
+            else:
+                built = range_flow.build_range(
+                    prior, spec.events, archetype=archetype, dead=dead)
             bucket = range_flow.bucket_of(spec.events[-1])
         if built is None:
             # 事件链不可用（没有翻后动作 / 牌面缺张）时退回旧口径：先验 ×
             # 当前街动作。宁可窄一点，也不要拿翻前先验冒充收窄后的范围。
             built = board_range.build(board, spec.mode, prior)
+            trail = None
         if built is None:
             warnings.append(f"seat {spec.seat_id}: board range empty "
                             f"({spec.mode}, {spec.prior_id})")
@@ -696,6 +823,12 @@ def _lookup(sit: Any) -> HandVsRanges | None:
         entries.append((spec.seat_id, spec.position, built, spec.mode,
                         bucket, spec.events))
         used_specs.append(spec)
+        if tracing:
+            traced.append((_seat_trace(spec, prior, built, bucket, trail,
+                                       archetype), built))
+            n_events = int((trail or {}).get("params", {}).get("n_events") or 0)
+            if trail and n_events > widest_events:
+                widest, widest_events = trail.get("params") or {}, n_events
     active = [o for o in snap.opponents if not o.folded]
     # 建模上限是 4 家（field_ranges.resolve 的渲染/性能 cap）。其余在局对手
     # 不展开范围，但必须按随机牌纳入 MC，否则 8 人池的 equity 只对 4 家算，
@@ -704,6 +837,7 @@ def _lookup(sit: Any) -> HandVsRanges | None:
     if not entries:
         # 一家可确认范围都没有时，不生成范围权益块；保留 gt 的随机牌下界，
         # 避免把「全随机」冒充成「对手范围」。
+        _emit_skipped(snap, "no_specs", warnings=tuple(warnings))
         return None
 
     result = compute(
@@ -720,7 +854,34 @@ def _lookup(sit: Any) -> HandVsRanges | None:
         seed_key=snap.hand_id,
         random_opponents=random_opponents,
     )
+    if tracing and result is not None and not result.cache_hit:
+        _emit_ok(snap, result, traced, widest, warnings,
+                 len(active) - len(entries))
     return result
+
+
+def _emit_ok(snap: Any, result: HandVsRanges,
+             traced: Sequence[tuple[dict, ranges.Range | None]],
+             widest: dict, warnings: Iterable[str], omitted: int) -> None:
+    """缓存 miss 才落一条 status:"ok"；命中不重复写（重试会刷重复行）。"""
+    try:
+        seats = []
+        for payload, built in traced:
+            payload = dict(payload)
+            edge = next((o for o in result.opponents
+                         if o.seat_id == payload.get("seat")), None)
+            payload["equity"] = _seat_equity(edge, built)
+            seats.append(payload)
+        record = range_trace.build_record(
+            snap, seats,
+            params=range_trace.params_payload(widest),
+            equity=_hero_equity(result),
+            warnings=list(warnings) + list(result.warnings),
+            omitted=max(int(omitted), 0),
+        )
+        range_trace.emit(record)
+    except Exception:  # noqa: BLE001 —— 落盘永远 fail open
+        pass
 
 
 def reset_cache() -> None:

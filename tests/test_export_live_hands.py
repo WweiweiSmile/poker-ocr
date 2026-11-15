@@ -137,6 +137,37 @@ def test_partial_and_mid_hand_flags() -> None:
               f"两个开关应得到全部 6 手：{ids}")
 
 
+def test_action_stack_passes_through() -> None:
+    """逐行动后手筹码（#35）原样透传：筛选口径与字段顺序都不动。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        log, out = Path(tmp) / "live.states.jsonl", Path(tmp) / "hands.json"
+        record = hand("h1")
+        record["streets"][0]["actions"] = [
+            {"seat_id": "hero", "action": "raise", "amount": 3.0,
+             "all_in": False, "is_hero": True, "source": "badge",
+             "stack": 97.0},
+            # 没读到就是 null，不能变成 99、也不能丢键
+            {"seat_id": "upR", "action": "call", "amount": 3.0,
+             "all_in": False, "is_hero": False, "source": "badge",
+             "stack": None},
+        ]
+        log.write_text(json.dumps({"type": "session_start",
+                                   "started_at": "2026-01-01T00:00:00+08:00"})
+                       + "\n" + json.dumps(record, ensure_ascii=False) + "\n",
+                       encoding="utf-8")
+        proc = run(log, out)
+        check(proc.returncode == 0, f"应正常退出：{proc.stderr}")
+        exported = load(out)
+        check(len(exported) == 1, f"应导出 1 手：{exported}")
+        if not exported:
+            return
+        actions = exported[0]["streets"][0]["actions"]
+        check([a.get("stack") for a in actions] == [97.0, None],
+              f"stack 应原样透传（含 null）：{[a.get('stack') for a in actions]}")
+        check(list(actions[0]) == list(record["streets"][0]["actions"][0]),
+              f"字段顺序不该被改：{list(actions[0])}")
+
+
 def test_missing_input_fails() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         proc = run(Path(tmp) / "nope.jsonl", Path(tmp) / "hands.json")
@@ -150,6 +181,7 @@ def main() -> int:
         test_default_filters_and_enriches,
         test_require_hero_and_actions,
         test_partial_and_mid_hand_flags,
+        test_action_stack_passes_through,
         test_missing_input_fails,
     ]
     for t in tests:

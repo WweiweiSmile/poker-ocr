@@ -9,6 +9,8 @@ system 的保守线只对硬缺口生效，这段就是它的输入。分类靠�
 
 from __future__ import annotations
 
+from ..refs import fact
+
 
 def _gap_zh(text: str) -> str:
     """把数据缺口翻成一句可读中文；未知英文告警不再原样塞进 prompt。"""
@@ -97,8 +99,12 @@ def render_data_quality_zh(sit) -> list[str]:
         random_fill = getattr(sit.hand_ranges, "random_opponents", 0)
         if (actual > modeled + random_fill
                 and not any("只建模前" in gap for gap in gaps)):
-            gaps.append(f"只建模前 {modeled} 名对手；另有 "
-                        f"{actual - modeled - random_fill} 名未计入范围权益")
+            # 三个数都是推出来的（数组长度 / 在局人数 / 随机补足数），
+            # 挂 ref 会指到数组本身、与行内文本对不上：按契约标 derived。
+            gaps.append(fact(
+                f"只建模前 {modeled} 名对手；另有 "
+                f"{actual - modeled - random_fill} 名未计入范围权益",
+                kind="derived"))
     lines = ["## 数据质量（硬缺口 = 可选动作已被降级，或底牌/公共牌缺失；"
              "其余只降低可信度）"]
     summary = _summarize_gaps(

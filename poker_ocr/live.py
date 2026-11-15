@@ -61,6 +61,7 @@ from typing import Callable
 import cv2
 import numpy as np
 
+from . import range_trace
 from .advice import (AISettings, AdviceRunner, PROMPT_LANGUAGE, PROMPT_VERSION,
                      build_situation, call_amount)
 from .cards import (DEFAULT_CARD_SLOTS, DEFAULT_DOUBT_WINDOW, CardsResult,
@@ -3219,6 +3220,11 @@ def build_parser() -> argparse.ArgumentParser:
                          "logs/live.states.jsonl → logs/live.events.jsonl）")
     ap.add_argument("--no-events", action="store_true",
                     help="不写结构化事件日志（看板仍可用）")
+    ap.add_argument("--range-trace-out", type=Path, default=None,
+                    help="范围推导 trace 路径（默认 logs/live.range.jsonl，"
+                         "本地按天切成 .YYYYMMDD，留 14 天 / 1 GB）")
+    ap.add_argument("--no-range-trace", action="store_true",
+                    help="不写范围推导 trace（看板「范围推导」tab 显示未开启）")
     # ── 工作台控制面（默认全关：不加这些参数时行为和旧版完全一致） ──
     ap.add_argument("--preview", action="store_true",
                     help="开启 GET /api/preview.jpg（最新已处理帧，给工作台看）")
@@ -3316,6 +3322,8 @@ def _validate_args(ap: argparse.ArgumentParser, args) -> None:
         ap.error("--control-token 至少 8 个字符（建议用随机串）")
     if args.no_events and args.events_out is not None:
         ap.error("--events-out 与 --no-events 不能同时使用")
+    if args.no_range_trace and args.range_trace_out is not None:
+        ap.error("--range-trace-out 与 --no-range-trace 不能同时使用")
     if args.no_log_file and args.log_file is not None:
         ap.error("--log-file 与 --no-log-file 不能同时使用")
     if args.test and args.hand_outbox is not None:
@@ -3418,9 +3426,19 @@ def _build_runtime(ap: argparse.ArgumentParser, args, env_load) -> _Runtime:
             _log(f"[警告] 事件日志打不开（只推看板）：{exc}")
             events_path = None
 
+    # 范围推导 trace：默认开；这里只装配 writer，写盘失败在 writer 里 fail open。
+    range_trace.configure(enabled=not args.no_range_trace,
+                          path=args.range_trace_out)
+    range_trace.set_session(session_id)
+
     _log(f"[启动] 会话 {session_id}")
     if console_log is not None:
         _log(f"[启动] 控制台日志 {console_log.path}")
+    if range_trace.enabled():
+        _log(f"[启动] 范围推导 trace → {range_trace.writer().path}"
+             "（按天切分，留 14 天 / 1 GB）")
+    else:
+        _log("[启动] 范围推导 trace 已关闭（看板显示未开启）")
     if event_log is not None:
         _log(f"[启动] 事件日志 {event_log.path}")
     if args.test:
@@ -3469,6 +3487,8 @@ def _build_runtime(ap: argparse.ArgumentParser, args, env_load) -> _Runtime:
         "source_kind": _source_kind(args.url),
         "out": str(args.out),
         "events_out": str(events_path) if events_path else None,
+        "range_trace": (str(args.range_trace_out or range_trace.DEFAULT_PATH)
+                        if not args.no_range_trace else None),
         "log_file": str(console_log.path) if console_log is not None else None,
         "prompt_version": PROMPT_VERSION if args.ai_advice else None,
         "prompt_lang": PROMPT_LANGUAGE if args.ai_advice else None,
@@ -3527,6 +3547,8 @@ def _build_runtime(ap: argparse.ArgumentParser, args, env_load) -> _Runtime:
             "stats": stats,
             "layout": build_layout(profile),
             "prompt_version": PROMPT_VERSION if args.ai_advice else None,
+            # 看板据此决定「范围推导」tab 是画图还是「未开启」。
+            "range_trace": range_trace.status(),
             "ts": _iso_now(),
         }
 
@@ -3539,6 +3561,7 @@ def _build_runtime(ap: argparse.ArgumentParser, args, env_load) -> _Runtime:
                                 control=control,
                                 preview=preview,
                                 meta=live_meta,
+                                range_query=range_trace.lookup,
                                 token=args.control_token,
                                 run_id=args.run_id)
             web.start()

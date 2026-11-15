@@ -264,6 +264,11 @@ class ActionRecord:
     source: str = ""
     # 顺序无法确定（同帧同额、街末补全等）。#27 开始置真。
     order_unknown: bool = False
+    # 行动时**观测到的**该座位后手（BB，与 amount 同单位；#35）。落库键是
+    # `stack`。只存事实：读不到、推断补记（bet_delta/ledger/avatar_fold）、
+    # 盲注补记一律 None —— 绝不补 99/0，也不拿起始筹码反推。离线重放算
+    # 「行动前有效筹码」用它；旧归档没有这个键，读回同样按 None（无筹码）。
+    stack_after: float | None = None
 
     def __post_init__(self) -> None:
         source = self.source or ("ledger" if self.inferred else "badge")
@@ -1322,6 +1327,21 @@ class LiveHandTracker:
         # 否则 SB 补到 1.0 的真实 call 会被当成强制投入吞掉。
         return blind
 
+    @staticmethod
+    def _observed_stack(p: PlayerState) -> float | None:
+        """这一帧这座位**读到**的后手（BB），读不到就是 None。
+
+        只搬运观测值，不做任何推算（#35）：`stack=None` 是没读到；裸 0 是
+        筹码图标被读成 0 的已知误读（见 `_opening_stack`），同样按没读到；
+        但 `all_in` 时 0 是真事实（筹码全推进去了），照存。
+        """
+        stack = p.stack
+        if stack is None:
+            return None
+        if stack <= 0 and not p.all_in:
+            return None
+        return float(stack)
+
     def _record_actions(self, state: FrameState, hand: _LiveHand) -> None:
         """把这一帧里每座的徽章翻成行动记录，并去掉重复帧。
 
@@ -1385,7 +1405,8 @@ class LiveHandTracker:
                     source="badge",
                     street=hand.street, seat_id=p.seat_id, name=p.name,
                     position=p.position, action=p.action, amount=None,
-                    all_in=p.all_in, is_hero=p.seat_id == hero_seat))
+                    all_in=p.all_in, is_hero=p.seat_id == hero_seat,
+                    stack_after=self._observed_stack(p)))
                 new_indices.append(len(hand.actions) - 1)
                 hand.last_index[key] = len(hand.actions) - 1
                 continue
@@ -1462,6 +1483,15 @@ class LiveHandTracker:
                     for a in hand.actions[last + 1:])
                 if not raised_since:
                     # 只是下注 pill 后更新了（徽章先出现、金额后到）
+                    # 只有「本来就是观测到的徽章」这条才配后手读数：反推出来的
+                    # bet_delta 记录再补一个帧读数，就变成「推断的行动 + 观测的
+                    # 筹码」混血，读端会当成真观测（#35 / 审查 P1）。
+                    if prev.source == "badge":
+                        observed = self._observed_stack(p)
+                        stack_after = (observed if observed is not None
+                                       else prev.stack_after)
+                    else:
+                        stack_after = None
                     hand.actions[last] = ActionRecord.make(
                         source=prev.source,
                         order_unknown=prev.order_unknown,
@@ -1470,7 +1500,8 @@ class LiveHandTracker:
                         name=prev.name, position=prev.position,
                         action=prev.action, amount=p.bet,
                         all_in=prev.all_in or p.all_in,
-                        is_hero=prev.is_hero)
+                        is_hero=prev.is_hero,
+                        stack_after=stack_after)
                     hand.baseline[key] = bet
                     hand.baseline_unknown.discard(key)
                     continue
@@ -1510,6 +1541,10 @@ class LiveHandTracker:
                 amount=amount,
                 all_in=p.all_in,
                 is_hero=p.seat_id == hero_seat,
+                # 只存观测事实：动作是从下注额反推出来的（bet_delta）时，
+                # 这条记录本身就不是观测到的行动，后手一律 null（#35）。
+                stack_after=(self._observed_stack(p)
+                             if source == "badge" else None),
             )
             hand.actions.append(record)
             new_indices.append(len(hand.actions) - 1)
@@ -2720,6 +2755,9 @@ class LiveHandTracker:
                   for row in hand.table_roster]
         out = {
             "hand_id": hand.hand_id,
+            # 本次 live 会话内的序号：range trace 的 hand 字段就是它，
+            # 看板据此把「范围推导」tab 的记录 join 到这手牌上（v1.2 新增）。
+            "hand_index": hand.hand_index,
             **({"table_signature": hand.table_signature}
                if hand.table_signature else {}),
             **({"table_roster": roster} if roster else {}),
@@ -2742,6 +2780,10 @@ class LiveHandTracker:
                          # 证据来源与顺序确定性（#22）。旧消费者忽略即可。
                          "source": a.source,
                          "order_unknown": a.order_unknown,
+                         # 行动时观测到的该座位后手（BB；#35）。没读到/推断
+                         # 补记就是 null —— 键始终写，读端才分得清「旧归档没
+                         # 这个字段」和「这一动确实没筹码」。
+                         "stack": a.stack_after,
                          # 只在补出来时写这个键：正常手牌的落库内容保持原样
                          **({"inferred": True} if a.inferred else {}),
                          # 补 fold 的证据快照；旧记录没有这个键，读回不报错

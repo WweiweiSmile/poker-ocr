@@ -9,6 +9,7 @@ from __future__ import annotations
 import itertools
 import os
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -168,7 +169,11 @@ def test_deterministic_and_cached() -> None:
     a = hand_vs_ranges.compute("AhQh", board, [rng], samples=3000)
     b = hand_vs_ranges.compute("AhQh", board, [rng], samples=3000)
     assert a and b
-    check(a == b, "同 key 第二次应命中缓存且完全一致")
+    # 命中缓存时只翻 cache_hit 标记、不重跑 MC，所以比较要剔掉这一个字段。
+    check(a.cache_hit is False, "首次不应标成缓存命中")
+    check(b.cache_hit is True, "同 key 第二次应标成缓存命中")
+    check(replace(a, cache_hit=False) == replace(b, cache_hit=False),
+          "同 key 第二次应命中缓存且除 cache_hit 外完全一致")
     hand_vs_ranges.reset_cache()
     c = hand_vs_ranges.compute("AhQh", board, [rng], samples=3000)
     assert c

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from ...hand_track import PREFLOP, RIVER
 from ...pot_math import _can_act, _hero_total_stack
+from ..refs import fact, section
 from ..shared.format import _fmt_num
 
 # 短码线：Hero 本手总筹码（后手 + 本街已下注）≤ 这个数时给口径。
@@ -87,12 +88,18 @@ def short_stack_section(sit) -> str | None:
         return None
     if snap.hero_stack is None or snap.hero_stack <= 0:
         return None
-    lines = [f"## 场景：短码（本手总筹码约 {_fmt_num(total)}BB）", _SHORT_PREFLOP]
-    if snap.street != PREFLOP:
-        lines.append(_SHORT_POSTFLOP)
-        lines.append(_by_class(sit, made=_SHORT_MADE, draw=_SHORT_DRAW,
-                               air=_SHORT_AIR))
-    return "\n".join(lines)
+    # system 里的两处事实例外之一：本手总筹码（后手 + 本街已下注）。
+    with section("scenario:short_stack") as sec:
+        sec.extend([
+            fact(f"## 场景：短码（本手总筹码约 {_fmt_num(total)}BB）",
+                 "hero_total_stack", values=[f"{_fmt_num(total)}BB"]),
+            _SHORT_PREFLOP,
+        ])
+        if snap.street != PREFLOP:
+            sec.lines.append(_SHORT_POSTFLOP)
+            sec.lines.append(_by_class(sit, made=_SHORT_MADE, draw=_SHORT_DRAW,
+                                       air=_SHORT_AIR))
+    return sec.text
 
 
 def multiway_section(sit) -> str | None:
@@ -107,7 +114,14 @@ def multiway_section(sit) -> str | None:
     players = opponents + 1
     title = "多人池" if players >= 4 else "3 人池"
     body = _by_class(sit, made=_MW_MADE, draw=_MW_DRAW, air=_MW_AIR)
-    return f"## 场景：{title}（本手 {players} 人）\n{body}"
+    # 例外之二：本手人数 = 对手数 + 1（facts 里只有对手数，所以是 derived）。
+    with section("scenario:multiway") as sec:
+        sec.extend([
+            fact(f"## 场景：{title}（本手 {players} 人）", "opponents_in_hand",
+                 kind="derived", values=[f"本手 {players} 人"]),
+            body,
+        ])
+    return sec.text
 
 
 def heads_up_section(sit) -> str | None:
