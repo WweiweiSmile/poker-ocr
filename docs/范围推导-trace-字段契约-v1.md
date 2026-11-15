@@ -282,6 +282,9 @@
   重算出来的数会和记录里的 `final` 对不上——那不是明细，是另一版推导。超 400 条只允许用
   `truncated: true` 显式截断，**不许静默少写**；整条记录还有 180 KB 体积闸与 6 ms 时间闸，
   触发时该步只留 `cell_n`、`detail: []`，步号写进记录级 `detail_omitted`。
+  阶梯砍完仍超 180 KB 时再剥到骨架（detail 全清、每步只留 3 条 top、`grid`/`cell_n` 置空）
+  照写，`warnings` 带 `trace_truncated`；只有骨架都装不下才丢。这一档不给新字段，
+  `/api/meta.range_trace` 报 `record_too_big`，`stats()` 里 `truncated` / `dropped` 计数。
 
 **条数与排序（grilling 4B）**：`top` 存 **lost 10 + gained 10**（按 |`dw`| 降序，各自取前 10），
 其余 combo 聚合成一条 `{"others": {"n": 220, "sum_dw": -0.014}}` 追加在数组末尾。

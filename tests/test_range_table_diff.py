@@ -435,6 +435,54 @@ def test_filters() -> None:
             check(False, "缺文件应抛 FileNotFoundError")
 
 
+def test_decision_key_matches_integer_actions() -> None:
+    """实时记录里 `decision_key.actions` 是整数序号，`--decision-key` 必须按序号匹配。
+
+    回归点（#39 review P1）：旧实现把整数当 token 元组，`flop:0` 永远匹配
+    不到、`flop:1` 反而命中该街所有决策点。
+    """
+    from tools.range_table_diff import _action_tokens, _actions_text
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "live.range.jsonl"
+        rows = []
+        for index, ts in ((0, "2026-11-15T01:00:00"),
+                          (1, "2026-11-15T01:00:01"),
+                          (2, "2026-11-15T01:00:02")):
+            rows.append(json.dumps({
+                "v": "live.range.v1.2", "status": "ok", "ts": ts,
+                "hand": "39", "street": "flop",
+                "decision_key": {"hand": "39", "street": "flop",
+                                 "actions": index},
+                "params": {"tables": tables()}, "seats": [],
+            }))
+        path.write_text("\n".join(rows) + "\n", encoding="utf-8")
+
+        loaded = load_records(path)
+        check(loaded["selected"] == 3,
+              f"三条整数序号记录都该在，实得 {loaded['selected']}")
+        first = loaded["records"][0]
+        check(_action_tokens(first) == (),
+              f"整数序号不是 token 列表：{_action_tokens(first)!r}")
+        check(_actions_text(first) == "0",
+              f"人读形式应是序号文本：{_actions_text(first)!r}")
+
+        for index in range(3):
+            hit = load_records(path, decision_key=f"39:flop:{index}")
+            check(hit["selected"] == 1,
+                  f"--decision-key 39:flop:{index} 应恰好 1 条，"
+                  f"实得 {hit['selected']}")
+            if hit["selected"] == 1:
+                got = hit["records"][0]["decision_key"]["actions"]
+                check(got == index,
+                      f"选中的应是 actions={index} 那条，实得 {got}")
+        miss = load_records(path, decision_key="39:flop:9")
+        check(miss["selected"] == 0,
+              f"不存在的序号应 0 条，实得 {miss['selected']}")
+        whole = load_records(path, decision_key="39:flop")
+        check(whole["selected"] == 3, "只给 hand+street 应 3 条")
+
+
 # ─────────────────────────── 6. CLI 冒烟（真实记录） ───────────────────────────
 
 def _real_trace(path: Path) -> dict | None:
@@ -477,7 +525,8 @@ def test_rebuild_matches_recorded() -> None:
     """重建必须逐位复现记录里的 final / steps（同一套 build 函数、同一版表）。
 
     这条是整条重建链路的自检：先验 id → ranges.get、steps[].event → ActionEvent、
-    dead → 剔除、alpha/support_floor → 参数。任何一环错了这里都会露馅。
+    dead → 剔除。alpha/support_floor 刻意不取记录里的值，走当前 profile 默认，
+    所以夹具的 params 与默认值一致时结果仍须逐位相同。
     """
     from tools.range_table_diff import rebuild_record
 
@@ -513,6 +562,26 @@ def test_rebuild_matches_recorded() -> None:
           and seat["prior"]["version"] == record["seats"][0]["prior"]["version"]
           and seat["prior"]["source"] == record["seats"][0]["prior"]["source"],
           f"先验四件套应对上：{seat['prior']}")
+
+
+def test_rebuild_ignores_recorded_params() -> None:
+    """重建不读记录里的 alpha_in / support_floor：唯一变量是表 profile（规格 C）。"""
+    from tools.range_table_diff import rebuild_record
+
+    with tempfile.TemporaryDirectory() as tmp:
+        record = _real_trace(Path(tmp) / "live.range.jsonl")
+    if not record:
+        check(False, "夹具没造出来，跳过 params 断言")
+        return
+    base = rebuild_record(record)
+    changed = json.loads(json.dumps(record))
+    changed["params"]["alpha_in"] = 0.05
+    changed["params"]["support_floor"] = 0.9
+    other = rebuild_record(changed)
+    check(base == other,
+          "记录里的 alpha_in/support_floor 不该影响重建结果")
+    check(base["seats"][0]["alpha_in"] is not None,
+          f"重建仍应回报实际用的 alpha_in：{base['seats'][0]['alpha_in']}")
 
 
 def test_ten_cards_parse() -> None:
@@ -666,7 +735,9 @@ def main() -> int:
     test_payload_error_does_not_raise()
     test_compare_accepts_none_and_garbage()
     test_filters()
+    test_decision_key_matches_integer_actions()
     test_rebuild_matches_recorded()
+    test_rebuild_ignores_recorded_params()
     test_ten_cards_parse()
     test_ten_board_record_rebuild()
     test_relative_file_path()

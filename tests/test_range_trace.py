@@ -237,6 +237,61 @@ def test_downgrade_ladder() -> None:
 
 # ─────────────────────── 轮转 / 配额 / fail open ───────────────────────
 
+def test_oversize_record_is_squeezed() -> None:
+    """超硬顶：剥到骨架照写并标 trace_truncated，绝不静默丢（#39 review P1）。"""
+    seat = {"seat": "s1", "steps": [_fat_step(i) for i in range(6)],
+            "detail_omitted": []}
+    record = {"v": range_trace.VERSION, "status": "ok", "seats": [seat],
+              "warnings": []}
+    squeezed = range_trace._encode(range_trace._squeeze(record))
+    check(len(squeezed) < len(range_trace._encode(record)),
+          "骨架应比原记录小")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        trace = range_trace.TraceWriter(Path(tmp) / "live.range.jsonl")
+        saved = range_trace.HARD_LIMIT
+        range_trace.HARD_LIMIT = len(squeezed) + 10
+        try:
+            ok = trace.write(record)
+        finally:
+            range_trace.HARD_LIMIT = saved
+        check(ok is True, "超硬顶应截断后照写，不能直接 return False")
+        check(trace.status == range_trace.STATUS_TOO_BIG,
+              f"超硬顶 status 应是 record_too_big，实际 {trace.status}")
+        check(trace.truncated == 1 and trace.dropped == 0,
+              f"应记 1 条截断、0 条丢弃：{trace.stats()}")
+        check("hard cap" in trace.last_error,
+              f"last_error 应说明超硬顶截断：{trace.last_error!r}")
+        line = json.loads(
+            trace.current_path.read_text(encoding="utf-8").splitlines()[-1])
+        check("trace_truncated" in line["warnings"],
+              f"截断记录应带 trace_truncated：{line.get('warnings')}")
+        check(bool(line.get("detail_omitted")),
+              "截断记录应把步号写进 detail_omitted")
+        check(all(not step.get("grid") for step in line["seats"][0]["steps"]),
+              "骨架不该再带 grid")
+        # 这个状态不闸后续写入。
+        small = {"v": range_trace.VERSION, "status": "ok", "seats": [],
+                 "warnings": []}
+        check(trace.write(small) is True, "截断过一次之后仍应继续写")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        trace = range_trace.TraceWriter(Path(tmp) / "live.range.jsonl")
+        saved = range_trace.HARD_LIMIT
+        range_trace.HARD_LIMIT = 10
+        try:
+            ok = trace.write(record)
+        finally:
+            range_trace.HARD_LIMIT = saved
+        check(ok is False, "骨架都装不下才允许丢")
+        check(trace.dropped == 1 and trace.truncated == 0,
+              f"应记 1 条丢弃：{trace.stats()}")
+        check("dropped" in trace.last_error,
+              f"丢弃也要留痕：{trace.last_error!r}")
+        check(trace.status == range_trace.STATUS_TOO_BIG,
+              f"丢弃后 status 应是 record_too_big，实际 {trace.status}")
+
+
 def test_writer_rotate_and_prune() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "live.range.jsonl"
@@ -380,6 +435,7 @@ def main() -> int:
         test_trace_bypasses_build_cache,
         test_record_and_skipped_shape,
         test_downgrade_ladder,
+        test_oversize_record_is_squeezed,
         test_writer_rotate_and_prune,
         test_writer_day_limit_and_fail_open,
         test_module_switch,

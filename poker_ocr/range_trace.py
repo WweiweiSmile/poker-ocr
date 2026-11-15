@@ -53,6 +53,9 @@ STATUS_ON = "on"
 STATUS_OFF = "off"
 STATUS_BUDGET = "budget_exceeded"
 STATUS_WRITE_FAIL = "write_failed"
+# 单条记录超硬顶：先剥到骨架照写（记录带 trace_truncated），剥完还超才丢。
+# 这个状态不闸后续写入，只是让 /api/meta 能看出「最近有记录被截断/丢弃」。
+STATUS_TOO_BIG = "record_too_big"
 
 # 降级阶梯：(detail 上限, top 每侧上限, 是否保留每步 grid/cell_n)。
 LEVELS: tuple[tuple[int, int, bool], ...] = (
@@ -321,6 +324,44 @@ def downgrade(record: dict) -> dict:
     return payload
 
 
+def _squeeze(record: dict) -> dict:
+    """超硬顶的最后一道：剥到骨架（标签 + 宽度），保证记录仍能落盘。
+
+    看板没有 grid/detail 时退化成只看宽度曲线；`trace_truncated` 与
+    `detail_omitted` 让读者知道「不是没采到，是被截掉了」——规格要求超硬顶
+    不许静默少写，这一档就是不静默的那一档。
+    """
+    out = dict(record)
+    seats = []
+    omitted: set[int] = set()
+    for seat in record.get("seats") or ():
+        seat = dict(seat)
+        steps = []
+        for step in seat.get("steps") or ():
+            step = dict(step)
+            if not step.get("skipped"):
+                omitted.add(step.get("i"))
+            step["detail"] = []
+            if step.get("top"):
+                step["top"] = _cap_top(step["top"], 3)
+            step["grid"] = None
+            step["cell_n"] = None
+            step["truncated"] = True
+            steps.append(step)
+        seat["steps"] = steps
+        if omitted:
+            seat["detail_omitted"] = sorted(i for i in omitted if i is not None)
+        seats.append(seat)
+    out["seats"] = seats
+    if omitted:
+        out["detail_omitted"] = sorted(i for i in omitted if i is not None)
+    warnings = list(out.get("warnings") or ())
+    if "trace_truncated" not in warnings:
+        warnings.append("trace_truncated")
+    out["warnings"] = warnings
+    return out
+
+
 # ─────────────────────────── 写盘 ───────────────────────────
 
 
@@ -342,6 +383,8 @@ class TraceWriter:
         self._status = STATUS_ON
         self.last_error = ""
         self.written = 0
+        self.truncated = 0
+        self.dropped = 0
 
     # —— 查询 ——
     @property
@@ -359,6 +402,8 @@ class TraceWriter:
             "current": str(self.current_path),
             "status": self._status,
             "written": self.written,
+            "truncated": self.truncated,
+            "dropped": self.dropped,
             "day_bytes": self._day_bytes,
             "last_error": self.last_error,
         }
@@ -406,14 +451,29 @@ class TraceWriter:
     # —— 写 ——
     def write(self, record: dict) -> bool:
         with self._lock:
-            if self._status != STATUS_ON:
+            if self._status in (STATUS_OFF, STATUS_BUDGET, STATUS_WRITE_FAIL):
                 return False
             now = datetime.now()
             try:
                 self._rotate(now)
                 data = _encode(downgrade(record))
                 if len(data) > HARD_LIMIT:
-                    return False
+                    # 硬顶：先剥到骨架照写（带 trace_truncated），剥完仍装不下
+                    # 才丢。两种都要留痕，绝不静默少写。
+                    original = len(_encode(record))
+                    squeezed = _encode(_squeeze(record))
+                    self._status = STATUS_TOO_BIG
+                    if len(squeezed) > HARD_LIMIT:
+                        self.dropped += 1
+                        self.last_error = (
+                            f"record {original} bytes over hard cap {HARD_LIMIT}; "
+                            f"squeezed to {len(squeezed)} still too big, dropped")
+                        return False
+                    self.truncated += 1
+                    self.last_error = (
+                        f"record {original} bytes over hard cap {HARD_LIMIT}; "
+                        f"written squeezed to {len(squeezed)} bytes")
+                    data = squeezed
                 if self._day_bytes + len(data) > self.day_limit:
                     self._status = STATUS_BUDGET
                     self.last_error = (f"daily cap {self.day_limit} bytes reached "
@@ -607,7 +667,8 @@ def enabled() -> bool:
 
 
 def status() -> str:
-    """`/api/meta.range_trace` 的值：on｜off｜budget_exceeded｜write_failed。"""
+    """`/api/meta.range_trace` 的值：on｜off｜budget_exceeded｜write_failed｜
+    record_too_big（最近有记录超硬顶被截断或丢弃，写入继续）。"""
     if _writer is None:
         return STATUS_OFF
     return _writer.status
@@ -630,7 +691,8 @@ def reset() -> None:
 __all__ = [
     "DEFAULT_PATH", "DAY_LIMIT", "HARD_LIMIT", "KEEP_DAYS", "LEVELS",
     "SOFT_LIMIT", "STATUS_BUDGET", "STATUS_OFF", "STATUS_ON",
-    "STATUS_WRITE_FAIL", "TOTAL_LIMIT", "TraceWriter", "VERSION",
+    "STATUS_TOO_BIG", "STATUS_WRITE_FAIL", "TOTAL_LIMIT", "TraceWriter",
+    "VERSION",
     "advice_version", "build_record", "build_skipped", "configure",
     "downgrade", "emit", "enabled", "lookup", "params_payload", "records_for",
     "reset", "session", "set_session", "status", "tables_sha", "writer",

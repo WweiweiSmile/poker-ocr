@@ -150,14 +150,19 @@ def _step_shares(step: dict | None) -> dict[str, float]:
             for row in (step or {}).get("top") or () if row.get("c")}
 
 
-def _action_tokens(record: dict) -> tuple[str, ...]:
-    """`decision_key.actions` 归一成 token 元组。
+def _action_value(record: dict):
+    """`decision_key.actions` 原值：实时链路写整数决策序号，旧载荷写 token 列表。"""
+    return (record.get("decision_key") or {}).get("actions")
 
-    契约里它是动作 token 列表（如 `["bet:6"]`），按街内决策点递增；
-    也容忍写成单个字符串。
+
+def _action_tokens(record: dict) -> tuple[str, ...]:
+    """`decision_key.actions` 归一成 token 元组（旧载荷形态）。
+
+    实时链路现在写的是**整数决策序号**（如 `actions: 0`），那不是 token
+    列表，这里返回空元组，由 `_actions_text` / `_matches_actions` 单独处理。
     """
-    value = (record.get("decision_key") or {}).get("actions")
-    if value is None:
+    value = _action_value(record)
+    if value is None or isinstance(value, int):
         return ()
     if isinstance(value, str):
         return (value,)
@@ -168,7 +173,10 @@ def _action_tokens(record: dict) -> tuple[str, ...]:
 
 
 def _actions_text(record: dict) -> str:
-    """决策点的人读形式：token 用 `:` 连起来（如 `bet:6:raise:20`）。"""
+    """决策点的人读形式：整数序号 → `"0"`，token → `:` 连起来（如 `bet:6:raise:20`）。"""
+    value = _action_value(record)
+    if isinstance(value, int):
+        return str(value)
     return ":".join(_action_tokens(record))
 
 
@@ -188,7 +196,9 @@ def _sort_key(record: dict) -> tuple:
         hand = int(record.get("hand") or 0)
     except (TypeError, ValueError):
         hand = 0
-    return (order, hand, len(_action_tokens(record)), _actions_text(record))
+    value = _action_value(record)
+    count = value if isinstance(value, int) else len(_action_tokens(record))
+    return (order, hand, count, _actions_text(record))
 
 
 def _keep_newer(bucket: dict, key: tuple, record: dict) -> None:
@@ -211,8 +221,9 @@ def default_source(base: Path = DEFAULT_PATH) -> Path:
 def _parse_decision_key(spec: str | None) -> tuple:
     """`flop` / `flop:bet:6` / `104:flop:bet:6` / `flop:2` → (hand, street, actions)。
 
-    actions 是 `decision_key.actions` 里 token 用 `:` 连接后的文本
-    （例 `bet:6:raise:20`），也可以只给 token 个数（例 `2`）。
+    actions 段两种形态：实时记录里 `decision_key.actions` 是**整数决策序号**
+    （0 起），此时 `flop:2` 指该街第 3 个决策点；旧载荷/fixture 里是 token
+    列表，此时 `flop:2` 指 token 个数、`flop:bet:6` 指 token 文本。
     """
     if not spec:
         return None, None, None
@@ -239,10 +250,17 @@ def _parse_decision_key(spec: str | None) -> tuple:
 
 
 def _matches_actions(record: dict, actions: str) -> bool:
-    """`--decision-key` 的 actions 段：token 文本精确匹配，或只给个数。"""
-    tokens = _action_tokens(record)
+    """`--decision-key` 的 actions 段。
+
+    记录里是整数决策序号（实时链路）：数字段按序号相等匹配，token 文本段
+    无从匹配。记录里是 token 列表（旧载荷/fixture）：数字段按 token 个数，
+    文本段按 `:` 连接后精确比较。
+    """
+    value = _action_value(record)
+    if isinstance(value, int):
+        return actions.isdigit() and int(actions) == value
     if actions.isdigit():
-        return len(tokens) == int(actions)
+        return len(_action_tokens(record)) == int(actions)
     return _actions_text(record) == actions.replace("|", ":")
 
 
@@ -419,9 +437,14 @@ def _step_top(step: dict, limit: int = _TOP_STEP) -> list[dict]:
     return rows
 
 
-def _rebuild_seat(seat: dict, board: str, dead: tuple,
-                  alpha, support_floor) -> dict:
-    """一个座位：先验 → 事件链 → final，全部复用实时同一套 build 函数。"""
+def _rebuild_seat(seat: dict, board: str, dead: tuple) -> dict:
+    """一个座位：先验 → 事件链 → final，全部复用实时同一套 build 函数。
+
+    刻意不传记录里的 `params.alpha_in` / `params.support_floor`：规格 C 要求
+    两侧「唯一变量是表 profile」。实时链路（hand_vs_ranges）也不传这两个，
+    让 range_flow 用当前 profile 的默认值；回放记录里的旧值会把两版都锁死
+    在历史参数上，换表差异反而看不出来。
+    """
     from poker_ocr import board_range, range_flow, ranges
 
     prior_id = str(((seat.get("prior") or {}).get("id")) or "")
@@ -465,8 +488,7 @@ def _rebuild_seat(seat: dict, board: str, dead: tuple,
 
     events = _rebuild_events(steps, board)
     built, trail = range_flow.build_range_traced(
-        prior, events, alpha=alpha, archetype=out["archetype"],
-        dead=dead, support_floor=support_floor)
+        prior, events, archetype=out["archetype"], dead=dead)
     if built is None or not trail:
         out["error"] = (f"build_range_traced 返回空"
                         f"（{len(events)} 个事件，prior={prior_id}）")
@@ -496,13 +518,14 @@ def _rebuild_seat(seat: dict, board: str, dead: tuple,
 
 
 def rebuild_record(record: dict) -> dict:
-    """一条 trace 记录 → 规范化重算载荷（单 profile，子进程内调用）。"""
+    """一条 trace 记录 → 规范化重算载荷（单 profile，子进程内调用）。
+
+    记录里的 `params`（alpha_in / support_floor）不参与重建：两侧都走当前
+    profile 的默认值，唯一变量是表 profile（规格 C）。
+    """
     board = str(record.get("board") or "")
     dead = _cards(record.get("dead") or ())
-    params = record.get("params") or {}
-    alpha = params.get("alpha_in")
-    support_floor = params.get("support_floor")
-    seats = [_rebuild_seat(seat, board, dead, alpha, support_floor)
+    seats = [_rebuild_seat(seat, board, dead)
              for seat in record.get("seats") or ()]
     return {
         "hand": record.get("hand"),

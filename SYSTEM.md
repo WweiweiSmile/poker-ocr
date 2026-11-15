@@ -281,6 +281,11 @@ advice / hand / incident / session_end`。`frame` 每帧一条，带 `hand_id` /
 `final`（宽度/有效宽度/峰值/combo 数/剔除计数）、`dead`、`decision_key`（与
 states 的 advice 行 join）。**这是另一份契约**：改它不动 `states.jsonl`。
 
+单条记录过软上限（110 KB）先按阶梯砍 detail/top/grid；仍超硬顶（180 KB）就
+剥到骨架照写，记录带 `warnings: ["trace_truncated"]` + `detail_omitted`，
+`/api/meta.range_trace` 报 `record_too_big`，`stats()` 里 `truncated`/`dropped`
+计数——**绝不静默少写**，只有骨架都装不下才丢（`dropped` + `last_error`）。
+
 ### 5.1.3 `hands/*.hands.json` 的行动字段（#35）
 
 `actions[]` 每条带 `stack`：**行动时该座位观测到的后手**（BB，与 `amount` 同单位）。
