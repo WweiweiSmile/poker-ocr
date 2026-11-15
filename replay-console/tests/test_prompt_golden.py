@@ -3,7 +3,9 @@
 改了系统/用户提示词、事实块或选项生成规则却没 bump ADVICE_VERSION 时，
 这个测试会失败。更新提示词后请同时：
   1. bump replay/versioning.py 的 CURRENT_ADVICE_VERSION
-  2. 更新下面的 EXPECTED_PROMPT_HASH
+  2. 更新下面的 EXPECTED_PROMPT_HASH（改动只落在 3-bet 池的翻后局面时，
+     改的是 EXPECTED_THREE_BET_PROMPT_HASH——那个 fixture 才会渲染
+     `_THREE_BET`；单加注翻后的 fixture 对它看不见）
 """
 
 from __future__ import annotations
@@ -18,8 +20,9 @@ from poker_ocr.parse import Blinds
 
 from replay.versioning import CURRENT_ADVICE_VERSION
 
-EXPECTED_ADVICE_VERSION = "advice-2026-11-14.1"
+EXPECTED_ADVICE_VERSION = "advice-2026-11-15.1"
 EXPECTED_PROMPT_HASH = "5acf3bc972653d5186f806c64e1b313310ef3111e5979b48e68c002abd7365e7"
+EXPECTED_THREE_BET_PROMPT_HASH = "e93a419cde584363ed6267a9ff52676acc7465370bbeb7c5f32bcab35ca15734"
 
 # 快照没有可用画像，所以「对手画像」段只有标题 + 缺口说明；
 # witness 数据落地前这一段必须逐字节不变（spec §15.1）。
@@ -77,3 +80,49 @@ def test_profile_segment_is_byte_stable_without_witness():
     assert user[start:end] == EXPECTED_PROFILE_SEGMENT, (
         "画像段变了。witness 数据落地前这一段不应有任何变化（含图例行/缩进）。")
     assert "摊牌证据" not in user
+
+
+def _three_bet_snapshot() -> HandSnapshot:
+    """3-bet 池的翻后局面：只有这个 fixture 会渲染 3-bet+ 场景段。
+
+    单加注翻后那个 fixture 不渲染 `_THREE_BET`（场景段要求 pot_type 是
+    3-bet+ 池），所以 2026-11-15 的加宽（#40）改了提示词而
+    `EXPECTED_PROMPT_HASH` 不变——golden 对这种改动是瞎的。这里补一个
+    3-bet 池的翻后快照，把加宽后的口径钉成字节。
+    """
+    return HandSnapshot(
+        hand_id="golden-3bet", hand_index=0, street="flop",
+        board=("Kd", "7c", "2s"), hero_cards=("Kh", "Ad"), hero_position="UTG",
+        hero_stack=64.0, hero_bet=0.0, hero_invested=12.0, to_call=9.0,
+        second_bet=None, pot=45.0, pot_before_street=36.0, table_size=6,
+        blinds=Blinds(0.5, 1.0, None, "0.5/1.0"),
+        opponents=(
+            OpponentSnapshot("CO", "Villain", "CO", 88.0, 9.0, False),
+            OpponentSnapshot("BB", None, "BB", 100.0, 0.0, False),
+        ),
+        streets=(
+            StreetRecord("preflop", 1.5, (
+                ActionRecord("preflop", "hero", None, "UTG", "raise", 3.0, False, True),
+                ActionRecord("preflop", "CO", "Villain", "CO", "raise", 12.0, False, False),
+                ActionRecord("preflop", "hero", None, "UTG", "call", 12.0, False, True),
+            )),
+            StreetRecord("flop", 36.0, (
+                ActionRecord("flop", "CO", "Villain", "CO", "bet", 9.0, False, False),
+            )),
+        ),
+        preflop_shapes=("three-bet",), hero_is_pfr=False, cbet_spot=False,
+        decision_key=("golden-3bet", "flop", 0, 45.0, 9.0),
+        warnings=(), bomb_pot=False, players_dealt=6,
+    )
+
+
+def test_three_bet_prompt_golden_tracks_prior_width():
+    sit = build_situation(_three_bet_snapshot(), table_dynamics="")
+    system, user = build_messages(sit)
+    digest = hashlib.sha256((system + "\n---\n" + user).encode()).hexdigest()
+    assert "## 场景：3-bet+ 池" in system, "fixture 必须真的渲染 3-bet 场景段"
+    assert "22+" in system and "QQ+/AK" not in system, (
+        "3-bet 场景段要与加宽后的先验表一致（#40）；改了就要 bump 版本并更新下面的哈希")
+    assert digest == EXPECTED_THREE_BET_PROMPT_HASH, (
+        "3-bet 提示词内容变了。若这是有意的，请 bump CURRENT_ADVICE_VERSION 并更新 "
+        "EXPECTED_THREE_BET_PROMPT_HASH；否则说明当前版本语义已经漂移。")

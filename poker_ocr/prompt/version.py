@@ -83,5 +83,11 @@ from __future__ import annotations
 # 2026-11-14.1：事实优先级第 3 层拆 3a/3b/3c——逐座位摊牌证据最具体。
 # 依据 #10 地图的 #15 决议（docs/摊牌-witness-数据契约-v1.md §14）；
 # 本次只改 system，user 事实块在 witness 数据落地前逐字节不变。
-PROMPT_VERSION = "lean-zh-2026-11-14.1"
+# 2026-11-15.1：3-bet 先验按类别加宽（#40）——`THREE_BET` 补 66/77/QTs/QTo、
+# `THREE_BET_CALL` 补 22–99 与 AQo/KQo，宽度 5.58→7.69% / 3.77→9.20%。
+# 依据 docs/3-bet先验-摊牌反核-2026-11-15.md（并入 data/hand_outbox/sent/ 后
+# 315 个摊牌样本：加宽前两张表 prior_absent 15/22=68%（全局 28.6%），加宽后
+# 5/22=22.7%（全局 25.4%））。同批改掉
+# 提示词里写死的旧枚举：场景段「QQ+/AK、少量诈唬」与继续范围的「TT+、AQs+、AK」。
+PROMPT_VERSION = "lean-zh-2026-11-15.1"
 PROMPT_LANGUAGE = "zh"

@@ -74,18 +74,36 @@ class Sample:
     hand_key: str = ""      # 169 键（如 "T9s"），缺口统计用
 
 
-def _hands() -> list[dict]:
-    """本地手牌：hands/*.json + outbox。"""
+def _hands(include_sent: bool = False) -> list[dict]:
+    """本地手牌：hands/*.json + outbox。
+
+    `include_sent=True` 再并入 `data/hand_outbox/sent/`（已推到远端的历史手牌），
+    按 hand_id 去重——`hands/*.json` 里通常已经有同一批手，直接相加会把同一手
+    算两遍，样本数虚高、比例失真。`docs/3-bet先验-摊牌反核-2026-11-15.md` 用的是
+    合并口径（58 → 315 条），复跑时要带这个开关。
+    """
     import glob
     out: list[dict] = []
     for p in glob.glob(str(ROOT / "hands" / "*.json")):
         out += json.loads(Path(p).read_text(encoding="utf-8"))
-    for sub in ("pending", "discarded"):
+    subs = ("pending", "discarded", "sent") if include_sent else ("pending", "discarded")
+    for sub in subs:
         for p in glob.glob(str(ROOT / "data" / "hand_outbox" / sub / "*.json")):
             try:
                 out.append(json.loads(Path(p).read_text(encoding="utf-8")))
             except (OSError, ValueError):
                 pass
+    if include_sent:
+        seen: set[str] = set()
+        deduped: list[dict] = []
+        for hand in out:
+            hid = str(hand.get("hand_id") or "")
+            if hid:
+                if hid in seen:
+                    continue
+                seen.add(hid)
+            deduped.append(hand)
+        out = deduped
     return out
 
 
@@ -230,10 +248,10 @@ def _tier_shares(built, dead, board) -> dict[str, float]:
     return {t: v / total for t, v in acc.items() if v > 0}
 
 
-def collect(limit: int = 0) -> tuple[list[Sample], dict]:
+def collect(limit: int = 0, include_sent: bool = False) -> tuple[list[Sample], dict]:
     stats = Counter()
     samples: list[Sample] = []
-    for hand in _hands():
+    for hand in _hands(include_sent):
         snap = _snap(hand)
         if snap is None:
             stats["no_snapshot"] += 1
@@ -340,8 +358,11 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="摊牌反核范围")
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--html", default=None)
+    ap.add_argument("--include-sent", action="store_true",
+                    help="并入 data/hand_outbox/sent/（按 hand_id 去重），"
+                         "与摊牌反核笔记的口径一致")
     args = ap.parse_args()
-    samples, stats = collect(args.limit)
+    samples, stats = collect(args.limit, args.include_sent)
     report(samples, stats)
     if args.html and samples:
         _write_html(args.html, samples, stats)

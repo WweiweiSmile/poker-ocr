@@ -245,7 +245,7 @@ def uniform_range(id: str = "UNIFORM", *, note: str = "") -> Range:
 # 没有具名表时用的「描述性池子先验」。宽度按设计文档的目标区间校准：
 #   · 冷跟 IP ~20%，OOP ~14.5%；
 #   · 溜入 EP ~37%、MP ~41%、LP ~47%（现场松弱池）；
-#   · 3-bet ~5.6%，面对 3-bet 继续 ~3.8%。
+#   · 3-bet ~7.7%，面对 3-bet 继续 ~9.2%（2026-11-15 加宽，见 #40）。
 # 这些不是均衡频率，只是「他实际会拿什么」的粗模型。所有 token 都用
 # preflop_ranges.expand 展开；测试会检查没有写错的空 token。
 #
@@ -288,8 +288,13 @@ _RULE_TOKENS: dict[str, tuple[str, ...]] = {
         "95s+", "85s+", "75s+", "65s", "54s",
         "A2o+", "K7o+", "Q8o+", "J8o+", "T8o", "98o", "87o",
     ),
-    "THREE_BET": ("QQ+", "AKs", "AKo", "A5s+", "KQs", "KJs"),
-    "THREE_BET_CALL": ("TT+", "AQs+", "AKs", "AKo"),
+    # 2026-11-15 按类别加宽（#40，证据 docs/3-bet先验-摊牌反核-2026-11-15.md）：
+    # 全量摊牌里这两张表只占 22 个样本，却贡献 15 个 prior_absent（68% vs 全局
+    # 28.6%）；落在先验外的是小/中对子与非同花高张。加宽按类别做：3-bettor 补
+    # 中张对子 66/77 与 QTs/QTo 诈唬；跟 3-bet 补全部对子 + AQo/KQo（"22+" 已
+    # 覆盖原来的 TT+）。同花连张 76s/87s/97s/T7s 不进池——315 个摊牌样本零证据。
+    "THREE_BET": ("QQ+", "AKs", "AKo", "A5s+", "KQs", "KJs", "66", "77", "QTs", "QTo"),
+    "THREE_BET_CALL": ("22+", "AQs+", "AKs", "AKo", "AQo", "KQo"),
     # SB 开池在 RFI 表里没有单独一行；按提示词 ~30% 的粗范围兜底。
     "OPEN_SB": (
         "22+", "A2s+", "KTs+", "QTs+", "JTs", "T9s", "98s", "87s", "76s",

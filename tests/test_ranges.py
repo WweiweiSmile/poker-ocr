@@ -73,8 +73,9 @@ def test_rule_prior_widths_follow_design_targets() -> None:
         "LIMP_EP": (36.0, 39.0),
         "LIMP_MP": (39.5, 42.0),
         "LIMP_LP": (45.0, 49.0),
-        "3BET_vs_EP": (5.0, 7.0),
-        "3BET_CALL_vs_LP": (3.0, 5.0),
+        # 2026-11-15 3-bet 两张表按类别加宽（#40）：5.58→7.69 / 3.77→9.20。
+        "3BET_vs_EP": (6.5, 9.0),
+        "3BET_CALL_vs_LP": (8.0, 10.5),
     }
     for rid, (lo, hi) in cases.items():
         rng = ranges.get(rid)
@@ -105,6 +106,49 @@ def test_make_range_filters_zero_and_negative() -> None:
     check(ranges.make_range("empty", {}) is None, "空范围应返回 None")
 
 
+def test_three_bet_priors_widen_by_category() -> None:
+    """3-bet / 3-bet 跟注按类别加宽（#40）。
+
+    依据 docs/3-bet先验-摊牌反核-2026-11-15.md：两张表的 prior_absent 占
+    68%（全局 28.6%，全仓最差），落在先验外的是小/中对子与非同花高张。
+    同花连张（76s/87s/97s/T7s）在 315 个摊牌样本里零证据，维护者已否。
+    """
+    def keys(rng: ranges.Range) -> set[str]:
+        return {ranges.key_of_combo(combo) for combo in rng.combo_weights}
+
+    bet = ranges.get("3BET_vs_MP")
+    call = ranges.get("3BET_CALL_vs_LP")
+    assert bet is not None and call is not None
+    bet_keys, call_keys = keys(bet), keys(call)
+
+    # 宽度来自票面拍板（#40 表格），不是从当前表反推出来的。
+    check(abs(bet.width_pct - 7.69) < 0.05,
+          f"3-bet 宽度应 7.69%，实际 {bet.width_pct:.2f}%")
+    check(abs(call.width_pct - 9.20) < 0.05,
+          f"跟 3-bet 宽度应 9.20%，实际 {call.width_pct:.2f}%")
+
+    check({"66", "77", "QTs", "QTo"} <= bet_keys,
+          f"3-bet 缺加宽后的 key：{sorted({'66', '77', 'QTs', 'QTo'} - bet_keys)}")
+    pairs_22_99 = {f"{rank}{rank}" for rank in "23456789"}
+    check(pairs_22_99 <= call_keys,
+          f"跟 3-bet 缺 22–99 对子：{sorted(pairs_22_99 - call_keys)}")
+    check({"AQo", "KQo"} <= call_keys,
+          f"跟 3-bet 缺 AQo/KQo：{sorted({'AQo', 'KQo'} - call_keys)}")
+
+    for banned in ("76s", "87s", "97s", "T7s"):
+        check(banned not in bet_keys, f"3-bet 不该含 {banned}")
+        check(banned not in call_keys, f"跟 3-bet 不该含 {banned}")
+
+    # 位置桶共用同一张类表：同类先验在不同位置桶之间宽度必须一致。
+    for rid, expected in (("3BET_vs_EP", bet.width_pct), ("3BET_vs_LP", bet.width_pct),
+                          ("3BET_CALL_vs_EP", call.width_pct),
+                          ("3BET_CALL_vs_BB", call.width_pct)):
+        rng = ranges.get(rid)
+        assert rng is not None, rid
+        check(abs(rng.width_pct - expected) < 0.01,
+              f"{rid} 宽度 {rng.width_pct:.2f}% 应与同类先验 {expected:.2f}% 一致")
+
+
 def main() -> int:
     tests = [
         test_combo_key_roundtrip,
@@ -113,6 +157,7 @@ def main() -> int:
         test_rule_prior_widths_follow_design_targets,
         test_uniform_and_fail_open,
         test_make_range_filters_zero_and_negative,
+        test_three_bet_priors_widen_by_category,
     ]
     for t in tests:
         before = len(FAILS)

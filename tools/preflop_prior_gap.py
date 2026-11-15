@@ -57,9 +57,11 @@ def category(key: str) -> str:
 def main() -> int:
     ap = argparse.ArgumentParser(description="翻前先验缺口归因")
     ap.add_argument("--top", type=int, default=8)
+    ap.add_argument("--include-sent", action="store_true",
+                    help="并入 data/hand_outbox/sent/（按 hand_id 去重）")
     args = ap.parse_args()
 
-    samples, stats = collect()
+    samples, stats = collect(include_sent=args.include_sent)
     total = len(samples)
     misses = [s for s in samples if not s.in_range and s.miss == "prior_absent"]
     if not total:

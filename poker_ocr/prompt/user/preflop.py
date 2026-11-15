@@ -195,7 +195,7 @@ def _facing_raise_zh(sit: Situation) -> list[str]:
         label = f"面对 {facing_level}-bet 的继续范围（{range_desc}）"
     elif n_raises == 2:
         kind = "3-bet"
-        label = "面对 3-bet 的继续范围（TT+、AQs+、AK）"
+        label = "面对 3-bet 的继续范围（全对子 + AQs+ / AK / AQo / KQo）"
         rng = range_mod.get("3BET_CALL_VS_MP")
         in_range = key in ("AA", "KK") or _in_keys_range(key, rng)
         width = rng.width_pct if rng is not None else None

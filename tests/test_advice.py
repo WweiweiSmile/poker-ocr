@@ -3172,6 +3172,11 @@ def test_three_bet_pot_scenario_shrinks_ranges() -> None:
           f"3-bet 池应有独立场景：\n{system}")
     check("极度收缩" in system,
           f"3-bet 池应收缩对手范围：\n{system}")
+    # 2026-11-15 先验加宽（#40）：场景段不能再把对手读成只有 QQ+/AK。
+    check("QQ+/AK" not in system,
+          f"3-bet 池不能再写死 QQ+/AK（先验已补 22–99 对子与 QTs/QTo/AQo/KQo）：\n{system}")
+    check("66/77" in system and "22+" in system,
+          f"3-bet 池要写明两侧加宽后的类别（3-bet 的人 66/77、跟注的人 22+）：\n{system}")
 
 
 def test_conflict_detector_flags_bet_mismatch() -> None:
@@ -4376,6 +4381,15 @@ def test_preflop_facing_raise_facts_cover_dominated_calls() -> None:
           f"AKo 要给 3-bet 继续范围：\n{ak_text}")
     check("可以跟注，不 4-bet" in ak_text,
           f"AK 面对 3-bet 只跟不 4-bet：\n{ak_text}")
+    # 继续范围的文字必须跟着表走：加宽后 3BET_CALL 是 9.2%，旧文案的
+    # 「TT+、AQs+」枚举已经和表不符（表里还有 22–99 与 AQo/KQo）。
+    from poker_ocr import ranges as _ranges
+    _call = _ranges.get("3BET_CALL_vs_MP")
+    assert _call is not None
+    check(f"（{_call.width_pct:.0f}%）" in ak_text,
+          f"3-bet 继续范围宽度应与表一致（{_call.width_pct:.0f}%）：\n{ak_text}")
+    check("TT+、AQs+" not in ak_text,
+          f"不要再写死旧的 TT+、AQs+：\n{ak_text}")
     check("位置：Hero 无位置" in ak_text,
           f"UTG 被 LJ 3-bet 必须写无位置：\n{ak_text}")
     check("有位置" not in ak_text.split("## 翻前信息")[0],
