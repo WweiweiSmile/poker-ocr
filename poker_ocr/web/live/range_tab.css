@@ -197,6 +197,7 @@
 .rt-dseg.zero { background: var(--amber); opacity: 0.85; }
 .rt-dseg.floor { background: var(--blue); opacity: 0.85; }
 .rt-dlegend { margin-top: 3px; color: var(--dim); font-size: 10px; font-family: var(--mono); }
+.rt-dlegend-absent { color: var(--dim); opacity: 0.85; }
 
 /* ───────── 各家宽度概览 ───────── */
 
@@ -264,6 +265,14 @@
   overflow: hidden;
 }
 .rt-cell.zero { background: #131720; cursor: default; }
+/* 先验表里就没有的格子：比“删掉的”更空——透明底 + 更淡的描边，不参与任何删减口径。 */
+.rt-cell.absent { background: transparent; cursor: default; box-shadow: inset 0 0 0 1px rgba(232, 235, 242, 0.03); }
+.rt-hmlegend { display: flex; flex-wrap: wrap; gap: 14px; justify-content: center; margin: 10px auto 0; max-width: 560px; color: var(--dim); font-family: var(--mono); font-size: 10px; }
+.rt-hmk { display: flex; align-items: center; gap: 5px; }
+.rt-swatch { display: inline-block; width: 12px; height: 8px; border-radius: 2px; }
+.rt-swatch.alive { background: hsl(18, 73%, 58%); }
+.rt-swatch.zero { background: #131720; box-shadow: inset 0 0 0 1px rgba(232, 235, 242, 0.18); }
+.rt-swatch.absent { background: transparent; box-shadow: inset 0 0 0 1px rgba(232, 235, 242, 0.12); border: 1px dashed rgba(232, 235, 242, 0.28); }
 .rt-cell.on { box-shadow: inset 0 0 0 2px #fff; }
 .rt-cell-lab { pointer-events: none; }
 .rt-scale {

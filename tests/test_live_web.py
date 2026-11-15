@@ -157,6 +157,11 @@ def test_http_snapshot_static_and_sse() -> None:
         tab_css = urllib.request.urlopen(base + "/range_tab.css",
                                          timeout=3).read().decode()
         check(".rt-matrix" in tab_css, "范围推导样式应可加载")
+        cells_js = urllib.request.urlopen(base + "/range_cells.js",
+                                          timeout=3).read().decode()
+        check("RTCells" in cells_js and "先验未包含" in cells_js,
+              "热图三类格分类模块应可加载")
+        check("/range_cells.js" in page, "首页应在 range_tab.js 之前加载格分类模块")
 
         server.publish("frame", {"seq": 9, "kind": "record",
                                  "state": {"pot": 3}, "processed": 1})

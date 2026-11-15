@@ -42,6 +42,7 @@ _STATIC = {
     "/app.js": ("app.js", "text/javascript; charset=utf-8"),
     "/style.css": ("style.css", "text/css; charset=utf-8"),
     "/range_tab.js": ("range_tab.js", "text/javascript; charset=utf-8"),
+    "/range_cells.js": ("range_cells.js", "text/javascript; charset=utf-8"),
     "/range_tab.css": ("range_tab.css", "text/css; charset=utf-8"),
 }
 

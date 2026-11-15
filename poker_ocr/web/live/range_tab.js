@@ -695,7 +695,7 @@
     }
     var mass = Number(step.mass_after);
     if (isFinite(mass) && !step.skipped) bits.push("质量 " + num(mass, 3));
-    var extra = droppedBar(step.dropped);
+    var extra = droppedBar(step.dropped, absentCount());
     return stepCard({
       step: index + 1,
       lab: lab,
@@ -717,31 +717,37 @@
       lab: "留存量",
       right: "final",
       meta: bits.join(" · "),
-      extra: droppedBar(fin.dropped),
+      extra: droppedBar(fin.dropped, absentCount()),
       title: "留存量：所有事件之后、dead 与支撑集下限剪枝之后的范围（ρ " + num(fin.rho, 2) + "）",
     });
   }
 
-  function droppedBar(dropped) {
-    if (!dropped) return null;
-    var dead = Number(dropped.dead) || 0;
-    var zero = Number(dropped.zero) || 0;
-    var floor = Number(dropped.floor) || 0;
-    var total = dead + zero + floor;
-    if (total <= 0) return null;
+  function droppedBar(dropped, absent) {
     var wrap = el("div", "rt-dropwrap");
-    var bar = el("div", "rt-dbar");
-    [["dead", dead], ["zero", zero], ["floor", floor]].forEach(function (pair) {
-      if (!pair[1]) return;
-      var seg = el("div", "rt-dseg " + pair[0]);
-      seg.style.width = (pair[1] / total * 100) + "%";
-      seg.title = CUT_ZH[pair[0]] + " " + pair[1];
-      bar.append(seg);
-    });
-    wrap.append(bar);
-    var legend = el("div", "rt-dlegend", "本步删 " + total + " 个组合：dead " + dead + " · 归零 " + zero + " · 剪除 " + floor);
-    wrap.append(legend);
-    return wrap;
+    if (dropped) {
+      var dead = Number(dropped.dead) || 0;
+      var zero = Number(dropped.zero) || 0;
+      var floor = Number(dropped.floor) || 0;
+      var total = dead + zero + floor;
+      if (total > 0) {
+        var bar = el("div", "rt-dbar");
+        [["dead", dead], ["zero", zero], ["floor", floor]].forEach(function (pair) {
+          if (!pair[1]) return;
+          var seg = el("div", "rt-dseg " + pair[0]);
+          seg.style.width = (pair[1] / total * 100) + "%";
+          seg.title = CUT_ZH[pair[0]] + " " + pair[1];
+          bar.append(seg);
+        });
+        wrap.append(bar);
+        wrap.append(el("div", "rt-dlegend", "本步删 " + total + " 个组合：dead " + dead + " · 归零 " + zero + " · 剪除 " + floor));
+      }
+    }
+    var absentCells = (absent === null || absent === undefined) ? null : Number(absent);
+    if (absentCells !== null && absentCells > 0) {
+      var cut = Number(dropped && (Number(dropped.dead) + Number(dropped.zero) + Number(dropped.floor))) || 0;
+      wrap.append(el("div", "rt-dlegend rt-dlegend-absent", RTCells.absentNote(absentCells, cut)));
+    }
+    return wrap.childNodes.length ? wrap : null;
   }
 
   function overviewPanel(rec) {
@@ -848,6 +854,35 @@
 
   /* ───────── 热图 ───────── */
 
+  function priorGrid() {
+    var seat = seatRec();
+    return (seat && seat.prior && seat.prior.grid) || [];
+  }
+
+  function stepGrids() {
+    var seat = seatRec();
+    var steps = (seat && seat.steps) || [];
+    var grids = [];
+    for (var i = 0; i < steps.length; i++) grids.push((steps[i] && steps[i].grid) || null);
+    return grids;
+  }
+
+  function classifyView(view) {
+    return RTCells.classify({
+      kind: view && view.kind,
+      grid: (view && view.grid) || [],
+      priorGrid: priorGrid(),
+      stepGrids: stepGrids(),
+    });
+  }
+
+  // 先验外的格数是全集口径（169 − 先验覆盖的格），与走到第几步无关，所以整手只算一次。
+  function absentCount() {
+    var prior = priorGrid();
+    if (!prior.length) return null;
+    return RTCells.classify({ kind: "prior", grid: prior, priorGrid: prior, stepGrids: [] }).counts.absent;
+  }
+
   function heatmapPanel(rec) {
     var seat = seatRec();
     var view = currentView();
@@ -866,32 +901,39 @@
       var v = Number(view.grid[i]);
       if (isFinite(v) && v > max) max = v;
     }
+    var cls = classifyView(view);
     var matrix = el("div", "rt-matrix");
     for (var row = 0; row < 13; row++) {
       for (var col = 0; col < 13; col++) {
         var index = row * 13 + col;
         var value = Number(view.grid[index]) || 0;
         var key = keyOfIndex(index);
+        var kind = cls.kinds[index];
         var cell = el("div", "rt-cell");
-        if (value <= 0) {
-          cell.className = "rt-cell zero";
-          cell.title = key + " · 0%";
-        } else {
+        if (kind === "alive") {
           var t = max > 0 ? Math.sqrt(value / max) : 0;
           cell.style.background = "hsl(" + (18 + (1 - t) * 200) + ", " + (28 + t * 45) + "%, " + (12 + t * 46) + "%)";
           if (t > 0.12) cell.append(el("span", "rt-cell-lab", key));
-          cell.title = key + " · 份额 " + pct(value * 100, 2);
+          cell.title = RTCells.cellTitle(key, "alive", { share: value });
           cell.tabIndex = 0;
-          cell.addEventListener("click", function () {
-            S.cell = S.cell === key ? "" : key;
-            repaint();
-          });
+          // var 是函数作用域：不闭包住 key 的话，所有格子都会点到循环最后那个键。
+          (function (cellKey) {
+            cell.addEventListener("click", function () {
+              S.cell = S.cell === cellKey ? "" : cellKey;
+              repaint();
+            });
+          })(key);
+        } else {
+          // 零权重但先验含（被本步删）与先验从来不含，必须看起来不一样。
+          cell.className = kind === "absent" ? "rt-cell absent" : "rt-cell zero";
+          cell.title = RTCells.cellTitle(key, kind, { removedStep: cls.removedStep[index] });
         }
-        if (key === S.cell) cell.classList.add("on");
+        if (kind === "alive" && key === S.cell) cell.classList.add("on");
         matrix.append(cell);
       }
     }
     panel.append(matrix);
+    panel.append(hmLegend(cls.counts));
 
     var scale = el("div", "rt-scale");
     scale.append(el("span", null, "0"));
@@ -917,6 +959,20 @@
     return panel;
   }
 
+  // 三类零权重格在图例里各占一格：只报「有份额 / 已被删」的话，先验缺失会被读成收得太紧。
+  function hmLegend(counts) {
+    var box = el("div", "rt-hmlegend");
+    [["alive", "有份额 " + counts.alive],
+     ["zero", "已被删 " + counts.removed],
+     ["absent", "先验未包含 " + counts.absent]].forEach(function (pair) {
+      var item = el("span", "rt-hmk");
+      item.append(el("i", "rt-swatch " + pair[0]));
+      item.append(el("span", null, pair[1]));
+      box.append(item);
+    });
+    return box;
+  }
+
   function cellCount(view) {
     if (view.kind === "step" && view.step && view.step.cell_n) {
       var index = indexOfKey(S.cell);
@@ -931,7 +987,7 @@
       return "留存量只落 169 格聚合（契约 v1.2）：份额在剪枝后的支撑集内归一化。逐 combo 明细看最后一步。";
     }
     if (view.kind === "prior") {
-      return "先验范围（翻前表 + board_range 构造），还没有吃任何翻后动作。";
+      return "先验范围（翻前表 + board_range 构造），还没有吃任何翻后动作；白格是这张先验表里就没有的手牌，不是被收掉的。";
     }
     return "份额在「本步存活支撑集」内归一化；宽度变化见左栏时间线。";
   }
