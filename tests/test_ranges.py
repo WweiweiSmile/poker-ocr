@@ -73,9 +73,10 @@ def test_rule_prior_widths_follow_design_targets() -> None:
         "LIMP_EP": (36.0, 39.0),
         "LIMP_MP": (39.5, 42.0),
         "LIMP_LP": (45.0, 49.0),
-        # 2026-11-15 3-bet 两张表按类别加宽（#40）：5.58→7.69 / 3.77→9.20。
-        "3BET_vs_EP": (6.5, 9.0),
-        "3BET_CALL_vs_LP": (8.0, 10.5),
+        # 2026-11-15 3-bet 两张表按类别加宽（#40）：5.58→7.69 / 3.77→9.20；
+        # 同日晚维护者追加 7 个同花连张/一隔连张：7.69→9.80 / 9.20→11.31。
+        "3BET_vs_EP": (8.8, 10.8),
+        "3BET_CALL_vs_LP": (10.3, 12.3),
     }
     for rid, (lo, hi) in cases.items():
         rng = ranges.get(rid)
@@ -107,11 +108,12 @@ def test_make_range_filters_zero_and_negative() -> None:
 
 
 def test_three_bet_priors_widen_by_category() -> None:
-    """3-bet / 3-bet 跟注按类别加宽（#40）。
+    """3-bet / 3-bet 跟注按类别加宽（#40），并追加同花连张（2026-11-15 追加）。
 
     依据 docs/3-bet先验-摊牌反核-2026-11-15.md：两张表的 prior_absent 占
     68%（全局 28.6%，全仓最差），落在先验外的是小/中对子与非同花高张。
-    同花连张（76s/87s/97s/T7s）在 315 个摊牌样本里零证据，维护者已否。
+    同花连张（76s/87s/97s/T7s/86s/65s/75s）最初因 315 个摊牌样本零证据被排除，
+    2026-11-15 维护者决定仍然加入：诈唬类别要成体系，不能只留一手 QTs/QTo。
     """
     def keys(rng: ranges.Range) -> set[str]:
         return {ranges.key_of_combo(combo) for combo in rng.combo_weights}
@@ -121,11 +123,11 @@ def test_three_bet_priors_widen_by_category() -> None:
     assert bet is not None and call is not None
     bet_keys, call_keys = keys(bet), keys(call)
 
-    # 宽度来自票面拍板（#40 表格），不是从当前表反推出来的。
-    check(abs(bet.width_pct - 7.69) < 0.05,
-          f"3-bet 宽度应 7.69%，实际 {bet.width_pct:.2f}%")
-    check(abs(call.width_pct - 9.20) < 0.05,
-          f"跟 3-bet 宽度应 9.20%，实际 {call.width_pct:.2f}%")
+    # 宽度来自票面拍板（#40 表格 + 2026-11-15 追加同花连张），不是从当前表反推的。
+    check(abs(bet.width_pct - 9.80) < 0.05,
+          f"3-bet 宽度应 9.80%，实际 {bet.width_pct:.2f}%")
+    check(abs(call.width_pct - 11.31) < 0.05,
+          f"跟 3-bet 宽度应 11.31%，实际 {call.width_pct:.2f}%")
 
     check({"66", "77", "QTs", "QTo"} <= bet_keys,
           f"3-bet 缺加宽后的 key：{sorted({'66', '77', 'QTs', 'QTo'} - bet_keys)}")
@@ -135,9 +137,11 @@ def test_three_bet_priors_widen_by_category() -> None:
     check({"AQo", "KQo"} <= call_keys,
           f"跟 3-bet 缺 AQo/KQo：{sorted({'AQo', 'KQo'} - call_keys)}")
 
-    for banned in ("76s", "87s", "97s", "T7s"):
-        check(banned not in bet_keys, f"3-bet 不该含 {banned}")
-        check(banned not in call_keys, f"跟 3-bet 不该含 {banned}")
+    suited = ("76s", "87s", "97s", "T7s", "86s", "65s", "75s")
+    for key in suited:
+        check(len(ranges.combos_of_key(key)) == 4, f"{key} 应展开成 4 个 combo")
+        check(key in bet_keys, f"3-bet 应含同花连张 {key}")
+        check(key in call_keys, f"跟 3-bet 应含同花连张 {key}")
 
     # 位置桶共用同一张类表：同类先验在不同位置桶之间宽度必须一致。
     for rid, expected in (("3BET_vs_EP", bet.width_pct), ("3BET_vs_LP", bet.width_pct),

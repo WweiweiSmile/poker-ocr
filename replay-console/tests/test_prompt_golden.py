@@ -20,9 +20,9 @@ from poker_ocr.parse import Blinds
 
 from replay.versioning import CURRENT_ADVICE_VERSION
 
-EXPECTED_ADVICE_VERSION = "advice-2026-11-15.1"
+EXPECTED_ADVICE_VERSION = "advice-2026-11-15.2"
 EXPECTED_PROMPT_HASH = "5acf3bc972653d5186f806c64e1b313310ef3111e5979b48e68c002abd7365e7"
-EXPECTED_THREE_BET_PROMPT_HASH = "e93a419cde584363ed6267a9ff52676acc7465370bbeb7c5f32bcab35ca15734"
+EXPECTED_THREE_BET_PROMPT_HASH = "789b459d0e350289add2c706babe48dd344fcee735e1abeff24150be2b1d370e"
 
 # 快照没有可用画像，所以「对手画像」段只有标题 + 缺口说明；
 # witness 数据落地前这一段必须逐字节不变（spec §15.1）。
@@ -123,6 +123,7 @@ def test_three_bet_prompt_golden_tracks_prior_width():
     assert "## 场景：3-bet+ 池" in system, "fixture 必须真的渲染 3-bet 场景段"
     assert "22+" in system and "QQ+/AK" not in system, (
         "3-bet 场景段要与加宽后的先验表一致（#40）；改了就要 bump 版本并更新下面的哈希")
+    assert "同花连张" in system, "场景段的诈唬类别要带上同花连张（2026-11-15.2）"
     assert digest == EXPECTED_THREE_BET_PROMPT_HASH, (
         "3-bet 提示词内容变了。若这是有意的，请 bump CURRENT_ADVICE_VERSION 并更新 "
         "EXPECTED_THREE_BET_PROMPT_HASH；否则说明当前版本语义已经漂移。")
