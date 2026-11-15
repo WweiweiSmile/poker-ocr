@@ -24,7 +24,7 @@
     # 默认读当天 logs/live.range.jsonl.YYYYMMDD（没有就退回 logs/live.range.jsonl）
     nv tools/range_table_diff.py
     nv tools/range_table_diff.py --hand 104 --street flop
-    nv tools/range_table_diff.py --decision-key flop:bet:6 --json
+    nv tools/range_table_diff.py --decision-key 104:flop:0 --json
     nv tools/range_table_diff.py --file /tmp/range-e2e/live.range.jsonl --top 20
 
 退出码
@@ -155,6 +155,11 @@ def _action_value(record: dict):
     return (record.get("decision_key") or {}).get("actions")
 
 
+def _is_index(value) -> bool:
+    """整数决策序号；`True`/`False` 是 int 的子类，不算序号。"""
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
 def _action_tokens(record: dict) -> tuple[str, ...]:
     """`decision_key.actions` 归一成 token 元组（旧载荷形态）。
 
@@ -162,7 +167,7 @@ def _action_tokens(record: dict) -> tuple[str, ...]:
     列表，这里返回空元组，由 `_actions_text` / `_matches_actions` 单独处理。
     """
     value = _action_value(record)
-    if value is None or isinstance(value, int):
+    if value is None or _is_index(value):
         return ()
     if isinstance(value, str):
         return (value,)
@@ -175,7 +180,7 @@ def _action_tokens(record: dict) -> tuple[str, ...]:
 def _actions_text(record: dict) -> str:
     """决策点的人读形式：整数序号 → `"0"`，token → `:` 连起来（如 `bet:6:raise:20`）。"""
     value = _action_value(record)
-    if isinstance(value, int):
+    if _is_index(value):
         return str(value)
     return ":".join(_action_tokens(record))
 
@@ -197,7 +202,7 @@ def _sort_key(record: dict) -> tuple:
     except (TypeError, ValueError):
         hand = 0
     value = _action_value(record)
-    count = value if isinstance(value, int) else len(_action_tokens(record))
+    count = value if _is_index(value) else len(_action_tokens(record))
     return (order, hand, count, _actions_text(record))
 
 
@@ -257,7 +262,7 @@ def _matches_actions(record: dict, actions: str) -> bool:
     文本段按 `:` 连接后精确比较。
     """
     value = _action_value(record)
-    if isinstance(value, int):
+    if _is_index(value):
         return actions.isdigit() and int(actions) == value
     if actions.isdigit():
         return len(_action_tokens(record)) == int(actions)

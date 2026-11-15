@@ -11,7 +11,9 @@
     `write_failed`，AI 建议照常出；
   · **体积**：单条软上限 110 KB、硬顶 180 KB。超了按阶梯收缩 detail
     （400 → 200 → 100 → 空 → 再丢中间步 grid），每收缩一档把步号写进
-    `detail_omitted`，绝不静默少写；
+    `detail_omitted`，绝不静默少写；阶梯尽头仍超硬顶就剥到骨架照写
+    （`trace_truncated` + `/api/meta` 的 `record_too_big`），骨架都装不下
+    才丢（`dropped` + `last_error`）；
   · **轮转**：本地按天切 `.YYYYMMDD`，留 14 天、总量 1 GB、当天 200 MB 停写。
 
 为什么不用 logging：这里的行是**数据**不是日志（下游要按 decision_key join、
@@ -462,20 +464,20 @@ class TraceWriter:
             try:
                 self._rotate(now)
                 data = _encode(downgrade(record))
+                squeezed_note = ""
                 if len(data) > HARD_LIMIT:
                     # 硬顶：先剥到骨架照写（带 trace_truncated），剥完仍装不下
                     # 才丢。两种都要留痕，绝不静默少写。
                     original = len(_encode(record))
                     squeezed = _encode(_squeeze(record))
-                    self._status = STATUS_TOO_BIG
                     if len(squeezed) > HARD_LIMIT:
                         self.dropped += 1
+                        self._status = STATUS_TOO_BIG
                         self.last_error = (
                             f"record {original} bytes over hard cap {HARD_LIMIT}; "
                             f"squeezed to {len(squeezed)} still too big, dropped")
                         return False
-                    self.truncated += 1
-                    self.last_error = (
+                    squeezed_note = (
                         f"record {original} bytes over hard cap {HARD_LIMIT}; "
                         f"written squeezed to {len(squeezed)} bytes")
                     data = squeezed
@@ -492,6 +494,11 @@ class TraceWriter:
                         os.fsync(handle.fileno())
                 self._day_bytes += len(data)
                 self.written += 1
+                if squeezed_note:
+                    # 只有真写进去了才算「截断落盘」；日预算拒绝的不计数。
+                    self.truncated += 1
+                    self._status = STATUS_TOO_BIG
+                    self.last_error = squeezed_note
                 return True
             except OSError as exc:
                 self._status = STATUS_WRITE_FAIL

@@ -120,12 +120,15 @@ def build_range_traced(prior, events, *, alpha=None, archetype="unknown", dead=(
 
 **体积闸（v1.1）**：单条编码前先估长度，超 **180 KB** 就从最后一步往前丢 `detail`
 （保留 `cell_n`），写 `truncated: true` + `detail_omitted`。180 KB 是 1 GB /（400 条/天 × 14 天）
-反推的上限，**不是**可以越过的软目标。
+反推的上限，**不是**可以越过的软目标。阶梯砍完仍超 180 KB 时剥到骨架照写（detail 全清、
+每步只留 3 条 top、`grid`/`cell_n` 置空），`warnings` 带 `trace_truncated`、
+`/api/meta.range_trace` 报 `record_too_big`；只有骨架都装不下才丢（`stats().dropped`）。
 
 ## 5. 开关与降级显示
 
 - 默认开；`--no-range-trace` 关闭本次进程的 trace。
-- `/api/meta` 增 `range_trace`，取值 `on` / `off` / `budget_exceeded` / `write_failed`；
+- `/api/meta` 增 `range_trace`，取值 `on` / `off` / `budget_exceeded` / `write_failed` /
+  `record_too_big`（最近有记录超硬顶被截断，写入继续）；
   看板诊断页据此显示「未开启」「已停写（超日预算）」「写盘失败」。
 - 关闭时：诊断页明确写「未开启（本次会话）」，**保留现有 facts 旧视图**，
   不显示空推导、不伪造 0%。
@@ -167,7 +170,7 @@ def build_range_traced(prior, events, *, alpha=None, archetype="unknown", dead=(
 | `poker_ocr/range_trace.py`（新） | `build_record` / `build_skipped` / `downgrade` / `TraceWriter`（日切、14 天、1 GB、200 MB/日、≥4096 字节 fsync、fail open）、模块级 `configure/enabled/status/emit/reset/set_session`。 |
 | `poker_ocr/ranges.py` | 新增 `key_index(key) -> int`（169 平铺下标：AA=0、AKs=1、AKo=13、22=168），`grid` 与 `cell_n` 共用。 |
 | `poker_ocr/hand_vs_ranges.py` | `HandVsRanges` 补 `seed` / `samples_requested` / `n_failed` / `cache_hit`；缓存命中 `replace(hit, cache_hit=True)` 不重跑 MC；`_lookup` 接 trace（含 skipped 早退）与座位级 `equity`。 |
-| `poker_ocr/live.py` | `--range-trace-out`（默认 `logs/live.range.jsonl`）与 `--no-range-trace`；启动时 configure + set_session；`/api/meta.range_trace` 输出 `on/off/budget_exceeded/write_failed`。 |
+| `poker_ocr/live.py` | `--range-trace-out`（默认 `logs/live.range.jsonl`）与 `--no-range-trace`；启动时 configure + set_session；`/api/meta.range_trace` 输出 `on/off/budget_exceeded/write_failed/record_too_big`。 |
 | `tests/test_range_trace.py`（新） | 10 组：下标、grid 和、逐位相等、detail 形状/截断、时间闸、不碰 `_BUILD_CACHE`、记录形状、降级阶梯、轮转与配额、fail open、开关。 |
 
 ### 9.2 逐位不变

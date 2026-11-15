@@ -167,7 +167,7 @@
 | `prior` | **step 0**：翻前先验的完整快照，见 3.3.1 |
 | `steps` | 逐事件阶梯，见 3.3.2；`path=="board_range"` 时为空数组 |
 | `final` | 最终范围摘要（`Range` 上的数）；**v1.2** 起带 `grid[169]`（剪枝后支撑集内的归一化份额，与 `width_pct` 同一批 combo）。不带 `detail`——逐 combo 明细看最后一步 |
-| `detail_omitted` | **v1.1** 记录级：因时间/体积闸没写 `detail` 的步号数组（这些步仍有 `cell_n`）。为空数组表示全部步都有明细 |
+| `detail_omitted` | **v1.1** 记录级：因时间/体积闸没写 `detail` 的步号数组（阶梯档这些步仍有 `cell_n`；骨架档 `cell_n` 一并置空）。为空数组表示全部步都有明细 |
 | `equity` | 该对手与 hero 的比牌分布（**`method:"exact"`**，按范围权重逐 combo 归一化）：`behind` / `tie` 为边缘分布，`ahead = 1-behind-tie` 不单独存；`beaten_by` / `ahead_groups` 为牌型分组（带 169 键示例）；`removed` = 因 hero 牌 + 公共牌剔除的 combo 数。口径细节见 `docs/equity-与牌力分解口径-v1.md` §2 |
 
 `final` 的四个宽度数是**并列**关系，不是同一个数的别名：
