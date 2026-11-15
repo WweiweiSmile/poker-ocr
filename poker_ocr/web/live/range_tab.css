@@ -264,14 +264,21 @@
   min-width: 0;
   overflow: hidden;
 }
-.rt-cell.zero { background: #131720; cursor: default; }
-/* 先验表里就没有的格子：比“删掉的”更空——透明底 + 更淡的描边，不参与任何删减口径。 */
+/* 被删格：斜纹 + 砖红描边，比「先验未包含」的空格更显眼——本来有、现在没了，
+   不能画成和空格一样的黑洞（#32 目视验收）。 */
+.rt-cell.zero {
+  background: repeating-linear-gradient(135deg,
+    rgba(255, 122, 96, 0.22) 0 3px, rgba(255, 122, 96, 0.04) 3px 6px);
+  box-shadow: inset 0 0 0 1px rgba(255, 122, 96, 0.38);
+  cursor: default;
+}
+/* 先验表里就没有的格子：透明底 + 更淡的描边，不参与任何删减口径。 */
 .rt-cell.absent { background: transparent; cursor: default; box-shadow: inset 0 0 0 1px rgba(232, 235, 242, 0.03); }
 .rt-hmlegend { display: flex; flex-wrap: wrap; gap: 14px; justify-content: center; margin: 10px auto 0; max-width: 560px; color: var(--dim); font-family: var(--mono); font-size: 10px; }
 .rt-hmk { display: flex; align-items: center; gap: 5px; }
 .rt-swatch { display: inline-block; width: 12px; height: 8px; border-radius: 2px; }
 .rt-swatch.alive { background: hsl(18, 73%, 58%); }
-.rt-swatch.zero { background: #131720; box-shadow: inset 0 0 0 1px rgba(232, 235, 242, 0.18); }
+.rt-swatch.zero { background: repeating-linear-gradient(135deg, rgba(255, 122, 96, 0.55) 0 2px, rgba(255, 122, 96, 0.12) 2px 4px); box-shadow: inset 0 0 0 1px rgba(255, 122, 96, 0.55); }
 .rt-swatch.absent { background: transparent; box-shadow: inset 0 0 0 1px rgba(232, 235, 242, 0.12); border: 1px dashed rgba(232, 235, 242, 0.28); }
 .rt-cell.on { box-shadow: inset 0 0 0 2px #fff; }
 .rt-cell-lab { pointer-events: none; }

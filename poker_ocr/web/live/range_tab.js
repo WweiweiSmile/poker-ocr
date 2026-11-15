@@ -927,6 +927,8 @@
           // 零权重但先验含（被本步删）与先验从来不含，必须看起来不一样。
           cell.className = kind === "absent" ? "rt-cell absent" : "rt-cell zero";
           cell.title = RTCells.cellTitle(key, kind, { removedStep: cls.removedStep[index] });
+          // 被删格写上键名：只靠 hover 才知道「A7s 是被删的」不算看得见。
+          if (kind === "removed") cell.append(el("span", "rt-cell-lab", key));
         }
         if (kind === "alive" && key === S.cell) cell.classList.add("on");
         matrix.append(cell);
@@ -984,12 +986,12 @@
 
   function heatNote(view) {
     if (view.kind === "final") {
-      return "留存量只落 169 格聚合（契约 v1.2）：份额在剪枝后的支撑集内归一化。逐 combo 明细看最后一步。";
+      return "留存量只落 169 格聚合（契约 v1.2）：份额在剪枝后的支撑集内归一化。逐 combo 明细看最后一步；斜纹红格是过程里被删掉的手牌，空格是这张先验表里就没有的。";
     }
     if (view.kind === "prior") {
-      return "先验范围（翻前表 + board_range 构造），还没有吃任何翻后动作；白格是这张先验表里就没有的手牌，不是被收掉的。";
+      return "先验范围（翻前表 + board_range 构造），还没有吃任何翻后动作；空格是这张先验表里就没有的手牌，不是被收掉的。";
     }
-    return "份额在「本步存活支撑集」内归一化；宽度变化见左栏时间线。";
+    return "份额在「本步存活支撑集」内归一化；宽度变化见左栏时间线。斜纹红格是到这一步为止已被删掉的手牌。";
   }
 
   /* ───────── 组合表 ───────── */
