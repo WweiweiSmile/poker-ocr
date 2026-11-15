@@ -333,14 +333,18 @@ def _squeeze(record: dict) -> dict:
     """
     out = dict(record)
     seats = []
-    omitted: set[int] = set()
+    union: set[int] = set()
     for seat in record.get("seats") or ():
         seat = dict(seat)
         steps = []
+        omitted: set[int] = set()
         for step in seat.get("steps") or ():
             step = dict(step)
-            if not step.get("skipped"):
-                omitted.add(step.get("i"))
+            if step.get("skipped"):
+                # 时间闸跳过的步本来没有 detail，不算「被截掉」。
+                steps.append(step)
+                continue
+            omitted.add(step.get("i"))
             step["detail"] = []
             if step.get("top"):
                 step["top"] = _cap_top(step["top"], 3)
@@ -351,10 +355,11 @@ def _squeeze(record: dict) -> dict:
         seat["steps"] = steps
         if omitted:
             seat["detail_omitted"] = sorted(i for i in omitted if i is not None)
+            union |= omitted
         seats.append(seat)
     out["seats"] = seats
-    if omitted:
-        out["detail_omitted"] = sorted(i for i in omitted if i is not None)
+    if union:
+        out["detail_omitted"] = sorted(i for i in union if i is not None)
     warnings = list(out.get("warnings") or ())
     if "trace_truncated" not in warnings:
         warnings.append("trace_truncated")
