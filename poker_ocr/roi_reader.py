@@ -449,8 +449,34 @@ _HERO_ACTION_BUTTONS: dict[str, Slot] = {
     "left": (0.17, 0.795, 0.35, 0.875),
     "right": (0.66, 0.795, 0.88, 0.875),
 }
+# 上面那套矩形是 1080x2400 手机布局的实测值。web 端（table_wpk_mac*）同一颗
+# 「N BB 跟注」pill 在 x 0.58–0.64，profile 已经标了 hero_call_button /
+# hero_fold_button —— 有就一起看，取占比大的那个（见 _hero_action_slots）。
+_HERO_ACTION_BUTTON_SLOTS: dict[str, str] = {
+    "left": "hero_fold_button",
+    "right": "hero_call_button",
+}
 # 按钮被激活时红/蓝占比 ≥ 0.25（实测 0.27–0.34）；灰色按钮和非回合帧为 0.00
 _HERO_ACTION_COLOR_MIN = 0.15
+
+
+def _hero_action_slots(profile: Profile) -> dict[str, list[Slot]]:
+    """每一侧要看的候选槽位：profile 槽位（有的话）+ 手机硬编码矩形。
+
+    两份都看、由调用方取大的，不按 profile 二选一：归一化坐标跟着画面宽高比
+    走，同名的按钮在手机（1080x2400）和 web（1472x1676）上不在一个位置。
+    只认硬编码矩形 → web 端右侧读到毛毡、恒 0.00（2026-11-16 实盘漏判就是
+    这个原因）；只认 profile 槽位 → 手机老图全漏。
+    """
+    out: dict[str, list[Slot]] = {}
+    for name, base in _HERO_ACTION_BUTTONS.items():
+        slots: list[Slot] = []
+        configured = profile.global_slots.get(_HERO_ACTION_BUTTON_SLOTS[name])
+        if configured is not None:
+            slots.append(tuple(configured))     # type: ignore[arg-type]
+        slots.append(base)
+        out[name] = slots
+    return out
 
 
 def measure_hero_action_buttons(img: np.ndarray, profile: Profile,
@@ -471,22 +497,38 @@ def measure_hero_action_buttons(img: np.ndarray, profile: Profile,
 
     这条判据补上了旧「蓝色按钮覆盖 hero 头像槽」的漏洞：只剩弃牌 / All in 时，
     蓝色按钮在右下角而不是头像位置，旧判据会把**轮到我**误判成 False。
+
+    **槽位取「配置 + 手机硬编码矩形」两者的大值**（见 `_hero_action_slots`）：
+    归一化坐标跟着画面比例走，手机 1080x2400（0.45）与 web 1472x1676（0.88）
+    的同一颗按钮不在一个位置。只认硬编码矩形时，web 端右侧那块读到的是毛毡
+    （恒 0.00，2026-11-16 实盘面对 4-bet 就是因此整手没出建议）。
     """
     size = size or (img.shape[1], img.shape[0])
     evidence: dict = {"method": "action_buttons", "rects": {}}
     right = 0.0
     left = 0.0
-    for name, slot in _HERO_ACTION_BUTTONS.items():
-        rect, roi = crop_slot(img, profile, slot, size, pad=0.0)
-        red = _red_fraction(roi)
-        blue = _blue_fraction(roi)
-        evidence["rects"][name] = list(rect)
-        evidence[f"{name}_red"] = round(red, 4)
-        evidence[f"{name}_blue"] = round(blue, 4)
+    for name, slots in _hero_action_slots(profile).items():
+        # 同一侧可能有两个候选框（profile 槽位 + 手机矩形），取占比最大的那个：
+        # 哪个框真的盖住了按钮，就用哪个，不赌画面比例。
+        best: dict = {}
+        for slot in slots:
+            rect, roi = crop_slot(img, profile, slot, size, pad=0.0)
+            red = _red_fraction(roi)
+            blue = _blue_fraction(roi)
+            item = {"rect": list(rect), "slot": list(slot),
+                    "red": round(red, 4), "blue": round(blue, 4),
+                    "colored": round(red + blue, 4)}
+            if not best or item["colored"] > best["colored"]:
+                best = item
+        evidence["rects"][name] = best["rect"]
+        evidence[f"{name}_slot"] = best["slot"]
+        evidence[f"{name}_red"] = best["red"]
+        evidence[f"{name}_blue"] = best["blue"]
+        evidence[f"{name}_colored"] = best["colored"]
         if name == "right":
-            right = red + blue
+            right = best["colored"]
         else:
-            left = red + blue
+            left = best["colored"]
     evidence["colored"] = round(right, 4)
     # 左键只留作诊断：它红着不等于轮到我（可能是我自己预选了弃牌）。
     evidence["left_colored"] = round(left, 4)
@@ -585,6 +627,13 @@ def measure_hero_turn(img: np.ndarray, profile: Profile, engine: OcrEngine,
 
     旧判据为什么不删：它是 1080x2400 那套 UI 的实测结论（见配置的
     `_hero_turn_comment`），而且蓝色按钮在别的皮肤/分辨率上未必存在。
+
+    **preset_text 也不是唯一证据**：文本判据「空 = 没轮到我」有一个结构性
+    例外 —— 面对 all-in、或最小再加注已经超过后手（只剩全下可加注）时，
+    客户端把 1/3~1.2x 这套尺度预设整块收起来。这时右侧 call/加注按钮照样
+    是亮的，所以两条证据取并集：文本命中 BB → True；文本空但右侧按钮有色
+    → 也是 True；只有两条都否定才 False。2026-11-16 实盘就是这样整手
+    （面对 4-bet 只剩全下）一帧建议都没出。
     """
     size = size or (img.shape[1], img.shape[0])
     method = hero_turn_method(profile)
@@ -626,13 +675,30 @@ def measure_hero_turn(img: np.ndarray, profile: Profile, engine: OcrEngine,
         evidence.update(bet_ev)
     if read.reused:
         evidence["reused"] = True
+    # 文本判据之外的**第二条独立证据**：底部右侧按钮的颜色（预选不动这一侧）。
+    # 必要的原因：面对 all-in、或最小再加注已经超过后手（只剩全下这一种「加注」）
+    # 时，客户端不再渲染 1/3~1.2x 那套尺度预设 —— 探针整块读空，文本判据把
+    # 「轮到我」误判成 False，建议链在 live.py 的 hero_turn 闸门处直接退出，
+    # 表现就是「面对 3bet/4bet 和有人 all-in 时卡死不操作」（2026-11-16 实盘）。
+    _, btn_ev = measure_hero_action_buttons(img, profile, size)
+    evidence["action_buttons"] = btn_ev
+    # 兜底只看**蓝**（不看红）：右侧那颗蓝盘只在真的轮到我时出现；红在
+    # 「我已预选弃牌」时也有，拿它兜底会把预选之后每一帧都骗成「轮到我」。
+    btn_blue = float(btn_ev.get("right_blue") or 0.0) >= _HERO_ACTION_COLOR_MIN
     if read.text:
         if _HERO_TURN_RE.search(read.text) and read.score >= min_score:
             return True, evidence
+        if btn_blue:
+            return True, {**evidence,
+                          "why": "预设行有内容但不是 BB 值，右侧蓝盘亮着 ⇒ 轮到我"}
         return None, {**evidence,
                       "why": "这块有内容但不是预设钮的 BB 值（遮挡/表情面板？），不硬判"}
     if read.note and read.note.startswith("rec 没识别出文字"):
         # 空文本 = 那块什么都没有。注意这不是「没读出文字」，是 rec 确实没找到文本。
+        if btn_blue:
+            return True, {**evidence,
+                          "why": "预设行整块消失，右侧蓝盘亮着 ⇒ 轮到我"
+                                 "（面对 all-in / 只剩全下可加注）"}
         return False, evidence
     # 裁剪为空 / rec 抛异常 → 不知道，别把故障翻译成「没轮到他」
     return None, {**evidence, "why": read.note or "空读数但没有原因"}
