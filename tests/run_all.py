@@ -5,6 +5,7 @@
 
 分层，从不需要图到需要图：
     test_positions  位置推导（纯逻辑，最快）
+    test_profile_8p  8 人桌 profile：单顶座/环序/chip↔bet 不重叠（纯逻辑）
     test_env        .env 解析与加载（纯逻辑）
     test_coach      翻后建议引擎（纯逻辑，不需要图）
     test_ranges     翻前范围：169 键展开/宽度/具名与规则先验（纯逻辑）
@@ -66,7 +67,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 
-SUITES = ["test_positions.py", "test_env.py", "test_coach.py",
+SUITES = ["test_positions.py", "test_env.py", "test_profile_8p.py", "test_coach.py",
           "test_ranges.py", "test_board_range.py", "test_field_ranges.py",
           "test_hand_vs_ranges.py", "test_range_flow.py", "test_hand_strength.py",
           "test_strategy_tables.py", "test_fold_curve_probe.py",
