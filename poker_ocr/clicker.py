@@ -910,6 +910,37 @@ class Clicker:
             return ClickResult("skipped", action=plan.action,
                                reason="no_steps",
                                elapsed_ms=int((self._clock() - started) * 1000))
+        return self._play(plan, option, started)
+
+    def press(self, button: str, *, targets: dict | None = None
+              ) -> ClickResult:
+        """按名字直接点一个按钮，不经过「建议 → 动作」的映射。
+
+        给**建议之外**的动作复用同一套后端/权限/计时/日志：目前只有翻前
+        提前弃牌（`live.LiveProcessor._service_prefold`）用它点灰的「让/弃」。`live` 侧自己
+        做完全部门禁，这里只负责「把这一下按下去」。
+
+        `targets` 与 `run()` 同口径：优先用按文字现找的坐标，没有再退回
+        profile 固定槽位；槽位缺失返回 skipped（`missing_button:<name>`）。
+        """
+        started = self._clock()
+        step = _target_step(button, targets, self.config, self.rng)
+        if step is None:
+            return ClickResult("skipped", action=button,
+                               reason=f"missing_button:{button}",
+                               elapsed_ms=int((self._clock() - started) * 1000))
+        return self._play(ClickPlan(button, (step,)), None, started)
+
+    def _play(self, plan: ClickPlan, option: "Option | None",
+              started: float) -> ClickResult:
+        """执行一个已规划好的点击，返回结果。
+
+        `option` 只用于「建议额」字段（`target_bb`）；`press()` 没有建议，
+        传 None —— `_amount_fields` 用 getattr，None 时三项额度都是空。
+        """
+
+        def _elapsed() -> int:
+            return int((self._clock() - started) * 1000)
 
         if not self.dry_run:
             try:
@@ -919,14 +950,14 @@ class Clicker:
                                    mapping=plan.mapping, steps=plan.steps,
                                    error=f"{type(exc).__name__}: {exc}",
                                    **_amount_fields(option, plan_bb=plan.target_bb),
-                                   elapsed_ms=int((self._clock() - started) * 1000))
+                                   elapsed_ms=_elapsed())
             if not allowed:
                 return ClickResult(
                     "error", action=plan.action, preset=plan.preset,
                     mapping=plan.mapping, steps=plan.steps,
                     error="accessibility_permission_denied",
                     **_amount_fields(option, plan_bb=plan.target_bb),
-                    elapsed_ms=int((self._clock() - started) * 1000))
+                    elapsed_ms=_elapsed())
 
         down_at: tuple[float, float] | None = None
         try:
@@ -953,7 +984,7 @@ class Clicker:
                                mapping=plan.mapping, steps=plan.steps,
                                error=f"{type(exc).__name__}: {exc}",
                                **_amount_fields(option, plan_bb=plan.target_bb),
-                               elapsed_ms=int((self._clock() - started) * 1000))
+                               elapsed_ms=_elapsed())
 
         return ClickResult(
             "dry_run" if self.dry_run else "clicked",
@@ -961,4 +992,4 @@ class Clicker:
             steps=plan.steps,
             **_amount_fields(option, plan_bb=plan.target_bb,
                              final_bb=plan.target_bb),
-            elapsed_ms=int((self._clock() - started) * 1000))
+            elapsed_ms=_elapsed())

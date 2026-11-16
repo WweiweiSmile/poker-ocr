@@ -172,7 +172,7 @@ def _feed_item(event_id: int, kind: str, payload: dict) -> dict:
 
 
 class LiveControl:
-    """工作台 → live 的最小控制面：目前只有「暂停/恢复自动点击」。
+    """工作台 → live 的最小控制面：「暂停/恢复自动点击」与「预点弃牌」三态。
 
     只存开关和原因，不碰鼠标；真正的语义（作废待执行点击、恢复后不补点）
     由 `LiveProcessor` 在监听器里实现。没有启用点击器时 `available=False`，
@@ -180,14 +180,24 @@ class LiveControl:
     """
 
     def __init__(self, *, available: bool, dry_run: bool = False,
-                 enabled: bool = True, reason: str | None = None) -> None:
+                 enabled: bool = True, reason: str | None = None,
+                 prefold: str = "off",
+                 prefold_available: bool = False) -> None:
         self._lock = threading.Lock()
         self._listeners: list[Callable[[bool], None]] = []
+        self._prefold_listeners: list[Callable[[str], None]] = []
         self.available = bool(available)
         self.dry_run = bool(dry_run)
         self._enabled = bool(enabled) if self.available else False
         self._reason = reason
         self.changed_at = _now()
+        # 预点弃牌：off / dry / live。与「暂停自动点击」是两道独立的闸 ——
+        # 暂停管的是「AI 建议落地」，预点管的是「翻前提前弃牌」；但预点实际
+        # 按鼠标时仍受 available（有没有点击器）约束。
+        self.prefold_available = bool(prefold_available)
+        mode = str(prefold)
+        self._prefold = mode if mode in ("off", "dry", "live") else "off"
+        self.prefold_changed_at = _now()
 
     def add_listener(self, fn: Callable[[bool], None]) -> None:
         with self._lock:
@@ -202,6 +212,12 @@ class LiveControl:
                 "dry_run": self.dry_run,
                 "reason": self._reason,
                 "changed_at": self.changed_at,
+                # dry-run 不按鼠标，所以没有点击器也能用；只有 live 依赖它。
+                "prefold": ("off" if (self._prefold == "live"
+                                      and not self.prefold_available)
+                            else self._prefold),
+                "prefold_available": self.prefold_available,
+                "prefold_changed_at": self.prefold_changed_at,
             }
 
     def set_click_enabled(self, enabled: bool, reason: str | None = None, *,
@@ -221,6 +237,32 @@ class LiveControl:
         for fn in listeners:
             try:
                 fn(self._enabled)
+            except Exception:  # noqa: BLE001 — 控制面故障不能反噬识别
+                pass
+        return {**self.state(), "ok": True, "source": source}
+
+    def add_prefold_listener(self, fn: Callable[[str], None]) -> None:
+        with self._lock:
+            self._prefold_listeners.append(fn)
+
+    def set_prefold(self, mode: str, source: str = "workbench") -> dict:
+        """切换预点弃牌（off/dry/live）。没有点击器时只能 dry/off。"""
+        if mode not in ("off", "dry", "live"):
+            return {**self.state(), "ok": False,
+                    "detail": "mode 只能是 off / dry / live"}
+        if mode == "live" and not self.prefold_available:
+            return {**self.state(), "ok": False,
+                    "detail": "本次运行没有可用的点击器，只能 dry-run"}
+        with self._lock:
+            changed = mode != self._prefold
+            self._prefold = mode
+            if changed:
+                self.prefold_changed_at = _now()
+            listeners = list(self._prefold_listeners) if changed else []
+        # 监听器在锁外跑：它可能要按一下鼠标取消已挂上的预选。
+        for fn in listeners:
+            try:
+                fn(mode)
             except Exception:  # noqa: BLE001 — 控制面故障不能反噬识别
                 pass
         return {**self.state(), "ok": True, "source": source}
@@ -517,6 +559,7 @@ class _Handler(BaseHTTPRequestHandler):
             control = getattr(self.server, "control", None)
             self._json(control.state() if control is not None else {
                 "available": False, "enabled": False, "paused": False,
+                "prefold": "off", "prefold_available": False,
                 "reason": "未启用控制面"})
             return
         if path == "/api/range":
@@ -529,7 +572,7 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         path = urlsplit(self.path).path
-        if path != "/api/control/click":
+        if path not in ("/api/control/click", "/api/control/prefold"):
             self.send_error(404)
             return
         if not self._authorized():
@@ -547,19 +590,33 @@ class _Handler(BaseHTTPRequestHandler):
         except (ValueError, UnicodeDecodeError):
             self._json({"ok": False, "detail": "请求体不是合法 JSON"}, status=400)
             return
-        if not isinstance(body, dict) or not isinstance(body.get("enabled"), bool):
-            self._json({"ok": False, "detail": "需要 {\"enabled\": true|false}"},
+        if not isinstance(body, dict):
+            self._json({"ok": False, "detail": "请求体必须是 JSON 对象"},
                        status=400)
             return
-        state = control.set_click_enabled(
-            body["enabled"], body.get("reason"),
-            source=str(body.get("source") or "workbench"))
-        # 事件流/事件日志同步记一条，方便事后把「暂停」和点击时间线对齐。
+        source = str(body.get("source") or "workbench")
+        if path == "/api/control/prefold":
+            mode = body.get("mode")
+            if not isinstance(mode, str):
+                self._json({"ok": False,
+                            "detail": "需要 {\"mode\": \"off\"|\"dry\"|\"live\"}"},
+                           status=400)
+                return
+            state = control.set_prefold(mode, source=source)
+        else:
+            if not isinstance(body.get("enabled"), bool):
+                self._json({"ok": False,
+                            "detail": "需要 {\"enabled\": true|false}"},
+                           status=400)
+                return
+            state = control.set_click_enabled(
+                body["enabled"], body.get("reason"), source=source)
+        # 事件流/事件日志同步记一条，方便事后把「暂停/预点」和动作时间线对齐。
         try:
             self._store.publish("control", dict(state))
         except Exception:  # noqa: BLE001
             pass
-        self._json(state)
+        self._json(state, status=(200 if state.get("ok", True) else 400))
 
     def _range(self) -> None:
         """`GET /api/range?hand=&street=&actions=`：只读一条 trace 记录。

@@ -187,6 +187,65 @@ def test_http_snapshot_static_and_sse() -> None:
         server.close()
 
 
+def test_prefold_control() -> None:
+    """预点三态的热切换：off/dry/live 走 /api/control/prefold，非法值不改状态。
+
+    这条控制面是工作台 run 页那个下拉的后端。切 live 但本次运行没有点击器
+    时必须拒绝 —— 否则界面显示「已开启」，实际一下也点不出去。
+    """
+    control = LiveControl(available=True, prefold="off", prefold_available=True)
+    seen: list[str] = []
+    control.add_prefold_listener(seen.append)
+    check(control.state()["prefold"] == "off", "默认应为 off")
+
+    server = LiveWebServer(session={"session_id": "s-1"}, layout={}, port=0,
+                           control=control, token="tok-123456", run_id="r-1")
+    server.start()
+    try:
+        base = server.url
+
+        def post(payload: dict) -> tuple[int, dict]:
+            req = urllib.request.Request(
+                base + "/api/control/prefold",
+                data=json.dumps(payload).encode(), method="POST",
+                headers={"Content-Type": "application/json",
+                         "X-Workbench-Token": "tok-123456"})
+            try:
+                with urllib.request.urlopen(req, timeout=3) as resp:
+                    return resp.status, json.loads(resp.read())
+            except urllib.error.HTTPError as exc:
+                return exc.code, json.loads(exc.read() or b"{}")
+
+        code, res = post({"mode": "dry"})
+        check(code == 200 and res["prefold"] == "dry", f"切 dry：{code} {res}")
+        check(seen == ["dry"], f"监听器应收到 dry：{seen}")
+
+        # 同值不重复通知（每次切换都会让主循环清状态，没必要）
+        code, _ = post({"mode": "dry"})
+        check(code == 200 and seen == ["dry"], f"同值不该再通知：{seen}")
+
+        code, res = post({"mode": "live"})
+        check(code == 200 and res["prefold"] == "live", f"切 live：{code} {res}")
+
+        code, res = post({"mode": "on"})
+        check(code == 400 and "off / dry / live" in res.get("detail", ""),
+              f"非法模式应 400：{code} {res}")
+        check(control.state()["prefold"] == "live", "非法请求不能改状态")
+
+        # 没有点击器的运行：只能 dry-run
+        no_clicker = LiveControl(available=True, prefold="off",
+                                 prefold_available=False)
+        check(no_clicker.state()["prefold"] == "off", "无点击器状态仍是 off")
+        res = no_clicker.set_prefold("live")
+        check(not res.get("ok") and res.get("prefold") == "off",
+              f"无点击器切 live 应拒绝：{res}")
+        res = no_clicker.set_prefold("dry")
+        check(res.get("ok") and res.get("prefold") == "dry",
+              f"无点击器仍可 dry-run：{res}")
+    finally:
+        server.close()
+
+
 def test_meta_preview_and_click_control() -> None:
     """工作台最小控制面：meta / preview.jpg / control/click（token 校验）。"""
     control = LiveControl(available=True, dry_run=True)
@@ -348,6 +407,7 @@ def main() -> int:
              test_store_tracks_frames_advice_hands,
         test_cards_event_updates_table_without_a_state_record,
              test_http_snapshot_static_and_sse,
+             test_prefold_control,
              test_meta_preview_and_click_control,
              test_range_api]
     print("── 实时 Web 看板 ──────────────────────────────")

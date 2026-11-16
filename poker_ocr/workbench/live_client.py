@@ -105,6 +105,14 @@ def set_click(port: int, token: str, enabled: bool, *,
                      token=token, timeout=timeout)
 
 
+def set_prefold(port: int, token: str, mode: str, *,
+                source: str = "workbench", timeout: float = 3.0) -> dict:
+    """切换预点弃牌三态（off/dry/live）；不重启 live。"""
+    return post_json(port, "/api/control/prefold",
+                     {"mode": str(mode), "source": source},
+                     token=token, timeout=timeout)
+
+
 def preview(port: int, *, width: int | None = 960, full: bool = False,
             timeout: float = 3.0) -> bytes:
     if full:

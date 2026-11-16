@@ -1,0 +1,5 @@
+{
+  "version": 1,
+  "_comment": "预点弃牌：从「哪个位置都不开池」的恒弃集合里划掉的手牌。默认空 —— 集合由 poker_ocr/preflop_ranges.py 的 RFI/limp 表派生（49 手）。key 写成 27o 这种形状；写不在集合里的手会直接报错，避免拼错了还静默生效。",
+  "exclude": []
+}

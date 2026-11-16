@@ -411,6 +411,50 @@ def has_low_straight_potential(cards) -> bool:
     return abs(ia - ib) <= 2 and min(ia, ib) < 3
 
 
+def first_open_position(key: str) -> str | None:
+    """这手牌从哪个位置开始进开池范围；哪个位置都不要就返回 None。
+
+    表是逐行累积的（BTN 最宽），所以「进不了任何一个位置」等价于「进不了
+    BTN 那一行」；仍然逐个走一遍，是为了不依赖累积这条实现细节。
+    """
+    for position in OPEN_POSITIONS:
+        if key in RFI.get(position, frozenset()):
+            return position
+    return None
+
+
+def always_fold(cards) -> bool:
+    """翻前「哪个位置都不该开池」的牌 —— 提前弃牌用。
+
+    判据（任一条不满足就不算垃圾牌）：
+
+      · 两张牌都读到了、能出 `hand_key`；
+      · 不在**任何一个**非盲位置的开池范围里；
+      · 不在 limp 白名单（小对子 / 低同花 A-K / 同花连张这类可以跟注）；
+      · 小盲补齐也不值（`sb_completable` 为假，见该函数的判据）。
+
+    典型命中：27o / 72o / 93o / Q5o —— 翻不出可下注的牌面，也没有便宜的
+    看牌理由。`A2o` 也算：A2s 在范围里，但非同花的 A2 哪个位置都不开。
+
+    **不看位置**：位置由调用方判。大盲也不排除 —— 预选在没人加注时解析成
+    「让牌」，照样免费看翻牌；有人加注才变成弃牌（2026-11-16 维护者拍板）。
+    读不出牌 / 未知一律 False：fail open，不点比点错好。
+    """
+    try:
+        if cards is None or len(cards) < 2:
+            return False
+        key = hand_key(cards)
+    except (TypeError, ValueError, IndexError):
+        return False
+    if not key or len(key) < 2:
+        return False
+    if first_open_position(key) is not None:
+        return False
+    if limp_whitelist(key):
+        return False
+    return not sb_completable(cards)
+
+
 @dataclass(frozen=True)
 class Verdict:
     """这手牌在该位置的开池归属，以及「有 limper 时的隔离归属」。

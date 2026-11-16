@@ -193,6 +193,15 @@ def create_app(*, service: WorkbenchService | None = None,
                                 detail="需要 {\"enabled\": true|false}")
         return svc.click(workspace_id, body["enabled"])
 
+    @app.post("/api/workspaces/{workspace_id}/prefold",
+              dependencies=[Depends(require_token)])
+    def prefold(workspace_id: str, body: dict = Body(...)) -> dict:
+        mode = (body or {}).get("mode")
+        if not isinstance(mode, str):
+            raise HTTPException(status_code=400,
+                                detail="需要 {\"mode\": \"off\"|\"dry\"|\"live\"}")
+        return svc.prefold(workspace_id, mode)
+
     @app.post("/api/workspaces/{workspace_id}/pin-window",
               dependencies=[Depends(require_token)])
     def pin_window(workspace_id: str) -> dict:

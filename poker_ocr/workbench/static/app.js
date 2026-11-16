@@ -1152,6 +1152,12 @@ async function pageRun(id) {
         <button class="btn btn-sm btn-primary" id="btn-start"
           ${['running', 'paused_click', 'starting'].includes(status.state) ? 'style="display:none"' : ''}>启动</button>
         <button class="btn btn-sm" id="btn-pause"></button>
+        <select class="btn btn-sm" id="sel-prefold"
+          title="预点弃牌：翻前拿到垃圾牌时，在别人行动就先点「让/弃」">
+          <option value="off">预点：关</option>
+          <option value="dry">预点：只记录</option>
+          <option value="live">预点：开</option>
+        </select>
         <a class="btn btn-sm" href="#/w/${esc(id)}/calibrate">标定</a>
         <button class="btn btn-sm" id="btn-restart">重启</button>
         <button class="btn btn-sm btn-danger" id="btn-stop">停止</button>
@@ -1283,6 +1289,22 @@ function bindRunControls(ws) {
       await pollRunStatus();
     } catch (err) { toast(err.message, 'err'); }
   });
+  const prefoldSel = document.getElementById('sel-prefold');
+  if (prefoldSel) {
+    prefoldSel.addEventListener('change', async () => {
+      const mode = prefoldSel.value;
+      try {
+        await api(`/api/workspaces/${ws.id}/prefold`, {
+          method: 'POST', body: { mode },
+        });
+        toast(mode === 'live' ? '预点弃牌已开启'
+          : mode === 'dry' ? '预点弃牌：只记录，不点鼠标' : '预点弃牌已关闭', 'ok');
+      } catch (err) {
+        toast(err.message, 'err');
+      }
+      await pollRunStatus();
+    });
+  }
   const canvas = document.getElementById('run-canvas');
   canvas.addEventListener('pointerdown', onRunCanvasClick);
   const img = document.getElementById('run-img');
@@ -1345,6 +1367,17 @@ function updateRunPage(status) {
       pauseBtn.disabled = false;
       pauseBtn.classList.toggle('active', !!click.paused);
     }
+  }
+  const prefoldSel = document.getElementById('sel-prefold');
+  if (prefoldSel) {
+    prefoldSel.value = click.prefold || 'off';
+    prefoldSel.disabled = !active;
+    // 没有点击器时只能 dry-run / off，别让用户点了才发现。
+    const liveOpt = prefoldSel.querySelector('option[value="live"]');
+    if (liveOpt) liveOpt.disabled = click.prefold_available === false;
+    prefoldSel.title = click.prefold_available === false
+      ? '本次运行没有可用点击器：只能「只记录」'
+      : '预点弃牌：翻前拿到垃圾牌时，在别人行动就先点「让/弃」';
   }
   const dash = document.getElementById('btn-dashboard');
   if (dash) {

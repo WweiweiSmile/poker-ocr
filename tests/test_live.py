@@ -481,6 +481,82 @@ def test_unreliable_cards_skip_advice_until_recovered() -> None:
           f"手牌记录应带 cards_warnings：{hand}")
 
 
+class _PreflopTrashStream:
+    """翻前、还没轮到我（hero BTN），只有盲注在池里。"""
+
+    def ingest(self, img, frame_id: str, t: float, *,
+               extra_signature: tuple | None = None) -> FrameOutcome:
+        st = FrameState(
+            frame_id=frame_id, table_seats=3, players_in_hand=3,
+            players=[
+                PlayerState("hero", name="me", position="BTN", stack=100.0,
+                            bet=0.0, in_hand=True),
+                PlayerState("a", name="A", position="SB", stack=99.0,
+                            bet=1.0, in_hand=True),
+                PlayerState("b", name="B", position="BB", stack=98.0,
+                            bet=2.0, in_hand=True),
+            ],
+            blinds=live.parse_blinds("1/2"), dealer="hero",
+            hero_seat_id="hero", hero_turn=False, pot=3.0,
+            pot_before_street=1.5)
+        return FrameOutcome("no_change", st, [], None, 0, 0)
+
+    def reset(self) -> None:      # pragma: no cover
+        pass
+
+
+class _FakePrefoldClicker:
+    def __init__(self) -> None:
+        self.pressed: list[str] = []
+
+    def press(self, button: str):
+        self.pressed.append(button)
+        return ClickResult("dry_run", action=button)
+
+
+def test_prefold_arms_before_turn_and_suppresses_advice() -> None:
+    """垃圾牌在别人行动时就预点弃牌；这一手不投建议、也不点 AI 建议。"""
+    class FakeRunner:
+        busy = False
+
+        def __init__(self) -> None:
+            self.count = 0
+
+        def submit(self, sit) -> bool:
+            self.count += 1
+            return True
+
+        def poll(self):
+            return []
+
+    runner = FakeRunner()
+    clicker = _FakePrefoldClicker()
+    logs: list[str] = []
+    tracker = LiveHandTracker(confirm_frames=1)
+    trash = SimpleNamespace(hero_codes=["7h", "2c"], board_codes=[],
+                            warnings=[], reliable=True)
+    logs = []
+    with patch.object(live, "recognize_cards", lambda img, profile: trash):
+        proc = LiveProcessor(_PreflopTrashStream(), StubWriter(), quiet=False,
+                             profile=SimpleNamespace(), hand_tracker=tracker,
+                             advice_runner=runner, clicker=clicker,
+                             prefold_mode="live", log=logs.append)
+        proc.handle(packet(1))
+        check(clicker.pressed == ["fold"],
+              f"翻前垃圾牌应先点一次「让/弃」：{clicker.pressed}")
+        check(any("预点" in line for line in logs),
+              f"预点应打日志：{logs}")
+        check(runner.count == 0, f"预点接管的这一手不该投建议：{runner.count}")
+
+        # 看不到按钮颜色（这个 profile 没槽位）→ 绝不补第二下，否则会取消预选
+        proc.handle(packet(2))
+        check(clicker.pressed == ["fold"],
+              f"看不见颜色时不许再点：{clicker.pressed}")
+
+    hand = tracker.take_current()
+    check(hand is not None, "手牌仍应被记录（只是没有建议）")
+
+
 def _incident_proc(incident: Path, logs: list[str], now: list[float]):
     return live.LiveProcessor(
         StubStateStream(), StubWriter(), quiet=True,
@@ -2736,6 +2812,7 @@ def main() -> int:
         test_auto_click_after_observe_on_next_frame,
         test_ai_advice_waits_for_hero_cards,
         test_unreliable_cards_skip_advice_until_recovered,
+        test_prefold_arms_before_turn_and_suppresses_advice,
         test_hand_memory_keeps_action_line_and_advices,
         test_hand_memory_flushes_on_switch_frame,
         test_hand_gap_without_hero_is_skipped_by_default,

@@ -37,6 +37,7 @@ extract_table.py        # 截图 → 识别结果 JSON（CLI）
 scan.py                 # ⚠ 已冻结的旧标定工具（仅保留 clean_number / preprocess / RapidEngine 被 import）
 rois.json               # ⚠ 现在是「识别结果」文件，不是配置！几何配置在 config/
 config/                 # 牌桌几何 profile（归一化坐标、环序、阈值）+ 点击器坐标 + MediaMTX
+                        # + prefold_trash.json（预点弃牌的排除名单，默认空）
 poker_ocr/              # 全部核心逻辑（64 个模块 + __init__，见 §4）
   prompt/               # 提示词包：system / user / shared / offline
   assets/               # 点数模板图集（工具生成，勿手改）
@@ -95,6 +96,7 @@ AdviceRunner（后台线程，绝不阻塞 OCR 主循环）
    │  OpenAI 兼容接口（AI_SERVER_*）
    ▼
 Advice ──┬─ Clicker                 建议落到客户端按钮（macOS CoreGraphics）
+         （翻前垃圾牌：prefold.py 在回合**之前**预点「让/弃」，不走建议链）
          ├─ JsonlWriter             logs/live.states.jsonl（即时 flush）
          ├─ LiveEventLog            logs/live.events.jsonl（帧级诊断索引）
          ├─ RangeTrace              logs/live.range.jsonl（范围推导，按天切分）
@@ -195,6 +197,7 @@ poker_ocr.workbench :8030
 | 模块 | 职责 |
 |---|---|
 | `advice.py` | `advise()`（一次建议 + 完整 prompt 快照）、`AdviceRunner`（后台、只留最新一个待办） |
+| `prefold.py` | 翻前预点弃牌：恒弃集合（49 个非同花）+ 排除名单 + 预选状态机（`armed/confirmed/spent/released/gave_up/retiring`），可注入时钟与点击器 |
 | `options.py` | 可选动作空间（翻后按池倍数、翻前按位置/前注/溜入者） |
 | `coach.py` | 规则引擎（`advise()` 纯规则版 + 牌型评估原语），被 `ground_truth` / `hand_strength` 复用 |
 | `ground_truth.py` | 不可变牌力事实；`beaten_by` / `hero_is_nuts` 用精确枚举 |
@@ -378,6 +381,8 @@ nv -m poker_ocr.live \
 #   只看建议不点击：--no-auto-click    完全自动：--no-confirm
 #   不看板/不写事件日志：--no-web --no-events --no-log-file
 #   看板端口冲突：--web-port 8021
+#   翻前垃圾牌提前弃：--prefold-trash（先 --prefold-dry-run 只看日志）
+#   预点排除名单：--prefold-exclude config/prefold_trash.json（默认就是这个）
 
 # 测试模式（按实战视频演练，不是实战）：日志写 logs/live.test.jsonl，手牌不进手牌库
 nv -m poker_ocr.live --test \
@@ -427,6 +432,7 @@ STRATEGY_TABLES_PROFILE=sourced nv -m poker_ocr.live ...
 - **`board_range.build`（旧）与 `range_flow`（新）语义不同**：旧路径按街一次过滤会丢掉上一街的收窄信息；新代码用 `range_flow`，`board_range` 只作为离线工具的 legacy 路径保留。
 - **恒定段的池级频率常数是历史统计，不是当前桌**：`AGGRESSION` 里 40% 下注率 / 14–16% PFR / 跟注站阈值来自 2026-11-04 的 665 手复盘；与实测冲突时以实测为准。
 - **攻击块必须按街分支才能写半诈唬**：河牌没有听牌，`attack._attack_word()` 在河牌用「纯诈唬」口径；把「强听」写回河牌会与「场景：河牌」直接冲突。
+- **预选「让/弃」会把左键涂红，和「轮到我」的红一样**：`measure_hero_action_buttons` 以前取 `max(左,右)`，预选之后每一帧都判「轮到我」→ 建议链会去点**右侧**（跟注/加注），27o 上就是直接烧钱。现在只看右侧（跟注/加注/All in 的蓝），左侧红只作诊断（`left_colored`）；头像槽蓝仍是主判据。改这条判据前先读 `poker_ocr/prefold.py` 的文档。
 - **`table_default` 的 `region_gate.y_max=0.855` 会切掉 WPK 竖屏 hero 的筹码胶囊**：所以 `table_wpk_live.json` 改成 `0.99`。
 - **onnxruntime 的 session 不保证线程安全**：`api.py` 用一把锁串行推理（6 并发结果一致但排队）；要吞吐只能多进程（每个 worker 各加载一份模型，内存翻倍）。
 - **OBS 虚拟摄像头固定 1920×1080**：手机源竖屏铺满时必须 `--rotate 90`，否则 ROI 被横向压扁。

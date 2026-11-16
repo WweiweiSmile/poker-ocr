@@ -27,11 +27,13 @@ sys.path.insert(0, str(ROOT))
 
 from poker_ocr.profile import Profile  # noqa: E402
 from poker_ocr.roi_reader import (  # noqa: E402
-    GLOBAL_FIELDS, ROI_PAD, SEAT_FIELDS, RoiRead, measure_hero_action_buttons,
-    measure_hero_bet_button, measure_hero_turn, read_avatars, read_frame,
+    GLOBAL_FIELDS, ROI_PAD, SEAT_FIELDS, RoiRead, measure_fold_button,
+    measure_hero_action_buttons, measure_hero_bet_button, measure_hero_turn,
+    read_avatars, read_frame,
 )
 
 WPK = ROOT / "config" / "table_wpk_1080x2400.json"
+WPK_MAC = ROOT / "config" / "table_wpk_mac.json"
 WPK_LIVE = ROOT / "config" / "table_wpk_live.json"
 LEGACY = ROOT / "config" / "table_default.json"
 
@@ -345,6 +347,73 @@ def test_hero_turn_by_action_button_colors() -> None:
               f"{name} 整体判据应判 {want}，实际 {turn}：{ev}")
 
 
+RED = (40, 40, 210)          # BGR，H≈0 —— 客户端把按钮涂成的红
+BLUE = (255, 128, 0)         # BGR，H≈105 —— 轮到我时右侧的蓝
+
+
+def _action_button_image(profile: Profile, *, left=None, right=None,
+                         size=SIZE) -> np.ndarray:
+    """黑底图，按判据自己的归一化矩形涂色（左上原点 = 探针给的原点）。"""
+    img = np.zeros((size[1], size[0], 3), dtype=np.uint8)
+    _, ev = measure_hero_action_buttons(img, profile, size=size)
+    for name, color in (("left", left), ("right", right)):
+        if color is None:
+            continue
+        x1, y1, x2, y2 = ev["rects"][name]
+        img[y1:y2, x1:x2] = color
+    return img
+
+
+def test_preselected_fold_red_is_not_my_turn() -> None:
+    """预选「让/弃」把左键涂红，和「轮到我」的红一模一样 —— 不能算回合。
+
+    旧判据 best=max(左,右) 在预选之后每一帧都判轮到我，建议链会去点右侧
+    的跟注/加注（27o 上跟注就是烧钱）。现在只看右侧，左红只做诊断。
+    """
+    profile = Profile.load(WPK)
+
+    preselected = _action_button_image(profile, left=RED)
+    turn, ev = measure_hero_action_buttons(preselected, profile)
+    check(turn is False, f"左红右灰不该判轮到我：{turn} {ev}")
+    check(ev["left_colored"] > 0.9, f"左键诊断值应认出红：{ev}")
+    check(ev["colored"] < 0.05, f"判定值应只看右侧：{ev}")
+    turn, ev = measure_hero_turn(preselected, profile, StubEngine({}))
+    check(turn is False, f"整条判据也不该判轮到我：{turn} {ev}")
+
+    # 真的轮到我：左侧照样红，区别在右侧变蓝
+    my_turn = _action_button_image(profile, left=RED, right=BLUE)
+    turn, ev = measure_hero_action_buttons(my_turn, profile)
+    check(turn is True, f"右蓝应判轮到我：{turn} {ev}")
+
+    # 只有右侧蓝、左侧灰（All in 且弃牌钮不在左边）也要判得出来
+    turn, ev = measure_hero_action_buttons(
+        _action_button_image(profile, right=BLUE), profile)
+    check(turn is True, f"仅右蓝也应判轮到我：{turn} {ev}")
+
+
+def test_measure_fold_button_colors() -> None:
+    """「让/弃」按钮颜色：预选生效 = 灰→红；没槽位的 profile 明确说不支持。"""
+    profile = Profile.load(WPK_MAC)
+    slot = profile.global_slots.get("hero_fold_button")
+    check(slot is not None, "table_wpk_mac 应标了 hero_fold_button 槽位")
+
+    img = np.zeros((SIZE[1], SIZE[0], 3), dtype=np.uint8)
+    out = measure_fold_button(img, profile)
+    check(out.get("available") is True, f"有槽位应 available：{out}")
+    check(out["red"] < 0.02, f"黑底不该读出红：{out}")
+
+    x1, y1, x2, y2 = profile.slot_to_px(slot, SIZE, pad=0.0)
+    img[y1:y2, x1:x2] = RED
+    out = measure_fold_button(img, profile)
+    check(out["red"] > 0.9, f"涂红后应读出红：{out}")
+
+    # 没有槽位（1080x2400 / live）→ 明确返回不可用，调用方据此不重试
+    out = measure_fold_button(np.zeros((SIZE[1], SIZE[0], 3), np.uint8),
+                              Profile.load(WPK))
+    check(out.get("available") is False, f"无槽位应 available=False：{out}")
+    check("hero_fold_button" in out.get("why", ""), f"要说清缺的是哪个槽：{out}")
+
+
 def test_hero_turn_unknown_without_the_slot() -> None:
     """老配置没有 hero_turn_probe：报 None + 原因，不能猜。"""
     profile = Profile.load(LEGACY)
@@ -468,6 +537,8 @@ def main() -> int:
         test_hero_turn_by_blue_bet_button,
         test_hero_turn_blue_button_without_legacy_probe,
         test_hero_turn_by_action_button_colors,
+        test_preselected_fold_red_is_not_my_turn,
+        test_measure_fold_button_colors,
         test_hero_turn_unknown_without_the_slot,
         test_score_is_the_worst_box_and_text_is_concatenated,
         test_legacy_profile_degrades_with_a_note_not_a_crash,

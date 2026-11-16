@@ -441,8 +441,10 @@ def _red_fraction(roi: np.ndarray) -> float:
 
 
 # 底部左右两个动作按钮的位置（归一化，WPK 1080x2400 布局）。
-# 左：弃牌（回合红 / 非回合灰）；右：跟注/加注/All in（回合蓝 / 非回合灰）。
-# 只取按钮本身，避开中间的 hero 头像与手牌，防止头像照片里的红/蓝被骗到。
+# 左：弃牌（回合红 / 非回合灰）。**不参与回合判定**：预选「让/弃」也把它
+#     涂红，和「回合红」是同一个颜色 —— 用它判回合，预选之后每一帧都会被
+#     误判成「轮到我」，建议链和自动点击会去点右侧的跟注/加注。
+# 右：跟注/加注/All in（回合蓝 / 非回合灰）。预选不动这一侧，判回合只看它。
 _HERO_ACTION_BUTTONS: dict[str, Slot] = {
     "left": (0.17, 0.795, 0.35, 0.875),
     "right": (0.66, 0.795, 0.88, 0.875),
@@ -454,20 +456,26 @@ _HERO_ACTION_COLOR_MIN = 0.15
 def measure_hero_action_buttons(img: np.ndarray, profile: Profile,
                                 size: Size | None = None
                                 ) -> tuple[bool, dict]:
-    """底部动作按钮的颜色 → 轮到 hero 了吗。
+    """底部**右侧**动作按钮的颜色 → 轮到 hero 了吗。
 
     真机四种状态（images/position/）：
 
       · action_me / byCover —— 轮到我：左按钮红、右按钮蓝（All in），占比 0.27–0.34
+      · 预选「让/弃」后（别人还在行动）—— 左按钮被客户端涂红、右按钮仍是灰的
       · noFold —— 没轮到我但还没弃牌：左右按钮都是灰的，红/蓝占比 0.00
       · fold —— 已经弃牌：按钮整块消失，红/蓝占比 0.00
+
+    只看**右侧**：左侧的红在「轮到我」和「我已预选」两种状态下完全一样
+    （2026-11-16 维护者实测：预选生效 = 按钮背景灰→红），拿它判回合会在
+    预选之后永久误判。右侧的蓝只在真的轮到我时出现，预选不动它。
 
     这条判据补上了旧「蓝色按钮覆盖 hero 头像槽」的漏洞：只剩弃牌 / All in 时，
     蓝色按钮在右下角而不是头像位置，旧判据会把**轮到我**误判成 False。
     """
     size = size or (img.shape[1], img.shape[0])
     evidence: dict = {"method": "action_buttons", "rects": {}}
-    best = 0.0
+    right = 0.0
+    left = 0.0
     for name, slot in _HERO_ACTION_BUTTONS.items():
         rect, roi = crop_slot(img, profile, slot, size, pad=0.0)
         red = _red_fraction(roi)
@@ -475,9 +483,39 @@ def measure_hero_action_buttons(img: np.ndarray, profile: Profile,
         evidence["rects"][name] = list(rect)
         evidence[f"{name}_red"] = round(red, 4)
         evidence[f"{name}_blue"] = round(blue, 4)
-        best = max(best, red + blue)
-    evidence["colored"] = round(best, 4)
-    return best >= _HERO_ACTION_COLOR_MIN, evidence
+        if name == "right":
+            right = red + blue
+        else:
+            left = red + blue
+    evidence["colored"] = round(right, 4)
+    # 左键只留作诊断：它红着不等于轮到我（可能是我自己预选了弃牌）。
+    evidence["left_colored"] = round(left, 4)
+    return right >= _HERO_ACTION_COLOR_MIN, evidence
+
+
+def measure_fold_button(img: np.ndarray, profile: Profile,
+                        size: Size | None = None) -> dict:
+    """左下「让/弃」按钮的颜色 → 预选挂上了没有。
+
+    预选生效时按钮背景**灰→红**（2026-11-16 维护者实测）；轮到我时它也是
+    红的，所以只有 `hero_turn is False` 时，红才读作「预选已挂上」。
+
+    槽位取 `global_slots["hero_fold_button"]`（table_wpk_mac 有此槽位）。
+    没有这个槽位就返回 `available=False`：调用方据此退化成「不重试」——
+    看不到颜色时盲点第二次会把刚挂上的预选**取消**掉。
+    """
+    size = size or (img.shape[1], img.shape[0])
+    slot = profile.global_slots.get("hero_fold_button")
+    if slot is None:
+        return {"available": False, "why": "profile 里没有 hero_fold_button 槽位"}
+    rect, roi = crop_slot(img, profile, slot, size, pad=0.0)
+    return {
+        "available": True,
+        "method": "fold_button",
+        "rect": list(rect),
+        "red": round(_red_fraction(roi), 4),
+        "blue": round(_blue_fraction(roi), 4),
+    }
 
 
 def measure_hero_bet_button(img: np.ndarray, profile: Profile,
@@ -537,10 +575,13 @@ def measure_hero_turn(img: np.ndarray, profile: Profile, engine: OcrEngine,
 
     **优先走视觉判据**（`hero_turn_method = "blue_button"`），两条独立证据取并集：
     `measure_hero_bet_button` 判头像槽是否被蓝色按钮覆盖；`measure_hero_action_buttons`
-    判底部左右按钮是不是红/蓝。后者专门覆盖「只剩弃牌 + All in」——此时蓝色按钮在
+    判底部**右侧**按钮是不是蓝的。后者专门覆盖「只剩弃牌 + All in」——此时蓝色按钮在
     右下角，头像槽判据会漏。两条都明确否定才判 False；否则回退到旧的
     `hero_turn_probe`（第一个预设钮的 BB 值行）文本判据 —— 老配置（table_default 等）
     没有蓝色按钮，仍然能工作。
+
+    左侧那颗「让/弃」不参与判定：预选它之后它也是红的，和「回合红」不可分
+    （见 `measure_hero_action_buttons` 的 docstring）。
 
     旧判据为什么不删：它是 1080x2400 那套 UI 的实测结论（见配置的
     `_hero_turn_comment`），而且蓝色按钮在别的皮肤/分辨率上未必存在。
@@ -551,7 +592,7 @@ def measure_hero_turn(img: np.ndarray, profile: Profile, engine: OcrEngine,
     bet_ev: dict = {}
     if method == "blue_button":
         bet_turn, bet_ev = measure_hero_bet_button(img, profile, engine, size, cache)
-        # 第二条独立判据：底部左右按钮的颜色。旧判据只看 hero 头像槽，
+        # 第二条独立判据：底部**右侧**按钮的颜色。旧判据只看 hero 头像槽，
         # 「只剩弃牌 / All in」时蓝色按钮在右下角，会漏判成 False。
         btn_turn, btn_ev = measure_hero_action_buttons(img, profile, size)
         if bet_turn is True:

@@ -80,7 +80,7 @@ from .full_table import (DealerTracker, FullOutcome, FullStateRecorder,
                          FullTableConfig, load_full_config, observe_full)
 from .hand_outbox import HandOutbox
 from .hand_ingest import HandIngestWorker, IngestConfig
-from .hand_track import LiveHandTracker
+from .hand_track import PREFLOP, LiveHandTracker
 from .live_log import (ConsoleLog, LiveEventLog, derive_console_path,
                        derive_event_path)
 from .live_web import (LiveControl, LiveWebServer, PreviewStore,
@@ -88,9 +88,13 @@ from .live_web import (LiveControl, LiveWebServer, PreviewStore,
 from .name_lexicon import NameLexicon, duplicate_pairs
 from .ocr import OcrEngine
 from .parse import parse_blinds
+from .prefold import (DEFAULT_EXCLUDE_PATH as DEFAULT_PREFOLD_EXCLUDE,
+                      MODE_DRY, MODE_LIVE, MODE_OFF, MODES as PREFOLD_MODES,
+                      PrefoldManager, load_exclude)
+from .preflop_ranges import always_fold, hand_key
 from .profile import Profile
 from .roi_dedup import pixel_mad
-from .roi_reader import hero_turn_method
+from .roi_reader import hero_turn_method, measure_fold_button
 from .state_stream import DEFAULT_ROI_THREADS, StateStream
 from .opponent_profile import (DEFAULT_PROFILE_PATH as DEFAULT_OPPONENT_DB,
                                ProfileStore, format_read_line,
@@ -1152,6 +1156,44 @@ def _open_capture(url: str):
 
 # ─────────────────────────── 处理 ───────────────────────────
 
+class _PrefoldSkip:
+    """预点没点成时的替身结果（形状与 `ClickResult` 一致）。"""
+
+    status = "skipped"
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+
+
+class _PrefoldPresser:
+    """给预点用的点击入口：每次现取 `clicker`，并尊重「暂停自动点击」总闸。
+
+    预点在自己那一层还有 off/dry/live 三态；这里的总闸是工作台上的
+    「暂停自动点击」——用户按下它，意味着「这一手别替我点鼠标」，预点也
+    必须停手，否则暂停就名不副实。
+    """
+
+    def __init__(self, owner) -> None:
+        self._owner = owner
+
+    def press(self, button: str):
+        owner = self._owner
+        control = getattr(owner, "control", None)
+        if control is not None:
+            try:
+                if not control.state().get("enabled", True):
+                    return _PrefoldSkip("auto_click_paused")
+            except Exception:            # noqa: BLE001 — 控制面读不到就照常点
+                pass
+        clicker = getattr(owner, "clicker", None)
+        if clicker is None:
+            return _PrefoldSkip("no_clicker")
+        press = getattr(clicker, "press", None)
+        if press is None:
+            return _PrefoldSkip("clicker_without_press")
+        return press(button)
+
+
 class LiveProcessor:
     """一帧包的完整处理：限速、断流重置、OCR、写 JSONL。单线程调用。"""
 
@@ -1173,6 +1215,8 @@ class LiveProcessor:
                  click_executor=None,
                  confirm_click: bool = False,
                  confirm_timeout: float = 6.0,
+                 prefold_mode: str = MODE_OFF,
+                 prefold_exclude: frozenset[str] | None = None,
                  min_advice_confidence: float = 0.0,
                  cross_check_mode: str = "block",
                  table_dynamics_loader: Callable[[], TableDynamics] | None = None,
@@ -1292,6 +1336,16 @@ class LiveProcessor:
         self._last_advice = None
         self.clock = clock
         self.log = log
+        # 提前弃牌：翻前拿到「哪儿都不开池」的垃圾牌时，在别人行动就先点灰的
+        # 「让/弃」，回合一到由客户端自动弃牌。默认关闭 —— 它会在**轮到我
+        # 之前**点鼠标，必须显式开启（`--prefold-trash`）。判定与状态机都在
+        # `poker_ocr/prefold.py`；这里只负责喂帧、打日志、压住建议。
+        self.prefold_mgr = PrefoldManager(
+            mode=prefold_mode,
+            clicker=_PrefoldPresser(self),
+            exclude=prefold_exclude or frozenset(),
+            log=self.log)
+        self._prefold_owned_hand: str | None = None   # 已接管的手，避免重复打日志
         # 事件出口：main() 里接成「写 live.events.jsonl + 推 Web 看板」。
         # None = 不产生事件（单测/只跑识别时零开销）。回调自身必须吞异常，
         # 这里再包一层 _publish()，保证日志/看板永远不能拖垮 OCR。
@@ -1694,6 +1748,89 @@ class LiveProcessor:
         self.gate_dumps += 1
         self.last_gate_dump = str(folder)
 
+    # ── 翻前预点弃牌 ────────────────────────────────────────────
+    def set_prefold_mode(self, mode: str) -> None:
+        """工作台热切换预点开关：off / dry / live，不重启也不重建点击器。"""
+        try:
+            warnings = self.prefold_mgr.set_mode(mode)
+        except ValueError as exc:
+            self.log(f"  [预点] 切换失败：{exc}")
+            return
+        self._prefold_owned_hand = None
+        if mode == MODE_OFF:
+            self.log("  [预点] 已关闭（不再提前点「让/弃」）")
+        elif mode == MODE_DRY:
+            self.log("  [预点] 已开启 dry-run：只记日志，不点鼠标")
+        else:
+            self.log("  [预点] 已开启：翻前垃圾牌在别人行动时预点「让/弃」")
+        self._publish("prefold", {
+            "kind": "mode", "mode": mode,
+            "detail": "；".join(warnings) if warnings else "",
+            "captured_at": _iso_now(),
+        })
+        for warning in warnings:
+            self.log(f"  [预点] {warning}")
+
+    def _prefold_candidate(self, cards: CardsResult | None) -> bool:
+        """这一帧的底牌是否在「恒弃」集合里（不看位置，也不看街道）。"""
+        if cards is None:
+            return False
+        codes = tuple(cards.hero_codes or ())
+        if len(codes) != 2:
+            return False
+        try:
+            key = hand_key(codes)
+        except (TypeError, ValueError, IndexError):
+            return False
+        if key in self.prefold_mgr.exclude:
+            return False
+        return always_fold(codes)
+
+    def _prefold_owns(self, cards: CardsResult | None) -> bool:
+        """这一手是否由预点接管：接管期间不投建议，也不点 AI 建议。"""
+        mgr = self.prefold_mgr
+        if mgr.mode == MODE_OFF:
+            return False
+        hand = self.hand_tracker.hand if self.hand_tracker is not None else None
+        hand_id = getattr(hand, "hand_id", None)
+        if mgr.active(hand_id):
+            return True
+        if cards is None or not getattr(cards, "reliable", True):
+            return False
+        street = getattr(hand, "street", None)
+        if street not in (None, PREFLOP):
+            return False
+        return self._prefold_candidate(cards)
+
+    def _service_prefold(self, outcome, cards: CardsResult | None) -> None:
+        """把这一帧喂给预点状态机；点不点、点几次都由它决定。"""
+        mgr = self.prefold_mgr
+        state = outcome.state
+        # 关掉之后还要把「取消预选」这一按做完（retiring），所以不能只判 mode。
+        if state is None or not state.ok:
+            return
+        if mgr.mode == MODE_OFF and not mgr.retiring:
+            return
+        hand = self.hand_tracker.hand if self.hand_tracker is not None else None
+        fold = None
+        image = self._last_image
+        if image is not None and self.profile is not None:
+            try:
+                fold = measure_fold_button(image, self.profile)
+            except Exception as exc:     # noqa: BLE001 — 读颜色失败不中断识别
+                fold = {"available": False,
+                        "why": f"{type(exc).__name__}: {exc}"}
+        event = mgr.update(
+            hand_id=getattr(hand, "hand_id", None),
+            street=getattr(hand, "street", None),
+            hero_cards=(cards.hero_codes if cards is not None else ()),
+            cards_reliable=bool(getattr(cards, "reliable", True)),
+            hero_turn=state.hero_turn,
+            fold=fold)
+        if event is None:
+            return
+        self._publish("prefold", {**event.to_payload(), "captured_at": _iso_now()})
+
     def _track_hand(self, outcome, cards: CardsResult | None) -> None:
         """累积行动线；轮到我时把决策点投给后台建议线程。
 
@@ -1751,6 +1888,21 @@ class LiveProcessor:
         # 必须显式打一行警告，否则「这手为什么没建议」无从追查。
         if bet_warnings:
             self._log_bet_degraded(outcome.state, bet_warnings)
+        # 预点早弃：这一手是「哪个位置都不开池」的垃圾牌时，由预点接管 ——
+        # 不投建议，也不让建议链去点按钮。判定只看底牌与街道，不看轮到我
+        # 与否：真正点击由 `_service_prefold` 在龙头时刻决定。
+        prefold_owns = self._prefold_owns(cards)
+        if prefold_owns:
+            hand_now = (self.hand_tracker.hand
+                        if self.hand_tracker is not None else None)
+            hand_id_now = getattr(hand_now, "hand_id", None)
+            if self._prefold_owned_hand != hand_id_now:
+                self._prefold_owned_hand = hand_id_now
+                # 别让上一帧排进去的 AI 点击落到这一手：预点已经接管。
+                self._pending_decision_key = None
+                self._deferred_click = None
+                self._click_retry = None
+                self.log("  [预点] 这一手由预点接管：不投建议，AI 点击链作废")
         # 上一次建议因为「这一帧不能点」被挂起：画面恢复了就补点。
         self._service_deferred_click(
             outcome.state, allow_click=cards_reliable and not bet_warnings)
@@ -1790,8 +1942,15 @@ class LiveProcessor:
             allow_advice=(self.advice_runner is not None
                           and not getattr(self.advice_runner, "busy", False)
                           and self._advice_lock is None
-                          and not bet_warnings))
-        if (point is None and outcome.state.hero_turn is True
+                          and not bet_warnings
+                          and not prefold_owns))
+        if point is not None and not prefold_owns and self._prefold_owns(cards):
+            # 换手的第一帧：observe 之前 hand 还是上一手（街次可能不是翻前），
+            # 现在手牌已经换成这一手了，补一次判定，把刚排上的建议收回。
+            prefold_owns = True
+            point = None
+        if (point is None and not prefold_owns
+                and outcome.state.hero_turn is True
                 and not cards_reliable):
             if self._log_cards_skip(outcome.state, cards_warnings):
                 hand = self._current_hand() or {}
@@ -1803,8 +1962,8 @@ class LiveProcessor:
                     "pot": outcome.state.pot,
                     "captured_at": _iso_now(),
                 })
-        elif (point is None and outcome.state.hero_turn is True
-                and bet_warnings):
+        elif (point is None and not prefold_owns
+                and outcome.state.hero_turn is True and bet_warnings):
             if self._log_bet_skip(outcome.state, bet_warnings):
                 hand = self._current_hand() or {}
                 self._publish("advice_skip", {
@@ -1815,8 +1974,8 @@ class LiveProcessor:
                     "pot": outcome.state.pot,
                     "captured_at": _iso_now(),
                 })
-        elif (point is None and outcome.state.hero_turn is True
-                and self.hand_tracker.skip_reason):
+        elif (point is None and not prefold_owns
+                and outcome.state.hero_turn is True and self.hand_tracker.skip_reason):
             # 本街底池账单对不上（有人下注读小了 / 漏抓了行动）：to_call 会算小，
             # 宁可这一帧不给建议，也不推一条「只需跟 1BB」。
             reason = self.hand_tracker.skip_reason
@@ -1836,8 +1995,10 @@ class LiveProcessor:
         # 这里是**唯一允许自动点击**的 drain：state 与 hand_id 都是当前帧的，
         # 牌面不可靠 / 下注水位不可信时也不点（allow_click=False），
         # 避免错误手牌或错金额上的建议被执行。
+        self._service_prefold(outcome, cards)
         self.drain_advice(state=outcome.state,
-                          allow_click=cards_reliable and not bet_warnings)
+                          allow_click=(cards_reliable and not bet_warnings
+                                       and not prefold_owns))
         if point is not None:
             self.advice_count += 1
             if self.advice_runner is not None:
@@ -3159,6 +3320,17 @@ def build_parser() -> argparse.ArgumentParser:
                     help="滑杆操作参数 JSON（默认 config/bet_slider_mac.json）")
     ap.add_argument("--clicker-dry-run", action="store_true",
                     help="只打印将要点到的随机坐标，不发送真实鼠标事件")
+    ap.add_argument("--prefold-trash", action="store_true",
+                    help="翻前拿到「哪个位置都不开池」的垃圾牌（27o 这类）时，"
+                         "在别人行动就先点灰的「让/弃」，轮到我时客户端自动"
+                         "弃牌；需要 --auto-click。默认关闭")
+    ap.add_argument("--prefold-dry-run", action="store_true",
+                    help="预点弃牌只记日志、不点鼠标（用来先看几手判得对不对）；"
+                         "需要 --auto-click，且不能与 --prefold-trash 同用")
+    ap.add_argument("--prefold-exclude", type=Path,
+                    default=Path(DEFAULT_PREFOLD_EXCLUDE),
+                    help="从恒弃集合里划掉的手牌 JSON（默认 "
+                         "config/prefold_trash.json；文件不存在表示不划掉任何手）")
     ap.add_argument("--confirm-timeout", type=float, default=6.0,
                     help="终端确认最多等几秒（0 = 一直等）；超时按拒绝处理，"
                          "避免把识别主循环挂在一次按键上")
@@ -3268,6 +3440,16 @@ def _validate_args(ap: argparse.ArgumentParser, args) -> None:
         ap.error("--clicker-dry-run 需要配合 --auto-click 使用")
     if args.clicker_config is not None and not args.auto_click:
         ap.error("--clicker-config 需要配合 --auto-click 使用")
+    if (args.prefold_trash or args.prefold_dry_run) and not args.auto_click:
+        ap.error("--prefold-trash / --prefold-dry-run 需要配合 --auto-click 使用")
+    if args.prefold_trash and args.prefold_dry_run:
+        ap.error("--prefold-trash 与 --prefold-dry-run 只能二选一")
+    try:
+        args.prefold_exclude_keys = load_exclude(args.prefold_exclude)
+    except ValueError as exc:
+        ap.error(f"--prefold-exclude：{exc}")
+    args.prefold_mode = (MODE_LIVE if args.prefold_trash
+                         else MODE_DRY if args.prefold_dry_run else MODE_OFF)
     if args.bet_slider and not args.auto_click:
         ap.error("--bet-slider 需要配合 --auto-click 使用")
     if args.bet_slider_only and not args.bet_slider:
@@ -3439,7 +3621,9 @@ def _build_runtime(ap: argparse.ArgumentParser, args, env_load) -> _Runtime:
     # 点击控制面始终存在（看板显示状态用），但没开点击器时 available=False，
     # 暂停/恢复都是 no-op。
     control = LiveControl(available=bool(args.auto_click),
-                          dry_run=bool(args.clicker_dry_run))
+                          dry_run=bool(args.clicker_dry_run),
+                          prefold=args.prefold_mode,
+                          prefold_available=bool(args.auto_click))
     meta_state: dict = {"processor": None,
                         "window": _resolve_source_window(args.url)}
     session_meta = {
@@ -3867,6 +4051,10 @@ def _build_runtime(ap: argparse.ArgumentParser, args, env_load) -> _Runtime:
             "record_without_hero": bool(args.record_without_hero)}
            if args.ai_advice else {}),
         "auto_click": bool(args.auto_click),
+        **({"prefold": {"mode": args.prefold_mode,
+                        "path": str(args.prefold_exclude),
+                        "exclude": sorted(args.prefold_exclude_keys)}}
+           if args.prefold_mode != MODE_OFF else {}),
         **({"clicker_config": str(args.clicker_config or DEFAULT_CLICKER_CONFIG),
             "clicker_dry_run": bool(args.clicker_dry_run),
             "click_confirm": not args.no_confirm}
@@ -3915,6 +4103,8 @@ def _build_runtime(ap: argparse.ArgumentParser, args, env_load) -> _Runtime:
                         else None),
         confirm_click=not args.no_confirm,
         confirm_timeout=args.confirm_timeout,
+        prefold_mode=args.prefold_mode,
+        prefold_exclude=args.prefold_exclude_keys,
         min_advice_confidence=args.min_advice_confidence,
         cross_check_mode=args.cross_check,
         table_dynamics_loader=load_table_dynamics if args.ai_advice else None,
@@ -3933,6 +4123,9 @@ def _build_runtime(ap: argparse.ArgumentParser, args, env_load) -> _Runtime:
 
     # 工作台「暂停点击」：开关一变就作废待执行/补点/重试的点击。
     control.add_listener(processor.reset_pending_clicks)
+    # 工作台「预点弃牌」三态切换：不重启 live，只改状态机模式；从 live/off
+    # 切走时若预选还挂着，processor 会按一下取消。
+    control.add_prefold_listener(processor.set_prefold_mode)
     meta_state["processor"] = processor
 
     # 动作区静止闸只用于 roi 路线：它的区域来自固定槽位；full 路线没有布局。

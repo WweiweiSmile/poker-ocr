@@ -579,6 +579,25 @@ class WorkbenchService:
                 state.get("detail") or "本次运行未启用自动点击", status=409)
         return state
 
+    def prefold(self, workspace_id: str, mode: str) -> dict:
+        """运行中热切换「预点弃牌」：off / dry / live（不重启 live）。"""
+        if mode not in ("off", "dry", "live"):
+            raise WorkbenchError("mode 只能是 off / dry / live", status=400)
+        run = self.supervisor.status().get("run") or {}
+        if not run or run.get("workspace_id") != workspace_id:
+            raise WorkbenchError("工作区没有在运行", status=409)
+        if not run.get("alive"):
+            raise WorkbenchError("live 进程已退出", status=409)
+        try:
+            state = live_client.set_prefold(
+                run["port"], self.supervisor.current().token, mode)
+        except live_client.LiveClientError as exc:
+            raise WorkbenchError(str(exc), status=502) from exc
+        if not state.get("ok"):
+            raise WorkbenchError(
+                state.get("detail") or "预点弃牌切换失败", status=409)
+        return state
+
     # ─────────────────────────── 预览 / 布局 ───────────────────────────
     def preview_jpeg(self, workspace_id: str, *, width: int,
                      full: bool = False) -> tuple[bytes, dict]:
