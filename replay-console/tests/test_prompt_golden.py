@@ -5,7 +5,8 @@
   1. bump replay/versioning.py 的 CURRENT_ADVICE_VERSION
   2. 更新下面的 EXPECTED_PROMPT_HASH（改动只落在 3-bet 池的翻后局面时，
      改的是 EXPECTED_THREE_BET_PROMPT_HASH——那个 fixture 才会渲染
-     `_THREE_BET`；单加注翻后的 fixture 对它看不见）
+     `_THREE_BET`；改动只落在空气 c-bet 段（AIR_RULES）时，改的是
+     EXPECTED_AIR_PROMPT_HASH——顶对 fixture 走 MADE_RULES，看不见它）
 """
 
 from __future__ import annotations
@@ -20,9 +21,10 @@ from poker_ocr.parse import Blinds
 
 from replay.versioning import CURRENT_ADVICE_VERSION
 
-EXPECTED_ADVICE_VERSION = "advice-2026-11-16.2"
+EXPECTED_ADVICE_VERSION = "advice-2026-11-16.3"
 EXPECTED_PROMPT_HASH = "0e977f0f529b80f294c83f059af19577eeea3b8982610ea621795c5fea8b424e"
 EXPECTED_THREE_BET_PROMPT_HASH = "90556a6ba17d9c49d46eb2040c40132e5fbb8e54d6059d3d5e885457da96cc06"
+EXPECTED_AIR_PROMPT_HASH = "c6e288d6758ba77007f182f77248d26d870c0a06e2e7e04f6c2726d13b888ac9"
 
 # 快照没有可用画像，所以「对手画像」段只有标题 + 缺口说明；
 # witness 数据落地前这一段必须逐字节不变（spec §15.1）。
@@ -127,3 +129,51 @@ def test_three_bet_prompt_golden_tracks_prior_width():
     assert digest == EXPECTED_THREE_BET_PROMPT_HASH, (
         "3-bet 提示词内容变了。若这是有意的，请 bump CURRENT_ADVICE_VERSION 并更新 "
         "EXPECTED_THREE_BET_PROMPT_HASH；否则说明当前版本语义已经漂移。")
+
+
+def _air_snapshot() -> HandSnapshot:
+    """单高张翻牌 miss、没人下注（#43）。
+
+    只有这个 fixture 会渲染 AIR_RULES 的 c-bet 段；上面那个顶对 fixture 走
+    MADE_RULES，对 #43 的合并（两高张/单高张/0-out 同一套）是瞎的——加这个
+    快照就是为了把「单高张不套用」这个分叉钉死，别让它悄悄回来。
+    """
+    return HandSnapshot(
+        hand_id="golden-air", hand_index=0, street="flop",
+        board=("Kh", "8c", "2d"), hero_cards=("Ad", "Qc"),
+        hero_position="BTN", hero_stack=92.0, hero_bet=0.0,
+        hero_invested=8.0, to_call=0.0, second_bet=None,
+        pot=17.5, pot_before_street=17.0, table_size=6,
+        blinds=Blinds(0.5, 1.0, None, "0.5/1.0"),
+        opponents=(
+            OpponentSnapshot("CO", None, "CO", 100.0, 8.0, False),
+            OpponentSnapshot("BB", None, "BB", 100.0, 8.0, False),
+        ),
+        streets=(
+            StreetRecord("preflop", 1.5, (
+                ActionRecord("preflop", "hero", None, "BTN", "raise", 8.0, False, True),
+                ActionRecord("preflop", "CO", None, "CO", "call", 8.0, False, False),
+                ActionRecord("preflop", "BB", None, "BB", "call", 8.0, False, False),
+            )),
+            StreetRecord("flop", 17.0, (
+                ActionRecord("flop", "CO", None, "CO", "check", 0.0, False, False),
+                ActionRecord("flop", "BB", None, "BB", "check", 0.0, False, False),
+            )),
+        ),
+        preflop_shapes=("single-raise",), hero_is_pfr=True, cbet_spot=True,
+        decision_key=("golden-air", "flop", 0, 17.5, 0.0), warnings=(),
+        bomb_pot=False, players_dealt=6,
+    )
+
+
+def test_air_prompt_golden_pins_unified_air_rule():
+    """#43：两高张、单高张、0-out 纯空气共用同一套 c-bet 口径。"""
+    sit = build_situation(_air_snapshot(), table_dynamics="")
+    system, user = build_messages(sit)
+    assert "空气 c-bet" in system
+    assert "单高张、0-out 纯空气同一套" in system
+    assert "单高张不套用" not in system, "「单高张不套用」是 #43 收掉的分叉，不能回来"
+    digest = hashlib.sha256((system + "\n---\n" + user).encode()).hexdigest()
+    assert digest == EXPECTED_AIR_PROMPT_HASH, (
+        "空气段提示词变了。若这是有意的，请 bump CURRENT_ADVICE_VERSION 并更新 "
+        "EXPECTED_AIR_PROMPT_HASH；否则说明 #43 的一套口径又漂移了。")

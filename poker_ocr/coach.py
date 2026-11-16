@@ -959,7 +959,7 @@ def _fold_at(fold_eq: dict[float, SizeFold] | None, frac: float) -> SizeFold | N
 def _air_cbet(hand: Read, texture: str, line: Line, pot: float,
               in_position: bool | None,
               fold_eq: dict[float, SizeFold] | None) -> Decision:
-    """两高张 miss 的翻牌 c-bet（#41 口径，2026-11-16 维护者确认）。
+    """空气 miss 的翻牌 c-bet（#41 口径，#43 扩到单高张与 0-out 空气）。
 
     默认 1/3。湿面（花/顺/花顺）只在「有位置 **且** 1/3 这个尺寸的弃牌率
     事实达标」时才开一枪 —— 没有本手数据就过牌，不猜。升到 1/2 还要再加
@@ -974,7 +974,7 @@ def _air_cbet(hand: Read, texture: str, line: Line, pot: float,
                         line.warnings, line)
     if texture == PAIRED_BOARD:
         return Decision(True, "check", None, hand, texture,
-                        f"{hand.label}：公对面，两高张反超时会撞上葫芦/明三条 → 过牌。",
+                        f"{hand.label}：公对面，反超张会撞上葫芦/明三条 → 过牌。",
                         line.warnings, line)
 
     base = 1.0 / 3.0
@@ -1096,14 +1096,12 @@ def _checked_to_hero(hand: Read, texture: str, line: Line, pot: float,
                         f"{hand.label}：不足 8 outs，过牌（§5）。", line.warnings, line)
 
     # ── 空气：§6 cbet（只有翻前加注者才开火） ──
-    # 两高张单独走 #41 的口径（默认 1/3、按牌面/位置/条件弃牌率做门）；
-    # 单高张与无高张的纯空气仍是旧线，归 #43 另议。
-    if hand.two_overcards and line.hero_is_pfr:
+    # 所有空气共用 #41 的 EV 口径（默认 1/3、按牌面/位置/条件弃牌率做门）：
+    # 单高张（3 outs）与 0-out 空气的 E 差异由 breakeven 自己吸收，
+    # 不再需要第二套阈值（#43 Q1，2026-11-16 维护者确认）。
+    if hand.tier == AIR and line.hero_is_pfr:
         return _air_cbet(hand, texture, line, pot, in_position, fold_eq)
-    if line.hero_is_pfr and not multiway:
-        return Decision(True, "bet", _bet(pot, "1/2"), hand, texture,
-                        "我是翻前加注者、对手过牌示弱，按 §6 持续下注 1/2 池。",
-                        line.warnings, line)
+    # 走到这里的空气都不是翻前加注者——PFR 的空气上面已由 _air_cbet 决定。
     return Decision(True, "check", None, hand, texture,
                     f"{hand.label}，过牌（§3 说不出理由的下注就是漏损）。",
                     line.warnings, line)

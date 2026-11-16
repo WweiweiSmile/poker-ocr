@@ -282,14 +282,61 @@ def test_air_cbet_half_pool_needs_dry_ip_heads_up() -> None:
           f"1/2 只有 10% 弃牌率时退回 1/3，实际 {d.action} {d.sizing_bb}（{d.reason}）")
 
 
-def test_single_overcard_air_keeps_old_line() -> None:
-    """A/K 高面单高张归 #43，本票不动它的既有口径（单挑仍 1/2）。"""
+def test_single_overcard_air_uses_air_cbet() -> None:
+    """单高张 miss 走 #41 的同一套口径：默认 1/3，不再是硬编码 1/2（#43 Q1）。"""
     d = advise("AdQd", "Kh8c2d", pot=9, actions=pfr_checked(),
                hero_position="BTN", opponents=1)
     check(d.hand.tier == "空气" and d.hand.label == "高牌(3 outs)",
           f"AQ 在 K82 应是单高张(3 outs)，实际 {d.hand.tier}/{d.hand.label}")
-    check(d.action == "bet" and d.sizing_bb == 4.5,
-          f"单高张本票不改口径（仍 1/2 = 4.5），实际 {d.action} {d.sizing_bb}")
+    check(d.action == "bet" and d.sizing_bb == 3.0,
+          f"单挑干燥面单高张应下 1/3（3.0），实际 {d.action} {d.sizing_bb}（{d.reason}）")
+    check("两高张" not in d.reason and "6 outs" not in d.reason,
+          f"单高张不是两高张，reason 不得这么写：{d.reason}")
+    check("听" not in d.reason, f"单高张不是听牌，reason 不得这么写：{d.reason}")
+
+
+def test_zero_out_air_uses_air_cbet() -> None:
+    """A 高面 0-out 纯空气也走同一套口径：默认 1/3（#43 Q1）。"""
+    d = advise("KdQh", "Ah8c2d", pot=9, actions=pfr_checked(),
+               hero_position="BTN", opponents=1)
+    check(d.hand.tier == "空气" and d.hand.label == "高牌/空气",
+          f"KQ 在 A72 应是 0-out 空气，实际 {d.hand.tier}/{d.hand.label}")
+    check(d.action == "bet" and d.sizing_bb == 3.0,
+          f"单挑干燥面 0-out 空气应下 1/3（3.0），实际 {d.action} {d.sizing_bb}（{d.reason}）")
+
+
+def test_single_overcard_air_wet_and_fold_gate() -> None:
+    """湿面/弃牌率门槛与两高张同口径：湿面无数据过牌，他弃 < 需要过牌（#43 Q1）。"""
+    d = advise("AdQd", "Kh8h2c", pot=9, actions=pfr_checked(),
+               hero_position="BTN", opponents=1, in_position=True)
+    check(d.action == "check",
+          f"湿面有位置但没有本手弃牌率数据应过牌，实际 {d.action} {d.sizing_bb}（{d.reason}）")
+
+    d = advise("AdQd", "Kh8h2c", pot=9, actions=pfr_checked("BB"),
+               hero_position="BB", opponents=1, in_position=False)
+    check(d.action == "check",
+          f"湿面没位置应过牌，实际 {d.action} {d.sizing_bb}（{d.reason}）")
+
+    d = advise("AdQd", "Kh8c2d", pot=9, actions=pfr_checked(),
+               hero_position="BTN", opponents=1, in_position=True,
+               fold_eq={1 / 3: SizeFold(0.10, 0.224)})
+    check(d.action == "check",
+          f"他弃 10% < 需要 22.4% 应过牌，实际 {d.action} {d.sizing_bb}（{d.reason}）")
+    check("10%" in d.reason and "22%" in d.reason,
+          f"reason 要给出他弃 vs 需要：{d.reason}")
+
+
+def test_single_overcard_air_multiway() -> None:
+    """3 人池只 1/3、4 人以上过牌（与 #41 的多人池口径一致）。"""
+    d = advise("AdQd", "Kh8c2d", pot=9, actions=pfr_checked(opponents=2),
+               hero_position="BTN", opponents=2)
+    check(d.action == "bet" and d.sizing_bb == 3.0,
+          f"3 人池单高张应只下 1/3（3.0），实际 {d.action} {d.sizing_bb}（{d.reason}）")
+
+    d = advise("AdQd", "Kh8c2d", pot=9, actions=pfr_checked(opponents=3),
+               hero_position="BTN", opponents=3)
+    check(d.action == "check",
+          f"4 人池单高张应过牌，实际 {d.action}（{d.reason}）")
 
 
 # ─────────────────────────── 面对下注：加 / 跟 / 弃 ───────────────────────────
@@ -672,7 +719,10 @@ def main() -> int:
         test_air_cbet_dry_or_wet_by_position,
         test_air_cbet_fold_gate_blocks_bet,
         test_air_cbet_half_pool_needs_dry_ip_heads_up,
-        test_single_overcard_air_keeps_old_line,
+        test_single_overcard_air_uses_air_cbet,
+        test_zero_out_air_uses_air_cbet,
+        test_single_overcard_air_wet_and_fold_gate,
+        test_single_overcard_air_multiway,
         test_strong_made_raises,
         test_strong_draw_calls,
         test_nut_gate_only_when_board_threat,
