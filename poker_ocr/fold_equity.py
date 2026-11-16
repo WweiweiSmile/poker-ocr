@@ -566,6 +566,31 @@ def _size_lines(options, pot_now: float, owed: float) -> list[tuple[str, float]]
     return [(f"{f:.0%} pot", round(f * pot_now, 2)) for f in DEFAULT_SIZES]
 
 
+def by_pot_fraction(sit) -> dict[float, "coach.SizeFold"] | None:
+    """`{下注额占底池比例: SizeFold}` —— 给规则引擎做「他弃 ≥ 需要」的门。
+
+    `coach` 自己不建范围模型，只消费这个事实；拿不到（翻前 / 没有范围 /
+    多人池没有逐尺寸 EV）就返回 None，规则引擎退回默认线。
+    """
+    report = getattr(sit, "fold_eq", None)
+    lines = getattr(report, "lines", ()) if report is not None else ()
+    if not lines:
+        return None
+    from .advice import winnable_pot
+    from .coach import SizeFold
+
+    pot = float(winnable_pot(sit.snap) or 0.0)
+    if pot <= 0:
+        return None
+    out: dict[float, SizeFold] = {}
+    for ln in lines:
+        frac = ln.size / pot
+        if frac <= 0:
+            continue
+        out[round(frac, 3)] = SizeFold(ln.fold_equity, ln.breakeven)
+    return out or None
+
+
 def lookup(sit) -> FoldEquityReport | None:
     """从 `situation.Situation` 生成报告。缺数据/出错一律 None（fail open）。"""
     if not enabled():

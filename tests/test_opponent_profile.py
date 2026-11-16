@@ -1456,6 +1456,102 @@ def test_population_prior_shrinkage() -> None:
           "实测指标应给出剥削指令")
 
 
+def test_isolation_observation_and_trigger() -> None:
+    """#42：面对溜入的「加注隔离」要能从行动线拆出来，并驱动 limp 例外。
+
+    触发变量是**身后玩家对溜入的加注率**（不是 Hero 自己的开池率）：机会 =
+    前面有人 call、没人 bet/raise；命中 = 这次真的加注，且必须是 recorded
+    （弃牌 100% 是推断、加注 588 条里只有 9 条推断，推断的命中不算）。
+    """
+    from poker_ocr.opponent_profile import (
+        LIMP_TRIGGER_MAX_ISO_PCT, LIMP_TRIGGER_MIN_OPPS, OpponentRead,
+        OpponentStats, isolation_trigger)
+
+    seats = [
+        {"seat_id": "hero", "name": "我", "position": "CO", "stack": 100.0},
+        {"seat_id": "a", "name": "溜入者", "position": "HJ", "stack": 100.0},
+        {"seat_id": "b", "name": "隔离者", "position": "BTN", "stack": 100.0},
+    ]
+    hand = make_hand(
+        uid="s42-iso", seats=seats,
+        preflop=[act("a", "call", 1.0, name="溜入者", position="HJ"),
+                 act("hero", "fold", None, is_hero=True),
+                 act("b", "raise", 6.0, name="隔离者", position="BTN")],
+        board=("Ad", "7s", "2c"))
+    got = next(o for o in observations_from_hand(hand)
+               if o.opponent_key == "隔离者")
+    check(got.iso_opp and got.iso_raise, f"BTN 隔离应记命中：{got}")
+
+    # 同样是机会，但这次只是跟注 → 机会有、命中无
+    flat = make_hand(
+        uid="s42-iso2", seats=seats,
+        preflop=[act("a", "call", 1.0, name="溜入者", position="HJ"),
+                 act("hero", "fold", None, is_hero=True),
+                 act("b", "call", 1.0, name="隔离者", position="BTN")],
+        board=("Ad", "7s", "2c"))
+    got = next(o for o in observations_from_hand(flat)
+               if o.opponent_key == "隔离者")
+    check(got.iso_opp and not got.iso_raise, f"跟注不算隔离命中：{got}")
+
+    # 推断出来的加注不算命中（否则会把补全的动作当成剥削证据）
+    inferred = make_hand(
+        uid="s42-iso3", seats=seats,
+        preflop=[act("a", "call", 1.0, name="溜入者", position="HJ"),
+                 act("hero", "fold", None, is_hero=True),
+                 act("b", "raise", 6.0, name="隔离者", position="BTN",
+                     inferred=True)],
+        board=("Ad", "7s", "2c"))
+    got = next(o for o in observations_from_hand(inferred)
+               if o.opponent_key == "隔离者")
+    check(got.iso_opp and not got.iso_raise,
+          f"inferred 加注不算隔离命中：{got}")
+
+    # 统计层：机会/命中分别累积，能被序列化往返（replay 侧靠它还原）
+    stats = OpponentStats(key="隔离者")
+    for o in observations_from_hand(hand):
+        if o.opponent_key == "隔离者":
+            stats.add(o)
+    check((stats.iso_opp, stats.iso_raise) == (1.0, 1.0), f"统计错：{stats}")
+    # 机会数不到 `_pct` 的最小样本，百分比应当是 None 而不是 100%
+    check(stats.iso_raise_pct is None, f"小样本不该给百分比：{stats.iso_raise_pct}")
+    back = OpponentStats.from_dict("隔离者", stats.to_dict())
+    check((back.iso_opp, back.iso_raise) == (1.0, 1.0), "iso 字段没往返")
+
+    def read(seat: str, pct: float | None, opps: float) -> OpponentRead:
+        return OpponentRead(
+            seat_id=seat, key=seat, display_name=seat, archetype="unknown",
+            confidence=0.8, n=80, vpip=25.0, pfr=8.0, af=1.5,
+            source="auto", note="", iso_raise_pct=pct,
+            opps=(("iso", float(opps)),))
+
+    # 身后都低 → 放行，并给出人级依据
+    low = (read("btn", 17.0, 20.0), read("sb", 12.0, 22.0),
+           read("bb", 15.0, 25.0))
+    ok, why = isolation_trigger(low, ["btn", "sb", "bb"])
+    check(ok and "15%" in why and "67" in why, f"低隔离率应放行：{ok} {why}")
+
+    # 均值高 → 不放行（退回「入池就加注」）
+    high = (read("btn", 45.0, 20.0), read("sb", 12.0, 22.0),
+            read("bb", 15.0, 25.0))
+    check(isolation_trigger(high, ["btn", "sb", "bb"]) == (False, ""),
+          "均值 > 阈值不该放行")
+
+    # 少数人很爱隔离，也会被单人护栏挡住（不能被均值掩盖）
+    spiky = (read("btn", 40.0, 8.0), read("sb", 5.0, 20.0),
+             read("bb", 5.0, 20.0))
+    check(isolation_trigger(spiky, ["btn", "sb", "bb"]) == (False, ""),
+          "单人 ≥35% 应直接否决")
+
+    # 机会不够（<16）→ 不放行，也不接受用先验收缩值当证据
+    thin = (read("btn", 0.0, 5.0), read("sb", 10.0, 5.0),
+            read("bb", 10.0, 5.0))
+    check(isolation_trigger(thin, ["btn", "sb", "bb"]) == (False, ""),
+          "机会不足 16 次不该放行")
+    check(isolation_trigger(None, ["btn"]) == (False, ""), "无画像不该放行")
+    check(LIMP_TRIGGER_MIN_OPPS == 16.0 and LIMP_TRIGGER_MAX_ISO_PCT == 20.0,
+          "门槛常量被改了却没同步离线实测")
+
+
 def test_facing_bet_by_street() -> None:
     """分街面对下注：翻牌跟、转牌弃；以及「最后一街没人记录」的补推。"""
     seats = [
@@ -1597,6 +1693,7 @@ def run() -> int:
         test_showdown_gate_can_be_disabled,
         test_showdown_reads_reports_every_reason,
         test_population_prior_shrinkage,
+        test_isolation_observation_and_trigger,
         test_facing_bet_by_street,
         test_name_lexicon_source_and_alias_merge,
     ]

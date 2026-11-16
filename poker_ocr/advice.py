@@ -460,6 +460,15 @@ def parse_json_content(content: str) -> dict:
 
 # ─────────────────────────── 兜底 ───────────────────────────
 
+def _fold_eq_sizes(sit: Situation):
+    """本手条件弃牌率 → `{底池比例: SizeFold}`；拿不到返回 None（退默认线）。"""
+    try:
+        from . import fold_equity
+        return fold_equity.by_pot_fraction(sit)
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _rule_fallback(sit: Situation) -> tuple[str, str] | None:
     """翻后兜底：用 coach 规则引擎产出一个可执行的 option id。
 
@@ -487,6 +496,8 @@ def _rule_fallback(sit: Situation) -> tuple[str, str] | None:
             opponents=snap.opponents_in_hand,
             stack_bb=snap.hero_stack,
             hero_invested_bb=snap.hero_invested,
+            in_position=sit.in_position,
+            fold_eq=_fold_eq_sizes(sit),
         )
     except (ValueError, KeyError):
         return None

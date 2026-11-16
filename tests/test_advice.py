@@ -1219,6 +1219,92 @@ def make_point(**kw):
     return HandSnapshot(**base)
 
 
+def test_limp_exception_only_when_program_grants_it() -> None:
+    """#42：后位白名单牌 + 身后隔离率低才给 limp 例外，默认口径不变。
+
+    例外是「程序算出来的」而不是模型自由发挥：依据不进事实块时，翻前结论仍
+    是「不在范围就弃/加注」，SB 仍是「别为 0.5BB 补齐」。白名单牌只在
+    **不在开池/隔离范围** 时才平跟——范围里的默认还是加注。
+    """
+    from poker_ocr.hand_track import OpponentSnapshot, StreetRecord
+    from poker_ocr.opponent_profile import OpponentRead
+
+    def read(seat: str, pct: float | None, opps: float) -> OpponentRead:
+        return OpponentRead(
+            seat_id=seat, key=seat, display_name=seat, archetype="unknown",
+            confidence=0.8, n=80, vpip=25.0, pfr=8.0, af=1.5,
+            source="auto", note="", iso_raise_pct=pct,
+            opps=(("iso", float(opps)),))
+
+    low = (read("btn", 17.0, 20.0), read("sb", 12.0, 22.0),
+           read("bb", 15.0, 25.0))
+    high = (read("btn", 45.0, 20.0), read("sb", 12.0, 22.0),
+            read("bb", 15.0, 25.0))
+
+    def co_point(cards=("4s", "2s"), **kw):
+        base = dict(
+            street="preflop", board=(), hero_cards=cards,
+            hero_position="CO", hero_stack=100.0, hero_bet=0.0,
+            hero_invested=0.0, to_call=1.0, pot=6.0, pot_before_street=6.0,
+            table_size=9, preflop_shapes=("unopened",), hero_is_pfr=False,
+            cbet_spot=False,
+            opponents=(
+                OpponentSnapshot("btn", "B", "BTN", 100.0, 0.0, False),
+                OpponentSnapshot("sb", "S", "SB", 100.0, 0.5, False),
+                OpponentSnapshot("bb", "W", "BB", 100.0, 1.0, False)),
+            streets=(StreetRecord("preflop", 6.0, ()),),
+            decision_key=("h1", "preflop", 0, 6.0, 1.0, cards),
+        )
+        base.update(kw)
+        return make_point(**base)
+
+    # 1) 低隔离率 + 白名单牌（42s 不在 CO 开池范围）→ 给例外
+    sit = build_situation(co_point(), opponent_reads=low)
+    user = build_messages(sit)[1]
+    check(sit.limp_exception is not None, f"该给 limp 例外：{sit.range_verdict}")
+    check("limp 例外（程序建议）" in user, "提示词要渲染例外依据")
+    check("1BB 平跟进池" in user, f"非 SB 的价格应为 1BB：{user[-600:]}")
+
+    # 2) 隔离率高 → 不给例外，退回「弃牌」
+    sit = build_situation(co_point(), opponent_reads=high)
+    check(sit.limp_exception is None, f"隔离率高不该给例外：{sit.limp_exception}")
+    check("建议默认弃牌" in (sit.range_verdict or ""),
+          f"默认口径应保持不变：{sit.range_verdict}")
+
+    # 3) 没画像（实时最常见）→ 不给例外，默认口径逐字不变
+    sit = build_situation(co_point())
+    user = build_messages(sit)[1]
+    check(sit.limp_exception is None, "没有画像不该给例外")
+    check("limp 例外" not in user, "没依据时提示词里不该出现例外")
+
+    # 4) 不在白名单的牌 → 有依据也不给
+    sit = build_situation(co_point(cards=("Qs", "4s")), opponent_reads=low)
+    check(sit.limp_exception is None, "Q4s 不在白名单，不该给例外")
+
+    # 5) 范围里的牌默认加注，不因为「能 limp」而降级
+    sit = build_situation(co_point(cards=("Js", "9s")), opponent_reads=low)
+    check(sit.limp_exception is None,
+          f"CO 开池范围里的 J9s 应加注：{sit.range_verdict}")
+
+    # 6) SB 补齐：只花 0.5BB，且同一个触发变量（BB 对补齐的加注率）
+    sb_point = make_point(
+        street="preflop", board=(), hero_cards=("5h", "3h"),
+        hero_position="SB", hero_stack=100.0, hero_bet=0.5,
+        hero_invested=0.5, to_call=0.5, pot=7.0, pot_before_street=6.0,
+        table_size=9, preflop_shapes=("limped",), hero_is_pfr=False,
+        cbet_spot=False,
+        opponents=(
+            OpponentSnapshot("co", "C", "CO", 100.0, 1.0, False),
+            OpponentSnapshot("bb", "W", "BB", 100.0, 1.0, False)),
+        streets=(StreetRecord("preflop", 6.0, ()),),
+        decision_key=("h1", "preflop", 1, 7.0, 0.5, ("5h", "3h")))
+    sit = build_situation(sb_point, opponent_reads=(read("bb", 15.0, 25.0),))
+    check(sit.limp_exception is not None, "SB 补齐也该有例外依据")
+    user = build_messages(sit)[1]
+    check("0.5BB 补齐" in user, f"SB 的价格应为 0.5BB：{user[-800:]}")
+    check("23o/24s 这类牌永远不补齐" in user, "SB 行要保留「杂牌不补」的硬约束")
+
+
 def test_options_checked_to_hero() -> None:
     opts = build_options(make_point())
     ids = [o.id for o in opts]
@@ -3342,8 +3428,12 @@ def test_system_prompt_worst_case_stays_bounded() -> None:
     system, user = build_messages(build_situation(point))
     # 2026-11-14.1 起事实优先级第 3 层拆成 3a/3b/3c（摊牌证据 / 画像 / 池子先验），
     # 最坏局面约 +60 字；上界从 7000 放到 7100，仍是同一量级的延迟预算。
-    check(len(system) < 7100,
-          f"最坏局面 system 应 < 7100，实际 {len(system)}")
+    # 2026-11-16.1 修 #41 的两条相反指令（跟注站满池 / 跟 c-bet 高降频），
+    # 攻击段约 +55 字；上界放到 7200，同一量级。
+    # 2026-11-16.2 给翻前加注优先加一条 limp 例外（#42），约 +95 字；上界放到
+    # 7300，仍是同一量级的延迟预算。
+    check(len(system) < 7300,
+          f"最坏局面 system 应 < 7300，实际 {len(system)}")
     check(len(system) + len(user) < 10000,
           f"最坏局面 system+user 应 < 10000，实际 {len(system) + len(user)}")
 

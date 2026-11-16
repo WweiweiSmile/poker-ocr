@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from poker_ocr.coach import (  # noqa: E402
-    DRY, FLUSH_STRAIGHT_BOARD, PAIRED_BOARD, STRAIGHT_BOARD,
+    DRY, FLUSH_STRAIGHT_BOARD, PAIRED_BOARD, STRAIGHT_BOARD, SizeFold,
     advise, board_texture, opponent_strength, parse_cards, read_hand,
 )
 
@@ -185,13 +185,111 @@ def test_strong_draw_bets_multiway() -> None:
     check(d.action == "bet", f"OESD 多人池应下注，实际 {d.action}")
 
 
-def test_air_multiway_checks() -> None:
-    """空气在多人池：从不诈唬，过牌。"""
-    d = advise("AhKd", "Qs7c2d", pot=9,
-               actions=line({"actor": "BB", "action": "check", "street": "flop"},
-                            {"actor": "CO", "action": "check", "street": "flop"}),
+def pfr_checked(hero_pos: str = "BTN", opponents: int = 1) -> list[dict]:
+    """翻前 Hero 加注、其余人跟；翻牌全部过牌到 Hero（§6 c-bet 点）。"""
+    others = [s for s in ("BB", "CO", "SB") if s != hero_pos][:opponents]
+    out = [{"actor": hero_pos, "action": "raise", "amount": 3, "street": "preflop"}]
+    out += [{"actor": s, "action": "call", "street": "preflop"} for s in others]
+    out += [{"actor": s, "action": "check", "street": "flop"} for s in others]
+    return line(*out)
+
+
+def test_air_cbet_default_one_third() -> None:
+    """两高张 miss：默认 1/3，不再是硬编码的 1/2（#41 Q1）。"""
+    d = advise("AhKd", "Qs7c2d", pot=9, actions=pfr_checked(),
+               hero_position="BTN", opponents=1)
+    check(d.hand.tier == "空气" and d.hand.label == "两张高牌(6 outs)",
+          f"AK 在 Q72 应是两张高牌(6 outs)，实际 {d.hand.tier}/{d.hand.label}")
+    check(d.action == "bet", f"单挑干燥低面两高张应下注，实际 {d.action}（{d.reason}）")
+    check(d.sizing_bb == 3.0, f"应下 1/3 池（3.0），实际 {d.sizing_bb}")
+    check("1/3" in d.reason, f"reason 要写出尺寸依据：{d.reason}")
+    check("听" not in d.reason, f"两高张不是听牌，reason 不得这么写：{d.reason}")
+
+
+def test_air_cbet_multiway() -> None:
+    """3 人池只 1/3；4 人池过牌（#41 Q3，与提示词「单挑/3 人池」同口径）。"""
+    d = advise("AhKd", "Qs7c2d", pot=9, actions=pfr_checked(opponents=2),
                hero_position="BTN", opponents=2)
-    check(d.action == "check", f"多人池空气应过牌，实际 {d.action}（{d.reason}）")
+    check(d.action == "bet" and d.sizing_bb == 3.0,
+          f"3 人池两高张应 1/3 池，实际 {d.action} {d.sizing_bb}（{d.reason}）")
+
+    d = advise("AhKd", "Qs7c2d", pot=9, actions=pfr_checked(opponents=3),
+               hero_position="BTN", opponents=3)
+    check(d.action == "check", f"4 人池两高张应过牌，实际 {d.action}（{d.reason}）")
+
+
+def test_air_cbet_dry_or_wet_by_position() -> None:
+    """公对/花/顺/花顺面不做 c-bet；湿面没位置也过牌；湿面有位置只 1/3（#41 Q2/Q5）。"""
+    for board, want in (("QsQc2d", "公对面"), ("Qh7h2c", "花面"),
+                        ("Ts9c2d", "顺面"), ("9h8h7c", "花顺面")):
+        d = advise("AhKd", board, pot=9, actions=pfr_checked(),
+                   hero_position="BTN", opponents=1, in_position=True)
+        check(d.action == "check",
+              f"{want}两高张应过牌，实际 {d.action} {d.sizing_bb}（{d.reason}）")
+
+    d = advise("AhKd", "Qh7h2c", pot=9, actions=pfr_checked("BB"),
+               hero_position="BB", opponents=1, in_position=False)
+    check(d.action == "check", f"花面没位置应过牌，实际 {d.action}（{d.reason}）")
+
+    # 湿面有位置但没有本手弃牌率数据 → 仍然过牌（不拿账面权益赌他弃）
+    d = advise("AhKd", "Qh7h2c", pot=9, actions=pfr_checked(),
+               hero_position="BTN", opponents=1, in_position=True)
+    check(d.action == "check", f"湿面无数据应过牌，实际 {d.action}（{d.reason}）")
+
+    # 湿面 + 有位置 + 1/3 的弃牌率达标 → 只 1/3
+    d = advise("AhKd", "Qh7h2c", pot=9, actions=pfr_checked(),
+               hero_position="BTN", opponents=1, in_position=True,
+               fold_eq={1 / 3: SizeFold(0.35, 0.224)})
+    check(d.action == "bet" and d.sizing_bb == 3.0,
+          f"花面有位置只 1/3（3.0），实际 {d.action} {d.sizing_bb}（{d.reason}）")
+
+
+def test_air_cbet_fold_gate_blocks_bet() -> None:
+    """本手他弃 < 该尺寸需要 → 过牌；数字要写进 reason（#41 Q1/Q4）。"""
+    d = advise("AhKd", "Qs7c2d", pot=9, actions=pfr_checked(),
+               hero_position="BTN", opponents=1, in_position=True,
+               fold_eq={1 / 3: SizeFold(0.05, 0.224)})
+    # 事实块印的「需要」就是这个尺寸的 breakeven（12% 权益下 1/3 ≈ 22.4%），
+    # 5% 不够 → 过牌。
+    check(d.action == "check",
+          f"他弃 5% < 需要 12% 应过牌，实际 {d.action} {d.sizing_bb}（{d.reason}）")
+    check("5%" in d.reason and "22%" in d.reason,
+          f"reason 要给出他弃 vs 需要：{d.reason}")
+
+
+def test_air_cbet_half_pool_needs_dry_ip_heads_up() -> None:
+    """1/2 只在干燥面 + 有位置 + 单挑 + 1/2 自己也够弃牌率时出现（#41 Q1）。"""
+    enough = {1 / 3: SizeFold(0.35, 0.224), 0.5: SizeFold(0.32, 0.302)}
+    d = advise("AhKd", "Qs7c2d", pot=9, actions=pfr_checked(),
+               hero_position="BTN", opponents=1, in_position=True, fold_eq=enough)
+    check(d.action == "bet" and d.sizing_bb == 4.5,
+          f"干燥面有位置且 1/2 够应升 1/2（4.5），实际 {d.action} {d.sizing_bb}（{d.reason}）")
+
+    d = advise("AhKd", "Qs7c2d", pot=9, actions=pfr_checked("BB"),
+               hero_position="BB", opponents=1, in_position=False, fold_eq=enough)
+    check(d.action == "bet" and d.sizing_bb == 3.0,
+          f"没位置不升尺寸，实际 {d.action} {d.sizing_bb}（{d.reason}）")
+
+    d = advise("AhKd", "Qh7h2c", pot=9, actions=pfr_checked(),
+               hero_position="BTN", opponents=1, in_position=True, fold_eq=enough)
+    check(d.action == "bet" and d.sizing_bb == 3.0,
+          f"湿面不升尺寸，实际 {d.action} {d.sizing_bb}（{d.reason}）")
+
+    short = {1 / 3: SizeFold(0.35, 0.224), 0.5: SizeFold(0.10, 0.302)}
+    d = advise("AhKd", "Qs7c2d", pot=9, actions=pfr_checked(),
+               hero_position="BTN", opponents=1, in_position=True, fold_eq=short)
+    check(d.action == "bet" and d.sizing_bb == 3.0,
+          f"1/2 只有 10% 弃牌率时退回 1/3，实际 {d.action} {d.sizing_bb}（{d.reason}）")
+
+
+def test_single_overcard_air_keeps_old_line() -> None:
+    """A/K 高面单高张归 #43，本票不动它的既有口径（单挑仍 1/2）。"""
+    d = advise("AdQd", "Kh8c2d", pot=9, actions=pfr_checked(),
+               hero_position="BTN", opponents=1)
+    check(d.hand.tier == "空气" and d.hand.label == "高牌(3 outs)",
+          f"AQ 在 K82 应是单高张(3 outs)，实际 {d.hand.tier}/{d.hand.label}")
+    check(d.action == "bet" and d.sizing_bb == 4.5,
+          f"单高张本票不改口径（仍 1/2 = 4.5），实际 {d.action} {d.sizing_bb}")
 
 
 # ─────────────────────────── 面对下注：加 / 跟 / 弃 ───────────────────────────
@@ -569,7 +667,12 @@ def main() -> int:
         test_tptk_wet_bets_half,
         test_small_pair_wet_checks,
         test_strong_draw_bets_multiway,
-        test_air_multiway_checks,
+        test_air_cbet_default_one_third,
+        test_air_cbet_multiway,
+        test_air_cbet_dry_or_wet_by_position,
+        test_air_cbet_fold_gate_blocks_bet,
+        test_air_cbet_half_pool_needs_dry_ip_heads_up,
+        test_single_overcard_air_keeps_old_line,
         test_strong_made_raises,
         test_strong_draw_calls,
         test_nut_gate_only_when_board_threat,

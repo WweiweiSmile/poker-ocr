@@ -368,6 +368,15 @@ def render_preflop_zh(sit: Situation) -> list[str]:
         lines.append(fact(f"翻前范围结论（程序建议）：{sit.range_verdict}",
                           "range_verdict", kind="derived",
                           values=[sit.range_verdict]))
+    if sit.limp_exception:
+        # #42：例外依据单独成行 —— 它只对「白名单牌」生效，不要被模型推广成
+        # 「这桌可以随便平跟」。依据是逐座位实测，不是桌风形容词。
+        price = "0.5BB 补齐" if snap.hero_position == SB else "1BB 平跟进池"
+        lines.append(fact(
+            f"limp 例外（程序建议）：{sit.limp_exception} → 白名单牌（小对子/"
+            f"低同花 A/Kx 同花/低频同花结构张）可以只花 {price}；"
+            "不在白名单的牌仍按范围结论（加注或弃牌）",
+            "limp_exception", kind="derived", values=[sit.limp_exception]))
     lines.extend(_facing_raise_zh(sit))
     limpers = count_limpers(snap)
     if limpers:
@@ -379,6 +388,16 @@ def render_preflop_zh(sit: Situation) -> list[str]:
                     f"隔离尺寸：从「可选动作」挑最接近 {iso:g}BB 的加注档"
                     f"（{PREFLOP_MIN_RAISE_BB:g}BB 起，每多 1 个溜入者 +1BB）；"
                     "BB 可以过牌看翻牌，要抢主动权才加注，弱牌别为证明自己而加注")
+            elif sit.limp_exception:
+                lines.append(
+                    f"隔离尺寸：从「可选动作」挑最接近 {iso:g}BB 的加注档"
+                    f"（{PREFLOP_MIN_RAISE_BB:g}BB 起，每多 1 个溜入者 +1BB）；"
+                    "不在白名单、也没有 limp 例外的牌不要选跟注档")
+                if snap.hero_position == SB:
+                    lines.append(
+                        "你在 SB：只有上面「limp 例外」覆盖的白名单牌可以补齐"
+                        " 0.5BB（价格便宜但翻后无位置）；其余牌仍是不在隔离"
+                        "范围就弃、要玩就加注——23o/24s 这类牌永远不补齐")
             else:
                 lines.append(
                     f"隔离尺寸：从「可选动作」挑最接近 {iso:g}BB 的加注档"

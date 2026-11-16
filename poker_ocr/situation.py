@@ -26,10 +26,10 @@ from .options import (
 )
 from .pot_math import (
     _no_opponent_anomaly, _playable_depth, _unknown_stack_opponents,
-    count_limpers, hero_in_position, is_explosive_pot, players_left_to_act,
-    pot_per_player, pot_type, spr,
+    behind_opponents, count_limpers, hero_in_position, is_explosive_pot,
+    players_left_to_act, pot_per_player, pot_type, spr,
 )
-from .preflop_ranges import range_verdict
+from .preflop_ranges import limp_whitelist, range_verdict
 from .table_dynamics import (
     is_aggressive_table, is_loose_table, is_passive_table,
 )
@@ -102,6 +102,9 @@ class Situation:
     # 翻前：这手牌在该位置的开池范围归属（见 preflop_ranges.range_verdict）。
     # 由程序算、作为事实注入，模型只负责在事实之上做选择。
     range_verdict: str | None = None
+    # #42 的 over-limp 例外依据（「身后 N 人对溜入的加注隔离 17%（87 次机会）」）。
+    # 非空 = 白名单牌可以 1BB 平跟进池；None = 按原来的「入池就加注」口径。
+    limp_exception: str | None = None
     # 牌力事实块：最好的五张、精确坚果校验、听牌、牌面结构。
     # 由 ground_truth.compute_ground_truth 生成；None = 翻前/牌不全。
     ground_truth: GroundTruth | None = None
@@ -263,14 +266,47 @@ def _precise_texture_en(gt: GroundTruth | None, texture: str | None) -> str | No
     return " + ".join(parts)
 
 
-def _range_conclusion_zh(snap: HandSnapshot,
-                         table_dynamics: str | None,
-                         loose: bool | None = None,
-                         passive: bool | None = None) -> str | None:
-    """翻前开池归属的一句话中文结论（只在无人入池/溜入时使用）。
+# ── over-limp 例外（#42，2026-11-16 维护者拍板）─────────────────
+# 白名单牌（小对子 / 低同花 A / Kx 同花 / 低频同花结构张）在**开池/隔离
+# 范围之外**时的默认动作从「弃牌」改成「可以 1BB 平跟进池」，但只在两个
+# 条件同时成立时才说：① 位置是 CO / BTN / SB 补齐；② 身后还会行动的玩家
+# 对溜入的加注隔离率足够低且有 ≥16 次机会（`opponent_profile.isolation_trigger`）。
+# 任何一个条件不满足/缺数据都退回原文案 —— 例外是实测出来的，不是默认许可。
+_LIMP_EXCEPTION_POSITIONS = ("CO", "BTN", "SB")
 
-    `preflop_ranges.Verdict.render()` 是英文长句；模型只需要「在/不在 +
-    有溜入者时收紧后的归属」，这里只取结构化字段重新拼。
+
+def _limp_exception(snap: HandSnapshot, verdict, reads) -> str | None:
+    """#42：这手牌能不能走「1BB 平跟进池」的例外？返回依据文字，否则 None。"""
+    if not verdict.hand or verdict.position not in _LIMP_EXCEPTION_POSITIONS:
+        return None
+    if not limp_whitelist(verdict.hand):
+        return None
+    # 面对加注/补齐以上价格（> 1BB）不是「便宜看翻牌」，仍按原来的继续/弃牌口径。
+    if float(snap.to_call or 0.0) > 1.0 + 1e-9:
+        return None
+    # 在开池/隔离范围里的牌默认加注：不为了平跟把范围内的牌降级。
+    if verdict.in_range is True and verdict.isolation_ok in (None, True):
+        return None
+    if verdict.in_range is None and verdict.position != "SB":
+        return None
+    seats = [o.seat_id for o in behind_opponents(snap)]
+    if not seats:
+        return None
+    from .opponent_profile import isolation_trigger
+    ok, why = isolation_trigger(reads, seats)
+    return why if ok else None
+
+
+def _preflop_conclusion(snap: HandSnapshot,
+                        table_dynamics: str | None,
+                        loose: bool | None = None,
+                        passive: bool | None = None,
+                        reads=None) -> tuple[str | None, str | None]:
+    """翻前结论：(给模型的一句话, #42 over-limp 例外依据或 None)。
+
+    前者是「在/不在 + 有溜入者时收紧后的归属」，后者只有条件全部成立时才非空
+    （见 `_limp_exception`）。拆成元组是因为两处渲染要用同一份判断：范围结论
+    进「翻前信息」，`Situation.limp_exception` 进 SB 补齐口径与隔离尺寸行。
     """
     verdict = range_verdict(snap.hero_position, snap.hero_cards,
                             table_dynamics=table_dynamics,
@@ -278,10 +314,15 @@ def _range_conclusion_zh(snap: HandSnapshot,
                             stack_bb=_playable_depth(snap),
                             loose=loose, passive=passive)
     if verdict is None:
-        return None
+        return None, None
+    limp_note = _limp_exception(snap, verdict, reads)
     if verdict.in_range is None:
+        if limp_note:
+            return (f"{verdict.hand} 在 {verdict.position} 没有开池范围"
+                    f"（盲注位按补盲/过牌处理）→ 但{limp_note}，"
+                    "白名单牌可以只花 0.5BB 补盲（limp 例外），杂牌不补"), limp_note
         return (f"{verdict.hand} 在 {verdict.position} 没有开池范围"
-                "（盲注位按补盲/过牌/防守处理）")
+                "（盲注位按补盲/过牌/防守处理）"), None
     # 小对子抽 set 是「非盲位平跟」的一个明确例外；不要把所有平跟都写死。
     small_pair = (len(verdict.hand) == 2
                   and verdict.hand[0] == verdict.hand[1])
@@ -293,6 +334,10 @@ def _range_conclusion_zh(snap: HandSnapshot,
             if small_pair:
                 text += ("；若后手深/桌松，可按约 10:1 隐含赔率平跟抽 set"
                          "（非盲位平跟的例外）")
+        elif limp_note:
+            text = (f"{verdict.hand}：{verdict.limpers} 个溜入者后"
+                    f"收紧范围（{iso}）已不包括它 → 但{limp_note} → "
+                    "建议按 1BB 平跟进池（limp 例外），不要加注")
         else:
             text = (f"{verdict.hand}：{verdict.limpers} 个溜入者后"
                     f"收紧范围（{iso}）已不包括它 → "
@@ -300,12 +345,26 @@ def _range_conclusion_zh(snap: HandSnapshot,
     elif verdict.in_range:
         text = (f"{verdict.hand} 在 {verdict.position} 的开池范围内 → "
                 "建议可以开池加注，不要平跟（非盲位平跟是例外）")
+    elif limp_note:
+        text = (f"{verdict.hand} 不在 {verdict.position} 的开池范围内 → "
+                f"但{limp_note} → 建议按 1BB 平跟进池（limp 例外），不要加注")
     else:
         text = (f"{verdict.hand} 不在 {verdict.position} 的开池范围内 → "
                 "建议默认弃牌")
     if verdict.depth_note:
         text += f"（{verdict.depth_note}）"
-    return text
+    return text, limp_note
+
+
+def _range_conclusion_zh(snap: HandSnapshot,
+                         table_dynamics: str | None,
+                         loose: bool | None = None,
+                         passive: bool | None = None,
+                         reads=None) -> str | None:
+    """只看文字版本的入口（advice 仍 re-export 它；历史调用口径不变）。"""
+    return _preflop_conclusion(snap, table_dynamics, loose, passive, reads)[0]
+
+
 def build_situation(snap: HandSnapshot,
                     table_dynamics: str | None = None,
                     opponent_reads: Iterable[OpponentRead] | None = None,
@@ -406,6 +465,13 @@ def build_situation(snap: HandSnapshot,
                     and table_stats.passive is not None
                     else is_passive_table(table_dynamics))
     degraded = options_mode(snap, anomaly=anomaly)
+    # 翻前结论 + #42 over-limp 例外一次算完（同一份 range_verdict，不重复算）。
+    if (snap.street == PREFLOP and snap.preflop_shapes
+            and set(snap.preflop_shapes) <= {"unopened", "limped"}):
+        preflop_text, limp_note = _preflop_conclusion(
+            snap, table_dynamics, loose_flag, passive_flag, reads)
+    else:
+        preflop_text, limp_note = None, None
     sit = Situation(
         snap=snap,
         options=(_abnormal_options(snap) if degraded == "abnormal"
@@ -439,12 +505,9 @@ def build_situation(snap: HandSnapshot,
         opponents_in_hand=n_opp,
         # 翻前范围结论只在无人入池/溜入时渲染；面对加注不给 RFI 结论，
         # 否则模型会把「开池范围」当成「跟注/3-bet 范围」。
-        range_verdict=(
-            _range_conclusion_zh(snap, table_dynamics, loose_flag,
-                                 passive_flag)
-            if snap.street == PREFLOP and snap.preflop_shapes
-            and set(snap.preflop_shapes) <= {"unopened", "limped"}
-            else None),
+        # #42 的 over-limp 例外与结论同源：元组第二个值是例外依据。
+        range_verdict=preflop_text,
+        limp_exception=limp_note,
         ground_truth=gt,
         aggressive_table=is_aggressive_table(table_dynamics),
         outs=read.outs if read else None,

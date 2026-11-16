@@ -20,8 +20,8 @@ sys.path.insert(0, str(ROOT))
 
 from poker_ocr.preflop_ranges import (  # noqa: E402
     CHART_ADDITIONS, OPEN_POSITIONS, RFI, expand, hand_key,
-    depth_ranges, is_set_mine_pair, is_speculative, open_frequency,
-    range_verdict,
+    depth_ranges, is_set_mine_pair, is_speculative, limp_whitelist,
+    open_frequency, range_verdict,
     sb_completable,
 )
 
@@ -425,6 +425,30 @@ def test_depth_ranges_stay_monotonic() -> None:
             prev = cur
 
 
+def test_limp_whitelist_categories() -> None:
+    """#42 的 over-limp 白名单只有四类，且不把「非开池的垃圾同花」放进来。
+
+    白名单是「允许 1BB 平跟」的必要条件，不是充分条件：位置/身后隔离率/价格
+    都还要过。它和「开池范围」是两回事——54s 这类本来就在 CO 范围里，白名单
+    只是保证「不在范围时也认得它是有结构的牌」。
+    """
+    # 四类都收：小对子、低同花 A、Kx 同花、低频同花连张/隔张
+    for hand in ("22", "44", "55", "66"):
+        check(limp_whitelist(hand), f"小对子 {hand} 应在白名单")
+    for hand in ("A2s", "A5s", "A9s"):
+        check(limp_whitelist(hand), f"低同花 A {hand} 应在白名单")
+    for hand in ("K2s", "K7s", "K9s"):
+        check(limp_whitelist(hand), f"Kx 同花 {hand} 应在白名单")
+    for hand in ("42s", "53s", "54s", "64s", "86s", "97s", "T8s", "T9s"):
+        check(limp_whitelist(hand), f"低频同花结构张 {hand} 应在白名单")
+    # 明确不做：A 高无踢脚、高张 offsuit、两张都高的同花、间距太远的同花
+    for hand in ("A2o", "AJo", "KQo", "JTs", "J9s", "J8s", "72s", "82s", "KTs", "77"):
+        check(not limp_whitelist(hand), f"{hand} 不该进 limp 白名单")
+    # 锚定 #42 的边界：54s 本来就在 CO 开池范围里（白名单不是「加宽范围」）
+    check("54s" in RFI["CO"], "54s 已在 CO 开池范围")
+    check("42s" not in RFI["CO"], "42s 不在 CO 开池范围（白名单里第一个真新面孔）")
+
+
 def main() -> int:
     tests = [
         test_expand_notation, test_hand_key, test_positions_are_monotonic,
@@ -442,6 +466,7 @@ def main() -> int:
         test_depth_deep_widens_late_position,
         test_depth_short_drops_speculative,
         test_depth_ranges_stay_monotonic,
+        test_limp_whitelist_categories,
     ]
     for t in tests:
         before = len(FAILS)

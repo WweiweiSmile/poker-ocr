@@ -302,6 +302,51 @@ def is_speculative(key: str) -> bool:
     return False
 
 
+# ── over-limp 白名单（#42，2026-11-16 维护者拍板）───────────────────
+#
+# 「便宜看翻牌、中了大牌拿隐含价值」的牌：小对子抽 set、低同花 A 的坚果花、
+# Kx 同花的顶对 + 同花听、低频同花结构张（隔张顺）。它们在开池/隔离范围之外
+# （CO 范围外只剩 100 个同花组合），加注会把池子做大而权益不够；1BB 平跟
+# 只买「翻牌中了就是大牌」的那部分。
+#
+# 明确不收：offsuit 高张（被支配、反向隐含赔率）、A 高无踢脚（A2o–A9o）——
+# 它们在多人池里中一对多半是第二好的对子，正是 `sb_completable` 要排除的那类。
+# 这份白名单是「牌面类别」层，**位置与身后隔离率由调用方判**
+# （`situation._limp_exception`）：在开池/隔离范围里的牌仍然默认加注。
+LIMP_WHITELIST_NOTE = (
+    "小对子 22–66（抽 set）、低同花 A A2s–A9s（坚果花）、Kx 同花 K2s–K9s"
+    "（顶对 + 同花听）、低频同花连张/隔张（两张都 ≤9、间隔 ≤2）")
+
+
+def limp_whitelist(key: str) -> bool:
+    """这手牌是否在「允许 1BB over-limp」的白名单里（#42 拍板口径）。
+
+    只看牌面类别，不看位置、桌风与身后隔离率 —— 后两者由
+    `situation._limp_exception` 判。白名单里的牌**只在开池/隔离范围之外**才
+    平跟；范围里的默认仍然是加注（加注比平跟好，不该为了 limp 而降级）。
+    """
+    if not key or len(key) not in (2, 3):
+        return False
+    if len(key) == 2:                     # 对子：22–66 抽 set
+        return is_small_pair(key)
+    if key[2] != "s":                     # 非同花一律不进白名单
+        return False
+    hi, lo = key[0], key[1]
+    if hi == "A" and lo in "23456789":    # 低同花 A：A2s–A9s
+        return True
+    if hi == "K" and lo in "23456789":    # Kx 同花：K2s–K9s
+        return True
+    # 低频结构张：同花连张/一隔连张，高张不高于 T（#42 原话「54s–T9s」）。
+    # T9s/J9s/T8s 这类本来就在 CO/BTN 的开池范围里，白名单只是让 SB 补齐与
+    # 范围外的同类牌有据可依；J8s/QTs 以上不进白名单。
+    try:
+        return (RANKS.index(hi) <= RANKS.index("T")
+                and RANKS.index(lo) <= RANKS.index("T")
+                and RANKS.index(hi) - RANKS.index(lo) <= 2)
+    except ValueError:
+        return False
+
+
 def hand_key(cards) -> str:
     """('Jh','Ks') → 'KJo'。"""
     a, b = cards[0], cards[1]
