@@ -191,7 +191,7 @@ def test_two_pair_does_not_get_phantom_straight_outs() -> None:
     assert gt.draws.total_outs == 0
 
 
-def test_two_overcards_get_future_outs() -> None:
+def test_overcard_outs_get_future_outs() -> None:
     """两高张对当前顶对的 6 张反超 outs 要进事实，不能显示「无听牌、0%」。"""
     gt = compute_ground_truth("AcJc", "7sTs6d", opponents=1)
     assert gt is not None

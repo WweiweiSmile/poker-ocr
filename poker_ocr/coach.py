@@ -461,11 +461,6 @@ class Read:
     # 单个对手（随机两手牌）赢我的比例，0..1，见 beat_rate。
     # capped_by_board 用它做闸门：牌面上限更高**且**真有人能赢我才算被压制。
     beat_pct: float = 0.0
-    # 两高张：两张底牌都严格大于牌面最大牌（AK 在 Q72）。这是 #41 的口径域：
-    # 只有这种牌面「不可能被盖上任何一张高张」，A/K 高面天然不在其中
-    # （AQ 在 K72 是单高张 3 outs，AK 在 A72 已是顶对）。与 `overcard_outs=6`
-    # 不是一回事：那是「还能反超几张」，这是「两张都还没被牌面追平」。
-    two_overcards: bool = False
 
     def to_dict(self) -> dict:
         return {"tier": self.tier, "label": self.label,
@@ -616,9 +611,7 @@ def read_hand(hole: list[tuple[int, str]], board: list[tuple[int, str]]) -> Read
                     combo=(outs >= 8 and tier in paired_tiers),   # 有牌又有听
                     plays_board=(tier == BOARD_PLAY),
                     label_en=label_en, draw_outs=draw_outs,
-                    overcard_outs=overcard_outs, beat_pct=beat,
-                    two_overcards=(tier == AIR
-                                   and all(r > board_top for r in hole_ranks)))
+                    overcard_outs=overcard_outs, beat_pct=beat)
 
     # ── 打牌面：最好的 5 张全靠公共牌（人人都有），只有更好的牌会跟 ──
     if cat >= ONE_PAIR and _plays_board(hole, board):
