@@ -182,9 +182,14 @@ def test_fold_and_check_are_inferred_at_street_end() -> None:
                  for x in tr.hand.street_actions("flop")]
     check(("c", "fold", True) in flop_acts,
           f"翻牌漏读的弃牌应补出来：{flop_acts}")
-    check(("hero", "check", True) in flop_acts
-          and ("a", "check", True) in flop_acts,
-          f"无人下注时仍在局的人应补 check：{flop_acts}")
+    # 「没人下注却有人弃牌」是矛盾证据（弃牌只发生在面对下注时），说明这一街
+    # 的下注整条丢了：不补 check（会造出一个不存在的全场过牌回合），只记诊断。
+    # 2026-11-16 改口径，见 docs/对手动作-判定依据-2026-11-16.md §2.3。
+    check(not any(x.action == "check" for x in tr.hand.street_actions("flop")),
+          f"有弃牌但无人下注时不该补 check：{flop_acts}")
+    check(any(w.startswith("flop") and "不补过牌" in w
+              for w in tr.hand.data_warnings),
+          f"应收一条「疑似漏抓下注」的诊断：{tr.hand.data_warnings}")
 
     # 手末：转牌也没动作，hero/A 补过牌；不会给已弃牌的人补
     tr.finish_current()

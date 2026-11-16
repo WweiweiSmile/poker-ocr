@@ -349,6 +349,10 @@ class HandSnapshot:
     # 这手实际参与的人数（含本街已弃牌，不含空座/离桌）。
     # 炸弹池按每人固定 5BB 收前注，推算人均时要用它，不能拿 seats 当分母。
     players_dealt: int = 0
+    # 本帧有在局对手的下注读数被判不可信（frame_state 的质量闸降级成
+    # bet_unknown）的座位。这些座位不进 `to_call` 的取最大，所以 to_call 会
+    # **偏小甚至变成 0**；非空即表示这一帧的 to_call 不可用。
+    bets_unknown: tuple[str, ...] = ()
 
     @property
     def opponents_in_hand(self) -> int:
@@ -1416,14 +1420,12 @@ class LiveHandTracker:
             # 反推成「SB 3-bet」，整手牌被误判成 3-bet 底池。
             if p.fold is True and p.action is None:
                 continue
-            # 单人下注不可能超过本街总下注。`street_bet_total = pot -
-            # pot_before_street` 是底池口径的硬约束；单个 bet 超过它只能是
-            # 串位/动画残影，不能拿它推 raise。
-            street_total = state.street_bet_total
-            if (street_total is not None and street_total > 0
-                    and bet > street_total + 0.75):
-                continue
-
+            # 单人下注不可能超过本街总下注（`street_bet_total = pot - pbs`）。
+            # 越界的读数已经在 frame_state 的质量闸里降级成 bet_unknown
+            # （`bet > 本街总额 + 1e-6` → bet=None，见 frame_state._quality_gate），
+            # 这里再判一次没有意义：能走到这一行的 bet 必然在闸内
+            # （2026-11-16 删掉旧 `+ 0.75` 分支：它是不可达的死代码，
+            # 留着会让读代码的人以为有两道保护）。
             action = p.action
             if action is None:
                 # 徽章漏读时从下注额变化反推。没变化 = 没有行动
@@ -1444,6 +1446,16 @@ class LiveHandTracker:
                 forced = self._forced_preflop_level(hand, p)
                 if bet <= forced + 1e-9:
                     # 盲注/炸弹前注到账，不是行动：只更新基线，不写记录。
+                    # 全下**不**豁免：能落进这道闸的全下，金额必然全部落在
+                    # 强制投入以内（前注 5BB 的桌里后手只剩 3BB 的人，推出去
+                    # 的 3BB 就是他的前注本身），补一条 raise 反而是凭空造一条
+                    # 自愿行动。全下这个事实由 `hand.all_ins` 记着，这里补一条
+                    # 诊断让人能查到「这笔差是前注不是漏抓的 action」。
+                    if p.all_in:
+                        self._note_data_warning(
+                            hand,
+                            f"{hand.street}: {p.seat_id} 全下 {bet:g}BB 未超过"
+                            f"强制投入 {forced:g}BB，按前注/盲注处理，不记动作")
                     hand.baseline[key] = bet
                     continue
                 if bet > level + 1e-9:
@@ -1460,6 +1472,13 @@ class LiveHandTracker:
                     and action in ("call", "bet", "raise") and bet > 0):
                 forced = self._forced_preflop_level(hand, p)
                 if bet <= forced + 1e-9:
+                    # 全下不豁免，理由同上：金额没超过强制投入时，那是前注/
+                    # 盲注本身，不是一次自愿行动。
+                    if p.all_in:
+                        self._note_data_warning(
+                            hand,
+                            f"{hand.street}: {p.seat_id} 全下 {bet:g}BB 未超过"
+                            f"强制投入 {forced:g}BB，按前注/盲注处理，不记动作")
                     hand.baseline[key] = bet
                     continue
 
@@ -1581,6 +1600,19 @@ class LiveHandTracker:
                 hand.level.get(hand.street, 0.0), recovered)
             hand.level_unknown.discard(hand.street)
 
+    @staticmethod
+    def _all_in_seats(hand: _LiveHand) -> set[str]:
+        """这一手**推过全下**的座位：2 帧确认的 `hand.all_ins` ∪ 动作上的 all_in。
+
+        动作记录的 `all_in` 是单帧判据（frame_state 一帧就能置真），而
+        `hand.all_ins` 要 `ALL_IN_CONFIRM_FRAMES` 帧确认；只看后者会在结算帧
+        漏掉「刚被单帧判成全下」的人 —— 他随后被「离桌」补一条 fold，同一手
+        里既 all_in 又 fold。两套口径在这里合并成「推过就是推过」。
+        """
+        seats = set(hand.all_ins)
+        seats.update(a.seat_id for a in hand.actions if a.all_in)
+        return seats
+
     def _record_avatar_folds(self, state: FrameState, hand: _LiveHand) -> None:
         """头像弃牌：连续 `AVATAR_FOLD_CONFIRM_FRAMES` 帧才提交。
 
@@ -1590,8 +1622,10 @@ class LiveHandTracker:
         的人不可能弃牌；已经有过 fold 记录的座位不重复提交。
         """
         folded = {a.seat_id for a in hand.actions if a.action == "fold"}
+        all_in_seats = self._all_in_seats(hand)
         for p in state.players:
-            if (p.left or p.seat_id in folded or p.seat_id in hand.all_ins):
+            if (p.left or p.seat_id in folded
+                    or p.seat_id in all_in_seats):
                 self._fold_pending.pop(p.seat_id, None)
                 continue
             if p.fold is not True:
@@ -1634,6 +1668,7 @@ class LiveHandTracker:
         头像仍然是弃牌。这里用这一帧的读数补上确认，位置仍按第一次观测。
         同一帧（take_current 复用）不算新证据，直接作废——单帧不提交。
         """
+        all_in_seats = self._all_in_seats(hand)
         for seat_id, pending in list(self._fold_pending.items()):
             if pending.street != street:
                 continue
@@ -1641,7 +1676,7 @@ class LiveHandTracker:
                             if p.seat_id == seat_id), None)
                       if state is not None else None)
             if (player is not None and player.fold is True
-                    and not player.left and seat_id not in hand.all_ins
+                    and not player.left and seat_id not in all_in_seats
                     and state is not None
                     and state.frame_id != pending.frame_id):
                 pending.count += 1
@@ -1665,10 +1700,11 @@ class LiveHandTracker:
         `_revoke_left_folds` 能精确撤销它。
         """
         folded = {a.seat_id for a in hand.actions if a.action == "fold"}
+        all_in_seats = self._all_in_seats(hand)
         for p in state.players:
             if not p.left or p.seat_id in folded:
                 continue
-            if p.seat_id == hand.hero_seat_id or p.seat_id in hand.all_ins:
+            if p.seat_id == hand.hero_seat_id or p.seat_id in all_in_seats:
                 continue
             hand.actions.append(ActionRecord.make(
                 source="ledger",
@@ -1960,7 +1996,7 @@ class LiveHandTracker:
             return
         actual = round(end - start, 2)
         level = hand.level.get(street, 0.0)
-        if actual <= 1e-9 or level <= 1e-9:
+        if actual <= 1e-9:
             return
 
         # hero 那一笔先认下来：客户端不给 hero 画下注 pill，不认的话这条街的
@@ -1982,6 +2018,13 @@ class LiveHandTracker:
                      and p.status != "folded" and not p.all_in
                      and p.seat_id not in unknown]
         if not remaining:
+            return
+
+        # 整街一条激进动作都没有（水位还是 0）：可能连「首注 + 跟注」一起
+        # 丢了。首注不需要锚点 —— 新街水位从 0 起算，第一个激进动作按定义
+        # 就是 bet，推断出来的类型无歧义。
+        if level <= 1e-9:
+            self._infer_first_bet(hand, street, state, actual, known, remaining)
             return
 
         # ① 只补跟注：所有人补齐到已经记录到的当前水位
@@ -2080,6 +2123,54 @@ class LiveHandTracker:
                   if known.get(p.seat_id, 0.0) < final - RECONCILE_TOLERANCE]
         self._append_inferred(hand, street, state, items)
 
+    def _infer_first_bet(self, hand: _LiveHand, street: str,
+                         state: FrameState, actual: float,
+                         known: dict[str, float],
+                         remaining: list[PlayerState]) -> None:
+        """整街只丢了一次「首注 + 跟注」时的反解（没有锚点也补）。
+
+        `_infer_single_raise` 要求本街先有一个激进动作当锚点，否则不知道
+        加注发生在谁之后。**首注**不需要锚点：新街水位从 0 起算，第一个
+        激进动作按定义就是 bet，剩下的人要么跟注要么弃牌，还在局的人街末
+        投入相同 —— 金额能唯一反解，类型也唯一。
+
+        约束与单次加注同源：整 chip 半 BB、账单精确吻合、每座已记录投入都
+        不超过反解值。谁先下注仍然推不出来，取「最早能行动的人」并标
+        `order_unknown`（金额是精确值，先后是推断）。
+        """
+        if street == PREFLOP:
+            # 翻前的水位来自盲注基线，level==0 只说明盲注也没记到
+            # （炸弹池前注），那时平摊出来的「首注」其实是前注，不能补。
+            return
+        acts = hand.street_actions(street)
+        if any(a.action in AGGRESSIVE for a in acts):
+            return                      # 有锚点就该走 _infer_single_raise
+        n = len(remaining)
+        if n < 1:
+            return
+        ids = {p.seat_id for p in remaining}
+        other_known = sum(v for seat, v in known.items() if seat not in ids)
+        invested = [known.get(p.seat_id, 0.0) for p in remaining]
+        # 还在局的人街末投入相同（都跟到同一个水位）。不一样说明有弃牌者
+        # 的钱没记到，把差额平摊会把钱算到别人头上。
+        if max(invested) - min(invested) > RECONCILE_TOLERANCE:
+            return
+        base = invested[0]
+        final = round((actual - other_known) / n, 2)
+        if final <= base + RECONCILE_TOLERANCE:
+            return
+        if abs(final - round(final * 2) / 2) > RECONCILE_TOLERANCE:
+            return
+        if abs(n * final + other_known - actual) > RECONCILE_TOLERANCE:
+            return
+        bettor = min(remaining, key=self._action_rank)
+        ring = self._ring_from(bettor, remaining)
+        if not ring or ring[0] is not bettor:
+            return
+        items = [(bettor, "bet", final)]
+        items += [(p, "call", final) for p in ring[1:]]
+        self._append_inferred(hand, street, state, items, order_unknown=True)
+
     def _fill_amount_instead(self, hand: _LiveHand, street: str,
                              seat_id: str, amount: float) -> bool:
         """该座这一街已经有动作、只是金额没读到：补金额，不再追加一条。
@@ -2101,7 +2192,8 @@ class LiveHandTracker:
 
     def _append_inferred(self, hand: _LiveHand, street: str,
                          state: FrameState,
-                         items: list[tuple[PlayerState, str, float]]) -> None:
+                         items: list[tuple[PlayerState, str, float]],
+                         *, order_unknown: bool = False) -> None:
         """把补出来的动作按发生顺序追加到这一街，并标 inferred。"""
         for p, action, amount in items:
             name, position = self._seat_info(hand, p.seat_id, state)
@@ -2110,6 +2202,7 @@ class LiveHandTracker:
                 street=street, seat_id=p.seat_id, name=name or p.name,
                 position=position or p.position, action=action,
                 amount=amount, all_in=p.all_in,
+                order_unknown=order_unknown,
                 is_hero=p.seat_id == state.hero_seat_id))
             hand.last_index[(street, p.seat_id)] = len(hand.actions) - 1
             hand.baseline[(street, p.seat_id)] = amount
@@ -2244,9 +2337,10 @@ class LiveHandTracker:
         """街末/手末补全：漏读的弃牌 + 已经轮过且没动作的过牌。
 
         视频流里弃牌徽章经常整条街都抓不到；但「街开始时在局、街末已经不在局」
-        是可靠的结构证据。过牌更保守：只有这一街**没有任何 bet/raise** 时才补，
-        因为一旦有人下注，没记录到动作的人更可能是跟注（金额对账会先处理），
-        把它写成 check 会污染行动线。
+        是可靠的结构证据。过牌更保守：只有这一街**没有任何 bet/raise、也没有
+        弃牌**时才补 —— 有人下注时没记录到动作的人更可能是跟注（金额对账会先
+        处理）；而「无人下注却有弃牌」本身就是矛盾证据，说明下注整条丢了，
+        这时补 check 会造出一个不存在的「全场过牌」回合。
         """
         if street in hand.finalized_streets:
             return
@@ -2313,9 +2407,18 @@ class LiveHandTracker:
 
         # ④ 过牌：仍在局、这一街完全没人下注、没有全下，且已配平。
         # 手末的翻前不补：所有人弃牌到 BB 时，BB 是直接收池，不是「过牌」。
-        # 这一街已经有弃牌：多半是漏抓了下注，弃牌与过牌的先后无法从
-        # “人没了”唯一确定，过牌只补事实、顺序标未知。
         had_folds = any(a.action == "fold" for a in acts)
+        # 翻后有人弃牌却整街无人下注：不可能的组合（弃牌只发生在面对下注时），
+        # 说明这一街的下注整条丢了。此时补 check 会凭空造出一个「全场没人
+        # 下注」的回合，范围模型会当真；漏补只是一条缺口。（旧逻辑是照补
+        # check、只标 order_unknown，注释里自己也承认矛盾。）
+        # 翻前不算矛盾：面对盲注就弃牌是正常线路（UTG 弃、其余人跟），
+        # 那种街照旧补 check。
+        if street != PREFLOP and had_folds and not aggressive:
+            self._note_data_warning(
+                hand, f"{street}: 有弃牌但整街无人下注，疑似漏抓下注，不补过牌")
+            hand.finalized_streets.add(street)
+            return
         if (not unmatched and not aggressive
                 and not (at_hand_end and street == PREFLOP)):
             for p in pending:
@@ -2485,6 +2588,16 @@ class LiveHandTracker:
             return None
 
         snap = self._snapshot(state, hand)
+        # 有对手的下注读数被判不可信（frame_state 降级成 bet_unknown）：那个
+        # 座位不进 to_call 的取最大，to_call 会偏小甚至为 0，模型可能把「面对
+        # 20BB」看成「没人下注」。这一帧不给建议、也不占 advised 名额，读数
+        # 恢复后同一个决策点还能补投。比「只需跟 1BB」的建议安全得多。
+        if snap.bets_unknown:
+            self.skip_reason = "opponent_bet_unknown"
+            self.skip_detail = (
+                f"对手下注读数不可信（{'、'.join(snap.bets_unknown)}），"
+                "to_call 可能偏小，这一帧不出建议")
+            return None
         # 这一街自己已经行动过、又没有人把下注抬高：这一轮其实已经结束，
         # 按钮还在只是客户端还没收走。此时再投一次就是同一条街的重复请求 ——
         # 实测 SB 补齐（to_call 0.5→0）后立刻又投（h8/h46/h106），下注被跟注
@@ -2550,6 +2663,13 @@ class LiveHandTracker:
         if street_bet:
             hero_bet = max(hero_bet, street_bet)
 
+        # 下注读数被判不可信的座位不参与取最大（它们的 bet 是 None），
+        # 所以 max_bet/to_call 会偏小 —— 这不是「少一条事实」，是给错建议。
+        # 记下座位号，_maybe_decision 据此跳过这一帧。
+        bets_unknown = tuple(sorted(
+            p.seat_id for p in state.players
+            if getattr(p, "bet_unknown", False) and p.in_hand
+            and p.fold is not True and p.status != "folded"))
         bets = sorted(
             (p.bet for p in state.players if p.bet is not None and p.in_hand),
             reverse=True)
@@ -2591,6 +2711,10 @@ class LiveHandTracker:
             warnings.append("hero hole cards unread")
         if hand.street != PREFLOP and len(hand.board) < 3:
             warnings.append("board incomplete")
+        if bets_unknown:
+            warnings.append(
+                f"opponent bet unreadable ({', '.join(bets_unknown)}); "
+                "to_call may be underestimated")
 
         # 决策点身份 = 这一手、这一街到目前的**动作序列**（+ 自己的底牌）。
         # 底池/最高下注不进 key：它们是 OCR 读数，盲注补齐、筹码动画会让它们
@@ -2625,6 +2749,7 @@ class LiveHandTracker:
             warnings=tuple(warnings),
             bomb_pot=hand.bomb_pot,
             players_dealt=players_dealt,
+            bets_unknown=bets_unknown,
         )
 
     def _preflop_shapes(self, hand: _LiveHand, max_bet: float,

@@ -177,6 +177,38 @@ def test_unknown_street_does_not_fill_checks() -> None:
           f"欠动作座位应写进诊断：{warnings}")
 
 
+def test_flop_first_bet_inferred_without_anchor() -> None:
+    """翻牌整街只丢了一次「首注 + 跟注」：没有锚点也要反解，类型必为 bet。
+
+    `_infer_single_raise` 需要本街先有一条激进动作当锚点；首注不需要——新街
+    水位从 0 起算，第一个激进动作按定义就是 bet。金额由底池账单唯一反解，
+    谁先下注推不出来，所以标 order_unknown。
+    """
+    tracker = LiveHandTracker(confirm_frames=1)
+    limped_preflop(tracker)
+    tracker.observe(state("f3", board_len=3, pot=5.0, pbs=5.0),
+                    ["7c", "7s"], BOARD[:3])
+    # 翻牌 SB 下 6BB、其余四人各跟 6BB，但 pill 和徽章一个都没抓到
+    tracker.observe(state("f4", board_len=3, pot=5.0, pbs=5.0),
+                    ["7c", "7s"], BOARD[:3])
+    # 转牌出现：pbs=35 说明翻牌实际投了 30（6×5），行动线里一条都没有
+    tracker.observe(state("f5", board_len=4, pot=35.0, pbs=35.0),
+                    ["7c", "7s"], BOARD[:4])
+    hand = tracker.take_current()
+    check(hand is not None, "应产出当前手牌")
+    if hand is None:
+        return
+    acts = street_actions(hand, "flop")
+    got = [(a["seat_id"], a["action"], a.get("amount")) for a in acts]
+    want = [("sb", "bet", 6.0), ("bb", "call", 6.0), ("utg", "call", 6.0),
+            ("hero", "call", 6.0), ("btn", "call", 6.0)]
+    check(got == want, f"首注+跟注应按位置补齐：{got}")
+    check(all(a.get("source") == "ledger" for a in acts),
+          f"反解出来的动作应为 ledger：{acts}")
+    check(all(a.get("order_unknown") for a in acts),
+          f"谁先下注推不出来，应标 order_unknown：{acts}")
+
+
 def test_street_end_folds_follow_position_order() -> None:
     tracker = LiveHandTracker(confirm_frames=1)
     tracker.observe(state("f1", bets={"sb": 0.5, "bb": 1.0}), ["7c", "7s"], [])
@@ -239,6 +271,7 @@ def test_existing_call_amount_is_backfilled_not_duplicated() -> None:
 
 def main() -> int:
     tests = [test_checks_follow_position_order,
+             test_flop_first_bet_inferred_without_anchor,
              test_hand_end_unique_calls_fill_to_level,
              test_calls_not_filled_when_account_does_not_confirm,
              test_unknown_street_does_not_fill_checks,

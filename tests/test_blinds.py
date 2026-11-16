@@ -34,6 +34,7 @@ def check(cond: bool, msg: str) -> None:
 def state(frame_id: str, *, bets: dict[str, float] | None = None,
           actions: dict[str, tuple[float, str]] | None = None,
           folded: tuple[str, ...] = (),
+          all_in: tuple[str, ...] = (),
           bomb_pot: bool = False, ante: float | None = None,
           pot: float = 1.5) -> FrameState:
     """五个座位的一帧；bets 缺省全 0（模拟盲注 pill 还没渲染）。"""
@@ -45,10 +46,12 @@ def state(frame_id: str, *, bets: dict[str, float] | None = None,
     for sid, name, pos in seats:
         act = actions.get(sid)
         players.append(PlayerState(
-            sid, name=name, position=pos, stack=100.0,
+            sid, name=name, position=pos,
+            stack=0.0 if sid in all_in else 100.0,
             bet=bets.get(sid, 0.0),
             action=act[1] if act else None,
             fold=True if sid in folded else False,
+            all_in=sid in all_in,
             in_hand=True,
             status="folded" if sid in folded else "playing"))
     return FrameState(
@@ -128,6 +131,39 @@ def test_bomb_ante_posts_are_not_actions() -> None:
           f"BTN 只应有真实加注：{btn}")
 
 
+def test_all_in_below_forced_level_stays_a_forced_post() -> None:
+    """炸弹池里后手比前注还短：推出去的钱就是前注，不落成 raise，只留诊断。
+
+    2026-11-16 决定：强制投入闸**不**给全下开口子。能落到这道闸里的全下，
+    金额必然全部在强制投入以内 —— 补一条 raise 等于凭空造一次自愿行动，
+    会把 VPIP/PFR 一起带偏。事实由 `hand.all_ins` 记着，这里补一条诊断
+    让人能查到「这笔差是前注，不是漏抓的 action」。
+    """
+    tracker = LiveHandTracker(confirm_frames=1)
+    tracker.observe(state("f1", bomb_pot=True, ante=5.0, pot=50.0),
+                    ["7c", "7s"], [])
+    tracker.observe(state("f2", bomb_pot=True, ante=5.0, pot=50.0,
+                          bets={sid: 5.0 for sid in
+                                ("hero", "sb", "bb", "btn", "utg")}),
+                    ["7c", "7s"], [])
+    # UTG 后手只剩 3BB：客户端亮「全下」，但 3BB 还没到 5BB 前注
+    tracker.observe(state("f3", bomb_pot=True, ante=5.0, pot=48.0,
+                          bets={"hero": 5.0, "sb": 5.0, "bb": 5.0,
+                                "btn": 5.0, "utg": 3.0},
+                          actions={"utg": (3.0, "raise")},
+                          all_in=("utg",)),
+                    ["7c", "7s"], [])
+    hand = tracker.take_current()
+    check(hand is not None, "应产出当前手牌")
+    if hand is None:
+        return
+    check(not seat_actions(hand, "utg"),
+          f"未超过前注的全下不能落成行动：{seat_actions(hand, 'utg')}")
+    warnings = hand.get("data_warnings") or []
+    check(any("未超过强制投入" in w for w in warnings),
+          f"应留下「按前注处理」的诊断：{warnings}")
+
+
 def test_blind_badge_at_blind_level_is_not_an_action() -> None:
     """徽章把盲注本身读成 call/raise 时，不能落成行动；真实补注仍要记。"""
     tracker = LiveHandTracker(confirm_frames=1)
@@ -202,6 +238,7 @@ def main() -> int:
     tests = [test_blinds_rendered_late_are_not_actions,
              test_sb_complete_is_a_real_call,
              test_blind_badge_at_blind_level_is_not_an_action,
+             test_all_in_below_forced_level_stays_a_forced_post,
              test_bomb_ante_posts_are_not_actions,
              test_all_fold_to_bb_has_no_check,
              test_flop_bet_delta_keeps_source_and_total]

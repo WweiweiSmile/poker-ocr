@@ -35,7 +35,9 @@ def check(cond: bool, msg: str) -> None:
 def state(frame_id: str, *, folded: tuple[str, ...] = (),
           actions: dict[str, tuple[float, str]] | None = None,
           bets: dict[str, float] | None = None,
-          missing: tuple[str, ...] = ()) -> FrameState:
+          missing: tuple[str, ...] = (),
+          left: tuple[str, ...] = (),
+          all_in: tuple[str, ...] = ()) -> FrameState:
     """五个座位的一帧；`folded` 里的座位头像显示弃牌。"""
     actions = actions or {}
     bets = bets or {}
@@ -52,10 +54,13 @@ def state(frame_id: str, *, folded: tuple[str, ...] = (),
             continue
         act = actions.get(sid)
         players.append(PlayerState(
-            sid, name=name, position=pos, stack=100.0 - bet,
+            sid, name=name, position=pos,
+            stack=0.0 if sid in all_in else 100.0 - bet,
             bet=bets.get(sid, bet),
             action=act[1] if act else None,
             fold=True if sid in folded else False,
+            all_in=sid in all_in,
+            left=sid in left,
             in_hand=True,
             status="folded" if sid in folded else "playing"))
     return FrameState(
@@ -107,6 +112,36 @@ def test_two_frames_place_fold_between_actions() -> None:
                  ("utg", "call"), ("btn", "fold"), ("bb", "raise")}]
     check(order == [("utg", "call"), ("btn", "fold"), ("bb", "raise")],
           f"弃牌应落在第一次观测的位置：{order}")
+
+
+def test_all_in_seat_is_not_given_a_left_fold() -> None:
+    """单帧全下动作之后该座离桌：不能补 fold，否则同一手既 all_in 又 fold。
+
+    `hand.all_ins` 要 2 帧确认，动作上的 `all_in` 是单帧判据；只看前者会在
+    结算帧把「刚被判成全下」的人当成弃牌。两套口径合并成「推过就是推过」。
+    """
+    tracker = LiveHandTracker(confirm_frames=1)
+    tracker.observe(state("f1"), ["7c", "7s"], [])
+    # UTG 全下 20（单帧就够）：动作记录带 all_in=True，hand.all_ins 还没确认
+    tracker.observe(state("f2", actions={"utg": (20.0, "raise")},
+                          bets={"utg": 20.0}, all_in=("utg",)),
+                    ["7c", "7s"], [])
+    # 下一帧 UTG 离桌（结算动画里座位空掉）
+    tracker.observe(state("f3", bets={"utg": 20.0}, all_in=("utg",),
+                          left=("utg", "btn")), ["7c", "7s"], [])
+    hand = tracker.take_current()
+    check(hand is not None, "应产出当前手牌")
+    if hand is None:
+        return
+    utg = [a for a in actions_of(hand) if a["seat_id"] == "utg"]
+    check(not [a for a in utg if a["action"] == "fold"],
+          f"全下的座位不能被补成弃牌：{utg}")
+    check(any(a["action"] == "raise" and a.get("all_in") for a in utg),
+          f"全下动作应记为带 all_in 的加注：{utg}")
+    # 对照：同样离桌但没有全下的 BTN 仍要补 fold
+    btn = [a for a in actions_of(hand)
+           if a["seat_id"] == "btn" and a["action"] == "fold"]
+    check(len(btn) == 1, f"普通离桌仍应补一条 fold：{actions_of(hand)}")
 
 
 def test_single_frame_is_not_committed() -> None:
@@ -188,6 +223,7 @@ def test_residual_bet_after_fold_is_not_a_raise() -> None:
 
 def main() -> int:
     tests = [test_two_frames_place_fold_between_actions,
+             test_all_in_seat_is_not_given_a_left_fold,
              test_single_frame_is_not_committed,
              test_street_end_does_not_duplicate_committed_fold,
              test_confirm_on_street_change_uses_first_frame,

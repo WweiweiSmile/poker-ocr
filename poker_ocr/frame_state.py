@@ -644,8 +644,18 @@ def _build_players(ctx: BuildContext):
         all_in = bool(in_hand and (
             all_in_badge is True or equity is not None
             or (stack == 0.0 and ((bet or 0) > 0 or was_all_in))))
-        if all_in:
+        # 弃牌（手牌图标消失 **且** 头像「弃牌」）比全下更强：全下的三条判据
+        # 里只有徽章是强证据，胜率/筹码 0 都可能是一次读数抖动，而弃牌要两个
+        # 条件同时成立、还要连续两帧（见 hand_track 的 AVATAR_FOLD_CONFIRM_FRAMES）。
+        # 所以只有弃牌证据**弱**（只有文本、没有图标，或亮牌时沿用历史判定）
+        # 时才让全下压掉弃牌 —— 否则结算帧上同一个人会既 all_in 又 fold，
+        # 两条记录互相矛盾（2026-11-16 复盘，见 docs/对手动作-判定依据-2026-11-16.md）。
+        strong_fold = (not shown_here and icon is False and fold_badge is True)
+        if all_in and not strong_fold:
             fold = False
+        elif all_in:
+            # 弃牌赢了：全下这条判据随之作废，同一条记录不能既 all_in 又 fold。
+            all_in = False
         if no_player:
             fold = None
         status = ("buying_in" if buying_in else

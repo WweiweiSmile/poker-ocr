@@ -1005,6 +1005,38 @@ def test_unknown_bet_keeps_badge_action_and_backfills_amount() -> None:
           f"读数恢复后应补上金额：{acts[0].amount}")
 
 
+def test_opponent_bet_unknown_blocks_advice() -> None:
+    """对手下注读数被判不可信：这一帧不出建议，等读数恢复。
+
+    `bet_unknown` 的座位不进 to_call 的取最大，to_call 会偏小甚至为 0，
+    模型可能把「面对 20BB」看成「没人下注」。底池账单那一道闸多数时候会先
+    拦下（钱已经进池），但底池还没更新、或钱被别的读数吸收时拦不住，所以
+    在 snapshot 上再设一道。
+    """
+    tr = LiveHandTracker(confirm_frames=1)
+    board = ["9s", "Qs", "9h"]
+    st = state(player("hero", position="BTN"),
+               player("a", name="老王", position="SB", bet=0.0),
+               player("b", name="小李", position="BB", bet=None,
+                      bet_unknown=True),
+               pot=3.0, pbs=3.0, dealer="a", hero_turn=True)
+    point = feed(tr, st, ["7c", "Qh"], board)
+    check(point is None, "对手下注读不出时不该给建议")
+    check(tr.skip_reason == "opponent_bet_unknown",
+          f"应标记对手下注不可信，实际 {tr.skip_reason}")
+    check("to_call" in (tr.skip_detail or ""),
+          f"跳过原因应是说明 to_call 可能偏小：{tr.skip_detail}")
+
+    # 读数恢复：BB 的 1BB 读出来了 → 同一个决策点还能补投
+    st2 = state(player("hero", position="BTN"),
+                player("a", name="老王", position="SB", bet=0.0),
+                player("b", name="小李", position="BB", bet=1.0),
+                pot=4.0, pbs=3.0, dealer="a", hero_turn=True)
+    point = feed(tr, st2, ["7c", "Qh"], board)
+    check(point is not None, "读数恢复后应重新给建议")
+    check(tr.skip_reason is None, "读数恢复后不该再标跳过原因")
+
+
 def test_unbalanced_street_blocks_advice_until_bet_recovers() -> None:
     """对手下注 24.5 被读成 4.5：底池账单对不上 → 不给建议，读数恢复后才给。
 
