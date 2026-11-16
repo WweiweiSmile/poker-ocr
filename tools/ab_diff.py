@@ -302,7 +302,8 @@ def main() -> int:
         if not ks:
             print(f"{label:26s}{0:6d}{0:8d}{'—':>8s}{'—':>8s}{'—':>8s}")
             return
-        base_txt = f"{rs:.0%}" if (same and not is_baseline) else "—"
+        # 基线一侧同样受 n≥30 约束：不够就只给 n，不给比例，免得把 1 个点当基线
+        base_txt = f"{rs:.0%}" if (base_ok and not is_baseline) else "—"
         excess_txt = (f"{(r - rs) * 100:+.0f}pp"
                       if (base_ok and not is_baseline) else "—")
         print(f"{label:26s}{len(ks):6d}{f:8d}{r:8.0%}{base_txt:>8s}{excess_txt:>8s}")

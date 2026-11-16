@@ -74,21 +74,6 @@ FAMILIES: tuple[str, ...] = (
     "playing_board",
 )
 
-FAMILY_ZH: dict[str, str] = {
-    "weak_ace_top_pair": "弱A顶对",
-    "strong_ace_top_pair": "A顶对强踢",
-    "non_ace_top_pair": "非A顶对",
-    "overpair": "超对",
-    "middle_pair": "中等对子",
-    "small_pair": "小对子",
-    "air_high_card": "高张无对",
-    "suited_connector": "同花连张",
-    "busted_draw": "听牌破产",
-    "two_pair_plus": "两对+",
-    "set": "暗三",
-    "playing_board": "打牌面",
-}
-
 # 同组的两族不在一张桌上重复出现（#12「渲染层 6 组」）。
 FAMILY_RENDER_GROUP: dict[str, str] = {
     "weak_ace_top_pair": "weak_ace_top_pair",

@@ -131,7 +131,7 @@ fallback、或输出被 `MAX_TOKENS` 截断，看起来都可能像「建议变�
 - **与 ready 集的交叉核对**：本文件 §2 表里的 14 个 ready 手键与本轮 121 点**零交集**——ready 集是 10-30 / 11-01 的手，本机可复跑的 `runs/*` 只有 11-12 的局。这是数据可得性边界，不是抽样偏差。
 - **跑法**：`WITNESS_PROMPT=<0|1> nv tools/replay_live_decisions.py --log runs/<run>/live.states.jsonl --hands logs/ab/hands.json --profile-db logs/ab/profiles_witness.json --model --json logs/ab/<run>.w<arm>.json`，deepseek-flash、thinking=disabled、temperature=0.2；再 `nv tools/ab_diff.py logs/ab/merged-w0.json logs/ab/merged-w1.json --json-out logs/ab/diff-w0-w1.json`。
 - **偏差：对照组塌了**。§15.3 的主指标要「事实块未变」子集当基线，但 witness 覆盖饱和——121 点里 120 点事实块都变了（且只因 witness 行而变），未变子集 **n=1**，基线没有统计意义。改用**同配置重跑一遍**（第三臂 `w1b`，同快照同开关）估模型噪声：超额 = 翻转率(变了) − 翻转率(同配置重跑)。这是明确替换，不是悄悄改口径。
-  `tools/ab_diff.py` 也据此改了：基线子集 n<30 时**不再打印超额**（打印 `—` + 一行警告），免得 n=1 的「超额 +5pp」被当成结论；本轮的超额 −3.3pp 是拿 `merged-w1.json` 对 `merged-w1b.json` 手算的（`nv tools/ab_diff.py logs/ab/merged-w1.json logs/ab/merged-w1b.json --show 0`，翻转率那一行即噪声臂）。
+  `tools/ab_diff.py` 也据此改了：基线子集 n<30 时**基线与超额两列都不打印**（都打 `—` + 一行警告），免得 n=1 的「超额 +5pp」被当成结论；本轮的超额 −3.3pp 是拿 `merged-w1.json` 对 `merged-w1b.json` 手算的（`nv tools/ab_diff.py logs/ab/merged-w1.json logs/ab/merged-w1b.json --show 0`，翻转率那一行即噪声臂）。
 
 ### 6.2 结果
 

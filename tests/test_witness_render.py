@@ -409,6 +409,20 @@ def test_witness_by_seat_helper_degrades_to_empty() -> None:
         def witness_payload(self):
             return {"version": A.WITNESS_SCHEMA, "rows": [None, 42, "x"]}
 
+    class _NoVersionStore:
+        def witness_payload(self):
+            return {"rows": [{"status": A.STATUS_ADMITTED, "family": "two_pair_plus",
+                              "street": "river", "action": "check", "position": "ip",
+                              "cards": ["Ah", "Kd"], "player": "near",
+                              "ts": "2026-11-01T00:00:00+08:00"}]}
+
+    class _OldVersionStore:
+        def witness_payload(self):
+            return {"version": "witness-2020-01-01a", "rows": [{"status": A.STATUS_ADMITTED,
+                    "family": "two_pair_plus", "street": "river", "action": "check",
+                    "position": "ip", "cards": ["Ah", "Kd"], "player": "near",
+                    "ts": "2026-11-01T00:00:00+08:00"}]}
+
     check(R.witness_by_seat(None, _Point()) == {}, "无 store 应为空")
     check(R.witness_by_seat(_OldStore(), _Point()) == {}, "旧 store 应为空")
     check(R.witness_by_seat(_EmptyStore(), _Point()) == {}, "空 rows 应为空")
@@ -416,6 +430,17 @@ def test_witness_by_seat_helper_degrades_to_empty() -> None:
     check(R.witness_by_seat(_ListStore(), _Point()) == {}, "画像不是对象应退化为空")
     check(R.witness_by_seat(_JunkRowsStore(), _Point()) == {},
           "rows 是垃圾数据也不能把异常抛给调用方")
+    check(R.witness_by_seat(_NoVersionStore(), _Point()) == {},
+          "没有 version 的块不能按当前版本采信（§14.5）")
+    check(R.witness_by_seat(_OldVersionStore(), _Point()) == {},
+          "版本不符的块整段不出现（§14.5）")
+    check(R.render_witness_lines({"rows": [{"status": A.STATUS_ADMITTED,
+                                             "family": "two_pair_plus", "street": "river",
+                                             "action": "check", "position": "ip",
+                                             "cards": ["Ah", "Kd"], "player": "near",
+                                             "ts": "2026-11-01T00:00:00+08:00"}]},
+                                 seats={"near": "near"}) == {},
+          "包装载荷缺 version 时 render 也返回空")
     old = os.environ.get("WITNESS_PROMPT")
     try:
         os.environ["WITNESS_PROMPT"] = "0"

@@ -586,7 +586,7 @@ unknown 单独成格，不并进 check（#12）。
 - [x] `poker_ocr/witness/render.py`、`poker_ocr/tables/witness_phrasing.json` 落地（§14.8 第 1–2 条）
 - [x] `tests/test_witness_render.py` 四态通过（§15.1 线 1）
 - [x] prompt golden 两断言通过：无 witness 时 hash / 段字节不变、注入后有行（§15.1 线 2）
-- [x] 预算两层断言通过（§15.2）
+- [x] 预算两层断言通过（§15.2）——纯函数层在 `tests/test_witness_render.py`（600 字符、每座位 ≤2 条、远先丢 / N 小先丢）；prompt 层在 `tests/test_opponent_profile.py::test_prompt_witness_lines_respect_budget_and_seat_order`（穿过 build_situation → render_facts_zh，抽「摊牌证据：」行断言总长 ≤600、座位先后与 `witness_by_seat` 装配顺序一致）
 - [x] 禁词清单生效，且只作用于「摊牌证据：」行（§15.2）
 - [x] ground_truth 三条 fixture 通过；软测试未跑（本机无 `OPENAI_API_KEY`）
 

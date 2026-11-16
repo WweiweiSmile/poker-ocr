@@ -1658,8 +1658,74 @@ def test_prompt_injects_witness_lines_after_tendencies() -> None:
     check(empty == without, "空 witness 与不传必须逐字节相同")
 
 
+def test_prompt_witness_lines_respect_budget_and_seat_order() -> None:
+    """§15.2 第二层：从渲染后的 prompt 抽「摊牌证据：」行——总长 ≤600、座位由近到远。
+
+    第一层（纯函数）在 tests/test_witness_render.py 里断言预算与丢座位顺序；
+    这里断言穿过 build_situation → render_facts_zh 之后仍然成立：行数、总长、
+    以及 prompt 里的座位先后与 witness_by_seat 装配出来的键序一致。
+    """
+    from poker_ocr.witness.admission import WITNESS_SCHEMA
+    from poker_ocr.witness.render import witness_by_seat
+
+    seats = (("s1", "甲一", "SB"), ("s2", "乙二", "UTG"),
+             ("s3", "丙三", "MP"), ("s4", "丁四", "BTN"))
+
+    class _Store:
+        def witness_payload(self):
+            rows = []
+            # 每个座位的次数不同 → 句子互不相同，才能从 prompt 里认出是谁的行
+            for i, (_seat, name, _pos) in enumerate(seats, start=1):
+                for family, street in (("two_pair_plus", "river"),
+                                       ("middle_pair", "turn")):
+                    for _ in range(i):
+                        rows.append({
+                            "status": "admitted", "family": family, "street": street,
+                            "action": "check", "position": "ip", "cards": ["Ah", "Kd"],
+                            "player": name, "ts": "2026-11-01T00:00:00+08:00",
+                        })
+            return {"version": WITNESS_SCHEMA, "rows": rows}
+
+    point = HandSnapshot(
+        hand_id="h8b", hand_index=9, street="turn",
+        board=("Ad", "As", "Qc", "Kc"), hero_cards=("Jh", "Qd"),
+        hero_position="BB", hero_stack=95.0, hero_bet=0.0,
+        hero_invested=24.0, to_call=0.0, second_bet=None,
+        pot=47.5, pot_before_street=47.5, table_size=9, blinds=BLINDS,
+        opponents=tuple(OpponentSnapshot(seat, name, pos, 95.0, 0.0, False)
+                        for seat, name, pos in seats),
+        streets=(StreetRecord("preflop", 4.0, ()),
+                 StreetRecord("flop", 19.0, ()),
+                 StreetRecord("turn", 47.5, ())),
+        preflop_shapes=("single-raise",), hero_is_pfr=False, cbet_spot=False,
+        decision_key=("h8b", "turn", 0, 47.5, 0.0, ("Jh", "Qd")),
+        players_dealt=9,
+    )
+    by_seat = witness_by_seat(_Store(), point)
+    check(len(by_seat) == len(seats), f"四个座位都该有行：{by_seat}")
+
+    reads = tuple(_read(seat, name, "tag") for seat, name, _pos in seats)
+    facts = render_facts_zh(build_situation(
+        point, opponent_reads=reads, witness_by_seat=by_seat))
+    lines = [ln.strip() for ln in facts.splitlines()
+             if ln.strip().startswith("摊牌证据：")]
+    check(len(lines) == sum(len(v) for v in by_seat.values()),
+          f"prompt 里应有 {sum(len(v) for v in by_seat.values())} 行证据，实得 {len(lines)}")
+    total = sum(len(ln) + 1 for ln in lines)
+    check(total <= 600, f"§15.2 预算 600 字：实得 {total}")
+
+    seen: list[str] = []
+    for ln in lines:
+        seat = next(s for s, ls in by_seat.items() if ln in ls)
+        if not seen or seen[-1] != seat:
+            seen.append(seat)
+    check(seen == list(by_seat),
+          f"prompt 里的座位先后应与装配顺序一致：prompt {seen} vs 装配 {list(by_seat)}")
+
+
 def run() -> int:
     tests = [
+        test_prompt_witness_lines_respect_budget_and_seat_order,
         test_prompt_injects_witness_lines_after_tendencies,
         test_fold_and_check_are_inferred_at_street_end,
         test_no_fold_inferred_when_action_badge_recorded,

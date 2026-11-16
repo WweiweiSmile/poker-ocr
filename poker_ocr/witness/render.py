@@ -12,6 +12,7 @@
 
 词表 poker_ocr/tables/witness_phrasing.json 的 version 与 witness 数据版本
 （admission.WITNESS_SCHEMA）任一失配 → 返回 {}，让提示词整段不出现（§14.5）。
+带 {"version", "rows"} 包装的载荷同样要自报版本，缺 version 一律当未知、不采信。
 """
 
 from __future__ import annotations
@@ -339,6 +340,9 @@ def witness_by_seat(
         return {}
     if not isinstance(data, Mapping):  # 旧/坏文件可能不是对象，别让 .get 抛出去
         return {}
+    # 版本在磁盘边界上把关：没有 version 或版本不符，整段证据不出现（§14.5）
+    if data.get("version") != WITNESS_SCHEMA:
+        return {}
     rows = data.get("rows") or ()
     if not rows:
         return {}
@@ -390,6 +394,9 @@ def render_witness_lines(
         wrapper = rows
         if version is None:
             version = wrapper.get("version")
+        # 带包装的载荷必须自报版本：没有版本号就当未知，不按当前版本采信
+        if version != WITNESS_SCHEMA:
+            return {}
         rows = wrapper.get("rows") or ()
     data_version = version if version is not None else WITNESS_SCHEMA
     if data_version != WITNESS_SCHEMA:
