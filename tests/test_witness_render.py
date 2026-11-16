@@ -342,6 +342,122 @@ def test_env_flag_disables_rendering() -> None:
             os.environ["WITNESS_PROMPT"] = old
 
 
+def test_witness_by_seat_helper_orders_by_action_and_skips_folded() -> None:
+    """live / replay 共用的座位组装：Hero 之后由近到远，弃牌座位不进（§14.6）。"""
+
+    class _Opp:
+        def __init__(self, seat_id, name, position, folded=False):
+            self.seat_id = seat_id
+            self.name = name
+            self.position = position
+            self.folded = folded
+
+    class _Store:
+        def witness_payload(self):
+            return {"version": A.WITNESS_SCHEMA, "rows": tuple(
+                rows_for("far", "weak_ace_top_pair", 2, seat="far")
+                + rows_for("near", "overpair", 2, seat="near"))}
+
+    class _Point:
+        table_size = 9
+        hero_position = "BTN"
+        hero_seat_id = "hero"
+        opponents = (_Opp("far", "far", "UTG"),
+                     _Opp("near", "near", "SB"),
+                     _Opp("dead", "dead", "BB", folded=True))
+
+    got = R.witness_by_seat(_Store(), _Point())
+    check(list(got) == ["near", "far"], f"应按行动顺序由近到远：{list(got)}")
+    check("dead" not in got, f"弃牌座位不应出证据：{list(got)}")
+    lines = [line for seat in got.values() for line in seat]
+    check(lines and all(line.startswith(PREFIX) for line in lines),
+          f"每行都要带统一前缀：{lines}")
+
+
+def test_witness_by_seat_helper_degrades_to_empty() -> None:
+    """没有 witness 块 / 空 rows / 旧 store / 开关关闭 → 空 mapping，不抛异常（§14.5）。"""
+    import os
+
+    class _Opp:
+        seat_id = "near"
+        name = "near"
+        position = "SB"
+        folded = False
+
+    class _Point:
+        table_size = 9
+        hero_position = "BTN"
+        hero_seat_id = "hero"
+        opponents = (_Opp(),)
+
+    class _OldStore:
+        pass
+
+    class _EmptyStore:
+        def witness_payload(self):
+            return {"version": A.WITNESS_SCHEMA, "rows": []}
+
+    class _BoomStore:
+        def witness_payload(self):
+            raise RuntimeError("boom")
+
+    class _ListStore:
+        def witness_payload(self):
+            return ["不是对象"]
+
+    class _JunkRowsStore:
+        def witness_payload(self):
+            return {"version": A.WITNESS_SCHEMA, "rows": [None, 42, "x"]}
+
+    check(R.witness_by_seat(None, _Point()) == {}, "无 store 应为空")
+    check(R.witness_by_seat(_OldStore(), _Point()) == {}, "旧 store 应为空")
+    check(R.witness_by_seat(_EmptyStore(), _Point()) == {}, "空 rows 应为空")
+    check(R.witness_by_seat(_BoomStore(), _Point()) == {}, "读取异常应退化为空")
+    check(R.witness_by_seat(_ListStore(), _Point()) == {}, "画像不是对象应退化为空")
+    check(R.witness_by_seat(_JunkRowsStore(), _Point()) == {},
+          "rows 是垃圾数据也不能把异常抛给调用方")
+    old = os.environ.get("WITNESS_PROMPT")
+    try:
+        os.environ["WITNESS_PROMPT"] = "0"
+        check(R.witness_by_seat(_Store_with_row(), _Point()) == {},
+              "WITNESS_PROMPT=0 时整段关闭")
+    finally:
+        if old is None:
+            os.environ.pop("WITNESS_PROMPT", None)
+        else:
+            os.environ["WITNESS_PROMPT"] = old
+
+
+def test_replay_tool_injects_witness() -> None:
+    """离线复跑也要注入（§15.3）：没有画像库 → 空；有 → 出同一份行。"""
+    from tools.replay_live_decisions import witness_for
+
+    class _Opp:
+        seat_id = "near"
+        name = "near"
+        position = "SB"
+        folded = False
+
+    class _Point:
+        table_size = 9
+        hero_position = "BTN"
+        hero_seat_id = "hero"
+        opponents = (_Opp(),)
+
+    check(witness_for(None, _Point()) == {}, "没有画像库应为空")
+    got = witness_for(_Store_with_row(), _Point())
+    check(bool(got.get("near")), f"有 witness 块应出行：{got}")
+    check(got["near"][0].startswith(PREFIX), f"行应带前缀：{got}")
+
+
+def _Store_with_row():
+    class _S:
+        def witness_payload(self):
+            return {"version": A.WITNESS_SCHEMA,
+                    "rows": tuple(rows_for("near", "overpair", 2, seat="near"))}
+    return _S()
+
+
 def main() -> int:
     tests = [value for name, value in sorted(globals().items())
              if name.startswith("test_") and callable(value)

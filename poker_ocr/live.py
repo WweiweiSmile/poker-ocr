@@ -192,44 +192,12 @@ def _table_stats_for_active(profile_store, opponents):
 def _witness_by_seat(profile_store, point) -> dict:
     """本手「他亮过什么」→ {seat_id: (行…)}；任何缺失都退化为空。
 
-    只读：profiles.json 里没有 witness 块（旧文件）就没有证据，不猜。
-    座位按 Hero 下注后的行动顺序给（与 prompt/user/profiles.py 同源），
-    render_witness_lines 的预算耗尽时先丢更远的座位。
+    实现住在 poker_ocr/witness/render.py（离线复跑 A/B 走同一份，免得
+    座位顺序和预算口径在两条链路上漂移），这里只留实时链路的入口。
     """
-    from .opponent_profile import normalize_name
-    from .positions import POSITIONS_BY_TABLE_SIZE
-    from .witness import render as witness_render
+    from .witness.render import witness_by_seat
 
-    if not witness_render.enabled():
-        return {}
-    payload = getattr(profile_store, "witness_payload", None)
-    if payload is None:
-        return {}
-    data = payload() or {}
-    rows = data.get("rows") or ()
-    if not rows:
-        return {}
-    table_size = getattr(point, "table_size", 0) or 0
-    order = POSITIONS_BY_TABLE_SIZE.get(table_size, [])
-    hero_position = getattr(point, "hero_position", None)
-    if hero_position in order:
-        i = order.index(hero_position)
-        order = order[i + 1:] + order[:i]
-    rank = {position: i for i, position in enumerate(order)}
-    active = [o for o in getattr(point, "opponents", ())
-              if not getattr(o, "folded", False)]
-    active.sort(key=lambda o: rank.get(o.position or "", len(rank)))
-    seats: dict[str, str] = {}
-    for opp in active:
-        key = normalize_name(getattr(opp, "name", None))
-        if key:
-            seats[str(opp.seat_id)] = key
-    if not seats:
-        return {}
-    return witness_render.render_witness_lines(
-        rows, seats=seats,
-        hero_seat=getattr(point, "hero_seat_id", None),
-        version=data.get("version"))
+    return witness_by_seat(profile_store, point)
 
 
 def _hand_done_text(hand: dict) -> str:

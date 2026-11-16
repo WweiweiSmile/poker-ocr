@@ -39,6 +39,16 @@ from .admission import (
 
 log = logging.getLogger(__name__)
 
+_WARNED: set[str] = set()
+
+
+def _warn_once(key: str, message: str) -> None:
+    """同一种失败只刷一次日志：实时链路每手都会走到这里，逐帧打栈会淹掉日志。"""
+    if key in _WARNED:
+        return
+    _WARNED.add(key)
+    log.warning(message, exc_info=True)
+
 PHRASING_PATH = Path(__file__).resolve().parent.parent / "tables" / "witness_phrasing.json"
 
 POOL_MIN_COUNT = 20  # §10.2：池级比例线 n≥20 才出
@@ -301,6 +311,65 @@ def _seat_items(seats: Mapping[str, Any] | Iterable[Sequence[str]]) -> list[tupl
 
 
 # ---------------------------------------------------------------- 入口
+
+
+def witness_by_seat(
+    profile_store: Any,
+    point: Any,
+) -> dict[str, tuple[str, ...]]:
+    """本手「他亮过什么」→ {seat_id: (行…)}；任何缺失都退化为空（§14.5）。
+
+    只读：profiles.json 里没有 witness 块（旧文件）就没有证据，不猜。
+    座位按 Hero 下注后的行动顺序给（与 prompt/user/profiles.py 同源），
+    预算耗尽时先丢更远的座位。实时链路（live.py）和离线复跑
+    （tools/replay_live_decisions.py）共用这一份，A/B 两遍走的是同一条路。
+
+    point 只用到三个字段（table_size / hero_position / opponents），
+    任何对象只要有它们就能传进来；hero_seat_id 可选。
+    """
+    if not enabled():
+        return {}
+    payload = getattr(profile_store, "witness_payload", None)
+    if payload is None:
+        return {}
+    try:
+        data = payload() or {}
+    except Exception:  # noqa: BLE001 - 读画像失败只丢证据，不阻塞建议
+        _warn_once("payload", "witness 读取失败，本次不出摊牌证据行")
+        return {}
+    if not isinstance(data, Mapping):  # 旧/坏文件可能不是对象，别让 .get 抛出去
+        return {}
+    rows = data.get("rows") or ()
+    if not rows:
+        return {}
+    from ..opponent_profile import normalize_name
+    from ..positions import POSITIONS_BY_TABLE_SIZE
+
+    table_size = getattr(point, "table_size", 0) or 0
+    order = POSITIONS_BY_TABLE_SIZE.get(table_size, [])
+    hero_position = getattr(point, "hero_position", None)
+    if hero_position in order:
+        i = order.index(hero_position)
+        order = order[i + 1:] + order[:i]
+    rank = {position: i for i, position in enumerate(order)}
+    active = [o for o in getattr(point, "opponents", ())
+              if not getattr(o, "folded", False)]
+    active.sort(key=lambda o: rank.get(o.position or "", len(rank)))
+    seats: dict[str, str] = {}
+    for opp in active:
+        key = normalize_name(getattr(opp, "name", None))
+        if key:
+            seats[str(opp.seat_id)] = key
+    if not seats:
+        return {}
+    try:
+        return render_witness_lines(
+            rows, seats=seats,
+            hero_seat=getattr(point, "hero_seat_id", None),
+            version=data.get("version"))
+    except Exception:  # noqa: BLE001 - 单条坏数据不该挡住整条建议（§14.5）
+        _warn_once("render", "witness 渲染失败，本次不出摊牌证据行")
+        return {}
 
 
 def render_witness_lines(

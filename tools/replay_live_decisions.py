@@ -57,6 +57,7 @@ from poker_ocr.hand_track import (  # noqa: E402
 )
 from poker_ocr.parse import Blinds  # noqa: E402
 from poker_ocr.table_dynamics import load_table_dynamics  # noqa: E402
+from poker_ocr.witness.render import witness_by_seat  # noqa: E402
 
 STATE_PER_STREET = {0: "preflop", 3: "flop", 4: "turn", 5: "river"}
 BOARD_LEN = {"preflop": 0, "flop": 3, "turn": 4, "river": 5}
@@ -241,6 +242,16 @@ def build_snap(advice: dict, state: dict, hand: dict | None) -> HandSnapshot:
     )
 
 
+def witness_for(store, snap) -> dict:
+    """离线复跑也注入摊牌证据：§15.3 的 A/B 靠它让两遍真的不一样。
+
+    和 live.py 同一条路（witness.render.witness_by_seat）；没有画像库就空。
+    """
+    if store is None:
+        return {}
+    return witness_by_seat(store, snap)
+
+
 def old_summary(advice: dict) -> str:
     return f"{advice['option']['id']}"
 
@@ -356,9 +367,11 @@ def main(argv: list[str] | None = None) -> int:
                     current, total_players=len(active) + 1)
             except Exception:                          # noqa: BLE001
                 table_stats = None
+        witness = witness_for(store, snap)
         sit = build_situation(snap, table_dynamics=dynamics_text,
                               opponent_reads=reads.values() if reads else None,
-                              table_stats=table_stats)
+                              table_stats=table_stats,
+                              witness_by_seat=witness)
         hs = sit.hand_strength
         row = {
             "hand": snap.hand_id, "street": adv["street"],
@@ -369,6 +382,7 @@ def main(argv: list[str] | None = None) -> int:
             "hs_kind": hs.kind if hs is not None else None,
             "hs_size": hs.size if hs is not None else None,
             "facts": render_facts_zh(sit),
+            "witness": witness,
             "snap": snap, "sit": sit,
         }
         rows.append(row)
@@ -392,7 +406,10 @@ def main(argv: list[str] | None = None) -> int:
     print(f"决策点 {len(rows)} 个（跳过陈旧帧 {stale} 个）；"
           "当前中文 facts 的牌力解析：\n")
     flagged = [r for r in rows if r["hs_kind"] in ("weak", "board_play")]
-    print(f"牌力解析判为空气/打牌面的有 {len(flagged)} 个\n")
+    print(f"牌力解析判为空气/打牌面的有 {len(flagged)} 个")
+    witnessed = sum(1 for r in rows if r.get("witness"))
+    print(f"摊牌证据：{witnessed}/{len(rows)} 个决策点带座位行"
+          "（WITNESS_PROMPT=0 时恒 0；§15.3 A/B 两遍必须不同）\n")
 
     hdr = f"{'手':7}{'街':8}{'我的牌':9}{'牌面':18}{'全桌领先':>9}  {'旧建议':10}{'牌力'}"
     print(hdr)
@@ -461,6 +478,7 @@ def main(argv: list[str] | None = None) -> int:
                     "equity": sit.hand_strength.equity,
                 } if sit.hand_strength is not None else None),
                 "prompt_facts": r["facts"],
+                "witness": r.get("witness") or {},
                 "new": r.get("new"), "new_reason": r.get("new_reason"),
                 "options": [o.id for o in sit.options],
             })
