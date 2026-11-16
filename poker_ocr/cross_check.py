@@ -30,6 +30,15 @@ def _bucket(kind: str) -> str:
     return "aggressive"      # bet | raise | allin
 
 
+def _fold_eq_sizes(sit):
+    """同一份条件弃牌率事实，保证交叉校验与兜底看到的是同一个数。"""
+    try:
+        from . import fold_equity
+        return fold_equity.by_pot_fraction(sit)
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def check(sit, option) -> CrossCheck:
     """对比模型动作与规则引擎动作；覆盖范围外一律返回 ok（不误伤）。"""
     snap = sit.snap
@@ -50,6 +59,8 @@ def check(sit, option) -> CrossCheck:
             opponents=snap.opponents_in_hand,
             stack_bb=snap.hero_stack,
             hero_invested_bb=snap.hero_invested,
+            in_position=sit.in_position,
+            fold_eq=_fold_eq_sizes(sit),
         )
     except (ValueError, KeyError):
         return CrossCheck(_OK, None, "规则引擎无法评估")

@@ -461,6 +461,11 @@ class Read:
     # 单个对手（随机两手牌）赢我的比例，0..1，见 beat_rate。
     # capped_by_board 用它做闸门：牌面上限更高**且**真有人能赢我才算被压制。
     beat_pct: float = 0.0
+    # 两高张：两张底牌都严格大于牌面最大牌（AK 在 Q72）。这是 #41 的口径域：
+    # 只有这种牌面「不可能被盖上任何一张高张」，A/K 高面天然不在其中
+    # （AQ 在 K72 是单高张 3 outs，AK 在 A72 已是顶对）。与 `overcard_outs=6`
+    # 不是一回事：那是「还能反超几张」，这是「两张都还没被牌面追平」。
+    two_overcards: bool = False
 
     def to_dict(self) -> dict:
         return {"tier": self.tier, "label": self.label,
@@ -611,7 +616,9 @@ def read_hand(hole: list[tuple[int, str]], board: list[tuple[int, str]]) -> Read
                     combo=(outs >= 8 and tier in paired_tiers),   # 有牌又有听
                     plays_board=(tier == BOARD_PLAY),
                     label_en=label_en, draw_outs=draw_outs,
-                    overcard_outs=overcard_outs, beat_pct=beat)
+                    overcard_outs=overcard_outs, beat_pct=beat,
+                    two_overcards=(tier == AIR
+                                   and all(r > board_top for r in hole_ranks)))
 
     # ── 打牌面：最好的 5 张全靠公共牌（人人都有），只有更好的牌会跟 ──
     if cat >= ONE_PAIR and _plays_board(hole, board):
@@ -928,8 +935,99 @@ def _na(reason: str, hand: Read | None = None, texture: str | None = None,
     return Decision(False, None, None, hand, texture, reason, warnings or [])
 
 
+@dataclass(frozen=True)
+class SizeFold:
+    """某个下注尺寸上，事实块给出的两条兑现：他弃多少、这个尺寸需要多少。
+
+    数字直接来自 `fold_equity` 的条件弃牌率报告（与提示词事实块印给模型的
+    是同一个 `breakeven`），规则引擎只做「他弃 ≥ 需要」的比较，不自己
+    重算权益 —— 否则兜底与模型会各算一套，交叉校验反而制造分歧。
+    """
+
+    fold: float
+    breakeven: float
+
+
+def _fold_at(fold_eq: dict[float, SizeFold] | None, frac: float) -> SizeFold | None:
+    """按底池比例取最接近的条件弃牌率事实；差得太远就当没有（不硬套别的尺寸）。"""
+    if not fold_eq:
+        return None
+    best = min(fold_eq, key=lambda k: abs(float(k) - frac))
+    return fold_eq[best] if abs(float(best) - frac) <= 0.06 else None
+
+
+def _air_cbet(hand: Read, texture: str, line: Line, pot: float,
+              in_position: bool | None,
+              fold_eq: dict[float, SizeFold] | None) -> Decision:
+    """两高张 miss 的翻牌 c-bet（#41 口径，2026-11-16 维护者确认）。
+
+    默认 1/3。湿面（花/顺/花顺）只在「有位置 **且** 1/3 这个尺寸的弃牌率
+    事实达标」时才开一枪 —— 没有本手数据就过牌，不猜。升到 1/2 还要再加
+    三条：单挑、干燥面、有位置。公对面一律过牌；4 人及以上过牌。
+
+    没有条件弃牌率事实时退回 1/3 默认，不做任何逐座位推断 ——
+    逐座位样本永远不够（78/163 人里只有 4 人达 8 次门槛）。
+    """
+    if line.opponents >= 3:
+        return Decision(True, "check", None, hand, texture,
+                        f"{hand.label}：4 人以上没有 c-bet 的弃牌收益 → 过牌（§7）。",
+                        line.warnings, line)
+    if texture == PAIRED_BOARD:
+        return Decision(True, "check", None, hand, texture,
+                        f"{hand.label}：公对面，两高张反超时会撞上葫芦/明三条 → 过牌。",
+                        line.warnings, line)
+
+    base = 1.0 / 3.0
+    one_third = _fold_at(fold_eq, base)
+    need = one_third.breakeven if one_third else 0.0
+    # 湿面：没位置直接过牌；有位置也要这道门真的过了才开火
+    if texture != DRY:
+        if in_position is not True:
+            return Decision(True, "check", None, hand, texture,
+                            f"{hand.label}：{texture}、没位置，c-bet 被加注就得放弃 → 过牌。",
+                            line.warnings, line)
+        if one_third is None:
+            return Decision(True, "check", None, hand, texture,
+                            f"{hand.label}：{texture}、没有本手弃牌率数据 → 过牌，"
+                            "不拿账面权益赌他弃。",
+                            line.warnings, line)
+        if one_third.fold < need:
+            return Decision(True, "check", None, hand, texture,
+                            f"{hand.label}：{texture}，1/3 池他弃 "
+                            f"{one_third.fold * 100:.0f}%，低于需要的 "
+                            f"{need * 100:.0f}% → 过牌。",
+                            line.warnings, line)
+    elif one_third is not None and one_third.fold < need:
+        return Decision(True, "check", None, hand, texture,
+                        f"{hand.label}：1/3 池他弃 {one_third.fold * 100:.0f}%，"
+                        f"低于需要的 {need * 100:.0f}% → 过牌（EV 不够）。",
+                        line.warnings, line)
+
+    # 升 1/2：单挑 + 干燥 + 有位置 + 1/2 自己也够
+    if texture == DRY and in_position is True and line.opponents == 1:
+        half = _fold_at(fold_eq, 0.5)
+        if half is not None:
+            need_half = half.breakeven
+            if half.fold >= need_half:
+                return Decision(
+                    True, "bet", _bet(pot, "1/2"), hand, texture,
+                    f"{hand.label}：干燥面有位置，他弃 {half.fold * 100:.0f}% "
+                    f"≥ 1/2 池需要的 {need_half * 100:.0f}% → 下 1/2 池。",
+                    line.warnings, line)
+
+    if one_third is not None:
+        detail = (f"他弃 {one_third.fold * 100:.0f}% ≥ 需要 {need * 100:.0f}%")
+    else:
+        detail = "没有本手弃牌率事实，退回默认小注"
+    return Decision(True, "bet", _bet(pot, "1/3"), hand, texture,
+                    f"{hand.label}：{texture}、下 1/3 池（{detail}）。",
+                    line.warnings, line)
+
+
 def _checked_to_hero(hand: Read, texture: str, line: Line, pot: float,
-                     read_name: str = "未知") -> Decision:
+                     read_name: str = "未知",
+                     in_position: bool | None = None,
+                     fold_eq: dict[float, SizeFold] | None = None) -> Decision:
     """本街没人下注、轮到我：按 §4/§6/§7 出「下注 or 过牌 + 尺度」。"""
     card = hand.category
     multiway = line.opponents >= 2
@@ -998,6 +1096,10 @@ def _checked_to_hero(hand: Read, texture: str, line: Line, pot: float,
                         f"{hand.label}：不足 8 outs，过牌（§5）。", line.warnings, line)
 
     # ── 空气：§6 cbet（只有翻前加注者才开火） ──
+    # 两高张单独走 #41 的口径（默认 1/3、按牌面/位置/条件弃牌率做门）；
+    # 单高张与无高张的纯空气仍是旧线，归 #43 另议。
+    if hand.two_overcards and line.hero_is_pfr:
+        return _air_cbet(hand, texture, line, pot, in_position, fold_eq)
     if line.hero_is_pfr and not multiway:
         return Decision(True, "bet", _bet(pot, "1/2"), hand, texture,
                         "我是翻前加注者、对手过牌示弱，按 §6 持续下注 1/2 池。",
@@ -1406,7 +1508,9 @@ def advise(hero_cards, board, street: str = "flop", actions: list[dict] | None =
            pot: float | None = None, hero_position: str | None = None,
            opponents: int | None = None, read_name: str = "未知",
            stack_bb: float | None = None,
-           hero_invested_bb: float | None = None) -> Decision:
+           hero_invested_bb: float | None = None,
+           in_position: bool | None = None,
+           fold_eq: dict[float, SizeFold] | None = None) -> Decision:
     """给一手具体牌出建议。
 
     hero_cards     我的底牌，'KhQh' / ['Kh','Qh'] 均可
@@ -1420,6 +1524,10 @@ def advise(hero_cards, board, street: str = "flop", actions: list[dict] | None =
     read_name      对手形象：松弱/紧弱/松凶/紧凶/未知（§8 微调）
     stack_bb       有效筹码（BB）。转牌隐含赔率用；套池比例的分母也用；不给则按 0 算
     hero_invested_bb  我已投入底池的总筹码（BB）。≥3/4×stack_bb 即「套池」，不允许弃牌
+    in_position    我在这手是不是有位置（True/False/None=未知）。只用于两高张
+                   c-bet 的「湿面没位置就过牌」；None 按没位置处理，不猜
+    fold_eq        本手线路算出来的逐尺寸条件弃牌率 {底池比例: SizeFold}。
+                   给了才按「他弃 ≥ 需要」做门；None 时退回默认线
 
     落在覆盖范围外（street 非法、公共牌张数不对、缺 pot、牌不合法）时 ok=False，绝不猜。
     """
@@ -1462,7 +1570,8 @@ def advise(hero_cards, board, street: str = "flop", actions: list[dict] | None =
 
     if street == "flop":
         decision = (_facing_bet(hand, texture, line, pot, read_name, brd) if line.facing_bet
-                    else _checked_to_hero(hand, texture, line, pot, read_name))
+                    else _checked_to_hero(hand, texture, line, pot, read_name,
+                                          in_position=in_position, fold_eq=fold_eq))
     elif street == "turn":
         decision = _advise_turn(hand, texture, line, pot, stack_bb, read_name, brd)
     else:

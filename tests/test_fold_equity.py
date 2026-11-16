@@ -532,6 +532,27 @@ def test_situation_has_report() -> None:
         check(0.0 <= ln.breakeven <= 1.0, f"平衡点越界：{ln.breakeven}")
 
 
+def test_by_pot_fraction_matches_reported_lines() -> None:
+    """规则引擎拿到的 {比例: SizeFold} 必须逐条对应事实块印给模型的那几个数。
+
+    兜底与提示词各算一套的话，交叉校验会在本来没分歧的地方报分歧。
+    """
+    sit = _situation(to_call=0.0, pot=9.0, board=("Qs", "7c", "2d"),
+                     hero_cards=("Ah", "Kd"))
+    got = fe.by_pot_fraction(sit)
+    check(got is not None, "单挑翻牌应给出逐尺寸事实")
+    if not got or sit.fold_eq is None:
+        return
+    for ln in sit.fold_eq.lines:
+        frac = round(ln.size / 9.0, 3)
+        check(frac in got, f"缺少尺寸 {ln.size}BE（{frac}）")
+        if frac in got:
+            check(close(got[frac].fold, ln.fold_equity),
+                  f"他弃没原样透传：{got[frac].fold} vs {ln.fold_equity}")
+            check(close(got[frac].breakeven, ln.breakeven),
+                  f"需要没原样透传：{got[frac].breakeven} vs {ln.breakeven}")
+
+
 def test_prompt_renders_block() -> None:
     from poker_ocr.prompt.offline.hand_facts import render_hand_facts
 

@@ -3342,7 +3342,9 @@ def test_system_prompt_worst_case_stays_bounded() -> None:
     system, user = build_messages(build_situation(point))
     # 2026-11-14.1 起事实优先级第 3 层拆成 3a/3b/3c（摊牌证据 / 画像 / 池子先验），
     # 最坏局面约 +60 字；上界从 7000 放到 7100，仍是同一量级的延迟预算。
-    check(len(system) < 7100,
+    # 2026-11-16.1 修 #41 的两条相反指令（跟注站满池 / 跟 c-bet 高降频），
+    # 攻击段约 +55 字；上界放到 7200，同一量级。
+    check(len(system) < 7200,
           f"最坏局面 system 应 < 7100，实际 {len(system)}")
     check(len(system) + len(user) < 10000,
           f"最坏局面 system+user 应 < 10000，实际 {len(system) + len(user)}")
