@@ -164,6 +164,7 @@ PRIOR_STRENGTH: dict[str, float] = {
     "stab": 8.0,
     "check_raise": 5.0,
     "limp": 8.0,
+    "iso": 8.0,
     "fold_to_cbet": 8.0,
     "fold_to_barrel": 5.0,
     "delay_cbet": 5.0,
@@ -186,6 +187,9 @@ DEFAULT_PRIORS: dict[str, float] = {
     "stab": 40.0,
     "check_raise": 12.0,
     "limp": 20.0,
+    # 对溜入的隔离率：全池实测 14–17%（CO 13.5% / BTN 22.0% / SB 10.5% /
+    # BB 17.8%，735 手，见 docs/隔离率-离线实测-2026-11-16.md）。
+    "iso": 15.0,
     "fold_to_cbet": 45.0,
     "fold_to_barrel": 45.0,
     "delay_cbet": 30.0,
@@ -207,6 +211,7 @@ PRIOR_FIELDS: dict[str, tuple[str, str]] = {
     "stab": ("stabs", "stab_opp"),
     "check_raise": ("check_raises", "check_raise_opp"),
     "limp": ("limped", "limp_opp"),
+    "iso": ("iso_raise", "iso_opp"),
     "fold_to_cbet": ("ftc_fold", "ftc_opp"),
     "fold_to_barrel": ("ftb_fold", "ftb_opp"),
     "delay_cbet": ("dcb", "dcb_opp"),
@@ -355,6 +360,13 @@ class HandObservation:
     # 溜入：前面无人加注时主动跟注（BB 免费过牌不算机会）。
     limp_opp: bool = False
     limped: bool = False
+    # 对溜入者的隔离（#42）：前面已经有人溜入、且还没人加注时轮到我。
+    # 命中 = 我加注隔离。**只认 recorded**：弃牌 3141/3141 是推断出来的，
+    # 加注 588 条里只有 9 条是推断 —— 命中判据排除 inferred，才不会把推断
+    # 链上的加注算成实测。这条统计的用途是「Hero 身后还会不会有人隔离我」，
+    # 与「我自己爱不爱溜入」（limp_opp）是两件事。
+    iso_opp: bool = False
+    iso_raise: bool = False
     # 面对 c-bet：翻牌面对「翻前最后加注者」的第一枪，拆成弃/跟/加。
     ftc_opp: bool = False
     ftc_fold: bool = False
@@ -977,6 +989,18 @@ def observations_from_hand(hand: Mapping, *,
                     and not any(_aggr(a) for a in prior_pre))
         limped = bool(limp_opp and first_pre.get("action") == "call")
 
+        # ── 对溜入的隔离（#42）：前面有人溜入、无人加注，轮到我 ──
+        # 机会口径与 `limp_opp` 一致（BB 免费过牌不算机会）；差别只在
+        # **命中 = 加注隔离**而不是跟注，而且推断出来的加注不算命中。
+        iso_opp = bool(
+            not passive_entry
+            and str(info.get("position") or "").upper() != "BB"
+            and first_pre is not None
+            and any(a.get("action") == "call" for a in prior_pre)
+            and not any(_aggr(a) for a in prior_pre))
+        iso_raise = bool(iso_opp and _aggr(first_pre)
+                         and not first_pre.get("inferred"))
+
         # ── 面对 3-bet：自己开的池，被后面的人再加注 ──
         f3b_opp = f3b_fold = f3b_call = f3b_4bet = False
         pre_seq = ordered.get(_PREFLOP) or []
@@ -1143,6 +1167,8 @@ def observations_from_hand(hand: Mapping, *,
             check_raise=check_raise,
             limp_opp=limp_opp,
             limped=limped,
+            iso_opp=iso_opp,
+            iso_raise=iso_raise,
             ftc_opp=ftc_opp,
             ftc_fold=ftc_fold,
             ftc_call=ftc_call,
@@ -1215,6 +1241,9 @@ class OpponentStats:
     # 溜入 / 防守端 / 延迟 c-bet
     limp_opp: float = 0.0
     limped: float = 0.0
+    # 对溜入者的隔离（#42）：前面有人溜入、无人加注时轮到我，我加注隔离。
+    iso_opp: float = 0.0
+    iso_raise: float = 0.0
     ftc_opp: float = 0.0
     ftc_fold: float = 0.0
     ftc_call: float = 0.0
@@ -1309,6 +1338,15 @@ class OpponentStats:
     def limp_pct(self) -> float | None:
         """前面没人加注时主动跟注的比例。BB 的免费过牌不计入机会。"""
         return _pct(self.limped, self.limp_opp)
+
+    @property
+    def iso_raise_pct(self) -> float | None:
+        """前面有人溜入、没人加注时，加注隔离的比例（#42）。
+
+        这是「Hero 在后位平跟，身后还会不会被隔离」的触发变量 —— 与
+        `limp_pct`（我自己爱不爱溜入）方向相反，别混用。
+        """
+        return _pct(self.iso_raise, self.iso_opp)
 
     @property
     def fold_to_cbet_pct(self) -> float | None:
@@ -1410,6 +1448,8 @@ class OpponentStats:
         self.check_raises += w if obs.check_raise else 0.0
         self.limp_opp += w if obs.limp_opp else 0.0
         self.limped += w if obs.limped else 0.0
+        self.iso_opp += w if obs.iso_opp else 0.0
+        self.iso_raise += w if obs.iso_raise else 0.0
         self.ftc_opp += w if obs.ftc_opp else 0.0
         self.ftc_fold += w if obs.ftc_fold else 0.0
         self.ftc_call += w if obs.ftc_call else 0.0
@@ -1495,6 +1535,8 @@ class OpponentStats:
                                    for k, v in self.open_opp_by_bucket.items()},
             "limp_opp": _num(self.limp_opp),
             "limped": _num(self.limped),
+            "iso_opp": _num(self.iso_opp),
+            "iso_raise": _num(self.iso_raise),
             "ftc_opp": _num(self.ftc_opp),
             "ftc_fold": _num(self.ftc_fold),
             "ftc_call": _num(self.ftc_call),
@@ -1572,6 +1614,8 @@ class OpponentStats:
             open_opp_by_bucket=_bucket_map(raw.get("open_opp_by_bucket")),
             limp_opp=f("limp_opp"),
             limped=f("limped"),
+            iso_opp=f("iso_opp"),
+            iso_raise=f("iso_raise"),
             ftc_opp=f("ftc_opp"),
             ftc_fold=f("ftc_fold"),
             ftc_call=f("ftc_call"),
@@ -1627,6 +1671,9 @@ class OpponentRead:
     check_raise_pct: float | None = None
     threebet_pct: float | None = None
     limp_pct: float | None = None
+    # 对溜入的隔离率（#42）：Hero 后位平跟时「身后还会不会被加注」的
+    # 触发变量，与 limp_pct（自己爱不爱溜入）方向相反。
+    iso_raise_pct: float | None = None
     fold_to_cbet_pct: float | None = None
     call_to_cbet_pct: float | None = None
     fold_to_barrel_pct: float | None = None
@@ -1818,6 +1865,10 @@ TENDENCY_MIN_OPPS = {
     "stab": 6.0,
     "check_raise": 6.0,
     "limp": 8.0,
+    # #42：区分「身后隔离率 15%」与「40%」在单侧 α=.05、power .80 下
+    # 约需 16 次机会（精确二项 n=16）。低于 16 次一律不给例外，退回
+    # 原来的「入池就加注」—— 见 docs/隔离率-离线实测-2026-11-16.md。
+    "iso": 16.0,
     "fold_to_cbet": 8.0,
     "fold_to_barrel": 5.0,
     "delay_cbet": 5.0,
@@ -1836,7 +1887,8 @@ TENDENCY_MIN_OPPS = {
 # 字段，复盘里的画像段没有打法数字、攻击块也没有弃牌率证据）。
 TENDENCY_PCT_FIELDS: tuple[str, ...] = (
     "open_ep_pct", "open_lp_pct", "cbet_pct", "barrel_pct", "stab_pct",
-    "check_raise_pct", "threebet_pct", "limp_pct", "fold_to_cbet_pct",
+    "check_raise_pct", "threebet_pct", "limp_pct", "iso_raise_pct",
+    "fold_to_cbet_pct",
     "call_to_cbet_pct", "fold_to_barrel_pct", "delay_cbet_pct",
     "fold_to_3bet_pct", "fourbet_pct", "fold_to_bet_flop_pct",
     "fold_to_bet_turn_pct", "barrel_call_pct", "fold_to_bet_river_pct",
@@ -1896,6 +1948,7 @@ def _tendencies(stats: OpponentStats,
     put("stab", stats.stabs, stats.stab_opp)
     put("check_raise", stats.check_raises, stats.check_raise_opp)
     put("limp", stats.limped, stats.limp_opp)
+    put("iso_raise", stats.iso_raise, stats.iso_opp, "iso")
     put("fold_to_cbet", stats.ftc_fold, stats.ftc_opp)
     put("call_to_cbet", stats.ftc_call, stats.ftc_opp)
     put("fold_to_barrel", stats.ftb_fold, stats.ftb_opp)
@@ -1910,6 +1963,64 @@ def _tendencies(stats: OpponentStats,
     put("fold_to_bet_river", stats.face_fold.get("river", 0.0),
         stats.face_opps("river"), "fold_to_bet_river")
     return fields, tuple(low), tuple(sorted(opp_counts.items()))
+
+
+# ── over-limp 的触发（#42，2026-11-16）────────────────────────────
+# 后位（CO/BTN/SB 补齐）要不要给「1BB 平跟进池」的例外，看的是**身后还会
+# 行动的玩家有多爱加注隔离溜入者**，不是 Hero 自己的 open%。
+# 阈值来自离线实测（`docs/隔离率-离线实测-2026-11-16.md`，735 手）：
+# 位置级隔离率 CO 13.5% / BTN 22.0% / SB 10.5% / BB 17.8%；区分 15% 与 40%
+# 在单侧 α=.05、power .80 下约需 16 次机会。
+LIMP_TRIGGER_MIN_OPPS = TENDENCY_MIN_OPPS["iso"]      # 16 次机会
+LIMP_TRIGGER_MAX_ISO_PCT = 20.0                        # 均值超过就当「会隔离」
+LIMP_TRIGGER_SEAT_MIN_OPPS = 8.0                       # 单人证据的最低门槛
+LIMP_TRIGGER_SEAT_MAX_PCT = 35.0                       # 单人不许被均值掩盖
+
+
+def isolation_trigger(
+        reads: Iterable[OpponentRead] | None,
+        seats: Iterable[str] | None = None,
+        *,
+        max_pct: float = LIMP_TRIGGER_MAX_ISO_PCT,
+        min_opps: float = LIMP_TRIGGER_MIN_OPPS,
+) -> tuple[bool, str]:
+    """「身后的人很少隔离溜入者」是否成立，以及一句话依据（#42）。
+
+    成立才允许白名单牌 1BB 平跟进池；不成立/数据不足时一律退回原来的
+    「入池就加注」口径（fail open，绝不拿 2–3 次机会的 0% 当「没人隔离」）。
+
+    两个额外的护栏（防止均值掩盖少数隔离者）：
+
+      · 单人机会 ≥ 8 且隔离率 ≥ 35% → 直接否决，哪怕均值被其他人拉低；
+      · 总机会 < 16 → 不成立（区分 15%/40% 的样本量门槛，见离线实测）。
+
+    混合口径用的是读到的百分比 × 机会数（即各座位比率的加权均值）：小样本
+    在 `_tendency` 里已向人群先验（本指标 15%）收缩，先验本身就低于阈值，
+    所以混合值只会更保守地偏向「低隔离」——为此才需要上面的单人护栏。
+    """
+    seat_ids = {str(s) for s in seats} if seats is not None else None
+    total_opps = 0.0
+    total_hits = 0.0
+    covered = 0
+    for read in reads or ():
+        if seat_ids is not None and str(read.seat_id) not in seat_ids:
+            continue
+        opps = read.opp("iso") or 0.0
+        pct = read.iso_raise_pct
+        if opps <= 0 or pct is None:
+            continue
+        covered += 1
+        if opps >= LIMP_TRIGGER_SEAT_MIN_OPPS and pct >= LIMP_TRIGGER_SEAT_MAX_PCT:
+            return False, ""
+        total_opps += opps
+        total_hits += pct / 100.0 * opps
+    if total_opps < min_opps:
+        return False, ""
+    rate = total_hits / total_opps * 100.0
+    if rate > max_pct:
+        return False, ""
+    return True, (f"身后 {covered} 人对溜入的加注隔离 {rate:.0f}%"
+                  f"（{total_opps:.0f} 次机会）")
 
 
 def _unknown_read(stats: OpponentStats | None, *, seat_id: str | None = None,
@@ -2238,6 +2349,8 @@ class ProfileStore:
         target.check_raises += old.check_raises
         target.limp_opp += old.limp_opp
         target.limped += old.limped
+        target.iso_opp += old.iso_opp
+        target.iso_raise += old.iso_raise
         target.ftc_opp += old.ftc_opp
         target.ftc_fold += old.ftc_fold
         target.ftc_call += old.ftc_call
@@ -2821,6 +2934,10 @@ def render_tendencies_zh(read: OpponentRead) -> str:
     if read.limp_pct is not None:
         parts.append(_mark(read, ("limp",), f"溜入 {read.limp_pct:.0f}%")
                      + _cnt(read, "limp"))
+    if read.iso_raise_pct is not None:
+        parts.append(_mark(read, ("iso_raise",),
+                           f"对溜入加注隔离 {read.iso_raise_pct:.0f}%")
+                     + _cnt(read, "iso"))
     if read.fold_to_cbet_pct is not None:
         seg = f"对 c-bet 弃 {read.fold_to_cbet_pct:.0f}%"
         if read.call_to_cbet_pct is not None:
