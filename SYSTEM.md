@@ -51,7 +51,8 @@ runs/                   # 工作台运行产物（日志/manifest/预览；本�
 replay-console/         # 独立子项目：手牌库 + A/B 复盘控制台（Python 后端 + React 前端）
 tests/                  # 52 个测试套件 + golden/ 期望 JSON，run_all.py 分层执行
 tools/                  # 离线 CLI（回放 / 画像重建 / 报表 / SFT 数据集 /
-                        # hand_recognition_audit.py 手牌识别倒查）
+                        # hand_recognition_audit.py 手牌识别倒查 /
+                        # import_case_seed.py 案例集 seed / backfill_advice_decisions.py）
 docs/                   # 56 篇设计文档与复盘（业务语义的真正来源）
 data/                   # 运行期数据：hand_outbox/、opponents/、sft/
 logs/                   # live.states.jsonl、复盘产物、incidents/
@@ -402,6 +403,12 @@ cd replay-console && ./start.sh
 # 手牌导出 / outbox 同步
 nv tools/export_live_hands.py
 nv tools/sync_hand_outbox.py
+
+# 案例集 seed（工具 ab_set.json → replay_case_sets/replay_cases，幂等）
+nv tools/import_case_seed.py --no-migrate          # 加 --dry-run 只预演
+# 把「英雄动作缺录」的线上 advice 回填成决策点（#55；不编造动作，只补缺口）
+nv tools/backfill_advice_decisions.py --dry-run    # 去掉 --dry-run 才写库
+#   --hand-id 1000000000320 只看一手；--no-profiles 不读画像库
 
 # 策略表（默认 hand-tuned；切换必须用真环境变量，写 .env 不生效）
 nv -m poker_ocr.strategy_tables --profile sourced   # 生效 profile + 每张表来源/是否回落

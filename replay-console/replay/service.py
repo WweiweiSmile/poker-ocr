@@ -916,6 +916,23 @@ class ReplayService:
             "issues": errors[:50],
         }
 
+    def refresh_enrichment(self, hand_id: int) -> None:
+        """重算时间线 / 标记 / 复盘分（决策点被回填后必须重算，否则 flags 过期）。
+
+        get_row 刻意不取 payload_json（大字段），但重建靠 payload 里的 advices
+        才能补出「英雄动作缺录」的决策点，所以这里单独取一次。
+        """
+        row = self.hand_repo.get_row(int(hand_id))
+        if not row:
+            return
+        row = dict(row)
+        if not isinstance(row.get("advices"), list):
+            payload = self.import_repo.get_payload(int(hand_id))
+            advices = payload.get("advices") if isinstance(payload, dict) else None
+            if isinstance(advices, list):
+                row["advices"] = advices
+        self._apply_enrichment(int(hand_id), row, self.analyze(row))
+
     def _apply_enrichment(self, hand_id: int, row: dict, analysis: HandAnalysis,
                           decision_ids: dict | None = None) -> None:
         """物化时间线 + 深挖标记；失败不阻塞手牌入库。"""
@@ -2967,9 +2984,14 @@ class ReplayService:
             for tag in tags:
                 version["violations"][str(tag)] += 1
         for version in versions.values():
-            total = version["n"] or 1
-            version["agreement"] = round(
-                version["bucket"].get("一致", 0) / total, 4)
+            # 实际动作缺录的决策点记「未知动作」：没有可比的动作，不进分母
+            unknown = version["bucket"].get("未知动作", 0)
+            scored = max(version["n"] - unknown, 0)
+            version["unknown"] = unknown
+            version["scored"] = scored
+            version["agreement"] = (round(
+                version["bucket"].get("一致", 0) / scored, 4)
+                if scored else None)
             version["bucket"] = dict(version["bucket"])
             version["source"] = dict(version["source"])
             version["violations"] = dict(version["violations"])

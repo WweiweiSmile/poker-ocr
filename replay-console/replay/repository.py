@@ -1073,6 +1073,16 @@ class LiveAdviceRepository:
             }
         return out
 
+    def link_decision(self, hand_id: int, street: str, action_index: int,
+                      decision_id: int) -> int:
+        """把线上建议行挂到决策点；只补空挂，绝不覆盖已有 decision_id。"""
+        return int(self.db.execute(
+            """UPDATE replay_live_advices SET decision_id=%s
+                WHERE hand_id=%s AND street=%s AND action_index=%s
+                  AND decision_id IS NULL""",
+            (int(decision_id), int(hand_id), str(street)[:10],
+             int(action_index))) or 0)
+
     def context_for_hand(self, hand_id: int) -> dict[tuple[str, int], dict]:
         """(street, action_index) → context_json。没有线上快照的手牌返回空。"""
         rows = self.db.query(

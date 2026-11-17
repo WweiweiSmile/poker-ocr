@@ -327,8 +327,37 @@ def _validate_hand(h: dict) -> tuple[list[str], int, float, tuple[str, ...]]:
     return reasons, players, bb, hero_cards
 
 
-def missing_action_advices(h: dict) -> list[dict]:
-    """线上 advice 里「实际动作缺录」的候选决策点（尚未校验）。
+@dataclass(frozen=True)
+class MissingActionPoint:
+    """一条「英雄动作缺录」的线上 advice：决策上下文已知、真实动作未知。"""
+
+    street: str
+    action_index: int
+    pot: float | None
+    to_call: float | None
+
+
+def _as_float(value: object) -> float | None:
+    """advice 来自任意 JSON：非数值一律当缺（fail open，绝不抛）。"""
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _as_int(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
+def missing_action_advices(h: dict) -> list[MissingActionPoint]:
+    """线上 advice 里「实际动作缺录」的候选决策点（尚未校验底池/需跟）。
 
     线上采集偶发：手牌行动线里的英雄动作没进 timeline，但 advice 行仍然完整
     记录了那次决策的上下文（pot / to_call / board / options）。这些点没有动作
@@ -336,6 +365,9 @@ def missing_action_advices(h: dict) -> list[dict]:
 
     只取**整手最后一个 hero 动作之后**的点：那之前的点都有真实动作可挂，补进来
     会改变已有决策点的 seq —— seq 是 advice 和案例引用的身份，必须稳定。
+
+    advice 是外部 JSON，pot / to_call / action_index 都可能是任意类型；这里
+    只做形状过滤、把非数值当缺，绝不在构建决策点前抛异常（fail open）。
     """
     advices = h.get("advices") or []
     if not isinstance(advices, list) or not advices:
@@ -345,32 +377,32 @@ def missing_action_advices(h: dict) -> list[dict]:
     for rec in h.get("streets") or []:
         if not isinstance(rec, dict):
             continue
+        # 与 build_decisions 同口径：不认识的街整条跳过，动作也不计入边界，
+        # 否则 advice 的 action_index 会整体错位。
+        if rec.get("street") not in STREETS:
+            continue
         for action in rec.get("actions") or []:
             if not isinstance(action, dict):
                 continue
             if action.get("actor") == "hero":
                 last_hero = total
             total += 1
-    out: list[dict] = []
+    out: list[MissingActionPoint] = []
     seen: set[tuple[str, int]] = set()
     for advice in advices:
         if not isinstance(advice, dict) or advice.get("actual_action"):
             continue
         street = advice.get("street")
-        index = advice.get("action_index")
-        if street not in STREETS or index is None:
+        if street not in STREETS:
             continue
-        try:
-            index = int(index)
-        except (TypeError, ValueError):
-            continue
-        if index <= last_hero or (street, index) in seen:
+        index = _as_int(advice.get("action_index"))
+        if index is None or index <= last_hero or (street, index) in seen:
             continue
         seen.add((street, index))
-        out.append({
-            "street": street, "action_index": index,
-            "pot": advice.get("pot"), "to_call": advice.get("to_call"),
-        })
+        out.append(MissingActionPoint(
+            street=street, action_index=index,
+            pot=_as_float(advice.get("pot")),
+            to_call=_as_float(advice.get("to_call"))))
     return out
 
 
@@ -411,7 +443,7 @@ def build_decisions(h: dict) -> tuple[list[DecisionPoint], bool, list[str], int]
     # ── 决策点构造（闭包）─────────────────────────────────────────────
     # 抽成闭包是因为「线上 advice 回填」必须在同一份行动线状态上构造快照：
     # 英雄那一步没被录下来，但当时的底池 / 需跟 / 对手下注都是真实采集的。
-    def _emit(act: str | None, amt: float | None, *, street: str,
+    def _add_decision(act: str | None, amt: float | None, *, street: str,
               global_action_index: int, backfilled: bool = False) -> None:
         nonlocal idx
         opps: list[OpponentSnapshot] = []
@@ -461,7 +493,7 @@ def build_decisions(h: dict) -> tuple[list[DecisionPoint], bool, list[str], int]
 
         remaining = (max(hero_start - hero_invested, 0.0)
                      if hero_start is not None else None)
-        to_call = round(max(level - float(commit.get("hero", 0.0) or 0.0), 0.0), 2)
+        to_call = _hero_to_call()
         # 第二高下注：最小加注额 = 最高注 + max(最高注 − 第二高注, bb)。
         # 旧实现恒为 None，复盘算出的最小加注会比线上更大，选项金额
         # 和 A/B 结论都会偏（P1-4）。
@@ -512,25 +544,31 @@ def build_decisions(h: dict) -> tuple[list[DecisionPoint], bool, list[str], int]
         ))
         idx += 1
 
-    def _point_matches(point: dict) -> bool:
-        """advice 记录的底池/需跟必须对得上行动线，否则是误触发的建议。
+    def _hero_to_call() -> float:
+        """英雄当前还需跟多少（本街最高注 − 英雄本街已投）。"""
+        return round(max(level - float(commit.get("hero", 0.0) or 0.0), 0.0), 2)
 
-        线上撒点偶发：同一街会给同一个决策点补发一条 advice（例如 298 的
-        翻前 action_index=2、pot 7.5 —— 按行动线算那个边界是 8.0）。底池对
-        不上就说明这条 advice 不是按当前行动线做的决策，不能当决策点。
-        """
-        recorded_pot = point.get("pot")
-        recorded_call = point.get("to_call")
-        if recorded_pot is None or recorded_call is None:
-            return False
-        to_call_now = round(
-            max(level - float(commit.get("hero", 0.0) or 0.0), 0.0), 2)
-        return (abs(float(recorded_pot) - pot) <= 0.05
-                and abs(float(recorded_call) - to_call_now) <= 0.05)
-
-    extra_by_street: dict[str, dict[int, dict]] = {}
+    missing_by_street: dict[str, dict[int, MissingActionPoint]] = {}
     for point in missing_action_advices(h):
-        extra_by_street.setdefault(point["street"], {})[int(point["action_index"])] = point
+        missing_by_street.setdefault(point.street, {})[point.action_index] = point
+
+    def _add_backfilled_at(street: str, boundary: int) -> None:
+        """边界 boundary 处英雄被要求决策但动作缺录 → 补一个决策点。
+
+        只有底池与需跟都对得上才补。线上撒点偶发会给同一个决策点补发一条
+        advice（例如 298 翻前 action_index=2、pot 7.5 —— 按行动线算那个边界
+        是 8.0）；对不上说明这条 advice 不是按当前行动线做的决策，丢弃
+        （剩下的会在收尾时记一条 warning，不静默吞掉）。
+        """
+        point = missing_by_street.get(street, {}).get(boundary)
+        if point is None or point.pot is None or point.to_call is None:
+            return
+        if (abs(point.pot - pot) > 0.05
+                or abs(point.to_call - _hero_to_call()) > 0.05):
+            return  # 留着，收尾时记 warning（不静默吞掉）
+        del missing_by_street[street][boundary]
+        _add_decision(None, None, street=street,
+                      global_action_index=boundary, backfilled=True)
 
     for rec in h.get("streets") or []:
         if not isinstance(rec, dict):
@@ -570,14 +608,10 @@ def build_decisions(h: dict) -> tuple[list[DecisionPoint], bool, list[str], int]
             # 确实要决策。边界 = 处理这条动作之前已完成的动作总数，与 live 的
             # Advice.action_index 同口径。
             if not is_hero:
-                point = extra_by_street.get(street, {}).pop(boundary, None)
-                if point is not None and _point_matches(point):
-                    _emit(None, None, street=street,
-                          global_action_index=boundary, backfilled=True)
-
-            if is_hero:
-                _emit(act, amt, street=street,
-                      global_action_index=len(seen_actions) + len(cur))
+                _add_backfilled_at(street, boundary)
+            else:
+                _add_decision(act, amt, street=street,
+                              global_action_index=boundary)
 
             cur.append(ActionRecord(
                 street=street, seat_id=str(actor),
@@ -601,14 +635,17 @@ def build_decisions(h: dict) -> tuple[list[DecisionPoint], bool, list[str], int]
 
         # 街末缺口：英雄在街末被要求决策（对手已经下注或全下），本街再没有
         # 他的动作 —— 边界等于本街动作总数，只能在街末补。
-        boundary = len(seen_actions) + len(cur)
-        point = extra_by_street.get(street, {}).pop(boundary, None)
-        if point is not None and _point_matches(point):
-            _emit(None, None, street=street, global_action_index=boundary,
-                  backfilled=True)
+        _add_backfilled_at(street, len(seen_actions) + len(cur))
 
         built.append(StreetRecord(street, pot_start, tuple(cur)))
         seen_actions += cur
+
+    # 没补上的缺口 advice 不能静默吞掉：要么底池/需跟对不上，要么那个边界
+    # 在行动线里根本没走到。两者都说明 advice 与行动线不一致。
+    for street_name, points in missing_by_street.items():
+        for index in sorted(points):
+            warnings.append(f"英雄动作缺录的 advice 与行动线对不上，已丢弃："
+                            f"{street_name} ai={index}")
 
     # 每个决策点的最终质量：只要有任意推算/旧口径提示就是 approx
     for decision in decisions:

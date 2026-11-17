@@ -93,11 +93,16 @@ export default function ExperimentDetailPage() {
     },
     {
       title: '一致率', dataIndex: 'agreement', key: 'agreement', width: 110,
-      render: (value: number, row) => (
-        <Tooltip title={`一致 ${row.bucket['一致'] || 0} / 总 ${row.n || 0}`}>
+      render: (value: number | null, row) => (
+        <Tooltip title={`一致 ${row.bucket['一致'] || 0} / 可判定 ${row.scored || 0}` +
+          `（未知动作 ${row.unknown || 0} 个不计入）`}>
           <div>
-            <Progress percent={Math.round(value * 100)} size="small" showInfo={false} />
-            <span className="mono">{pct(value)}</span>
+            {value == null ? <span className="muted">—</span> : (
+              <>
+                <Progress percent={Math.round(value * 100)} size="small" showInfo={false} />
+                <span className="mono">{pct(value)}</span>
+              </>
+            )}
           </div>
         </Tooltip>
       ),
@@ -217,7 +222,8 @@ export default function ExperimentDetailPage() {
         <div>
           <h2>结果</h2>
           <p className="muted">
-            一致率 = 「一致」/ 全部决策点；bucket 和违规来自硬规则审计。n&lt;30 手不要写显著。
+            一致率 = 「一致」/ 可判定决策点（实际动作缺录的记「未知动作」，不计入分母）；
+            bucket 和违规来自硬规则审计。n&lt;30 手不要写显著。
           </p>
         </div>
         <Segmented

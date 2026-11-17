@@ -777,7 +777,12 @@ export interface ExperimentVersionResult {
   source: Record<string, number>
   violations: Record<string, number>
   splits: Record<string, number>
-  agreement: number
+  /** 「一致」/ 可判定决策点；全部不可判定（实际动作缺录）时为 null */
+  agreement: number | null
+  /** 实际动作缺录、不进一致率分母的决策点数 */
+  unknown: number
+  /** 进了分母的决策点数（n - unknown） */
+  scored: number
 }
 
 export interface ExperimentResults {

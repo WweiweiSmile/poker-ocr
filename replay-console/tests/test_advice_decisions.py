@@ -57,6 +57,27 @@ def test_backfill_drops_advice_with_mismatched_pot():
     assert not any(d.backfilled for d in analysis.decisions)
 
 
+def test_bad_advice_values_fail_open():
+    """advice 是外部 JSON：坏类型不能抛异常，也不能变成决策点。"""
+    analysis = analyze_hand(hand(advices=[
+        {"street": "river", "action_index": "x", "pot": 16.0, "to_call": 0.0},
+        {"street": "river", "action_index": 12, "pot": "abc", "to_call": 0.0},
+        {"street": "river", "action_index": 13, "pot": {"x": 1}, "to_call": 0.0},
+        {"street": "river", "action_index": 14, "pot": 16.0, "to_call": [0]},
+        {"street": ["river"], "action_index": 15, "pot": 16.0, "to_call": 0.0},
+        "not-a-dict",
+        None,
+    ]))
+    assert analysis.decision_count == 4
+    assert not any(d.backfilled for d in analysis.decisions)
+
+
+def test_mismatched_advice_is_reported_not_swallowed():
+    """丢弃的缺口 advice 要留 warning，不能静默吞掉。"""
+    analysis = analyze_hand(hand(advices=[advice("river", 12, 99.0, 0.0)]))
+    assert any("已丢弃" in w and "river ai=12" in w for w in analysis.warnings)
+
+
 def test_backfill_drops_points_before_last_hero_action():
     """最后一个英雄动作之前的 advice 已有真实动作可挂，补进来会改 seq。"""
     data = hand(advices=[advice("preflop", 2, 4.0, 2.5)])
@@ -150,3 +171,40 @@ def test_advices_read_from_payload_json_row():
     assert h["advices"] and h["advices"][0]["action_index"] == 12
     # 身份（指纹）不因 advice 快照而变
     assert hand_fingerprint(h) == hand_fingerprint(hand_to_input({**row, "payload_json": "{}"}))
+
+
+def test_refresh_enrichment_reads_advices_from_payload():
+    """get_row 不取 payload_json，重算时必须自己把 advices 补进 row。
+
+    少了这一步，回填出来的决策点会在重算时消失，flags 又变回「没有 hero 决策点」。
+    """
+    from replay.service import ReplayService
+
+    service = object.__new__(ReplayService)
+    snapshot = [advice("river", 12, 16.0, 0.0)]
+
+    class HandRepo:
+        def get_row(self, hand_id):
+            return {"id": hand_id, "streets": "[]"}
+
+    class ImportRepo:
+        def get_payload(self, hand_id):
+            return {"advices": snapshot}
+
+    seen = {}
+
+    def fake_analyze(row):
+        seen["advices"] = row.get("advices")
+        return "analysis"
+
+    def fake_apply(hand_id, row, analysis, decision_ids=None):
+        seen["applied"] = (hand_id, analysis)
+
+    service.hand_repo = HandRepo()
+    service.import_repo = ImportRepo()
+    service.analyze = fake_analyze
+    service._apply_enrichment = fake_apply
+
+    service.refresh_enrichment(7)
+    assert seen["advices"] == snapshot
+    assert seen["applied"] == (7, "analysis")

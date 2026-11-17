@@ -80,6 +80,8 @@ def test_classify_preflop_tolerance_and_actions():
     assert classify("raise", 11.0, "raise", 10.5, 8.0, "preflop") == "一致"
     assert classify("raise", 11.0, "raise", 7.5, 8.0, "preflop") == "尺度差"
     assert classify("call", None, "raise", 7.5, 8.0, "preflop") == "动作不同"
+    # 英雄动作缺录：fail open 记「未知动作」，不能算成「动作不同」
+    assert classify("raise", 11.0, None, None, 8.0, "preflop") == "未知动作"
 
 
 def test_summary_uses_option_kind_for_open_ids():

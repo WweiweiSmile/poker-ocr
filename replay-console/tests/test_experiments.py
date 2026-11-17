@@ -107,9 +107,13 @@ def test_experiment_results_aggregate_bucket_and_review():
          "source": "model", "violation_tags": '["有赔率却弃牌"]',
          "decision_id": 2, "street": "turn", "actual_action": "call",
          "actual_amount": 8.0},
+        {"split": "dev", "version_id": 10, "bucket": "未知动作",
+         "source": "model", "violation_tags": "[]",
+         "decision_id": 3, "street": "river", "actual_action": None,
+         "actual_amount": None},
         {"split": "holdout", "version_id": 11, "bucket": "一致",
          "source": "model", "violation_tags": "[]",
-         "decision_id": 3, "street": "river", "actual_action": "check",
+         "decision_id": 4, "street": "river", "actual_action": "check",
          "actual_amount": None},
     ]
     reviews = [
@@ -122,17 +126,38 @@ def test_experiment_results_aggregate_bucket_and_review():
         results=results, reviews=reviews,
     )
     out = service.experiment_results(1)
-    assert out["rows"] == 3
+    assert out["rows"] == 4
     baseline = out["versions"]["10"]
-    assert baseline["n"] == 2
+    assert baseline["n"] == 3
     assert baseline["bucket"]["一致"] == 1
     assert baseline["bucket"]["动作不同"] == 1
+    assert baseline["bucket"]["未知动作"] == 1
+    # 实际动作缺录的决策点不进一致率分母（fail open）
+    assert baseline["unknown"] == 1
+    assert baseline["scored"] == 2
     assert baseline["agreement"] == 0.5
     assert baseline["violations"]["有赔率却弃牌"] == 1
     variant = out["versions"]["11"]
     assert variant["n"] == 1
     assert variant["agreement"] == 1.0
+    assert variant["unknown"] == 0
     assert out["review"] == {"good": 1, "bad": 1}
+
+
+def test_experiment_agreement_is_none_when_nothing_is_scorable():
+    service = make_service(
+        experiment_row(),
+        [{"hand_id": 1, "split": "dev"}],
+        results=[{"split": "dev", "version_id": 11, "bucket": "未知动作",
+                  "source": "model", "violation_tags": "[]",
+                  "decision_id": 9, "street": "river", "actual_action": None,
+                  "actual_amount": None}],
+        reviews=[],
+    )
+    version = service.experiment_results(1)["versions"]["11"]
+    assert version["n"] == 1
+    assert version["scored"] == 0
+    assert version["agreement"] is None
 
 
 class FakeResultRepo:

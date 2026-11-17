@@ -40,7 +40,7 @@
 - **重建质量分级**：`exact` / `approx` / `invalid`，页面徽标 + 原因；
 - **手牌导入**：手牌库支持导入两种来源——**复盘手牌**（`review_hands` 导出的 JSON/JSONL）和**实时日志手牌记录**（`hands.json` 或 `live.states.jsonl`）；自动识别、预览计数、按内容幂等去重；
 - **多来源并列**：同一手牌在复盘/实时/构造三边各有一条源记录时，列表与详情都按 canonical 并列展示，复盘来源的结论只读；
-- **从决策点建案例**：详情页每条决策点都可建一条案例（选期望/P0-P2/备注），案例集、冻结与 seed 留给 #55；
+- **从决策点建案例**：详情页每条决策点都可建一条案例（选期望/P0-P2/备注）；案例集页可新建/改名/冻结 revision，seed 由 `tools/import_case_seed.py` 从 `tools/ab_set.json` 幂等导入；
 - **删除手牌**：列表行内、勾选批量、详情页均可删除；导入手牌软删除（重新导入可恢复），`review_hands` 手牌仅在控制台隐藏，不修改生产业务表；
 - **去重**：按手牌内容指纹识别；批量任务默认跳过重复，保留较新的一手；
 - **成本与时间预估**：调用单元、预计耗时、超过单任务上限需显式确认；
@@ -155,7 +155,7 @@ replay-console/
 
 数据表：`replay_versions`、`replay_jobs`、`replay_job_hands`、`replay_decisions`、`replay_results`、`replay_marks`、`replay_imported_hands`、`replay_import_batches`、`replay_hand_deletions`、`replay_spot_specs`、`replay_canonical_hands`、`replay_hand_sources`、`replay_case_sets`、`replay_cases`、`replay_runs`、`replay_run_items`、`replay_judge_overrides`、`replay_schema_migrations`。全部是逻辑外键，不修改 `review_hands`。
 
-canonical 手牌：一手牌可以在复盘（`review`）、实时（`live`）、构造（`synthetic`）三边各有一条源记录（`replay_hand_sources`），同内容（底牌相同 + 公共牌相同 + 发生时间差 ≤ 30 分钟）的源记录挂到同一个 `replay_canonical_hands.id` 上，并列保存、互不覆盖。`primary_source` 默认 `review > live > synthetic`，可人工切换；`content_group` 是 `sha1(底牌|公共牌|日期)` 的归组键。归组规则在 `replay/canonical.py`（纯逻辑），SQL 读写与 primary 切换在 `repository.CanonicalHandRepository`（逐条自动提交，不开显式事务；中途失败只会留下无源记录的空 canonical 行，不影响读路径）。案例表（`replay_case_sets`、`replay_cases`）已接最小写路径：详情页每个决策点可建案例，默认落在「待整理」案例集；案例集页、批量建案例、冻结与 seed 仍属 #55。运行/判定三张表（`replay_runs`、`replay_run_items`、`replay_judge_overrides`）仍是空表，第 2 期接线。
+canonical 手牌：一手牌可以在复盘（`review`）、实时（`live`）、构造（`synthetic`）三边各有一条源记录（`replay_hand_sources`），同内容（底牌相同 + 公共牌相同 + 发生时间差 ≤ 30 分钟）的源记录挂到同一个 `replay_canonical_hands.id` 上，并列保存、互不覆盖。`primary_source` 默认 `review > live > synthetic`，可人工切换；`content_group` 是 `sha1(底牌|公共牌|日期)` 的归组键。归组规则在 `replay/canonical.py`（纯逻辑），SQL 读写与 primary 切换在 `repository.CanonicalHandRepository`（逐条自动提交，不开显式事务；中途失败只会留下无源记录的空 canonical 行，不影响读路径）。案例表（`replay_case_sets`、`replay_cases`）已接最小写路径：详情页每个决策点可建案例，默认落在「待整理」案例集；案例集页、批量建案例、冻结与 seed 已接：冻结后只读（改内容要建新 revision），seed 按 (case_set, canonical, decision_key) 幂等，spec 落在 `replay_spot_specs`。运行/判定三张表（`replay_runs`、`replay_run_items`、`replay_judge_overrides`）仍是空表，第 2 期接线。
 
 ---
 
@@ -178,11 +178,12 @@ canonical 手牌：一手牌可以在复盘（`review`）、实时（`live`）�
 - 身份：`(hand_id, hand_fingerprint, reconstruct_version, street, seq)`。
 - 指纹只包含会影响建议的字段（底牌/公共牌/位置/筹码/盲注/对手/行动线），改标题、输赢金额、复盘结论**不会**让已有结果失效。
 - 同一街 hero 可能行动两次，`seq` 是整手牌内的序号，不是街序号。
+- `backfilled`：线上录制偶发英雄动作没进 timeline，但 advice 行完整记着当时的 pot/to_call。这类点按 advice 回填成决策点（`backfilled=true`、`actual=null`、质量 `approx`、warning 记「英雄动作缺录」），**绝不编造动作**。只补整手最后一个英雄动作之后的点，已有决策点的 `seq` 不因此改变；advice 的 pot/to_call 与行动线对不上（容差 0.05）则丢弃并记 warning。
 
 ### 4.3 重建质量
 
 - `exact`：首街是 `preflop` 且行动线完整（下注/加注金额齐全、没有旧聚合 actor），底池可以从盲注 + 行动精确重建；或每街都有 `potStartBb`。
-- `approx`：手牌从翻后开始且缺翻前/起始底池；对手位置/筹码缺失；旧数据 `actor=villain/other`；下注金额缺失；中间某街缺 hero 动作但后面 hero 还有决策。
+- `approx`：手牌从翻后开始且缺翻前/起始底池；对手位置/筹码缺失；旧数据 `actor=villain/other`；下注金额缺失；中间某街缺 hero 动作但后面 hero 还有决策；线上 advice 回填的决策点（英雄动作缺录，`actual` 未知）。
 - `invalid`：`bb<=0`、底牌不是 2 张、行动线为空、没有 hero 决策点。
 
 批量任务可以只跑 `exact` 决策点（弹窗里的「只跑重建精确」）。
@@ -356,8 +357,10 @@ curl -s -X POST http://127.0.0.1:8010/api/experiments/1/run   -H 'Content-Type: 
 curl -s 'http://127.0.0.1:8010/api/experiments/1/results?split=dev'
 ```
 
-结果按版本返回 `n`、`bucket`（一致/尺度差/动作不同/error）、`source`、
-`violations`、`agreement`，以及人工复盘 `review`（good/bad/unsure）。
+结果按版本返回 `n`、`bucket`（一致/尺度差/动作不同/未知动作/error）、`source`、
+`violations`、`scored`、`unknown`、`agreement`，以及人工复盘 `review`（good/bad/unsure）。
+实际动作缺录（线上 timeline 漏采、advice 回填的决策点）记 `未知动作`，不进
+`agreement` 的分母：`agreement = 一致 / (n - unknown)`，`scored == 0` 时为 `null`。
 逐决策点标记：
 
 ```bash
@@ -370,7 +373,8 @@ curl -s -X PATCH http://127.0.0.1:8010/api/decisions/123/mark   -H 'Content-Type
 版本管理里新增 `contextMode` / `tableStatsMode` 两个下拉，新版本默认 `snapshot`。
 
 **口径提醒**：`agreement` 只是「与人类实际动作一致」，不是正确率；结论要结合
-人工 review、violation 和样本数（n<30 手不要写显著）。
+人工 review、violation 和样本数（n<30 手不要写显著）。`未知动作` 占比高说明
+录制侧在丢英雄动作，先修数据再看一致率，别把它当成模型变差。
 
 ### 5.2 删除手牌
 
