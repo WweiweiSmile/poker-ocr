@@ -1,0 +1,152 @@
+from __future__ import annotations
+
+import json
+
+from replay.decisions import (
+    APPROX, analyze_hand, hand_fingerprint, hand_to_input,
+    missing_action_advices,
+)
+
+from tests.test_decisions import hand  # noqa: E402  （同一份夹具）
+
+
+def advice(street: str, action_index: int, pot: float, to_call: float, **kw):
+    return {
+        "street": street, "action_index": action_index,
+        "pot": pot, "to_call": to_call, "actual_action": None, **kw,
+    }
+
+
+def test_street_end_advice_backfills_missing_action():
+    """河牌英雄动作缺录：街末的 advice 补出一个 backfilled 决策点。"""
+    data = hand(advices=[advice("river", 12, 16.0, 0.0)])
+    analysis = analyze_hand(data)
+
+    assert analysis.decision_count == 5
+    last = analysis.decisions[-1]
+    assert last.street == "river"
+    assert last.action_index == 12
+    assert last.seq == 4
+    assert last.backfilled is True
+    assert last.actual is None
+    assert last.actual_amount is None
+    assert last.pot == 16.0
+    assert last.snap.to_call == 0.0
+    assert any("英雄动作缺录" in w for w in last.warnings)
+    assert last.snap.warnings and any("英雄动作缺录" in w for w in last.snap.warnings)
+    assert last.quality == APPROX
+    assert analysis.quality == APPROX
+
+
+def test_backfill_keeps_existing_decision_seqs():
+    """已有决策点的 seq 是 advice / 案例引用的身份，回填不能改它们。"""
+    base = analyze_hand(hand())
+    filled = analyze_hand(hand(advices=[advice("river", 12, 16.0, 0.0)]))
+
+    assert len(filled.decisions) == len(base.decisions) + 1
+    for before, after in zip(base.decisions, filled.decisions):
+        assert (before.street, before.seq, before.action_index) == (
+            after.street, after.seq, after.action_index)
+        assert after.backfilled is False
+
+
+def test_backfill_drops_advice_with_mismatched_pot():
+    """底池对不上行动线 = 误触发的建议，不能当决策点（298 翻前 7.5）。"""
+    analysis = analyze_hand(hand(advices=[advice("river", 12, 99.0, 0.0)]))
+    assert analysis.decision_count == 4
+    assert not any(d.backfilled for d in analysis.decisions)
+
+
+def test_backfill_drops_points_before_last_hero_action():
+    """最后一个英雄动作之前的 advice 已有真实动作可挂，补进来会改 seq。"""
+    data = hand(advices=[advice("preflop", 2, 4.0, 2.5)])
+    analysis = analyze_hand(data)
+    assert analysis.decision_count == 4
+    assert not any(d.backfilled for d in analysis.decisions)
+
+
+def test_backfill_dedupes_same_street_and_index():
+    data = hand(advices=[advice("river", 12, 16.0, 0.0),
+                         advice("river", 12, 16.0, 0.0)])
+    analysis = analyze_hand(data)
+    assert sum(1 for d in analysis.decisions if d.backfilled) == 1
+
+
+def test_mid_street_backfill_before_villain_action():
+    """缺口在街中（后面还有对手动作）：边界处插入，不影响前面的决策点。"""
+    data = hand(
+        streets=[
+            {"street": "preflop", "actions": [
+                {"actor": "CO", "action": "raise", "amountBb": 2.5},
+                {"actor": "hero", "action": "call"},
+                {"actor": "BB", "action": "call"},
+            ]},
+            {"street": "flop", "actions": [
+                {"actor": "BB", "action": "check"},
+                {"actor": "CO", "action": "bet", "amountBb": 4.0},
+                {"actor": "hero", "action": "call"},
+            ]},
+            {"street": "turn", "actions": [
+                {"actor": "BB", "action": "check"},
+                {"actor": "CO", "action": "check"},
+                {"actor": "hero", "action": "check"},
+            ]},
+            {"street": "river", "actions": [
+                {"actor": "BB", "action": "check"},
+                {"actor": "hero", "action": "check"},
+                {"actor": "CO", "action": "bet", "amountBb": 8.0},
+            ]},
+        ],
+        advices=[advice("river", 11, 16.0, 0.0)],
+    )
+    analysis = analyze_hand(data)
+
+    assert analysis.decision_count == 5
+    backfilled = analysis.decisions[-1]
+    assert backfilled.backfilled is True
+    assert backfilled.action_index == 11
+    assert backfilled.pot == 16.0
+    assert analysis.decisions[3].actual == "check"   # 河牌自己的过牌还在
+
+
+def test_backfill_can_make_hand_replayable():
+    """438：整手没有英雄动作，唯一决策点来自 advice。"""
+    data = hand(
+        heroPosition="BTN",
+        streets=[
+            {"street": "preflop", "actions": [
+                {"actor": "CO", "action": "raise", "amountBb": 2.5},
+                {"actor": "BB", "action": "call"},
+            ]},
+        ],
+        advices=[advice("preflop", 2, 5.5, 2.5)],
+    )
+    analysis = analyze_hand(data)
+
+    assert analysis.decision_count == 1
+    only = analysis.decisions[0]
+    assert only.backfilled is True
+    assert only.actual is None
+    assert only.snap.to_call == 2.5
+    assert analysis.quality == APPROX
+
+
+def test_missing_action_advices_skips_points_with_actual_action():
+    data = hand(advices=[dict(advice("river", 12, 16.0, 0.0), actual_action="call")])
+    assert missing_action_advices(data) == []
+
+
+def test_advices_read_from_payload_json_row():
+    """导入路径的 DB 行把 advice 快照放在 payload_json 里。"""
+    row = {
+        "id": 7, "table_size": 6, "hero_position": "BTN", "hero_cards": "KhQh",
+        "hero_stack_bb": 100.0, "small_blind_bb": 0.5, "big_blind_bb": 1.0,
+        "board": "Ks7d2c3h9s",
+        "streets": json.dumps(hand()["streets"]),
+        "villains": json.dumps(hand()["villains"]),
+        "payload_json": json.dumps({"advices": [advice("river", 12, 16.0, 0.0)]}),
+    }
+    h = hand_to_input(row)
+    assert h["advices"] and h["advices"][0]["action_index"] == 12
+    # 身份（指纹）不因 advice 快照而变
+    assert hand_fingerprint(h) == hand_fingerprint(hand_to_input({**row, "payload_json": "{}"}))

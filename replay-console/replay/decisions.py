@@ -55,6 +55,9 @@ class DecisionPoint:
     pot: float
     quality: str
     warnings: list[str] = field(default_factory=list)
+    # 英雄那一步动作在录制时缺失，这个决策点是从线上 advice 回填的：
+    # 底池/需跟/对手下注都真实采集，只有「我做了什么」未知（actual 为 None）。
+    backfilled: bool = False
     position_index: int = 0
     # 线上建议上下文快照（table_stats/opponent_reads/table_dynamics）。
     # runner 从 replay_live_advices 按 (street, action_index) 挂上来；
@@ -216,6 +219,17 @@ def hand_fingerprint(h: dict) -> str:
     return sha256_text(json_dumps(payload))
 
 
+def _advices_of(row: dict) -> list[dict]:
+    """线上建议快照：导入路径直接给 advices，DB 行从 payload_json 里取。"""
+    advices = row.get("advices")
+    if not isinstance(advices, list):
+        payload = json_load(row.get("payload_json"), {})
+        advices = payload.get("advices") if isinstance(payload, dict) else None
+    if not isinstance(advices, list):
+        return []
+    return [a for a in advices if isinstance(a, dict)]
+
+
 def hand_to_input(row: dict) -> dict:
     """DB 行 → build 函数使用的 camelCase 字典。"""
     return {
@@ -244,6 +258,8 @@ def hand_to_input(row: dict) -> dict:
                          if row.get("result_amount") is not None
                          else row.get("resultAmount")),
         "heroTags": json_load(row.get("hero_tags") or row.get("heroTags"), []) or [],
+        # 只用于回填「动作缺录」的决策点，不参与 hand_fingerprint（身份不变）。
+        "advices": _advices_of(row),
     }
 
 
@@ -311,6 +327,53 @@ def _validate_hand(h: dict) -> tuple[list[str], int, float, tuple[str, ...]]:
     return reasons, players, bb, hero_cards
 
 
+def missing_action_advices(h: dict) -> list[dict]:
+    """线上 advice 里「实际动作缺录」的候选决策点（尚未校验）。
+
+    线上采集偶发：手牌行动线里的英雄动作没进 timeline，但 advice 行仍然完整
+    记录了那次决策的上下文（pot / to_call / board / options）。这些点没有动作
+    可挂，只能按 advice 回填成决策点，真实动作标未知。
+
+    只取**整手最后一个 hero 动作之后**的点：那之前的点都有真实动作可挂，补进来
+    会改变已有决策点的 seq —— seq 是 advice 和案例引用的身份，必须稳定。
+    """
+    advices = h.get("advices") or []
+    if not isinstance(advices, list) or not advices:
+        return []
+    total = 0
+    last_hero = -1
+    for rec in h.get("streets") or []:
+        if not isinstance(rec, dict):
+            continue
+        for action in rec.get("actions") or []:
+            if not isinstance(action, dict):
+                continue
+            if action.get("actor") == "hero":
+                last_hero = total
+            total += 1
+    out: list[dict] = []
+    seen: set[tuple[str, int]] = set()
+    for advice in advices:
+        if not isinstance(advice, dict) or advice.get("actual_action"):
+            continue
+        street = advice.get("street")
+        index = advice.get("action_index")
+        if street not in STREETS or index is None:
+            continue
+        try:
+            index = int(index)
+        except (TypeError, ValueError):
+            continue
+        if index <= last_hero or (street, index) in seen:
+            continue
+        seen.add((street, index))
+        out.append({
+            "street": street, "action_index": index,
+            "pot": advice.get("pot"), "to_call": advice.get("to_call"),
+        })
+    return out
+
+
 def build_decisions(h: dict) -> tuple[list[DecisionPoint], bool, list[str], int]:
     """返回 (决策点, 是否爆炸底池, 重建警告, 参与人数)。
 
@@ -345,6 +408,130 @@ def build_decisions(h: dict) -> tuple[list[DecisionPoint], bool, list[str], int]
     seen_actions: list[ActionRecord] = []
     idx = 0
 
+    # ── 决策点构造（闭包）─────────────────────────────────────────────
+    # 抽成闭包是因为「线上 advice 回填」必须在同一份行动线状态上构造快照：
+    # 英雄那一步没被录下来，但当时的底池 / 需跟 / 对手下注都是真实采集的。
+    def _emit(act: str | None, amt: float | None, *, street: str,
+              global_action_index: int, backfilled: bool = False) -> None:
+        nonlocal idx
+        opps: list[OpponentSnapshot] = []
+        listed: set[str] = set()
+        for pos, v in villains.items():
+            if pos == hero_pos or pos in listed:
+                continue
+            listed.add(pos)
+            opps.append(OpponentSnapshot(
+                seat_id=pos, name=v.get("name"), position=pos,
+                stack=v.get("stackBb"),
+                bet=float(commit.get(pos, 0.0) or 0.0),
+                folded=bool(folded.get(pos))))
+        for pos in {x.seat_id for x in seen_actions + cur if x.seat_id}:
+            if pos in ("hero", hero_pos) or pos in listed:
+                continue
+            listed.add(pos)
+            opps.append(OpponentSnapshot(
+                seat_id=pos, name=None, position=pos, stack=None,
+                bet=float(commit.get(pos, 0.0) or 0.0),
+                folded=bool(folded.get(pos))))
+
+        streets = tuple(built) + (StreetRecord(street, pot_start, tuple(cur)),)
+        pre_acts = [x for r in streets if r.street == "preflop"
+                    for x in r.actions]
+        aggressive = preflop_aggressive(pre_acts)
+        raises = len(aggressive)
+        if raises == 0:
+            limped = any(x.action == "call" and not x.is_hero
+                         for x in pre_acts)
+            if not limped:
+                # 与 live 的 hand_track 同源：动作线漏掉 call 徽章时，
+                # 用「非盲位、本街下注 == 1BB」兜底，避免把溜入池判成
+                # 未开池（底池类型/攻击块/范围结论会全错）。
+                bb_now = bb or 1.0
+                limped = any(
+                    pos not in ("SB", "BB")
+                    and abs(float(commit.get(pos, 0.0) or 0.0)
+                            - bb_now) < 0.01
+                    for pos in villains)
+            shapes = ("limped",) if limped else ("unopened",)
+        elif raises == 1:
+            shapes = ("single-raise",)
+        else:
+            shapes = ("three-bet",)
+        hero_pfr = bool(aggressive) and aggressive[-1].is_hero
+
+        remaining = (max(hero_start - hero_invested, 0.0)
+                     if hero_start is not None else None)
+        to_call = round(max(level - float(commit.get("hero", 0.0) or 0.0), 0.0), 2)
+        # 第二高下注：最小加注额 = 最高注 + max(最高注 − 第二高注, bb)。
+        # 旧实现恒为 None，复盘算出的最小加注会比线上更大，选项金额
+        # 和 A/B 结论都会偏（P1-4）。
+        positive = sorted((float(v or 0.0) for v in commit.values()
+                           if float(v or 0.0) > 0), reverse=True)
+        second_bet = positive[1] if len(positive) > 1 else None
+        board = cards_of(h.get("board"))[:BOARD_LEN[street]]
+        # 与 live 的 Advice.action_index 对齐：它是「决策点之前整手牌
+        # 的动作总数」，不是本街第几个动作。旧实现用本街 enumerate，
+        # 导致多街手牌的线上建议和 replay 决策点对不上。
+        snap = HandSnapshot(
+            hand_id=str(h.get("id")), hand_index=0, street=street,
+            board=board, hero_cards=hero_cards,
+            hero_position=hero_pos,
+            hero_stack=round(remaining, 2) if remaining is not None else None,
+            hero_bet=float(commit.get("hero", 0.0) or 0.0),
+            hero_invested=round(hero_invested, 2),
+            to_call=to_call, second_bet=second_bet,
+            pot=round(pot, 2), pot_before_street=round(pot_start, 2),
+            table_size=players,
+            blinds=Blinds(sb, bb, ante or None, f"{sb}/{bb}({ante})"),
+            opponents=tuple(opps), streets=streets,
+            preflop_shapes=shapes, hero_is_pfr=hero_pfr,
+            cbet_spot=False,
+            decision_key=(str(h.get("id")), street, global_action_index,
+                          round(pot, 2), to_call),
+            players_dealt=players, bomb_pot=bomb,
+        )
+        decision_warnings = list(warnings)
+        if backfilled:
+            # 真实动作未知：不是「弃牌」，也不是「过牌」。宁可在质量上标
+            # approx、在快照里写明缺口，也不编一个动作进库。
+            decision_warnings.append("英雄动作缺录（线上 advice 回填），实际动作未知")
+        # 把重建警告放进快照：build_situation 会把它带进模型事实和
+        # replay_decisions.snapshot_json，任务详情才能解释「为什么可疑」。
+        if decision_warnings:
+            snap = dataclasses.replace(snap, warnings=tuple(decision_warnings))
+        decisions.append(DecisionPoint(
+            hand_id=str(h.get("id")), street=street, seq=idx,
+            action_index=global_action_index, snap=snap,
+            actual=act,
+            actual_amount=(float(amt) if amt is not None
+                           else (to_call if act == "call" else None)),
+            pot=round(pot, 2),
+            quality=APPROX if decision_warnings else EXACT,
+            warnings=decision_warnings,
+            backfilled=backfilled,
+        ))
+        idx += 1
+
+    def _point_matches(point: dict) -> bool:
+        """advice 记录的底池/需跟必须对得上行动线，否则是误触发的建议。
+
+        线上撒点偶发：同一街会给同一个决策点补发一条 advice（例如 298 的
+        翻前 action_index=2、pot 7.5 —— 按行动线算那个边界是 8.0）。底池对
+        不上就说明这条 advice 不是按当前行动线做的决策，不能当决策点。
+        """
+        recorded_pot = point.get("pot")
+        recorded_call = point.get("to_call")
+        if recorded_pot is None or recorded_call is None:
+            return False
+        to_call_now = round(
+            max(level - float(commit.get("hero", 0.0) or 0.0), 0.0), 2)
+        return (abs(float(recorded_pot) - pot) <= 0.05
+                and abs(float(recorded_call) - to_call_now) <= 0.05)
+
+    extra_by_street: dict[str, dict[int, dict]] = {}
+    for point in missing_action_advices(h):
+        extra_by_street.setdefault(point["street"], {})[int(point["action_index"])] = point
+
     for rec in h.get("streets") or []:
         if not isinstance(rec, dict):
             continue
@@ -378,102 +565,19 @@ def build_decisions(h: dict) -> tuple[list[DecisionPoint], bool, list[str], int]
             act = a.get("action")
             amt = a.get("amountBb")
             is_hero = actor == "hero"
+            boundary = len(seen_actions) + len(cur)
+            # 动作缺录的缺口：英雄那一步没进行动线，但这条 advice 说明当时
+            # 确实要决策。边界 = 处理这条动作之前已完成的动作总数，与 live 的
+            # Advice.action_index 同口径。
+            if not is_hero:
+                point = extra_by_street.get(street, {}).pop(boundary, None)
+                if point is not None and _point_matches(point):
+                    _emit(None, None, street=street,
+                          global_action_index=boundary, backfilled=True)
 
             if is_hero:
-                opps: list[OpponentSnapshot] = []
-                listed: set[str] = set()
-                for pos, v in villains.items():
-                    if pos == hero_pos or pos in listed:
-                        continue
-                    listed.add(pos)
-                    opps.append(OpponentSnapshot(
-                        seat_id=pos, name=v.get("name"), position=pos,
-                        stack=v.get("stackBb"),
-                        bet=float(commit.get(pos, 0.0) or 0.0),
-                        folded=bool(folded.get(pos))))
-                for pos in {x.seat_id for x in seen_actions + cur if x.seat_id}:
-                    if pos in ("hero", hero_pos) or pos in listed:
-                        continue
-                    listed.add(pos)
-                    opps.append(OpponentSnapshot(
-                        seat_id=pos, name=None, position=pos, stack=None,
-                        bet=float(commit.get(pos, 0.0) or 0.0),
-                        folded=bool(folded.get(pos))))
-
-                streets = tuple(built) + (
-                    StreetRecord(street, pot_start, tuple(cur)),)
-                pre_acts = [x for r in streets if r.street == "preflop"
-                            for x in r.actions]
-                aggressive = preflop_aggressive(pre_acts)
-                raises = len(aggressive)
-                if raises == 0:
-                    limped = any(x.action == "call" and not x.is_hero
-                                 for x in pre_acts)
-                    if not limped:
-                        # 与 live 的 hand_track 同源：动作线漏掉 call 徽章时，
-                        # 用「非盲位、本街下注 == 1BB」兜底，避免把溜入池判成
-                        # 未开池（底池类型/攻击块/范围结论会全错）。
-                        bb_now = bb or 1.0
-                        limped = any(
-                            pos not in ("SB", "BB")
-                            and abs(float(commit.get(pos, 0.0) or 0.0)
-                                    - bb_now) < 0.01
-                            for pos in villains)
-                    shapes = ("limped",) if limped else ("unopened",)
-                elif raises == 1:
-                    shapes = ("single-raise",)
-                else:
-                    shapes = ("three-bet",)
-                hero_pfr = bool(aggressive) and aggressive[-1].is_hero
-
-                remaining = (max(hero_start - hero_invested, 0.0)
-                             if hero_start is not None else None)
-                to_call = round(max(level - float(commit.get("hero", 0.0) or 0.0), 0.0), 2)
-                # 第二高下注：最小加注额 = 最高注 + max(最高注 − 第二高注, bb)。
-                # 旧实现恒为 None，复盘算出的最小加注会比线上更大，选项金额
-                # 和 A/B 结论都会偏（P1-4）。
-                positive = sorted((float(v or 0.0) for v in commit.values()
-                                   if float(v or 0.0) > 0), reverse=True)
-                second_bet = positive[1] if len(positive) > 1 else None
-                board = cards_of(h.get("board"))[:BOARD_LEN[street]]
-                # 与 live 的 Advice.action_index 对齐：它是「决策点之前整手牌
-                # 的动作总数」，不是本街第几个动作。旧实现用本街 enumerate，
-                # 导致多街手牌的线上建议和 replay 决策点对不上。
-                global_action_index = len(seen_actions) + len(cur)
-                snap = HandSnapshot(
-                    hand_id=str(h.get("id")), hand_index=0, street=street,
-                    board=board, hero_cards=hero_cards,
-                    hero_position=hero_pos,
-                    hero_stack=round(remaining, 2) if remaining is not None else None,
-                    hero_bet=float(commit.get("hero", 0.0) or 0.0),
-                    hero_invested=round(hero_invested, 2),
-                    to_call=to_call, second_bet=second_bet,
-                    pot=round(pot, 2), pot_before_street=round(pot_start, 2),
-                    table_size=players,
-                    blinds=Blinds(sb, bb, ante or None, f"{sb}/{bb}({ante})"),
-                    opponents=tuple(opps), streets=streets,
-                    preflop_shapes=shapes, hero_is_pfr=hero_pfr,
-                    cbet_spot=False,
-                    decision_key=(str(h.get("id")), street, global_action_index,
-                                  round(pot, 2), to_call),
-                    players_dealt=players, bomb_pot=bomb,
-                )
-                decision_warnings = list(warnings)
-                # 把重建警告放进快照：build_situation 会把它带进模型事实和
-                # replay_decisions.snapshot_json，任务详情才能解释「为什么可疑」。
-                if decision_warnings:
-                    snap = dataclasses.replace(snap, warnings=tuple(decision_warnings))
-                decisions.append(DecisionPoint(
-                    hand_id=str(h.get("id")), street=street, seq=idx,
-                    action_index=global_action_index, snap=snap,
-                    actual=act,
-                    actual_amount=(float(amt) if amt is not None
-                                   else (to_call if act == "call" else None)),
-                    pot=round(pot, 2),
-                    quality=APPROX if decision_warnings else EXACT,
-                    warnings=decision_warnings,
-                ))
-                idx += 1
+                _emit(act, amt, street=street,
+                      global_action_index=len(seen_actions) + len(cur))
 
             cur.append(ActionRecord(
                 street=street, seat_id=str(actor),
@@ -494,6 +598,14 @@ def build_decisions(h: dict) -> tuple[list[DecisionPoint], bool, list[str], int]
                 folded[actor] = True
             if is_hero:
                 hero_invested += delta
+
+        # 街末缺口：英雄在街末被要求决策（对手已经下注或全下），本街再没有
+        # 他的动作 —— 边界等于本街动作总数，只能在街末补。
+        boundary = len(seen_actions) + len(cur)
+        point = extra_by_street.get(street, {}).pop(boundary, None)
+        if point is not None and _point_matches(point):
+            _emit(None, None, street=street, global_action_index=boundary,
+                  backfilled=True)
 
         built.append(StreetRecord(street, pot_start, tuple(cur)))
         seen_actions += cur
