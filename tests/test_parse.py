@@ -93,6 +93,28 @@ def test_amount_digits_cleaned_from_chip_icon() -> None:
     check(not a.ok, f"尾巴过长不该硬洗出金额，实际 {a.to_debug()}")
 
 
+def test_amount_rejects_more_than_one_decimal() -> None:
+    """#48：BB 金额最多 1 位小数，`9.58B0` 是 `9.5BB` 被读坏的形状。
+
+    分不清 `9.5BB` 和 `9.58B`（B 被读成 8）时，只能按显示口径判：
+    牌桌不会渲染 2 位小数的 BB 金额，所以带单位且小数位 >1 的一律不可信。
+    不能改成「BB 后跟数字就拒」：`1BB0` / `0.5BB0` 是 2026-11-12 刻意
+    保留的图标尾噪容错，退回去会让整条街丢帧。
+    """
+    for text in ("9.58B0", "9.58B", "9.58BB", "0.55BB0", "100.25BB"):
+        a = parse_amount(text)
+        check(not a.ok,
+              f"{text!r} 小数位 >1 不该采信，实际 {a.to_debug()}")
+        check(a.too_precise,
+              f"{text!r} 应标出 too_precise，实际 {a.to_debug()}")
+    # 1 位小数、整数 + 图标尾噪仍按原口径接受
+    for text, want in (("9.5BB", 9.5), ("1BB0", 1.0), ("0.5BB0", 0.5),
+                       ("5.5BB8", 5.5), ("55BB0", 55.0)):
+        a = parse_amount(text)
+        check(a.ok and abs(a.value - want) < 1e-9 and not a.too_precise,
+              f"{text!r} 应仍解析成 {want}，实际 {a.to_debug()}")
+
+
 def test_amount_zero_glyphs() -> None:
     """All-in / 正在带入的裸 0 会被读成各种圈圈，这些是真实的 0。"""
     for text in AMOUNT_ZERO:
@@ -400,6 +422,7 @@ def main() -> int:
     tests = [
         test_amount_accepts_real_shapes,
         test_amount_rejects_noise_without_unit,
+        test_amount_rejects_more_than_one_decimal,
         test_amount_zero_glyphs,
         test_parse_chip_loose,
         test_amount_empty_is_not_zero,

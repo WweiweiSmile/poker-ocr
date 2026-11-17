@@ -1060,6 +1060,30 @@ def test_bet_gt_street_total_degrades_not_drops() -> None:
           f"notes 应写明读到多少、超过多少，实际 {up_r.notes}")
 
 
+def test_over_precise_bet_degrades_not_drops() -> None:
+    """#48：`9.5BB` 读成 `9.58B0` / `9.58B`，带单位但违背显示口径。
+
+    9.58 既不超过底池 38 也不超过本街总额 33.5，两道量级闸都拦不住；在
+    解析层按「BB 金额最多 1 位小数」判死之后，这里与 `bet > 底池` 同口径
+    降级成 bet_unknown：只这位的下注不可用，别人的筹码/底池/动作仍然有效，
+    这一帧只是不给建议，不丢整帧。
+    """
+    for raw in ("9.58B0", "9.58B"):
+        rows = {k: dict(v) for k, v in BASE.items()}
+        rows["upR"]["bet"] = raw
+        s = state(rows)
+        check(s.ok, f"{raw!r} 不该丢整帧，实际 errors={s.errors}")
+        up_r = s.player("upR")
+        check(up_r.bet is None and up_r.bet_unknown,
+              f"{raw!r} 应降级成未知，实际 {up_r.to_debug()}")
+        check("upR" in tuple(s.bet_warnings),
+              f"{raw!r} 应记进 bet_warnings，实际 {s.bet_warnings}")
+        check(any("9.58" in n for n in up_r.notes),
+              f"{raw!r} notes 应留痕，实际 {up_r.notes}")
+        check(s.player("topR").bet == 6.0,
+              f"{raw!r} 不该动别人的下注，实际 {s.player('topR').bet}")
+
+
 def test_decimal_point_lost_is_not_repaired() -> None:
     """`5.5BB` 被读成 `55BB`：不猜小数点、不按 ÷10 修，只降级。
 
@@ -1127,6 +1151,7 @@ def main() -> int:
         test_bet_from_separate_amount_box,
         test_bet_with_chip_leading_digit_still_drops,
         test_bet_gt_street_total_degrades_not_drops,
+        test_over_precise_bet_degrades_not_drops,
         test_decimal_point_lost_is_not_repaired,
         test_decimal_repair_refuses_non_grid_value,
         test_missing_dealer,
