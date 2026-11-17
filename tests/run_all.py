@@ -52,6 +52,7 @@
     test_doubt_window 疑惑帧时间窗仲裁（纯逻辑，不读图）
     test_export_live_hands 从 live.states.jsonl 导出完整手牌（纯逻辑）
     test_hand_leak_report 全量手牌复盘：净值口径/补码/炸弹池/牌力（纯逻辑）
+    test_buckets    七维桶：决策点 → 桶、词表单一来源、评分卡 golden（纯逻辑）
     test_cards      公共牌 / hero 手牌识别（需要 images/card 标注样本）
     test_card_replay 真实样张回放：一手牌只落一条记录、牌面只前进
     test_extract    端到端提取（需要 table.jpg）
@@ -101,7 +102,9 @@ SUITES = ["test_positions.py", "test_env.py", "test_coach.py",
           "test_card_replay.py", "test_extract.py", "test_api.py",
           # 规格 #33（范围推导收尾）新增套件：逐票追加，不删
           "test_range_trace.py", "test_range_cells.py", "test_range_table_diff.py",
-          "test_prompt_refs.py", "test_hand_action_stack.py"]
+          "test_prompt_refs.py", "test_hand_action_stack.py",
+          # 票 #50（桶维度收成单一函数 bucket_of）新增套件
+          "test_buckets.py"]
 
 
 def main() -> int:

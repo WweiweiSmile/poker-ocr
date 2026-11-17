@@ -29,9 +29,10 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from poker_ocr.coach import evaluate  # noqa: E402
+from poker_ocr.buckets import (  # noqa: E402
+    coarse_strength, facing_of, pot_type_of, position_bucket_of,
+)
 
-RANKS = "23456789TJQKA"
 STREETS = ("preflop", "flop", "turn", "river")
 POSTFLOP = ("flop", "turn", "river")
 KIND_ZH = {"bet": "下注", "raise": "加注", "check": "过牌",
@@ -46,71 +47,10 @@ TARGETS = {
 }
 
 
-def _card(text):
-    text = (text or "").strip().upper().replace("10", "T")
-    if len(text) != 2:
-        return None
-    return (RANKS.index(text[0]), text[1].lower())
-
-
-def _cards(items):
-    return [c for c in (_card(x) for x in items or []) if c]
-
-
-POS_BUCKET = {"UTG": "EP", "UTG+1": "EP", "UTG+2": "EP", "LJ": "MP",
-              "HJ": "MP", "CO": "LP", "BTN": "LP",
-              "SB": "盲注", "BB": "盲注"}
-
-
-def _pos_bucket(pos):
-    return POS_BUCKET.get((pos or "").strip().upper(), "?")
-
-
-def _strength(hole, board):
-    """strong / top_pair / mid / draw / air（与复盘表同一个口径）。"""
-    hole, board = _cards(hole), _cards(board)
-    if len(hole) < 2 or len(board) < 3:
-        return "air"
-    cat, _ = evaluate(hole + board)
-    if len(board) >= 5:
-        bcat, _ = evaluate(board)
-        if bcat >= cat and bcat >= 1:
-            return "air"
-    if cat >= 2:
-        return "strong"
-    if cat == 1:
-        br = sorted({r for r, _ in board}, reverse=True)
-        hr = [r for r, _ in hole]
-        if any(r == br[0] for r in hr):
-            return "top_pair"
-        return "mid"
-    # 听牌：4 张同花或单张成顺
-    suits = collections.Counter(s for _, s in hole + board)
-    if suits.most_common(1)[0][1] >= 4:
-        return "draw"
-    used = {s for _, s in hole + board}
-    spade = next((s for s in "shdc" if s not in used), "s")
-    have = {r for r, _ in hole + board}
-    for rank in range(len(RANKS)):
-        if rank in have:
-            continue
-        cat6, _ = evaluate(hole + board + [(rank, spade)])
-        if cat6 == 4:
-            return "draw"
-    return "air"
-
-
-def _pot_type(hand, pre_actions):
-    """limped / single / 3bet+ / bomb / unknown，只看翻前。"""
-    if not pre_actions:
-        return "bomb"
-    raises = sum(1 for a in pre_actions if a.get("action") in ("raise", "bet"))
-    if raises >= 2:
-        return "3bet+"
-    if raises == 1:
-        return "single"
-    calls = sum(1 for a in pre_actions if a.get("action") == "call")
-    return "limped" if calls else "unknown"
+# 牌力档 / 位置桶 / 池型都来自 `poker_ocr.buckets`：那里是「决策点 → 七维桶」
+# 的唯一定义（票 50）。这里的「牌力」列是 5 档粗分（coarse_strength），刻意
+# 不等于 hand_tier 的 9 档 —— 这张表按 5 档聚合了多年历史数据，换口径要单
+# 独评审。位置/池型/是否面对下注则完全同源，没有第二份定义。
 
 
 def _kind(option_id: str, to_call: float) -> str:
@@ -131,7 +71,7 @@ def _kind(option_id: str, to_call: float) -> str:
 
 
 def _node(street, to_call, pot_type, strength):
-    facing = "facing" if (to_call or 0) > 0 else "no_bet"
+    facing = "facing" if facing_of(to_call) else "no_bet"
     return (street, facing, pot_type, strength)
 
 
@@ -208,13 +148,13 @@ def collect(advices, hands, nets):
         if street not in STREETS:
             continue
         pre = _preflop_actions(hand)
-        pot_type = _pot_type(hand, pre)
+        pot_type = pot_type_of(pre)
         n_cards = {"flop": 3, "turn": 4, "river": 5}.get(street, 0)
         board = list(hand.get("board") or [])[:n_cards]
         if street == "preflop":
-            strength = _pos_bucket(hand.get("hero_position"))
+            strength = position_bucket_of(hand.get("hero_position"))
         else:
-            strength = _strength(adv.get("hero_cards") or [], board)
+            strength = coarse_strength(adv.get("hero_cards") or [], board)
         to_call = float(adv.get("to_call") or 0.0)
         kind = _kind((adv.get("option") or {}).get("id"), to_call)
         actual, resp = _hero_action(hand, street)
