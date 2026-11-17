@@ -139,18 +139,21 @@ replay-console/
 │   ├── versioning.py          # 版本不可变配置哈希 / advice_version / 桌风
 │   ├── engine.py              # 规则审计、动作分类、模型调用重试、重复分布聚合
 │   ├── specs.py               # 场景期望 §4.1 词表 / 校验 / revision diff（纯逻辑）
+│   ├── canonical.py           # canonical 手牌归组：同内容判定 / content_group / primary（纯逻辑）
 │   ├── repository.py          # review_hands 只读 + 导入手牌 + replay_* 读写
 │   ├── service.py             # 手牌库/导入/详情/版本/任务/对比/导出/健康
 │   ├── runner.py              # DB 队列 worker + 线程池 + 断点恢复
 │   ├── worker.py              # 可选独立 worker 进程
 │   ├── api.py                 # FastAPI 路由 + SPA 托管
 │   ├── schemas.py             # 请求体
-│   └── migrations/001_init.sql … 011_*.sql, 012_spot_specs.sql
+│   └── migrations/001_init.sql … 011_*.sql, 012_canonical_and_cases.sql, 012_spot_specs.sql
 ├── replay_web/                # React + Vite + AntD
 └── tests/                     # 决策点 / 引擎 / 版本 / API / 提示词 golden
 ```
 
-数据表：`replay_versions`、`replay_jobs`、`replay_job_hands`、`replay_decisions`、`replay_results`、`replay_marks`、`replay_imported_hands`、`replay_import_batches`、`replay_hand_deletions`、`replay_spot_specs`、`replay_schema_migrations`。全部是逻辑外键，不修改 `review_hands`。
+数据表：`replay_versions`、`replay_jobs`、`replay_job_hands`、`replay_decisions`、`replay_results`、`replay_marks`、`replay_imported_hands`、`replay_import_batches`、`replay_hand_deletions`、`replay_spot_specs`、`replay_canonical_hands`、`replay_hand_sources`、`replay_case_sets`、`replay_cases`、`replay_runs`、`replay_run_items`、`replay_judge_overrides`、`replay_schema_migrations`。全部是逻辑外键，不修改 `review_hands`。
+
+canonical 手牌：一手牌可以在复盘（`review`）、实时（`live`）、构造（`synthetic`）三边各有一条源记录（`replay_hand_sources`），同内容（底牌相同 + 公共牌相同 + 发生时间差 ≤ 30 分钟）的源记录挂到同一个 `replay_canonical_hands.id` 上，并列保存、互不覆盖。`primary_source` 默认 `review > live > synthetic`，可人工切换；`content_group` 是 `sha1(底牌|公共牌|日期)` 的归组键。归组规则在 `replay/canonical.py`（纯逻辑），SQL 读写与 primary 切换在 `repository.CanonicalHandRepository`（逐条自动提交，不开显式事务；中途失败只会留下无源记录的空 canonical 行，不影响读路径）。案例/运行五张表（`replay_case_sets`、`replay_cases`、`replay_runs`、`replay_run_items`、`replay_judge_overrides`）已建空表，第 2 期才接线。
 
 ---
 

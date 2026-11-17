@@ -8,6 +8,18 @@ from typing import Any, Iterable
 
 from pymysql.err import IntegrityError
 
+from .canonical import (
+    MATCH_WINDOW,
+    MERGE_CHAIN_LIMIT,
+    as_datetime,
+    content_group_key,
+    normalize_board,
+    normalize_hero_cards,
+    pick_candidate,
+    primary_row,
+    rank_key,
+    validate_source,
+)
 from .db import Database
 from .decisions import HandAnalysis
 from .errors import ApiError
@@ -32,19 +44,6 @@ HAND_SOURCE_LABELS = {
 def is_imported_hand_id(hand_id: int) -> bool:
     return int(hand_id) >= IMPORTED_HAND_ID_BASE
 
-
-def _mysql_datetime(value: Any) -> dt.datetime | None:
-    """把 ISO 字符串转成 MySQL DATETIME；无时区/坏值都安全返回 None。"""
-    if value is None or value == "":
-        return None
-    if isinstance(value, dt.datetime):
-        return value.replace(tzinfo=None)
-    text = str(value).strip()
-    try:
-        parsed = dt.datetime.fromisoformat(text.replace("Z", "+00:00"))
-        return parsed.replace(tzinfo=None)
-    except ValueError:
-        return None
 
 
 class HandRepository:
@@ -572,7 +571,7 @@ class ImportedHandRepository:
                  json_dumps(advice.get("model_params") or {}),
                  1 if advice.get("prompt_missing") else 0,
                  (str(advice.get("prompt_missing_reason") or "")[:64] or None),
-                 _mysql_datetime(advice.get("captured_at")),
+                 as_datetime(advice.get("captured_at")),
                  int(advice.get("attempt") or 1),
                  json_dumps(advice.get("context") or {}),
                  advice.get("duration_ms"),
@@ -1672,3 +1671,268 @@ class SpotSpecRepository:
     def delete(self, spec_id: int) -> int:
         return self.db.execute(
             "DELETE FROM replay_spot_specs WHERE id=%s", (spec_id,))
+
+
+
+# ──────────────────────────── canonical 手牌 ────────────────────────────
+
+_CANDIDATE_SQL = """
+    SELECT id, started_at, content_group
+      FROM replay_canonical_hands
+     WHERE hero_cards = %s AND board = %s AND is_synthetic = %s
+       AND merged_into IS NULL
+       AND started_at BETWEEN %s AND %s
+"""
+
+_SOURCE_JOIN_SQL = """
+    SELECT hs.canonical_id, hs.source, hs.source_hand_id, hs.fingerprint,
+           hs.is_primary, hs.linked_by,
+           ch.content_group, ch.primary_source, ch.merged_into
+      FROM replay_hand_sources hs
+      JOIN replay_canonical_hands ch ON ch.id = hs.canonical_id
+     WHERE hs.source = %s AND hs.source_hand_id = %s
+"""
+
+_PRIMARY_ROWS_SQL = """
+    SELECT source, source_hand_id, is_primary
+      FROM replay_hand_sources
+     WHERE canonical_id = %s
+"""
+
+_INSERT_CANONICAL_SQL = """
+    INSERT INTO replay_canonical_hands
+           (content_group, primary_source, title, hero_cards, board,
+            hero_position, started_at, is_synthetic)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+"""
+
+_INSERT_SOURCE_SQL = """
+    INSERT INTO replay_hand_sources
+           (canonical_id, source, source_hand_id, fingerprint, is_primary,
+            linked_by)
+    VALUES (%s, %s, %s, %s, %s, %s)
+    ON DUPLICATE KEY UPDATE fingerprint = VALUES(fingerprint)
+"""
+
+
+class CanonicalHandRepository:
+    """`replay_canonical_hands` / `replay_hand_sources` 的读写。
+
+    一条源记录 = 某个来源里的一手牌（复盘 review_hands.id、导入 id、构造 id）。
+    upsert 按 (source, source_hand_id) 幂等；同内容（底牌 + 公共牌 + 30 分钟内）
+    的源记录挂到同一个 canonical id 上，并列保存、互不覆盖（设计 §3.4）。
+
+    primary：新建时就是这条源；之后新来的源记录只有在默认优先级更高时才顶替
+    （review > live > synthetic），否则保留当前 primary —— 人工切换不会被
+    一次回填或一条低优先级来源悄悄改回去。重新跑回填更不会：已存在的源记录
+    直接跳过，只校正 fingerprint；若它指向的行被人工软合并过，源记录整体改挂
+    到保留行（`_resolve_merged`），旧行不删。
+
+    已知边界（都不影响读路径，留给第 2 期）：写入是逐条自动提交、不开显式事务，
+    中途失败会留下一条没有源记录的 canonical 空行（下次同内容 upsert 会接上它，
+    不产生错误数据）；「同内容超过 3 条 / 时间跨越」进待确认页的规则（§3.4 规则 4）
+    随合并/拆分 UI 一起做。
+    """
+
+    def __init__(self, db: Database):
+        self.db = db
+
+    # ── 读 ──
+
+    def get(self, canonical_id: int) -> dict | None:
+        return self.db.one(
+            "SELECT * FROM replay_canonical_hands WHERE id=%s",
+            (int(canonical_id),))
+
+    def source_of(self, source: str, source_hand_id: int) -> dict | None:
+        return self.db.one(_SOURCE_JOIN_SQL,
+                           (validate_source(source), int(source_hand_id)))
+
+    def sources(self, canonical_id: int) -> list[dict]:
+        """一个 canonical 下的全部源记录；primary 排第一，其次按来源、id。"""
+        return self.db.query(
+            """SELECT * FROM replay_hand_sources
+                WHERE canonical_id = %s
+                ORDER BY is_primary DESC, source, source_hand_id""",
+            (int(canonical_id),))
+
+    # ── 写 ──
+
+    def upsert_source(self, *, source: str, source_hand_id: int,
+                      hero_cards: str | None = "", board: str | None = "",
+                      fingerprint: str | None = None, started_at=None,
+                      title: str | None = None, hero_position: str | None = None,
+                      is_synthetic: bool = False,
+                      linked_by: str = "auto") -> dict:
+        """把一条源记录接到 canonical 上；返回 {canonical_id, created, ...}。"""
+        src = validate_source(source)
+        hand_id = _positive_id(source_hand_id)
+
+        existing = self.source_of(src, hand_id)
+        if existing is not None:
+            canonical_id = self._resolve_merged(int(existing["canonical_id"]))
+            if canonical_id != int(existing["canonical_id"]):
+                # 人工软合并过：源记录整体改挂到保留行，旧行不删（§3.4 规则 5）
+                self.db.execute(
+                    "UPDATE replay_hand_sources SET canonical_id=%s"
+                    " WHERE source=%s AND source_hand_id=%s",
+                    (canonical_id, existing["source"], hand_id))
+                existing = self.source_of(src, hand_id) or existing
+            self._fix_fingerprint(existing, fingerprint)
+            return {"canonical_id": canonical_id,
+                    "created": False,
+                    "content_group": existing.get("content_group"),
+                    "primary_source": existing.get("primary_source")}
+
+        hero = normalize_hero_cards(hero_cards)
+        board_text = normalize_board(board)
+        started = as_datetime(started_at)
+        # 构造手牌自成一列：source=synthetic 就算调用方忘了传 is_synthetic，
+        # 也不会和真实手牌并到同一行（否则构造样本会污染真实统计）
+        synthetic = 1 if (is_synthetic or src == "synthetic") else 0
+        group = content_group_key(hero, board_text, started)
+
+        target = self._match(hero, board_text, started, synthetic)
+        if target is None:
+            canonical_id = self._create_canonical(
+                content_group=group, primary_source=src,
+                title=(title or "").strip() or None,
+                hero_cards=hero, board=board_text,
+                hero_position=(hero_position or "").strip() or None,
+                started_at=started, is_synthetic=synthetic)
+            self._insert_source(canonical_id, src, hand_id, fingerprint,
+                                linked_by, primary=1)
+            return {"canonical_id": canonical_id, "created": True,
+                    "content_group": group, "primary_source": src}
+
+        canonical_id = int(target["id"])
+        if group and not target.get("content_group"):
+            # 老行可能没算过组键（早期回填缺时间）；补上，别的列不动
+            self.db.execute(
+                """UPDATE replay_canonical_hands SET content_group=%s
+                    WHERE id=%s AND content_group IS NULL""",
+                (group, canonical_id))
+        else:
+            group = target.get("content_group") or group
+        self._insert_source(canonical_id, src, hand_id, fingerprint,
+                            linked_by, primary=0)
+        primary = self._refresh_primary(
+            canonical_id, {"source": src, "source_hand_id": hand_id})
+        return {"canonical_id": canonical_id, "created": False,
+                "content_group": group, "primary_source": primary or src}
+
+    def set_primary(self, canonical_id: int, source: str,
+                    source_hand_id: int | None = None) -> dict:
+        """人工指定 primary；不给 hand_id 时取该来源 id 最小的一条。"""
+        src = validate_source(source)
+        canonical_id = int(canonical_id)
+        if source_hand_id is None:
+            row = self.db.one(
+                """SELECT source_hand_id FROM replay_hand_sources
+                    WHERE canonical_id=%s AND source=%s
+                    ORDER BY source_hand_id LIMIT 1""",
+                (canonical_id, src))
+            if row is None:
+                raise ApiError("SOURCE_NOT_FOUND",
+                               f"canonical {canonical_id} 没有 {src} 来源记录", 404)
+            hand_id = int(row["source_hand_id"])
+        else:
+            hand_id = _positive_id(source_hand_id)
+            found = self.db.one(
+                """SELECT 1 AS ok FROM replay_hand_sources
+                    WHERE canonical_id=%s AND source=%s AND source_hand_id=%s""",
+                (canonical_id, src, hand_id))
+            if found is None:
+                raise ApiError(
+                    "SOURCE_NOT_FOUND",
+                    f"canonical {canonical_id} 没有 {src}:{hand_id} 这条来源记录", 404)
+        self._write_primary(canonical_id, src, hand_id)
+        return {"canonical_id": canonical_id, "primary_source": src}
+
+    # ── 内部 ──
+
+    def _resolve_merged(self, canonical_id: int) -> int:
+        """沿 `merged_into` 走到人工合并后保留的那一行（链最多走 8 层）。
+
+        软合并只改指针、不删行；源记录跟着指针走，历史和审计都还在（§3.4 规则 5）。
+        """
+        current = int(canonical_id)
+        for _ in range(MERGE_CHAIN_LIMIT):
+            row = self.db.one(
+                "SELECT merged_into FROM replay_canonical_hands WHERE id=%s",
+                (current,))
+            if row is None or row.get("merged_into") in (None, 0):
+                return current
+            current = int(row["merged_into"])
+        return current
+
+    def _match(self, hero: str, board: str, started, synthetic: int):
+        if started is None:
+            return None
+        rows = self.db.query(
+            _CANDIDATE_SQL,
+            (hero, board, synthetic, started - MATCH_WINDOW,
+             started + MATCH_WINDOW))
+        return pick_candidate(rows, started)
+
+    def _create_canonical(self, *, content_group, primary_source, title,
+                          hero_cards, board, hero_position, started_at,
+                          is_synthetic) -> int:
+        return int(self.db.execute(
+            _INSERT_CANONICAL_SQL,
+            (content_group, primary_source, title, hero_cards,
+             board, hero_position, started_at, is_synthetic)))
+
+    def _insert_source(self, canonical_id: int, source: str, hand_id: int,
+                       fingerprint: str | None, linked_by: str,
+                       primary: int) -> None:
+        self.db.execute(_INSERT_SOURCE_SQL,
+                        (canonical_id, source, hand_id, fingerprint, primary,
+                         linked_by))
+
+    def _fix_fingerprint(self, existing: dict, fingerprint: str | None) -> None:
+        if not fingerprint or fingerprint == existing.get("fingerprint"):
+            return
+        self.db.execute(
+            """UPDATE replay_hand_sources SET fingerprint=%s
+                WHERE source=%s AND source_hand_id=%s""",
+            (fingerprint, existing["source"], int(existing["source_hand_id"])))
+
+    def _refresh_primary(self, canonical_id: int, added: dict) -> str | None:
+        rows = self.db.query(_PRIMARY_ROWS_SQL, (canonical_id,))
+        if not rows:
+            return None
+        current = next((r for r in rows if int(r.get("is_primary") or 0) == 1), None)
+        if current is None:
+            chosen = primary_row(rows)
+        elif rank_key(added) < rank_key(current):
+            chosen = added
+        else:
+            return str(current["source"])
+        if chosen is None:
+            return None
+        self._write_primary(canonical_id, str(chosen["source"]),
+                           int(chosen["source_hand_id"]))
+        return str(chosen["source"])
+
+    def _write_primary(self, canonical_id: int, source: str, hand_id: int) -> None:
+        self.db.execute(
+            """UPDATE replay_hand_sources
+                  SET is_primary = CASE WHEN source=%s AND source_hand_id=%s
+                                        THEN 1 ELSE 0 END
+                WHERE canonical_id=%s""",
+            (source, hand_id, canonical_id))
+        self.db.execute(
+            "UPDATE replay_canonical_hands SET primary_source=%s WHERE id=%s",
+            (source, canonical_id))
+
+
+def _positive_id(value) -> int:
+    try:
+        ident = int(value)
+    except (TypeError, ValueError):
+        ident = 0
+    if ident <= 0:
+        raise ApiError("BAD_SOURCE_ID", f"源记录 id 必须是正整数：{value!r}", 422)
+    return ident
+
