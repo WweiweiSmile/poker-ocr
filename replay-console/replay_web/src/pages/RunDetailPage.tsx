@@ -1,15 +1,20 @@
 import { useMemo, useState } from 'react'
 import {
-  Alert, App, Button, Card, Col, Collapse, Descriptions, Drawer, Empty,
-  Popconfirm, Row, Space, Statistic, Table, Tabs, Tag, Tooltip, Typography,
+  Alert, App, Button, Card, Col, Collapse, Descriptions, Drawer, Empty, Modal,
+  Popconfirm, Row, Select, Space, Statistic, Table, Tabs, Tag, Tooltip,
+  Typography,
 } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
-import { ArrowLeftOutlined, ReloadOutlined, StopOutlined } from '@ant-design/icons'
+import {
+  ArrowLeftOutlined, ReloadOutlined, StopOutlined, SwapOutlined,
+} from '@ant-design/icons'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Link, useParams } from 'react-router-dom'
+import { Link, useNavigate, useParams } from 'react-router-dom'
 import { api, errorMessage } from '../api'
 import { JudgeCard, OverrideCard } from '../components/ScoreJudgePanel'
-import type { ScoreRun, ScoreRunItem, ScoreRunItems } from '../types'
+import type {
+  ScoreRun, ScoreRunItem, ScoreRunItems, ScoreRunList,
+} from '../types'
 import {
   RUN_STATUS, adviceText as amountText, ciText, formatDate, rateText,
   scoreText,
@@ -39,10 +44,13 @@ export function scoreTags(scores: ScoreRunItem['scores']) {
 
 export default function RunDetailPage() {
   const { runId } = useParams()
+  const navigate = useNavigate()
   const { message } = App.useApp()
   const queryClient = useQueryClient()
   const [tab, setTab] = useState('all')
   const [active, setActive] = useState<ScoreRunItem | null>(null)
+  const [compareOpen, setCompareOpen] = useState(false)
+  const [compareTarget, setCompareTarget] = useState<number | null>(null)
 
   const id = Number(runId)
   const run = useQuery<ScoreRun>({
@@ -66,6 +74,13 @@ export default function RunDetailPage() {
     queryKey: ['score-run', id, 'item', active?.caseId, active?.repeatIndex],
     queryFn: () => api.get(`/score-runs/${id}/items/${active?.caseId}/${active?.repeatIndex}`),
     enabled: !!active,
+  })
+
+  // 对照入口的候选：最近 100 次运行，排除自己。
+  const runs = useQuery<ScoreRunList>({
+    queryKey: ['score-runs', 'compare-options'],
+    queryFn: () => api.get('/score-runs?limit=100'),
+    enabled: compareOpen,
   })
 
   const cancel = useMutation({
@@ -151,6 +166,12 @@ export default function RunDetailPage() {
         )}
         extra={(
           <Space>
+            <Button
+              icon={<SwapOutlined />}
+              onClick={() => { setCompareTarget(null); setCompareOpen(true) }}
+            >
+              版本对照
+            </Button>
             <Button icon={<ReloadOutlined />} onClick={() => { run.refetch(); items.refetch() }}>刷新</Button>
             <Popconfirm
               title="中断这次运行？"
@@ -341,6 +362,43 @@ export default function RunDetailPage() {
           </Space>
         ) : null}
       </Drawer>
+
+      <Modal
+        open={compareOpen}
+        title="版本对照：选另一次运行"
+        okText="开始对照"
+        okButtonProps={{ disabled: compareTarget === null }}
+        onCancel={() => setCompareOpen(false)}
+        onOk={() => {
+          if (compareTarget === null) return
+          setCompareOpen(false)
+          navigate(`/runs/${id}/compare/${compareTarget}`)
+        }}
+      >
+        <Space direction="vertical" size={8} style={{ width: '100%' }}>
+          <Text type="secondary">
+            只有两边都跑过的决策点才进对比：跨案例集 revision 时按决策点身份配对，
+            交集外的案例会单独报出数量。
+          </Text>
+          <Select
+            style={{ width: '100%' }}
+            showSearch
+            placeholder="选一次运行（只列最近 100 次）"
+            value={compareTarget ?? undefined}
+            onChange={setCompareTarget}
+            loading={runs.isLoading}
+            optionFilterProp="label"
+            options={(runs.data?.items || [])
+              .filter((item) => item.id !== id)
+              .map((item) => ({
+                value: item.id,
+                label: `#${item.id} · ${item.version.name || '未命名版本'} · `
+                  + `${item.caseSet.name || '—'} v${item.caseSet.revision} · `
+                  + `总分 ${scoreText(item.score)}`,
+              }))}
+          />
+        </Space>
+      </Modal>
     </div>
   )
 }

@@ -28,6 +28,7 @@ import CaseSetsPage from './pages/CaseSetsPage'
 import CaseSetDetailPage from './pages/CaseSetDetailPage'
 import RunsPage from './pages/RunsPage'
 import RunDetailPage from './pages/RunDetailPage'
+import RunComparePage from './pages/RunComparePage'
 import HotspotsPage from './pages/HotspotsPage'
 import SpecsPage from './pages/SpecsPage'
 import ExperimentPairsPage from './pages/ExperimentPairsPage'
@@ -215,6 +216,7 @@ export default function App() {
                 <Route path="/case-sets/:setId" element={<CaseSetDetailPage />} />
                 <Route path="/runs" element={<RunsPage />} />
                 <Route path="/runs/:runId" element={<RunDetailPage />} />
+                <Route path="/runs/:runId/compare/:otherId" element={<RunComparePage />} />
                 <Route path="/hotspots" element={<HotspotsPage />} />
                 <Route path="/specs" element={<SpecsPage />} />
                 <Route path="/experiments" element={<ExperimentsPage />} />

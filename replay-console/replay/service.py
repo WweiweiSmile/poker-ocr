@@ -22,7 +22,7 @@ from poker_ocr.advice import build_situation
 from poker_ocr.advice import AISettings
 from poker_ocr.buckets import BUCKET_ORDER, bucket_label
 
-from . import (case_seed, cases as case_lib, hotspots, judge, library,
+from . import (case_seed, cases as case_lib, compare, hotspots, judge, library,
                run_worker, scoring, specs)
 from .config import Settings
 from .db import Database
@@ -2053,6 +2053,207 @@ class ReplayService:
             if len(batch) < page:
                 return rows
             offset += page
+
+    # ─────────────── 版本对照（#60） ───────────────
+
+    def compare_score_runs(self, run_id: int, other_id: int,
+                           query: dict | None = None) -> dict:
+        """两次运行按共同决策点做翻转表（设计 §9 第 6 行 / §11 第 4 期）。
+
+        口径全在 `replay/compare.py`（纯函数）：配对键、方向、跨版本告警。
+        这里只负责取数、分页与把口径差异摆到响应最外层。
+        """
+        query = query or {}
+        only = self._compare_only(query)   # 参数错先报，不依赖两次运行是否存在
+        base, rows = self._compare_build(run_id, other_id)
+        filtered = self._compare_filter(rows, only)
+        total = len(filtered)
+        limit = self._query_int(query.get("limit"), 200, low=1, high=1000)
+        offset = self._query_int(query.get("offset"), 0, low=0)
+        base.update({
+            "rows": filtered[offset:offset + limit],
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "truncated": offset + limit < total,
+        })
+        return base
+
+    def export_score_run_comparison(self, run_id: int, other_id: int,
+                                    query: dict | None = None
+                                    ) -> tuple[str, str, str]:
+        """翻转表导出 CSV（验收第 4 条：案例 id、桶、两次分数、翻转方向）。
+
+        导出不受页面分页限制：`limit` 只是展示口径。CSV 里同时带上案例集与
+        spec revision、以及告警代码，避免文件离开页面后「跨版本」这件事被
+        静默丢掉。
+        """
+        query = query or {}
+        fmt = str(query.get("format") or "csv").lower()
+        if fmt not in ("csv",):
+            raise ApiError("INVALID_FORMAT", "版本对照目前只支持 csv", 422)
+        only = self._compare_only(query)
+        base, rows = self._compare_build(run_id, other_id)
+        filtered = self._compare_filter(rows, only)
+        left_set = base["left"].get("caseSet") or {}
+        right_set = base["right"].get("caseSet") or {}
+        warning_codes = "|".join(w["code"] for w in base["warnings"])
+        buf = io.StringIO()
+        fieldnames = [
+            "case_id_left", "case_id_right", "canonical_id", "decision_key",
+            "street", "action_index", "p0", "bucket_label", "bucket_json",
+            "score_left", "score_right", "delta", "direction",
+            "direction_label", "hard_fail_left", "hard_fail_right",
+            "advice_left", "advice_right", "source_left", "source_right",
+            "overridden_left", "overridden_right", "case_set_left",
+            "case_set_right", "spec_revision_left", "spec_revision_right",
+            "warning_codes",
+        ]
+        writer = csv.DictWriter(buf, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in filtered:
+            left, right = row["left"], row["right"]
+            writer.writerow({
+                "case_id_left": left["caseId"],
+                "case_id_right": right["caseId"],
+                "canonical_id": ("" if row["canonicalId"] is None
+                                 else row["canonicalId"]),
+                "decision_key": row["decisionKey"] or "",
+                "street": row["street"] or "",
+                "action_index": ("" if row["actionIndex"] is None
+                                 else row["actionIndex"]),
+                "p0": "yes" if row["p0"] else "no",
+                "bucket_label": row["bucketLabel"],
+                "bucket_json": json.dumps(row["bucket"] or {},
+                                          ensure_ascii=False),
+                "score_left": self._compare_number(left["score"]),
+                "score_right": self._compare_number(right["score"]),
+                "delta": self._compare_number(row["delta"]),
+                "direction": row["direction"],
+                "direction_label": compare.DIRECTION_LABELS[row["direction"]],
+                "hard_fail_left": left["hardFail"] or "",
+                "hard_fail_right": right["hardFail"] or "",
+                "advice_left": self._compare_advice(left),
+                "advice_right": self._compare_advice(right),
+                "source_left": left["source"] or "",
+                "source_right": right["source"] or "",
+                "overridden_left": "yes" if left["overridden"] else "no",
+                "overridden_right": "yes" if right["overridden"] else "no",
+                "case_set_left": f"#{left_set.get('id')} rev"
+                                 f"{left_set.get('revision')}",
+                "case_set_right": f"#{right_set.get('id')} rev"
+                                  f"{right_set.get('revision')}",
+                "spec_revision_left": ("" if left["specRevision"] is None
+                                       else left["specRevision"]),
+                "spec_revision_right": ("" if right["specRevision"] is None
+                                        else right["specRevision"]),
+                "warning_codes": warning_codes,
+            })
+        filename = f"replay-compare-{int(run_id)}-vs-{int(other_id)}.csv"
+        return ("csv", filename, "\ufeff" + buf.getvalue())
+
+    def _compare_build(self, run_id: int, other_id: int) -> tuple[dict, list]:
+        """配对 + 汇总 + 口径差异；行不在这里过滤/分页（导出要全量）。"""
+        if int(run_id) == int(other_id):
+            raise ApiError("COMPARE_SAME_RUN", "同一个运行不能和自己对照", 422)
+        left_run = self.run_repo.require(run_id)
+        right_run = self.run_repo.require(other_id)
+        left_entries = self._comparison_entries(left_run)
+        right_entries = self._comparison_entries(right_run)
+        pairs, cases = compare.pair(left_entries.values(),
+                                    right_entries.values())
+        rows = [compare.compare_row(left, right) for left, right in pairs]
+        rows.sort(key=self._compare_sort_key)
+        summary = compare.summarize(rows)
+        left = self._run_public(left_run)
+        right = self._run_public(right_run)
+        versions = compare.version_diff(left, right)
+        return ({
+            "left": left,
+            "right": right,
+            "cases": cases,
+            "summary": summary,
+            "directions": summary["directions"],
+            "versions": versions,
+            "warnings": compare.warnings(versions, left, right),
+        }, rows)
+
+    def _comparison_entries(self, run: dict) -> dict[tuple, dict]:
+        """一次运行 → 「决策点身份 → 条目」，只看首次建议与改判后的有效分。"""
+        run_id = int(run["id"])
+        config = json_load(run.get("config_snapshot"), {}) or {}
+        spec_meta: dict[int, dict] = {}
+        for snapshot in config.get("specs") or []:
+            try:
+                spec_meta[int(snapshot["id"])] = snapshot
+            except (KeyError, TypeError, ValueError):
+                continue
+        overrides = self.override_repo.list(run_id)
+        entries: dict[tuple, dict] = {}
+        for row in self._all_run_items(run):
+            if int(row["repeat_index"]) != 0:
+                continue
+            item = self.run_item_repo.public_item(row)
+            override = overrides.get(int(row["case_id"]))
+            score, scores, hard_fail = run_worker.apply_override(
+                json_load(row.get("scores_json"), {}) or {},
+                row.get("hard_fail") or None,
+                (float(row["score"]) if row.get("score") is not None else None),
+                override)
+            spec = spec_meta.get(int(item["specId"] or 0)) or {}
+            item.update({
+                "runId": run_id,
+                "score": score,
+                "scores": scores,
+                "hardFail": hard_fail,
+                "overridden": bool(override),
+                "specName": spec.get("name") or "",
+                "specRevision": spec.get("revision"),
+            })
+            entries[compare.comparison_key(item)] = item
+        return entries
+
+    @staticmethod
+    def _compare_only(query: dict) -> str:
+        """页面筛选：`only` 只认四个方向，写错就报错，不静默忽略。"""
+        only = str(query.get("only") or "").strip()
+        if only and only not in compare.DIRECTIONS:
+            raise ApiError(
+                "INVALID_DIRECTION",
+                "only 只能是 " + " / ".join(compare.DIRECTIONS), 422)
+        return only
+
+    @staticmethod
+    def _compare_filter(rows: list[dict], only: str) -> list[dict]:
+        if not only:
+            return list(rows)
+        return [row for row in rows if row["direction"] == only]
+
+    @staticmethod
+    def _compare_sort_key(row: dict) -> tuple:
+        """改坏在前（跌得最多最先），再改好、不变，最后不可比。"""
+        direction = row["direction"]
+        delta = row.get("delta")
+        if direction == "worse":
+            spread = delta if delta is not None else 0.0
+        elif direction == "improved":
+            spread = -(delta or 0.0)
+        else:
+            spread = 0.0
+        return (compare.direction_rank(direction), spread,
+                int(row["left"]["caseId"] or 0))
+
+    @staticmethod
+    def _compare_number(value: float | None) -> str:
+        return "" if value is None else str(float(value))
+
+    @staticmethod
+    def _compare_advice(side: dict) -> str:
+        """与页面的 `adviceText` / `fmt_option` 同口径：fold/check 不带金额。"""
+        advice = side.get("advice") or {}
+        text = fmt_option(advice.get("kind") or advice.get("optionId"),
+                          advice.get("amount"))
+        return "" if text == "—" else text
 
     def case_candidates(self, set_id: int, query: dict | None = None) -> dict:
         """从存档按桶找「可补样」的决策点：看得见手牌、标出已在集内。"""

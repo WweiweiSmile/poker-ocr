@@ -50,6 +50,17 @@ class FakeScoreRunService:
         self.calls.append(("score_run_item", run_id, case_id, repeat_index))
         return {"caseId": case_id, "repeatIndex": repeat_index}
 
+    def compare_score_runs(self, run_id, other_id, query):
+        self.calls.append(("compare_score_runs", run_id, other_id, dict(query)))
+        return {"left": {"id": run_id}, "right": {"id": other_id},
+                "rows": [], "total": 0}
+
+    def export_score_run_comparison(self, run_id, other_id, query):
+        self.calls.append(("export_score_run_comparison", run_id, other_id,
+                           dict(query)))
+        return ("csv", f"replay-compare-{run_id}-vs-{other_id}.csv",
+                "\ufeffcase_id_left,direction\n1,worse\n")
+
 
 @pytest.fixture()
 def client(monkeypatch):
@@ -121,3 +132,24 @@ def test_list_filters_are_forwarded(client):
     assert response.status_code == 200
     assert fake.calls == [("list_score_runs",
                            {"status": "partial", "limit": "5"})]
+
+
+def test_compare_route_passes_both_ids_and_filters(client):
+    test_client, fake = client
+    response = test_client.get("/api/score-runs/901/compare/902?only=worse")
+    assert response.status_code == 200, response.text
+    assert fake.calls == [("compare_score_runs", 901, 902, {"only": "worse"})]
+    assert response.json()["right"]["id"] == 902
+
+
+def test_compare_export_streams_csv_attachment(client):
+    test_client, fake = client
+    response = test_client.get("/api/score-runs/901/compare/902/export"
+                               "?format=csv&only=improved")
+    assert response.status_code == 200, response.text
+    assert fake.calls == [("export_score_run_comparison", 901, 902,
+                           {"format": "csv", "only": "improved"})]
+    assert response.headers["content-type"].startswith("text/csv")
+    assert "replay-compare-901-vs-902.csv" in \
+        response.headers["content-disposition"]
+    assert response.text.startswith("\ufeffcase_id_left")

@@ -56,6 +56,11 @@ def setup_logging(settings: Settings) -> None:
     root._replay_configured = True  # type: ignore[attr-defined]
 
 
+def _export_media(fmt: str) -> str:
+    return ("text/csv; charset=utf-8" if fmt == "csv"
+            else "text/markdown; charset=utf-8")
+
+
 def create_app(settings: Settings | None = None,
                db: Database | None = None,
                start_worker: bool | None = None) -> FastAPI:
@@ -560,14 +565,29 @@ def create_app(settings: Settings | None = None,
         return service(request).rejudge_score_run_item(
             run_id, case_id, repeat_index)
 
+    # ─────────────── 版本对照（#60） ───────────────
+
+    @app.get("/api/score-runs/{run_id}/compare/{other_id}")
+    def compare_score_runs(run_id: int, other_id: int, request: Request):
+        return service(request).compare_score_runs(
+            run_id, other_id, dict(request.query_params))
+
+    @app.get("/api/score-runs/{run_id}/compare/{other_id}/export")
+    def export_score_run_comparison(run_id: int, other_id: int,
+                                    request: Request):
+        fmt, filename, body = service(request).export_score_run_comparison(
+            run_id, other_id, dict(request.query_params))
+        return Response(
+            content=body, media_type=_export_media(fmt),
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
     # ─────────────── export ───────────────
 
     @app.get("/api/export")
     def export(request: Request):
         fmt, filename, body = service(request).export(dict(request.query_params))
-        media = "text/csv; charset=utf-8" if fmt == "csv" else "text/markdown; charset=utf-8"
         return Response(
-            content=body, media_type=media,
+            content=body, media_type=_export_media(fmt),
             headers={"Content-Disposition": f'attachment; filename="{filename}"'})
 
     # ─────────────── SPA ───────────────

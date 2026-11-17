@@ -1482,6 +1482,118 @@ export interface ScoreRunItems {
 }
 
 
+// ─────────────── 版本对照（#60） ───────────────
+
+/** 改坏在前：版本对照最该回答的是「有没有弄坏」。 */
+export type CompareDirection = 'worse' | 'improved' | 'unchanged' | 'incomparable'
+
+export interface CompareSide {
+  caseId: number
+  runId: number | null
+  specId: number | null
+  specName: string
+  specRevision: number | null
+  score: number | null
+  scores: ScoreRunScoreMap
+  hardFail: string | null
+  overridden: boolean
+  advice: ScoreRunAdvice
+  source: string | null
+  comparable: boolean
+}
+
+export interface CompareRow {
+  canonicalId: number | null
+  decisionKey: string | null
+  street: string | null
+  actionIndex: number | null
+  priority: number
+  p0: boolean
+  bucket: Record<string, unknown>
+  bucketLabel: string
+  hand: { heroCards: string; board: string; heroPosition: string | null }
+  left: CompareSide
+  right: CompareSide
+  delta: number | null
+  direction: CompareDirection
+}
+
+export interface CompareCases {
+  left: number
+  right: number
+  common: number
+  excludedLeft: number
+  excludedRight: number
+}
+
+export interface CompareMean {
+  n: number
+  mean: number | null
+  lo: number | null
+  hi: number | null
+}
+
+export interface CompareSummary {
+  n: number
+  scored: number
+  directions: Record<CompareDirection, number>
+  left: CompareMean
+  right: CompareMean
+  delta: number | null
+}
+
+export interface CompareVersionChange {
+  id: number
+  name: string
+  left: number | null
+  right: number | null
+}
+
+export interface CompareVersionOnly {
+  id: number
+  name: string
+  revision: number | null
+}
+
+export interface CompareVersions {
+  caseSet: {
+    same: boolean
+    left: { id: number | null; name: string | null; revision: number | null }
+    right: { id: number | null; name: string | null; revision: number | null }
+  }
+  specs: {
+    same: boolean
+    changed: CompareVersionChange[]
+    onlyLeft: CompareVersionOnly[]
+    onlyRight: CompareVersionOnly[]
+  }
+  judge: { same: boolean; left: string | null; right: string | null }
+  reconstruct: { same: boolean; left: string | null; right: string | null }
+  version: { same: boolean; left: ScoreRun['version']; right: ScoreRun['version'] }
+  /** 口径变了（案例集/spec/judge/reconstruct 任一不同）；被测版本不同不算。 */
+  crossVersion: boolean
+}
+
+export interface CompareWarning {
+  code: string
+  message: string
+}
+
+export interface ScoreRunComparison {
+  left: ScoreRun
+  right: ScoreRun
+  cases: CompareCases
+  summary: CompareSummary
+  directions: Record<CompareDirection, number>
+  versions: CompareVersions
+  warnings: CompareWarning[]
+  rows: CompareRow[]
+  total: number
+  limit: number
+  offset: number
+  truncated: boolean
+}
+
 // ─────────────── 偏差热点（#59） ───────────────
 
 export interface HotspotFreqCell {
