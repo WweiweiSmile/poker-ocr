@@ -73,7 +73,7 @@ def _run():
 def test_finalize_adds_stable_dimension_and_aggregates():
     rows = [_row(1, 0, "call"), _row(1, 1, "call"), _row(1, 2, "fold")]
     worker = _worker(rows)
-    worker._finalize(_run(), "recon-4", [], total_cases=1, done_cases=1)
+    worker._finalize(_run(), "recon-4", {}, total_cases=1, done_cases=1)
 
     assert worker.items.updated, "稳定维应写回 run_item"
     assert all(item["scores"]["stable"] == round(2 / 3, 4)
@@ -89,15 +89,40 @@ def test_finalize_adds_stable_dimension_and_aggregates():
 
 def test_finalize_single_repeat_has_no_stable_dimension():
     worker = _worker([_row(1)])
-    worker._finalize(_run(), "recon-4", [], total_cases=1, done_cases=1)
+    worker._finalize(_run(), "recon-4", {}, total_cases=1, done_cases=1)
     assert worker.items.updated == []
     assert worker.runs.finished[-1]["status"] == "succeeded"
+
+
+def test_same_rows_score_same_regardless_of_order():
+    # AC②：同集同版本重跑，除模型采样外分数一致——评分聚合本身必须与行顺序无关。
+    rows = [_row(1, 0, "call"), _row(1, 1, "call"), _row(1, 2, "fold"),
+            _row(2, 0, "raise", priority=0), _row(3, 0, "fold")]
+    first = _worker([dict(row) for row in rows])
+    first._finalize(_run(), "recon-4", {}, total_cases=2, done_cases=2)
+    second = _worker([dict(row) for row in reversed(rows)])
+    second._finalize(_run(), "recon-4", {}, total_cases=2, done_cases=2)
+
+    left, right = first.runs.finished[-1], second.runs.finished[-1]
+    assert left["score"] == right["score"]
+    assert left["metrics"] == right["metrics"]
+    assert [item["score"] for item in first.items.updated] == \
+        [item["score"] for item in second.items.updated]
+
+
+def test_partial_stable_samples_not_counted():
+    # 只跑到 2 次：稳定维不进分母（固定 3 次样本），否则两次 run 不可比。
+    rows = [_row(1, 0, "call"), _row(1, 1, "call")]
+    worker = _worker(rows)
+    worker._finalize(_run(), "recon-4", {}, canceled=True,
+                     total_cases=1, done_cases=1)
+    assert worker.items.updated == []
 
 
 def test_canceled_run_is_partial_not_succeeded():
     rows = [_row(1), _row(2, priority=1)]
     worker = _worker(rows)
-    worker._finalize(_run(), "recon-4", [], canceled=True,
+    worker._finalize(_run(), "recon-4", {}, canceled=True,
                      total_cases=3, done_cases=2)
     finished = worker.runs.finished[-1]
     assert finished["status"] == "partial"
@@ -109,7 +134,7 @@ def test_canceled_run_is_partial_not_succeeded():
 def test_all_errors_mark_run_failed():
     rows = [_row(1, source="error"), _row(2, source="error")]
     worker = _worker(rows)
-    worker._finalize(_run(), "recon-4", [], total_cases=2, done_cases=2)
+    worker._finalize(_run(), "recon-4", {}, total_cases=2, done_cases=2)
     finished = worker.runs.finished[-1]
     assert finished["status"] == "failed"
     assert finished["error_msg"] == "全部调用失败"
@@ -118,7 +143,7 @@ def test_all_errors_mark_run_failed():
 def test_partial_errors_mark_run_partial():
     rows = [_row(1), _row(2, source="error")]
     worker = _worker(rows)
-    worker._finalize(_run(), "recon-4", [], total_cases=2, done_cases=2)
+    worker._finalize(_run(), "recon-4", {}, total_cases=2, done_cases=2)
     finished = worker.runs.finished[-1]
     assert finished["status"] == "partial"
     assert "1 次调用失败" in finished["error_msg"]
@@ -126,9 +151,10 @@ def test_partial_errors_mark_run_partial():
 
 def test_hard_fail_caps_score_at_40():
     rows = [_row(1, 0, hard_fail=scoring.HF_FALLBACK),
-            _row(1, 1, hard_fail=scoring.HF_FALLBACK)]
+            _row(1, 1, hard_fail=scoring.HF_FALLBACK),
+            _row(1, 2, hard_fail=scoring.HF_FALLBACK)]
     worker = _worker(rows)
-    worker._finalize(_run(), "recon-4", [], total_cases=1, done_cases=1)
+    worker._finalize(_run(), "recon-4", {}, total_cases=1, done_cases=1)
     assert worker.items.updated[0]["score"] == 40.0
     assert worker.runs.finished[-1]["score"] == 40.0
 
@@ -164,7 +190,6 @@ def test_build_units_expands_p0_three_times():
     worker = RunWorker.__new__(RunWorker)
     worker.live_advice_repo = _FakeLiveAdvice()
     worker._decision_row = lambda *args: {"hand_id": 5}
-    worker.__dict__["_decision_from_row_patch"] = None
     import replay.run_worker as module
     original = module.decision_from_row
     module.decision_from_row = lambda row: _decision()
@@ -177,7 +202,7 @@ def test_build_units_expands_p0_three_times():
         ]
         specs = {11: {"id": 11, "bucket": {"street": ["flop"]}}}
         units = worker._build_units(cases, specs, list(specs.values()),
-                                    "recon-4", {1: 11})
+                                    "recon-4", {1: 11, 2: 11})
     finally:
         module.decision_from_row = original
 
@@ -187,6 +212,25 @@ def test_build_units_expands_p0_three_times():
     assert repeats == {1: [0, 1, 2], 2: [0]}
     assert all(unit["specId"] == 11 for unit in units)
     assert units[0]["prompt"] == ("sys", "usr")
+
+
+def test_build_units_does_not_fall_back_when_frozen_spec_deleted():
+    """冻结的 spec 被删了：报错，不偷偷换成本轮 active spec（跨 run 口径漂移）。"""
+    worker = RunWorker.__new__(RunWorker)
+    worker.live_advice_repo = _FakeLiveAdvice()
+    worker._decision_row = lambda *args: {"hand_id": 5}
+    import replay.run_worker as module
+    original = module.decision_from_row
+    module.decision_from_row = lambda row: _decision()
+    try:
+        cases = [{"id": 1, "canonical_id": 100, "decision_key": "flop:2",
+                  "priority": 0, "bucket": {"street": "flop"}}]
+        active = [{"id": 11, "bucket": {"street": ["flop"]}}]
+        units = worker._build_units(cases, {}, active, "recon-4", {1: 11})
+    finally:
+        module.decision_from_row = original
+    assert units and all(unit["spec"] is None for unit in units)
+    assert all("冻结的 spec #11" in unit["specError"] for unit in units)
 
 
 def test_build_units_falls_back_to_best_spec():
@@ -220,21 +264,34 @@ def test_worker_builds_repositories_with_settings_db_only():
     assert worker.limiter is not None
 
 
-def test_finalize_coverage_counts_spec_buckets_with_array_values():
-    """回归：active spec 的桶每维是数组，别当单值塞给 case_lib.label_of。"""
+def test_finalize_coverage_counts_spec_buckets_with_array_values(monkeypatch):
+    """回归：覆盖率按 spec 的桶划（每维是数组），别用更细的案例桶。"""
+    from poker_ocr.buckets import bucket_label
+
+    captured = {}
+    real_aggregate = scoring.aggregate
+
+    def spy(items, **kwargs):
+        captured["items"] = [dict(item) for item in items]
+        return real_aggregate(items, **kwargs)
+
+    monkeypatch.setattr(scoring, "aggregate", spy)
     worker = _worker([
-        {"case_id": 1, "repeat_index": 0, "case_priority": 0,
+        {"case_id": 1, "spec_id": 1, "repeat_index": 0, "case_priority": 0,
          "score": 80.0, "scores_json": json.dumps({"action": 1.0}),
-         "hard_fail": None, "source": "model", "street": "flop",
+         "hard_fail": None, "source": "model", "street": "turn",
          "position_bucket": "ip", "hand_tier": "strong",
          "board_texture": "dry", "pot_type": "single_raised",
          "facing": "bet", "opponent_profile": "unknown"},
     ])
-    active = [
-        {"id": 1, "bucket": {"street": ["flop"], "pot_type": ["single_raised"]}},
-        {"id": 2, "bucket": {"street": ["river"]}},
-    ]
-    worker._finalize(_run(), "recon-4", active, total_cases=1, done_cases=1)
+    specs = {
+        1: {"id": 1,
+            "bucket": {"street": ["flop"], "pot_type": ["single_raised"]}},
+        2: {"id": 2, "bucket": {"street": ["river"]}},
+    }
+    worker._finalize(_run(), "recon-4", specs, total_cases=1, done_cases=1)
     finished = worker.runs.finished[-1]
     assert finished["metrics"]["coverage"]["bucketTotal"] == 2
+    assert captured["items"][0]["bucket"] == bucket_label(
+        {"street": ["flop"], "pot_type": ["single_raised"]})
     assert finished["status"] == "succeeded"

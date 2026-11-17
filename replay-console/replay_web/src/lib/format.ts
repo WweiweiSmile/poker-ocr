@@ -1,5 +1,5 @@
 import dayjs from 'dayjs'
-import type { Quality, RunStatus } from '../types'
+import type { Quality, RunStatus, ScoreRunEstimate } from '../types'
 
 export function cardsFromString(text?: string | null): string[] {
   const value = (text || '').trim()
@@ -66,6 +66,29 @@ export const RUN_STATUS: Record<RunStatus, { label: string; color: string }> = {
   partial: { label: '部分完成', color: 'warning' },
   failed: { label: '失败', color: 'error' },
   canceled: { label: '已取消', color: 'default' },
+}
+
+export function scoreText(value: number | null | undefined) {
+  if (value === null || value === undefined) return '—'
+  return (Math.round(value * 10) / 10).toFixed(1)
+}
+
+export function rateText(value: number | null | undefined) {
+  if (value === null || value === undefined) return '—'
+  return `${(Math.round(value * 1000) / 10).toFixed(1)}%`
+}
+
+/** 置信区间按百分比展示；null（样本不足）时不显示。 */
+export function ciText(ci?: [number, number] | null): string | undefined {
+  if (!ci) return undefined
+  return `[${rateText(ci[0])}, ${rateText(ci[1])}]`
+}
+
+export function costText(estimate: ScoreRunEstimate) {
+  if (estimate.cost === null || estimate.cost === undefined) {
+    return estimate.priceMissing ? '未知单价（未配 REPLAY_PRICE_TABLE）' : '—'
+  }
+  return `¥${estimate.cost.toFixed(4)}`
 }
 
 export function scopeLabel(scope?: string | null): string {

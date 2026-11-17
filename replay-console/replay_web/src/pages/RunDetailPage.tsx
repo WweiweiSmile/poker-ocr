@@ -9,8 +9,9 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useParams } from 'react-router-dom'
 import { api, errorMessage } from '../api'
 import type { ScoreRun, ScoreRunItem, ScoreRunItems } from '../types'
-import { RUN_STATUS, formatDate } from '../lib/format'
-import { rateText, scoreText } from './RunsPage'
+import {
+  RUN_STATUS, ciText, formatDate, rateText, scoreText,
+} from '../lib/format'
 
 const { Text } = Typography
 
@@ -130,7 +131,12 @@ export default function RunDetailPage() {
   const metrics = data?.metrics || {}
   const running = data?.status === 'queued' || data?.status === 'running'
   const counts = items.data?.counts
-  const options = (detail.data?.options || []) as { id?: string; label?: string; kind?: string; amount?: number | null }[]
+  // facts 里的选项金额字段是 amount_bb（poker_ocr/options.py 的 Option.to_dict），
+  // 不是 amount——按 amount 渲染会永远显示不出尺寸。
+  const options = (detail.data?.options || []) as {
+    id?: string; label?: string; kind?: string
+    amount_bb?: number | null; amount?: number | null
+  }[]
 
   return (
     <div className="page">
@@ -183,18 +189,26 @@ export default function RunDetailPage() {
             />
           </Col>
           <Col span={4}>
-            <Statistic title="P0 通过率" value={rateText(metrics.p0?.rate ?? data?.p0PassRate ?? null)} />
-          </Col>
-          <Col span={4}>
-            <Statistic title="覆盖率" value={rateText(metrics.coverage?.rate ?? data?.coverageRate ?? null)} />
+            <Statistic
+              title={metrics.p0?.total ? `P0 通过率（n=${metrics.p0.total}）` : 'P0 通过率'}
+              value={rateText(metrics.p0?.rate ?? data?.p0PassRate ?? null)}
+              suffix={ciText(metrics.p0?.ci)}
+            />
           </Col>
           <Col span={4}>
             <Statistic
-              title="硬失败"
-              value={counts ? counts.fails : (metrics.hardFail?.count ?? 0)}
-              suffix={metrics.hardFail?.rate !== null && metrics.hardFail?.rate !== undefined
-                ? `(${rateText(metrics.hardFail.rate)})`
+              title="覆盖率"
+              value={rateText(metrics.coverage?.rate ?? data?.coverageRate ?? null)}
+              suffix={metrics.coverage
+                ? `(${metrics.coverage.reached}/${metrics.coverage.bucketTotal} 桶)`
                 : undefined}
+            />
+          </Col>
+          <Col span={4}>
+            <Statistic
+              title={metrics.hardFail ? `硬失败（n=${metrics.scored ?? 0}）` : '硬失败'}
+              value={counts ? counts.fails : (metrics.hardFail?.count ?? 0)}
+              suffix={ciText(metrics.hardFail?.ci)}
             />
           </Col>
           <Col span={4}>
@@ -299,7 +313,7 @@ export default function RunDetailPage() {
                   { title: '标签', dataIndex: 'label' },
                   {
                     title: '动作', key: 'kind', width: 140,
-                    render: (_: unknown, row) => amountText(row.kind, row.amount),
+                    render: (_: unknown, row) => amountText(row.kind, row.amount_bb ?? row.amount),
                   },
                   {
                     title: '', key: 'chosen', width: 80,

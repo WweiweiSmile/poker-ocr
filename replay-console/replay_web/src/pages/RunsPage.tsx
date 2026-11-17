@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react'
 import {
-  Alert, App, Button, Card, Descriptions, Form, Modal, Select, Space,
+  Alert, App, Button, Card, Checkbox, Descriptions, Form, Modal, Select, Space,
   Table, Tag, Tooltip,
 } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
@@ -11,24 +11,9 @@ import { api, errorMessage } from '../api'
 import type {
   ScoreRun, ScoreRunEstimate, ScoreRunList, ScoreRunMeta,
 } from '../types'
-import { RUN_STATUS, formatDate } from '../lib/format'
-
-export function scoreText(value: number | null | undefined) {
-  if (value === null || value === undefined) return '—'
-  return (Math.round(value * 10) / 10).toFixed(1)
-}
-
-export function rateText(value: number | null | undefined) {
-  if (value === null || value === undefined) return '—'
-  return `${(Math.round(value * 1000) / 10).toFixed(1)}%`
-}
-
-export function costText(estimate: ScoreRunEstimate) {
-  if (estimate.cost === null || estimate.cost === undefined) {
-    return estimate.priceMissing ? '未知单价（未配 REPLAY_PRICE_TABLE）' : '—'
-  }
-  return `¥${estimate.cost.toFixed(4)}`
-}
+import {
+  RUN_STATUS, costText, formatDate, rateText, scoreText,
+} from '../lib/format'
 
 export default function RunsPage() {
   const { message } = App.useApp()
@@ -37,6 +22,7 @@ export default function RunsPage() {
   const [open, setOpen] = useState(false)
   const [caseSetId, setCaseSetId] = useState<number | null>(null)
   const [versionId, setVersionId] = useState<number | null>(null)
+  const [confirmLarge, setConfirmLarge] = useState(false)
   const [form] = Form.useForm()
 
   const meta = useQuery<ScoreRunMeta>({
@@ -54,13 +40,17 @@ export default function RunsPage() {
     enabled: open && !!caseSetId && !!versionId,
     retry: false,
   })
+  const overLimit = Boolean(estimate.data?.overLimit)
   const create = useMutation({
-    mutationFn: () => api.post<ScoreRun>('/score-runs', { caseSetId, versionId }),
+    mutationFn: () => api.post<ScoreRun>('/score-runs', {
+      caseSetId, versionId, confirmLarge,
+    }),
     onSuccess: (run) => {
       message.success(`评分运行 #${run.id} 已创建`)
       setOpen(false)
       setCaseSetId(null)
       setVersionId(null)
+      setConfirmLarge(false)
       form.resetFields()
       queryClient.invalidateQueries({ queryKey: ['score-runs'] })
       navigate(`/runs/${run.id}`)
@@ -94,10 +84,10 @@ export default function RunsPage() {
     {
       title: '状态', dataIndex: 'status', width: 110,
       render: (status: ScoreRun['status'], row) => {
-        const meta = RUN_STATUS[status] || { label: status, color: 'default' }
+        const statusMeta = RUN_STATUS[status] || { label: status, color: 'default' }
         return (
           <Space size={4}>
-            <Tag color={meta.color}>{meta.label}</Tag>
+            <Tag color={statusMeta.color}>{statusMeta.label}</Tag>
             {row.cancelRequested && status !== 'partial' && status !== 'succeeded'
               ? <Tag color="default">已请求中断</Tag> : null}
           </Space>
@@ -172,11 +162,13 @@ export default function RunsPage() {
       <Modal
         title="新建评分运行"
         open={open}
-        onCancel={() => setOpen(false)}
+        onCancel={() => { setOpen(false); setConfirmLarge(false) }}
         onOk={() => create.mutate()}
         okText="创建并运行"
         confirmLoading={create.isPending}
-        okButtonProps={{ disabled: !estimate.data?.runnable }}
+        okButtonProps={{
+          disabled: !estimate.data?.runnable || (overLimit && !confirmLarge),
+        }}
         width={720}
       >
         <Form form={form} layout="vertical">
@@ -185,7 +177,7 @@ export default function RunsPage() {
               value={caseSetId}
               options={setOptions}
               placeholder="选择冻结案例集"
-              onChange={(value: number) => setCaseSetId(value)}
+              onChange={(value: number) => { setCaseSetId(value); setConfirmLarge(false) }}
             />
           </Form.Item>
           <Form.Item label="版本" required>
@@ -193,7 +185,7 @@ export default function RunsPage() {
               value={versionId}
               options={versionOptions}
               placeholder="选择版本"
-              onChange={(value: number) => setVersionId(value)}
+              onChange={(value: number) => { setVersionId(value); setConfirmLarge(false) }}
             />
           </Form.Item>
         </Form>
@@ -216,6 +208,22 @@ export default function RunsPage() {
               {meta.data?.judgeVersion || '—'} / {meta.data?.reconstructVersion || '—'}
             </Descriptions.Item>
           </Descriptions>
+        ) : null}
+        {estimate.data && overLimit ? (
+          <Alert
+            type="warning"
+            showIcon
+            style={{ marginTop: 8 }}
+            message={`预计调用 ${estimate.data.calls} 次，超过单次上限 ${estimate.data.maxCalls}。确认数量与成本后再勾选下方复选框。`}
+            description={(
+              <Checkbox
+                checked={confirmLarge}
+                onChange={(event) => setConfirmLarge(event.target.checked)}
+              >
+                我知道这次运行会超过单次上限
+              </Checkbox>
+            )}
+          />
         ) : null}
         {estimate.data && !estimate.data.runnable ? (
           <Alert

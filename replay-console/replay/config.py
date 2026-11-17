@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -60,6 +61,40 @@ def _float(value: str | None, default: float | None) -> float | None:
         return float(value)
     except ValueError:
         return default
+
+
+def _price_table(raw: str | None) -> dict[str, dict[str, float]]:
+    """`REPLAY_PRICE_TABLE` → {model: {"in": 元/百万 token, "out": ...}}。
+
+    配错就直接不启动（fail fast）：成本估算宁可报错，也不要静默显示「未知」
+    让人以为没配过。空值合法，表示没配单价。
+    """
+    if raw is None or not raw.strip():
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"REPLAY_PRICE_TABLE 不是合法 JSON：{exc}") from exc
+    if not isinstance(parsed, dict):
+        raise ValueError("REPLAY_PRICE_TABLE 必须是 {model: {in, out}} 对象")
+    table: dict[str, dict[str, float]] = {}
+    for model, prices in parsed.items():
+        if not isinstance(prices, dict):
+            raise ValueError(
+                f"REPLAY_PRICE_TABLE[{model!r}] 必须是 {{in, out}}")
+        entry: dict[str, float] = {}
+        for key in ("in", "out"):
+            try:
+                value = float(prices.get(key))
+            except (TypeError, ValueError):
+                raise ValueError(
+                    f"REPLAY_PRICE_TABLE[{model!r}].{key} 必须是数字") from None
+            if value < 0:
+                raise ValueError(
+                    f"REPLAY_PRICE_TABLE[{model!r}].{key} 不能为负")
+            entry[key] = value
+        table[str(model)] = entry
+    return table
 
 
 def _load_env_file(path: Path, applied: list[Path]) -> None:
@@ -139,6 +174,8 @@ class Settings:
     rate_limit_per_second: float = 5.0
     max_calls_per_job: int = 2000
     max_queue_depth: int = 3
+    # 成本估算单价（元/百万 token）：REPLAY_PRICE_TABLE，启动时校验
+    price_table: dict[str, dict[str, float]] = field(default_factory=dict)
     heartbeat_seconds: int = 10
     stale_seconds: int = 120
     auto_migrate: bool = True
@@ -192,6 +229,7 @@ class Settings:
             rate_limit_per_second=_float(os.environ.get("REPLAY_RATE_LIMIT"), 5.0) or 0.0,
             max_calls_per_job=_int(os.environ.get("REPLAY_MAX_CALLS_PER_JOB"), 2000, 1),
             max_queue_depth=_int(os.environ.get("REPLAY_MAX_QUEUE_DEPTH"), 3, 1),
+            price_table=_price_table(os.environ.get("REPLAY_PRICE_TABLE")),
             heartbeat_seconds=_int(os.environ.get("REPLAY_HEARTBEAT_SECONDS"), 10, 2, 120),
             stale_seconds=_int(os.environ.get("REPLAY_STALE_SECONDS"), 120, 10),
             auto_migrate=_truthy(os.environ.get("REPLAY_AUTO_MIGRATE"), True),

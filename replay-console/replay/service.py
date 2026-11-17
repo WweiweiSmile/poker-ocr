@@ -1601,18 +1601,9 @@ class ReplayService:
 
     # ───────────────────────── 评分运行（#57） ─────────────────────────
 
-    @staticmethod
-    def _price_table() -> dict:
-        """价目表：环境变量 REPLAY_PRICE_TABLE（JSON，元/百万 token）。"""
-        raw = os.environ.get("REPLAY_PRICE_TABLE") or ""
-        if not raw.strip():
-            return {}
-        try:
-            data = json.loads(raw)
-        except ValueError:
-            log.warning("REPLAY_PRICE_TABLE 不是合法 JSON，成本估算按未知单价处理")
-            return {}
-        return data if isinstance(data, dict) else {}
+    def _price_table(self) -> dict:
+        """价目表：`Settings.price_table`（启动时已校验 REPLAY_PRICE_TABLE）。"""
+        return dict(getattr(self.settings, "price_table", None) or {})
 
     @staticmethod
     def _run_id(payload: dict, key: str, label: str) -> int:
@@ -1620,6 +1611,20 @@ class ReplayService:
             return int(payload.get(key))
         except (TypeError, ValueError):
             raise ApiError("INVALID_RUN", f"需要 {key}（{label}）", 422) from None
+
+    @staticmethod
+    def _query_int(value: Any, default: int | None, *, low: int | None = None,
+                   high: int | None = None) -> int | None:
+        """查询参数转 int：坏值按缺省处理（fail open），不把 500 抛给页面。"""
+        try:
+            out = int(value)
+        except (TypeError, ValueError):
+            return default
+        if low is not None:
+            out = max(low, out)
+        if high is not None:
+            out = min(high, out)
+        return out
 
     def _require_ready_version(self, version_id: int) -> dict:
         row = self.version_repo.get(version_id)
@@ -1698,8 +1703,11 @@ class ReplayService:
             "price": price,
             "priceMissing": price is None,
             "frozen": bool(set_row.get("frozen_at")),
-            "runnable": bool(set_row.get("frozen_at")) and not unmatched,
+            "runnable": (bool(set_row.get("frozen_at")) and bool(cases)
+                         and not unmatched),
             "casesWithoutSpec": unmatched,
+            "maxCalls": self.settings.max_calls_per_job,
+            "overLimit": plan["calls"] > self.settings.max_calls_per_job,
         }
 
     def _case_spec_ids(
@@ -1746,11 +1754,15 @@ class ReplayService:
         spec_ids = sorted(set(case_specs.values()))
 
         plan = run_worker.plan_calls(cases)
-        if plan["calls"] > self.settings.max_calls_per_job:
+        # 超上限不是硬拒：创建页已经显示调用数与成本，用户明确确认（confirmLarge）
+        # 才继续；和 advice 任务的 TOO_MANY_CALLS 同一套语义。
+        if (plan["calls"] > self.settings.max_calls_per_job
+                and not bool(payload.get("confirmLarge"))):
             raise ApiError(
                 "RUN_TOO_LARGE",
                 f"预计调用 {plan['calls']} 次，超过单次上限 "
-                f"{self.settings.max_calls_per_job}", 422, detail=plan)
+                f"{self.settings.max_calls_per_job}；确认后再提交",
+                409, detail={**plan, "maxCalls": self.settings.max_calls_per_job})
 
         specs_meta: list[dict] = []
         for spec_id in spec_ids:
@@ -1814,11 +1826,9 @@ class ReplayService:
 
     def list_score_runs(self, query: dict | None = None) -> dict:
         query = query or {}
-        limit = int(query.get("limit") or 50)
         rows = self.run_repo.list(
-            limit=min(max(limit, 1), 200),
-            case_set_id=(int(query["caseSetId"])
-                         if query.get("caseSetId") else None),
+            limit=self._query_int(query.get("limit"), 50, low=1, high=200),
+            case_set_id=self._query_int(query.get("caseSetId"), None, low=1),
             status=(str(query.get("status") or "") or None),
         )
         return {"items": [self._run_public(row) for row in rows]}
@@ -1829,8 +1839,8 @@ class ReplayService:
     def score_run_items(self, run_id: int, query: dict | None = None) -> dict:
         query = query or {}
         run = self.run_repo.require(run_id)
-        limit = min(max(int(query.get("limit") or 200), 1), 1000)
-        offset = max(int(query.get("offset") or 0), 0)
+        limit = self._query_int(query.get("limit"), 200, low=1, high=1000)
+        offset = self._query_int(query.get("offset"), 0, low=0)
         only_fail = str(query.get("only") or "") == "hardfail"
         rows = self.run_item_repo.list(
             run_id, str(run.get("reconstruct_version")
@@ -1877,16 +1887,16 @@ class ReplayService:
         config = json_load(row.get("config_snapshot"), {}) or {}
         metrics = json_load(row.get("metrics_json"), {}) or {}
         return {
-            "id": int(row["id"]),
+            "id": int(row.get("id") or 0),
             "status": row.get("status") or "queued",
             "caseSet": {
-                "id": int(row["case_set_id"]),
+                "id": int(row.get("case_set_id") or 0),
                 "name": row.get("set_name"),
                 "revision": int(row.get("case_set_revision") or 1),
                 "frozen": bool(row.get("set_frozen_at")),
             },
             "version": {
-                "id": int(row["version_id"]),
+                "id": int(row.get("version_id") or 0),
                 "name": row.get("version_name"),
                 "model": row.get("version_model"),
             },

@@ -212,18 +212,20 @@ canonical 手牌：一手牌可以在复盘（`review`）、实时（`live`）�
 | 维度 | 权重 | 口径 |
 | --- | --- | --- |
 | 动作 `s_action` | 35 | 建议动作 ∈ spec 的 `allowed_actions` 且 ∉ `forbidden_actions` 得 1；与英雄实际动作的比较只作展示，实际动作是 `未知动作`（回填点/缺录）时记空、不算分歧 |
-| 尺寸 `s_size` | 15 | `fold/check/call` 恒 1；`bet/raise/allin` 落带内 1，带外 `max(0, 1 - 距离/带宽)`（带宽 0 用 0.1 兜底）；多条带取最小值；`pot<=0` 时底池比例带不参与，`bb<=0` 时 BB 带不参与 |
+| 尺寸 `s_size` | 15 | `fold/check/call` 恒 1；`bet/raise/allin` 落带内 1，带外 `max(0, 1 - 距离/带宽)`（带宽 0 用 0.1 兜底）；多条带取最小值；`pot<=0` 时底池比例带不参与。BB 带直接用 `option_amount`（它本来就是 BB），不再除大盲 |
 | 依据 `s_reason` | 30 | 命中 `required_points` 的加权和 / 总权重；要点为空时退化为「理由是否提到该动作」0/1 |
 | 事实 `s_fact` | 15 | `1 - 错误事实项/引用事实项`；没引用事实记 1（fail open） |
 | 稳定 `s_stable` | 5 | 同案例 3 次建议动作的一致率；没抽样时整维不进分母 |
 
 `score = Σ W·s / Σ W`；命中硬失败封顶 40。硬失败六码：`HF_OPTION`（option 不在该决策点选项里）、`HF_FALLBACK`（不是模型给的建议）、`HF_FORBIDDEN_ACTION`、`HF_FORBIDDEN_POINT`、`HF_HALLUCINATION`（把 facts 里没有的具体事实当依据）、`HF_ERROR`（调用异常）。事实说错只扣 `s_fact`，不算硬失败。
 
-聚合：总分取「重复 0 次」的案例均值，P0 通过率 = (P0 且无硬失败 且 `s_action=1`) / P0 数，覆盖率 = 达到 `FREQ_MIN_N=15` 样本的桶数 / 有 active spec 的桶数（桶按 spec 的桶标签去重，空桶不计）。比例类给 Wilson 95% 区间，均值给正态近似。
+聚合：总分取「重复 0 次」的案例均值，P0 通过率 = (P0 且无硬失败 且 `s_action=1`) / **本次 run 的 P0 案例总数**（没跑到/没出分的 P0 也算分母，否则通过率虚高），覆盖率 = 达到 `FREQ_MIN_N=15` 样本的桶数 / 有 active spec 的桶数（按 spec 的桶标签去重，空桶不计；分母是本次 run 开始时全部 active spec 的桶，不是恰好被冻结到的那些）。比例类给 Wilson 95% 区间，均值给正态近似；页面同时显示 n 与区间。
 
-采样与中断：每个案例跑 1 次，`priority=0` 的案例额外再跑 2 次（固定样本，不随机抽）；调用次数 = 案例数 + P0 数 × 2。取消是协作式的：已完成的案例照常计分，run 标 `partial` 并在 `error_msg` 里写「完成 X/Y 个案例；已按要求中断」；服务重启时 `running` 的 run 会被标成 `partial`，不冒充成功。
+**本次 run 的已知取舍**：#57 正文明确依据维先按退化口径——run 路径把 `required_points` 清空（judge 里记 `reasonMode: "action-support"`），`s_reason` 只判「理由是否提到该动作」，`cited_facts/wrong_facts` 也恒为 0。因此 `HF_HALLUCINATION`/`HF_FORBIDDEN_POINT` 在 run 路径不会触发，只有纯函数单测覆盖；要点加权、引用/错误事实与 §7.5 的频率达成率要等接 LLM judge 的票再接。硬失败证据目前只记 `code/optionId/source/optionIds`，还没有「引用原句/缺失 facts/命中禁令」三类证据。
 
-成本估算：`calls × token`，token 优先用该版本在 `replay_results` 的历史均值，没有就用默认 2000 in / 300 out；单价来自 `REPLAY_PRICE_TABLE`（JSON：`{"<model>": {"in": 元/百万, "out": 元/百万}}`），没配就显示「未知单价」而不是编一个数。
+采样与中断：每个案例跑 1 次，`priority=0` 的案例额外再跑 2 次（固定样本，不随机抽）；调用次数 = 案例数 + P0 数 × 2。取消是协作式的：已完成的案例照常计分，**没开跑就取消的单元不算「已完成」**（进度不会跳到 N/N），run 标 `partial` 并在 `error_msg` 里写「完成 X/Y 个案例；已按要求中断」；服务重启时 `running` 的 run 会被标成 `partial`，不冒充成功。案例缺决策点、或冻结的 spec 已被删时，不静默跳过也不换 spec：落一条 `source=error` 的 run_item（`HF_ERROR`，errorMsg 写明原因），run 因有 error 标 `partial`。
+
+成本估算：`calls × token`，token 优先用该版本在 `replay_results` 的历史均值，没有就用默认 2000 in / 300 out；单价来自 `REPLAY_PRICE_TABLE`（JSON：`{"<model>": {"in": 元/百万, "out": 元/百万}}`），没配就显示「未知单价」而不是编一个数；配了但格式错（坏 JSON、缺 `in`/`out`、负数）启动即报错，不静默当没配。预计调用超过 `REPLAY_MAX_CALLS_PER_JOB`（默认 2000）时不硬拒：创建页要求勾选「我知道会超上限」后带 `confirmLarge` 提交，否则 409 `RUN_TOO_LARGE`。
 
 ---
 

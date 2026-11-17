@@ -1293,6 +1293,8 @@ export interface ScoreRunEstimate {
   frozen: boolean
   runnable: boolean
   casesWithoutSpec: number[]
+  maxCalls: number
+  overLimit: boolean
 }
 
 export interface ScoreRunMetrics {

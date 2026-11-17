@@ -46,20 +46,20 @@ def test_pot_fraction_band_scales_with_distance():
     assert scoring.size_score("bet", 75, band, pot=None) == 1.0
 
 
-def test_bb_band_uses_big_blind_as_denominator():
+def test_bb_band_uses_option_amount_directly():
+    # option_amount 本身就是 BB（poker_ocr/options.py），不能再除一次大盲。
     band = {"unit": "bb", "min": 5, "max": 6}
-    assert scoring.size_score("raise", 10, band, bb=2) == 1.0
-    assert scoring.size_score("raise", 30, band, bb=2) == 0.0
-    # 没有 bb 时该带不参与 → fail open
-    assert scoring.size_score("raise", 30, band, bb=None) == 1.0
+    assert scoring.size_score("raise", 5.5, band) == 1.0
+    assert scoring.size_score("raise", 30, band) == 0.0
+    assert scoring.size_score("raise", 4.5, band) == pytest.approx(0.5)
 
 
 def test_multiple_bands_take_the_minimum():
     both = [{"unit": "pot_fraction", "min": 0.5, "max": 1.0},
             {"unit": "bb", "min": 20, "max": 30}]
     single = [{"unit": "pot_fraction", "min": 0.5, "max": 1.0}]
-    assert scoring.size_score("bet", 30, both, pot=100,
-                              bb=2) == pytest.approx(0.5)
+    # 30BB 落在 bb 带内（1.0）；但占池 30/100=0.3 离 0.5 差 0.2 → 0.6。
+    assert scoring.size_score("bet", 30, both, pot=100) == pytest.approx(0.6)
     assert (scoring.size_score("bet", 30, single, pot=100)
             == scoring.size_score("bet", 30, single[0], pot=100))
 
@@ -191,12 +191,22 @@ def test_freq_score_bands_and_sample_size():
     assert scoring.freq_score(None, ["bet"] * 20)["status"] == "absent"
 
 
+def test_p0_rate_counts_p0_cases_that_did_not_score():
+    # 只按已出分的 P0 算分母会让通过率虚高：p0_total 覆盖没跑到的那些。
+    items = [{"priority": 0, "score": 100.0, "scores": {"action": 1.0}},
+             {"priority": 0, "score": None, "scores": {}},
+             {"priority": 1, "score": 80.0, "scores": {"action": 1.0}}]
+    result = scoring.aggregate(items, bucket_total=1, p0_total=3)
+    assert result["p0"] == {"total": 3, "passed": 1, "rate": 0.3333,
+                            "ci": scoring.wilson(1, 3)}
+
+
 def test_bad_inputs_fail_open():
     result = scoring.score_case(
         spec={"sizing": "nope", "allowed_actions": None},
         advice={"option_id": "opt-1", "kind": "bet", "amount": "abc",
                 "reason": None, "source": None},
-        option_ids=["opt-1"], pot="x", bb={"n": 1})
+        option_ids=["opt-1"], pot="x")
     assert result["scores"]["size"] == 0.0
     assert result["scores"]["action"] == 1.0
     assert result["scores"]["reason"] == 0.0

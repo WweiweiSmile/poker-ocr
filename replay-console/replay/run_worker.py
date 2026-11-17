@@ -34,6 +34,8 @@ log = logging.getLogger("replay.run_worker")
 
 #: P0 案例在首次之外再跑两遍（设计 §7.4：固定样本，不随机抽）。
 P0_EXTRA_REPEATS = 2
+#: 稳定维固定样本数 = 1 + P0_EXTRA_REPEATS；不足就不进分母。
+STABLE_SAMPLES = P0_EXTRA_REPEATS + 1
 
 #: 没有历史 token 时的估算兜底（每次调用）。
 DEFAULT_TOKENS = {"tokensIn": 2000.0, "tokensOut": 300.0}
@@ -238,6 +240,12 @@ class RunWorker:
         config = json_load(run.get("config_snapshot"), {}) or {}
         case_specs = {int(key): int(value) for key, value in
                       (config.get("caseSpecs") or {}).items()}
+        # 覆盖率分母按设计 §7.3：有 active spec 的桶数，而不是本次 run 恰好
+        # 冻结到的那些 spec——否则只挑 2 个桶跑也能报 100%。
+        active_buckets = {bucket_label(spec.get("bucket"))
+                          for spec in active_specs if spec.get("bucket")}
+        p0_total = len({int(case["id"]) for case in cases
+                        if int(case.get("priority") or 0) == 0})
         units = self._build_units(cases, specs, active_specs,
                                   reconstruct_version, case_specs)
         total_cases = len(cases)
@@ -255,9 +263,11 @@ class RunWorker:
 
         if self.runs.cancel_requested(run_id):
             # 还没开跑就被取消：也要带上案例总数，否则「完成 0/0」看不出规模。
-            self._finalize(run, reconstruct_version, active_specs,
+            self._finalize(run, reconstruct_version, specs,
                            canceled=True, total_cases=total_cases,
-                           done_cases=done_cases)
+                           done_cases=done_cases,
+                           bucket_total=len(active_buckets),
+                           p0_total=p0_total)
             return
 
         lock = threading.Lock()
@@ -273,7 +283,6 @@ class RunWorker:
             return self._run_unit(run, unit, ai_settings, version,
                                   spec_ids)
 
-        failures = 0
         with ThreadPoolExecutor(max_workers=max(1, self.settings.unit_workers),
                                 thread_name_prefix="score-unit") as pool:
             futures = {pool.submit(task, unit): unit for unit in pending}
@@ -290,11 +299,13 @@ class RunWorker:
                         log.exception("评分 unit 异常 case=%s repeat=%s：%s",
                                       unit["case"]["id"], unit["repeat"], exc)
                         ok = False
+                    if ok is None:
+                        # 取消/停机时 task 没跑就返回 None：不能算「已完成」，
+                        # 否则进度会到 N/N 却标 partial。
+                        continue
                     with lock:
                         case_id = int(unit["case"]["id"])
                         done_per_case[case_id] = done_per_case.get(case_id, 0) + 1
-                        if not ok:
-                            failures += 1
                         if done_per_case[case_id] >= per_case.get(case_id, 0):
                             done_cases += 1
                 now = time.time()
@@ -305,11 +316,11 @@ class RunWorker:
                         log.exception("更新评分进度失败")
                     last_progress = now
 
-        self._finalize(run, reconstruct_version, active_specs,
+        self._finalize(run, reconstruct_version, specs,
                        canceled=cancelled.is_set() or bool(
                            self.runs.cancel_requested(run_id)),
-                       failures=failures, total_cases=total_cases,
-                       done_cases=done_cases)
+                       total_cases=total_cases, done_cases=done_cases,
+                       bucket_total=len(active_buckets), p0_total=p0_total)
 
     def _build_units(self, cases: list[dict], specs: dict[int, dict],
                      active_specs: list[dict], reconstruct_version: str,
@@ -327,8 +338,16 @@ class RunWorker:
             row = self._decision_row(int(canonical_id), str(decision_key),
                                      reconstruct_version)
             if row is None:
-                log.warning("案例 %s 找不到决策点 %s（%s），跳过",
+                # 不静默丢：落一条 error run_item，让「案例没跑到」在页面上看得见。
+                log.warning("案例 %s 找不到决策点 %s（%s），记 error",
                             case.get("id"), decision_key, reconstruct_version)
+                units.append({
+                    "case": case, "decision": None, "prompt": None,
+                    "spec": None, "specId": None,
+                    "specError": (f"找不到决策点 {decision_key}"
+                                  f"（{reconstruct_version}）"),
+                    "repeats": [0],
+                })
                 continue
             decision = decision_from_row(row)
             hand_id = int(row["hand_id"])
@@ -349,12 +368,27 @@ class RunWorker:
             decision.previous_advice = _previous_stored_advice(
                 advice_cache[hand_id], decision)
 
-            spec_id = ((case_specs or {}).get(int(case["id"]))
-                       or case.get("spec_id"))
+            frozen_spec_id = (case_specs or {}).get(int(case["id"]))
+            spec_id = frozen_spec_id or case.get("spec_id")
             spec = specs.get(int(spec_id)) if spec_id else None
-            if spec is None:
+            spec_error = None
+            if spec is None and frozen_spec_id:
+                # 写死的 spec 不在了（被删）：宁可这条落 error，也不跨 run
+                # 换成「当前的 active spec」——那会让两次 run 口径不同却看不出来。
+                spec_error = f"案例冻结的 spec #{frozen_spec_id} 已不存在"
+            elif spec is None and case_specs and not frozen_spec_id:
+                # run 有冻结映射但独缺这一条：快照不完整，不替它挑一个。
+                spec_error = "案例没有冻结的 spec（run 快照不完整）"
+            elif spec is None and not case_specs:
+                # 兼容 caseSpecs 之前建的 run：按当前 active spec 匹配。
                 spec = case_lib.best_spec(case_lib.case_bucket(case),
                                           active_specs)
+                if spec is None:
+                    spec_error = "案例没有可匹配的 spec"
+                else:
+                    log.warning("案例 %s 没有冻结 spec，按当前 active spec #%s "
+                                "匹配（旧 run 兼容）", case.get("id"),
+                                spec.get("id"))
             repeats = [0]
             if int(case.get("priority") or 0) == 0:
                 repeats += list(range(1, P0_EXTRA_REPEATS + 1))
@@ -366,6 +400,7 @@ class RunWorker:
                 "prompt": decision.baseline_prompt,
                 "spec": spec,
                 "specId": spec_row_id,
+                "specError": spec_error,
                 "repeats": repeats,
             })
         expanded: list[dict] = []
@@ -397,6 +432,24 @@ class RunWorker:
         case_id = int(case["id"])
         prompt = unit.get("prompt")
 
+        if decision is None or spec is None:
+            # 决策点/spec 缺：不花调用，直接落 error 行（仍算「跑到」）。
+            self.items.upsert(
+                run_id=run_id, case_id=case_id,
+                spec_id=unit.get("specId") or 0, repeat_index=repeat,
+                item={
+                    "source": "error",
+                    "errorMsg": unit.get("specError")
+                              or "案例没有可匹配的 spec",
+                    "hardFail": scoring.HF_ERROR, "scoresJson": "{}",
+                    "score": None, "kind": None, "amount": None,
+                    "optionId": None, "reason": "",
+                    "factsJson": "{}",
+                    "promptJson": None, "judgeJson": None,
+                    "durationMs": 0,
+                })
+            return False
+
         payload: dict
         try:
             outcome = execute_unit(
@@ -411,21 +464,6 @@ class RunWorker:
         except Exception as exc:  # noqa: BLE001
             log.exception("评分 unit 失败 case=%s", case_id)
             payload = _error_payload(f"{type(exc).__name__}: {exc}")
-
-        if spec is None:
-            self.items.upsert(
-                run_id=run_id, case_id=case_id,
-                spec_id=unit.get("specId") or 0, repeat_index=repeat,
-                item={
-                    "source": "error", "errorMsg": "案例没有可匹配的 spec",
-                    "hardFail": scoring.HF_ERROR, "scoresJson": "{}",
-                    "score": None, "kind": None, "amount": None,
-                    "optionId": None, "reason": "",
-                    "factsJson": payload.get("facts_json") or "{}",
-                    "promptJson": None, "judgeJson": None,
-                    "durationMs": payload.get("duration_ms") or 0,
-                })
-            return False
 
         facts = json_load(payload.get("facts_json"), {}) or {}
         option_ids = [str(option.get("id")) for option in
@@ -442,11 +480,13 @@ class RunWorker:
         score_spec = {**spec, "required_points": []}
         result = scoring.score_case(
             spec=score_spec, advice=advice, option_ids=option_ids,
-            pot=decision.pot, bb=_bb_of(decision), matched_points=[],
+            pot=decision.pot, matched_points=[],
             cited_facts=0, wrong_facts=0, repeat_kinds=None)
 
         judge = {
             "optionIds": option_ids,
+            # #57 依据维先按退化口径（理由是否支持该动作）；要点加权等 judge 票。
+            "reasonMode": "action-support",
             "matchedPoints": [],
             "citedFacts": [],
             "wrongFacts": [],
@@ -485,19 +525,22 @@ class RunWorker:
     # ─────────────── 收尾：稳定维 + 聚合 ───────────────
 
     def _finalize(self, run: dict, reconstruct_version: str,
-                  active_specs: list[dict], *, canceled: bool = False,
-                  failures: int = 0, total_cases: int = 0,
-                  done_cases: int = 0) -> None:
+                  specs: dict[int, dict], *, canceled: bool = False,
+                  total_cases: int = 0, done_cases: int = 0,
+                  bucket_total: int = 0, p0_total: int = 0) -> None:
         run_id = int(run["id"])
         rows = self.items.list(run_id, reconstruct_version, limit=10000)
         by_case: dict[int, list[dict]] = {}
         for row in rows:
             by_case.setdefault(int(row["case_id"]), []).append(row)
 
-        # 稳定维：同一案例的多次重复动作一致率；不足 2 次不进分母。
+        # 稳定维：同一案例的多次重复动作一致率。设计 §7.4 固定 3 次样本；
+        # partial run 只跑到 2 次时不进分母，否则两次 run 的稳定维不可比。
         for case_rows in by_case.values():
             kinds = [row.get("option_kind") for row in case_rows
                      if row.get("option_kind")]
+            if len(kinds) < STABLE_SAMPLES:
+                continue
             stable = scoring.stable_score(kinds)
             if stable is None:
                 continue
@@ -513,6 +556,13 @@ class RunWorker:
                     score=round(score, 2), hard_fail=row.get("hard_fail"))
 
         rows = self.items.list(run_id, reconstruct_version, limit=10000)
+        # 覆盖率按「本次 run 冻结的 spec」划桶：桶标签取 spec 自己的桶，而不是
+        # 案例的决策点桶。否则案例桶往往比 spec 桶更细（多两个维度），两边
+        # 标签永远对不上，覆盖率会静默恒为 0。
+        spec_buckets = {
+            int(spec_id): bucket_label(spec.get("bucket") or {})
+            for spec_id, spec in specs.items() if spec.get("bucket")
+        }
         agg_items: list[dict] = []
         errors = 0
         for row in rows:
@@ -522,19 +572,16 @@ class RunWorker:
                 continue
             agg_items.append({
                 "priority": int(row.get("case_priority") or 0),
-                "bucket": case_lib.label_of(case_lib.case_bucket(row)),
+                "bucket": spec_buckets.get(int(row.get("spec_id") or 0)),
                 "score": (float(row["score"])
                           if row.get("score") is not None else None),
                 "scores": json_load(row.get("scores_json"), {}) or {},
                 "hardFail": row.get("hard_fail") or None,
             })
-        # spec 的桶每维是数组，直接用 bucket_label；case_lib.label_of 只吃
-        # 单值（它内部会再包一层 list，传数组会变成嵌套的不可哈希值）。
-        bucket_total = len({
-            bucket_label(spec.get("bucket") or {})
-            for spec in active_specs if spec.get("bucket")
-        })
-        agg = scoring.aggregate(agg_items, bucket_total=bucket_total)
+        if not bucket_total:
+            bucket_total = len(set(spec_buckets.values()))
+        agg = scoring.aggregate(agg_items, bucket_total=bucket_total,
+                                p0_total=p0_total or None)
 
         if canceled:
             status = "partial"
@@ -566,15 +613,6 @@ class RunWorker:
         )
         log.info("评分运行 #%s 结束 status=%s score=%s scored=%s",
                  run_id, status, agg["score"]["mean"], agg["scored"])
-
-
-def _bb_of(decision) -> float | None:
-    blinds = getattr(getattr(decision, "snap", None), "blinds", None)
-    value = getattr(blinds, "bb", None) if blinds is not None else None
-    try:
-        return float(value) if value is not None else None
-    except (TypeError, ValueError):
-        return None
 
 
 def _hard_fail_evidence(code: str | None, advice: dict,

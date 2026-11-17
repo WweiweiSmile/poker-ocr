@@ -205,11 +205,12 @@ def _version_row(**overrides):
 
 
 def _service(cases, *, frozen=True, specs=None, version=None,
-             monkeypatch=None):
+             monkeypatch=None, price_table=None):
     monkeypatch.setenv("TEST_AI_KEY", "sk-test")
     service = ReplayService.__new__(ReplayService)
     service.settings = SimpleNamespace(max_calls_per_job=2000,
-                                       console_user_id=1)
+                                       console_user_id=1,
+                                       price_table=price_table or {})
     service.case_repo = _FakeCaseRepo(cases, frozen=frozen)
     service.spec_repo = _FakeSpecRepo(
         specs if specs is not None else [
@@ -237,12 +238,10 @@ def test_estimate_reports_calls_tokens_and_missing_price(monkeypatch):
     assert out["runnable"] is True
 
 
-def test_estimate_uses_price_table_env(monkeypatch):
+def test_estimate_uses_configured_price_table(monkeypatch):
     cases = [_case(1, priority=0)]
-    service = _service(cases, monkeypatch=monkeypatch)
-    monkeypatch.setenv(
-        "REPLAY_PRICE_TABLE",
-        json.dumps({"deepseek-flash": {"in": 1.0, "out": 2.0}}))
+    service = _service(cases, monkeypatch=monkeypatch,
+                       price_table={"deepseek-flash": {"in": 1.0, "out": 2.0}})
     out = service.estimate_score_run({"caseSetId": 4, "versionId": 7})
     assert out["price"] == {"in": 1.0, "out": 2.0}
     assert out["priceMissing"] is False
@@ -303,13 +302,36 @@ def test_create_tracks_p0_extra_repeats_in_calls(monkeypatch):
     assert kwargs["config_snapshot"]["plan"]["calls"] == 3 + 3 * 2
 
 
-def test_create_rejects_runs_over_call_limit(monkeypatch):
+def test_create_rejects_runs_over_call_limit_without_confirm(monkeypatch):
     cases = [_case(i, priority=0) for i in range(1, 5)]
     service = _service(cases, monkeypatch=monkeypatch)
     service.settings.max_calls_per_job = 10
     with pytest.raises(ApiError) as err:
         service.create_score_run({"caseSetId": 4, "versionId": 7})
     assert err.value.code == "RUN_TOO_LARGE"
+    assert err.value.status_code == 409
+    assert err.value.detail["maxCalls"] == 10
+
+
+def test_create_allows_over_limit_when_confirmed(monkeypatch):
+    cases = [_case(i, priority=0) for i in range(1, 5)]
+    service = _service(cases, monkeypatch=monkeypatch)
+    service.settings.max_calls_per_job = 10
+    created = service.create_score_run(
+        {"caseSetId": 4, "versionId": 7, "confirmLarge": True})
+    assert created["id"]
+    _run_id, kwargs = service.run_repo.created[0]
+    assert kwargs["config_snapshot"]["plan"]["calls"] == 12
+
+
+def test_estimate_reports_call_limit(monkeypatch):
+    cases = [_case(i, priority=0) for i in range(1, 5)]
+    service = _service(cases, monkeypatch=monkeypatch)
+    service.settings.max_calls_per_job = 10
+    est = service.estimate_score_run({"caseSetId": 4, "versionId": 7})
+    assert est["calls"] == 12
+    assert est["maxCalls"] == 10
+    assert est["overLimit"] is True
 
 
 # ─────────────── 读 / 取消 ───────────────
@@ -337,3 +359,37 @@ def test_list_score_runs_returns_public_shape(monkeypatch):
     assert len(out["items"]) == 1
     assert out["items"][0]["totalCases"] == 1
     assert out["items"][0]["version"]["name"] == "v-test"
+
+
+def test_bad_query_numbers_fall_back_instead_of_500(monkeypatch):
+    """回归：?limit=abc / ?caseSetId=oops 不能把页面打到 500。"""
+    service = _service([_case(1)], monkeypatch=monkeypatch)
+    created = service.create_score_run({"caseSetId": 4, "versionId": 7})
+    out = service.list_score_runs({"limit": "abc", "caseSetId": "oops"})
+    assert len(out["items"]) == 1
+    items = service.score_run_items(created["id"], {"limit": "x", "offset": "y"})
+    assert items["limit"] == 200 and items["offset"] == 0
+
+
+def test_empty_case_set_is_not_runnable(monkeypatch):
+    service = _service([], monkeypatch=monkeypatch)
+    out = service.estimate_score_run({"caseSetId": 4, "versionId": 7})
+    assert out["runnable"] is False
+    assert out["calls"] == 0
+
+
+def test_settings_reject_bad_price_table(monkeypatch):
+    """新配置项 fail fast：配错就不启动，别静默当「没配」。"""
+    from replay.config import Settings
+
+    monkeypatch.setenv("REPLAY_PRICE_TABLE", "{not json")
+    with pytest.raises(ValueError):
+        Settings.from_env(load=False)
+    monkeypatch.setenv("REPLAY_PRICE_TABLE",
+                       json.dumps({"m": {"in": 1.0}}))
+    with pytest.raises(ValueError):
+        Settings.from_env(load=False)
+    monkeypatch.setenv("REPLAY_PRICE_TABLE",
+                       json.dumps({"m": {"in": 1.0, "out": 2.0}}))
+    assert Settings.from_env(load=False).price_table == {
+        "m": {"in": 1.0, "out": 2.0}}

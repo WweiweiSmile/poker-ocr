@@ -90,20 +90,21 @@ def bands(sizing: Any) -> list[dict]:
     return out
 
 
-def _unit_value(unit: str, amount: float, pot: float | None,
-                bb: float | None) -> float | None:
-    """把筹码额换算成带单位的值；缺分母返回 None（该带不参与）。"""
+def _unit_value(unit: str, amount: float, pot: float | None) -> float | None:
+    """把金额换算成带单位的值；缺分母返回 None（该带不参与）。
+
+    `amount` 与 option_amount 同口径（本街加到多少 BB，见 poker_ocr/options.py），
+    所以 `bb` 带直接用原值——再除一次大盲会把 2.5BB 算成 1.25BB。
+    """
     if unit == "bb":
-        if not bb or bb <= 0:
-            return None
-        return amount / bb
+        return amount
     if not pot or pot <= 0:
         return None
     return amount / pot
 
 
 def size_score(kind: str | None, amount: Any, sizing: Any, *,
-               pot: Any = None, bb: Any = None) -> float:
+               pot: Any = None) -> float:
     """尺寸维；非下注类动作记 1.0，所有带都不适用时也记 1.0（fail open）。"""
     if kind not in SIZE_ACTIONS:
         return 1.0
@@ -111,10 +112,9 @@ def size_score(kind: str | None, amount: Any, sizing: Any, *,
     if value_amount is None:
         return 0.0
     pot_value = _as_float(pot)
-    bb_value = _as_float(bb)
     scored: list[float] = []
     for band in bands(sizing):
-        value = _unit_value(band["unit"], value_amount, pot_value, bb_value)
+        value = _unit_value(band["unit"], value_amount, pot_value)
         if value is None:
             continue
         minimum, maximum = band["min"], band["max"]
@@ -217,7 +217,7 @@ def detect_hard_fail(*, source: str = "model", option_id: Any = None,
 
 def score_case(*, spec: Mapping[str, Any] | None, advice: Mapping[str, Any],
                option_ids: Iterable[Any] = (), pot: Any = None,
-               bb: Any = None, matched_points: Iterable[str] = (),
+               matched_points: Iterable[str] = (),
                cited_facts: int = 0, wrong_facts: int = 0,
                repeat_kinds: Sequence[str | None] | None = None,
                hallucinated: bool = False,
@@ -229,7 +229,7 @@ def score_case(*, spec: Mapping[str, Any] | None, advice: Mapping[str, Any],
         "action": action_score(kind, spec.get("allowed_actions"),
                                spec.get("forbidden_actions")),
         "size": size_score(kind, advice.get("amount"),
-                           spec.get("sizing"), pot=pot, bb=bb),
+                           spec.get("sizing"), pot=pot),
         "reason": reason_score(advice.get("reason"),
                                spec.get("required_points"), kind=kind,
                                matched=matched_points),
@@ -337,23 +337,30 @@ def freq_score(freq: Mapping[str, Any] | None,
 
 
 def aggregate(items: Sequence[Mapping[str, Any]], *,
-              bucket_total: int = 0) -> dict:
-    """聚合一个 run（设计 §7.3/§7.6）：均分、P0 通过率、覆盖率、CI。"""
+              bucket_total: int = 0,
+              p0_total: int | None = None) -> dict:
+    """聚合一个 run（设计 §7.3/§7.6）：均分、P0 通过率、覆盖率、CI。
+
+    `p0_total` 是本次 run 的 P0 案例总数（含没出分/没跑到的）：只按已出分
+    的 P0 算分母会把通过率算虚高。不传时退回已出分数量。
+    """
     scored = [item for item in items if item.get("score") is not None]
     scores = [float(item["score"]) for item in scored]
     p0 = [item for item in scored if int(item.get("priority") or 0) == 0]
     p0_passed = [item for item in p0 if not item.get("hardFail")
                  and (item.get("scores") or {}).get("action") == 1.0]
+    p0_denominator = max(int(p0_total or 0), len(p0))
     hard_failed = [item for item in scored if item.get("hardFail")]
     return {
         "cases": len(items),
         "scored": len(scored),
         "score": mean_ci(scores),
         "p0": {
-            "total": len(p0),
+            "total": p0_denominator,
             "passed": len(p0_passed),
-            "rate": round(len(p0_passed) / len(p0), 4) if p0 else 0.0,
-            "ci": wilson(len(p0_passed), len(p0)),
+            "rate": (round(len(p0_passed) / p0_denominator, 4)
+                     if p0_denominator else 0.0),
+            "ci": wilson(len(p0_passed), p0_denominator),
         },
         "hardFail": {
             "count": len(hard_failed),
