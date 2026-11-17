@@ -72,7 +72,8 @@ def _as_list(value: Any, field: str, code: str) -> list:
     return list(value)
 
 
-def _validate_bucket(raw: Any) -> dict:
+def validate_bucket(raw: Any) -> dict:
+    """桶校验：spec 与案例集「按桶补样」共用同一套词表与规则。"""
     if raw is None:
         return {}
     if not isinstance(raw, dict):
@@ -285,7 +286,7 @@ def validate_spec(payload: Any) -> dict:
 
     return {
         "schema": SPEC_SCHEMA,
-        "bucket": _validate_bucket(payload.get("bucket")),
+        "bucket": validate_bucket(payload.get("bucket")),
         "allowed_actions": allowed,
         "forbidden_actions": forbidden,
         "sizing": _validate_sizing(payload.get("sizing")),

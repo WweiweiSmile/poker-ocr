@@ -212,6 +212,18 @@ canonical 手牌：一手牌可以在复盘（`review`）、实时（`live`）�
 | DELETE | `/api/hands/{id}` | 删除单只手牌（导入手牌软删除；review_hands 仅隐藏） |
 | POST | `/api/hands/delete` | 批量删除，body `{"handIds":[1,2]}`，最多 1000 手 |
 | POST | `/api/cases` | 从决策点建案例：`{canonicalId, decisionKey:"flop:2", specId, caseSetId?, priority?, overrides?, note?}`；返回 `{created, case}`，已存在则返回已有案例 |
+| GET | `/api/case-sets` | 案例集列表（`name` 精确过滤、`limit`）；每行带 `caseCount`/`p0Count`/`p0Ratio` |
+| POST | `/api/case-sets` | 新建案例集 v1：`{name, purpose?}`；同名再建报 `CASE_SET_EXISTS`（改内容走 revisions） |
+| GET | `/api/case-sets/{id}` | 详情：`items`（案例 + 手牌摘要 + 七桶）+ `stats`（P0 比例、按优先级/街/桶） |
+| PATCH | `/api/case-sets/{id}` | 改名/改用途；已冻结 409 |
+| POST | `/api/case-sets/{id}/freeze` | 冻结该 revision；之后增删改一律 409 并提示「建新版本」 |
+| POST | `/api/case-sets/{id}/revisions` | 从当前（含已冻结）复制成下一个 revision，可带 `{name?, purpose?}` |
+| POST | `/api/case-sets/{id}/cases` | 批量建案例 `{cases:[{canonicalId, decisionKey, specId, priority?, note?}]}`；失败项进 `skipped`，不整批回滚 |
+| PATCH | `/api/case-sets/{id}/cases/{caseId}` | 改案例的 spec/优先级/状态/备注（冻结后 409） |
+| DELETE | `/api/case-sets/{id}/cases/{caseId}` | 删案例（冻结后 409） |
+| POST | `/api/case-sets/{id}/hand-cases` | 整手全建 `{canonicalId, priority?}`：每个决策点自动挑最具体的 active 期望 |
+| POST | `/api/case-sets/{id}/sample` | 按桶补样 `{bucket:{维度:[值]}, count?, priority?}`，按时间倒序抽决策点 |
+| POST | `/api/case-sets/seed` | 把 `tools/ab_set.json` 导成 seed 案例集：`{path?, setName?, dryRun?}`；幂等，`dryRun` 只预演 |
 | GET | `/api/versions` | 版本列表（`includeArchived=1`） |
 | POST | `/api/versions` | 新建 |
 | POST | `/api/versions/import-env` | 从当前 `.env` + `.table_dy` 导入 |
@@ -241,7 +253,7 @@ canonical 手牌：一手牌可以在复盘（`review`）、实时（`live`）�
 {"error": {"code": "VERSION_STALE", "message": "…", "detail": {}}}
 ```
 
-常见错误码：`HAND_NOT_FOUND`、`INVALID_CASE`、`DECISION_NOT_FOUND`、`CASE_SET_NOT_FOUND`、`CASE_SET_FROZEN`、`SPEC_REQUIRED`、`VERSION_NOT_FOUND`、`VERSION_ARCHIVED`、`VERSION_STALE`、`INVALID_VERSION_CONFIG`、`AI_KEY_MISSING`、`TOO_MANY_CALLS`、`JOB_QUEUE_FULL`、`JOB_NOT_CANCELABLE`、`DB_UNAVAILABLE`、`EXPORT_EMPTY`。
+常见错误码：`HAND_NOT_FOUND`、`INVALID_CASE`、`DECISION_NOT_FOUND`、`CASE_SET_NOT_FOUND`、`CASE_SET_FROZEN`、`CASE_SET_EXISTS`、`INVALID_CASE_SET`、`SPEC_REQUIRED`、`SEED_HAND_MISSING`、`SEED_CANONICAL_MISSING`、`SEED_DECISION_MISSING`、`INVALID_SEED_PATH`、`VERSION_NOT_FOUND`、`VERSION_ARCHIVED`、`VERSION_STALE`、`INVALID_VERSION_CONFIG`、`AI_KEY_MISSING`、`TOO_MANY_CALLS`、`JOB_QUEUE_FULL`、`JOB_NOT_CANCELABLE`、`DB_UNAVAILABLE`、`EXPORT_EMPTY`。
 
 期望库错误码：`INVALID_SPEC`、`INVALID_SPEC_SCHEMA`、`INVALID_SPEC_BUCKET`、`INVALID_SPEC_DIMENSION`、`INVALID_SPEC_VALUE`、`INVALID_SPEC_ACTION`、`INVALID_SPEC_SIZING`、`INVALID_SPEC_FREQ`、`INVALID_SPEC_POINT`、`INVALID_SPEC_STATUS`、`INVALID_SPEC_DIFF`、`SPEC_NOT_FOUND`、`SPEC_NAME_TAKEN`、`SPEC_NAME_IMMUTABLE`、`SPEC_NOT_LATEST`、`SPEC_ACTIVE`、`SPEC_REVISION_CONFLICT`。
 

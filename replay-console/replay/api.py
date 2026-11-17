@@ -20,7 +20,9 @@ from .db import Database
 from .errors import ApiError
 from .runner import Runner
 from .schemas import (
-    CaseCreate, DecisionMark, ExperimentCreate, ExperimentOutcome, ExperimentRun,
+    CaseCreate, CaseHandCases, CaseSample, CaseSeed, CaseSetCasePatch,
+    CaseSetCases, CaseSetCreate, CaseSetPatch,
+    DecisionMark, ExperimentCreate, ExperimentOutcome, ExperimentRun,
     HandDelete, HandSetCreate, HandSetItems, HandSetPatch, ImportHands,
     IngestHands, MarkPatch, PairReviewPatch, RunCreate, RunPreview,
     SpecPatch, SpecWrite, VersionClone, VersionCreate, VersionMetaPatch,
@@ -241,6 +243,68 @@ def create_app(settings: Settings | None = None,
     def create_case(body: CaseCreate, request: Request):
         return service(request).create_case(
             body.model_dump(exclude_unset=True))
+
+    # ─────────────── 案例集（#55） ───────────────
+    # /seed 必须注册在 /{set_id} 之前，否则 "seed" 会被当成路径参数。
+
+    @app.post("/api/case-sets/seed")
+    def seed_case_sets(body: CaseSeed, request: Request):
+        return service(request).seed_case_sets(
+            body.model_dump(exclude_unset=True))
+
+    @app.get("/api/case-sets")
+    def list_case_sets(request: Request):
+        return service(request).list_case_sets(dict(request.query_params))
+
+    @app.post("/api/case-sets")
+    def create_case_set(body: CaseSetCreate, request: Request):
+        return service(request).create_case_set(
+            body.model_dump(exclude_unset=True))
+
+    @app.get("/api/case-sets/{set_id}")
+    def get_case_set(set_id: int, request: Request):
+        return service(request).get_case_set(set_id)
+
+    @app.patch("/api/case-sets/{set_id}")
+    def patch_case_set(set_id: int, body: CaseSetPatch, request: Request):
+        return service(request).patch_case_set(
+            set_id, body.model_dump(exclude_unset=True))
+
+    @app.post("/api/case-sets/{set_id}/freeze")
+    def freeze_case_set(set_id: int, request: Request):
+        return service(request).freeze_case_set(set_id)
+
+    @app.post("/api/case-sets/{set_id}/revisions")
+    def create_case_set_revision(set_id: int, body: CaseSetPatch,
+                                 request: Request):
+        return service(request).create_case_set_revision(
+            set_id, body.model_dump(exclude_unset=True))
+
+    @app.post("/api/case-sets/{set_id}/cases")
+    def add_case_set_cases(set_id: int, body: CaseSetCases, request: Request):
+        return service(request).add_case_set_cases(
+            set_id, body.model_dump(exclude_unset=True))
+
+    @app.patch("/api/case-sets/{set_id}/cases/{case_id}")
+    def patch_case_set_case(set_id: int, case_id: int,
+                            body: CaseSetCasePatch, request: Request):
+        return service(request).patch_case_set_case(
+            set_id, case_id, body.model_dump(exclude_unset=True))
+
+    @app.delete("/api/case-sets/{set_id}/cases/{case_id}")
+    def delete_case_set_case(set_id: int, case_id: int, request: Request):
+        return service(request).delete_case_set_case(set_id, case_id)
+
+    @app.post("/api/case-sets/{set_id}/hand-cases")
+    def build_hand_cases(set_id: int, body: CaseHandCases, request: Request):
+        return service(request).build_hand_cases(
+            set_id, body.model_dump(exclude_unset=True))
+
+    @app.post("/api/case-sets/{set_id}/sample")
+    def sample_case_set_cases(set_id: int, body: CaseSample,
+                              request: Request):
+        return service(request).sample_case_set_cases(
+            set_id, body.model_dump(exclude_unset=True))
 
     @app.get("/api/imports")
     def list_imports(request: Request):

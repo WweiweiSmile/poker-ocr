@@ -22,6 +22,8 @@ import HandDetailPage from './pages/HandDetailPage'
 import ReplayPage from './pages/ReplayPage'
 import HandSetsPage from './pages/HandSetsPage'
 import HandSetDetailPage from './pages/HandSetDetailPage'
+import CaseSetsPage from './pages/CaseSetsPage'
+import CaseSetDetailPage from './pages/CaseSetDetailPage'
 import SpecsPage from './pages/SpecsPage'
 import ExperimentPairsPage from './pages/ExperimentPairsPage'
 import JobsPage from './pages/JobsPage'
@@ -49,6 +51,7 @@ const NAV = [
   { to: '/hands', label: '手牌库', icon: <DatabaseOutlined />, hint: '筛选、收藏、逐街对比' },
   { to: '/experiments', label: 'A/B 实验', icon: <ExperimentOutlined />, hint: '离线冻结数据集、dev/holdout' },
   { to: '/sets', label: '手牌集', icon: <DatabaseOutlined />, hint: '挑选回归集、冻结 revision' },
+  { to: '/case-sets', label: '案例集', icon: <AimOutlined />, hint: '决策点 × 期望、冻结成版本' },
   { to: '/specs', label: '期望库', icon: <AimOutlined />, hint: '按桶分组的行为规范与 revision' },
   { to: '/range-ab', label: '范围 A/B', icon: <SwapOutlined />, hint: '旧路径 vs 事件模型' },
   { to: '/jobs', label: '复跑任务', icon: <ThunderboltOutlined />, hint: '进度、取消、重试' },
@@ -201,6 +204,8 @@ export default function App() {
                 <Route path="/hands/:handId/replay" element={<ReplayPage />} />
                 <Route path="/sets" element={<HandSetsPage />} />
                 <Route path="/sets/:setId" element={<HandSetDetailPage />} />
+                <Route path="/case-sets" element={<CaseSetsPage />} />
+                <Route path="/case-sets/:setId" element={<CaseSetDetailPage />} />
                 <Route path="/specs" element={<SpecsPage />} />
                 <Route path="/experiments" element={<ExperimentsPage />} />
                 <Route path="/experiments/:experimentId" element={<ExperimentDetailPage />} />

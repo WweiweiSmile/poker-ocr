@@ -66,6 +66,89 @@ export interface CaseItem {
   note: string
   overrides: Record<string, unknown>
   createdAt: string | null
+  // 案例集详情里额外带：决策点所在街、扁平动作索引、桶与手牌摘要。
+  street?: string
+  actionIndex?: number | null
+  bucket?: Record<string, string | number>
+  bucketLabel?: string
+  hand?: {
+    heroCards: string
+    board: string
+    heroPosition: string | null
+  }
+}
+
+export interface CasePriorityStat {
+  priority: number
+  count: number
+}
+
+export interface CaseStreetStat {
+  street: string
+  count: number
+}
+
+export interface CaseBucketStat {
+  bucket: Record<string, string | number>
+  label: string
+  count: number
+}
+
+export interface CaseStats {
+  total: number
+  p0: number
+  p0Ratio: number
+  byPriority: CasePriorityStat[]
+  byStreet: CaseStreetStat[]
+  byBucket: CaseBucketStat[]
+}
+
+export interface CaseSet {
+  id: number
+  name: string
+  revision: number
+  purpose: 'golden' | 'regression' | 'exploration' | 'coverage' | string
+  frozen: boolean
+  frozenAt: string | null
+  createdAt: string | null
+  caseCount: number
+  p0Count: number
+  p0Ratio: number
+  // 详情接口才有
+  items?: CaseItem[]
+  stats?: CaseStats
+  // 批量接口的增量回执
+  created?: number
+  existing?: number
+  skipped?: { canonicalId?: number | null; decisionKey?: string | null; code?: string; reason?: string }[]
+  noSpec?: string[]
+}
+
+export interface CaseSetList {
+  items: CaseSet[]
+}
+
+export interface CaseSeedSpecs {
+  created: string[]
+  reused: string[]
+  wouldCreate: string[]
+}
+
+export interface CaseSeedCases {
+  created: { seedId: string; canonicalId: number; decisionKey: string; specName: string }[]
+  existing: { seedId: string; canonicalId: number; decisionKey: string; specName: string }[]
+  wouldCreate: { seedId: string; canonicalId: number; decisionKey: string; specName: string }[]
+  skipped: { seedId: string; code?: string; reason?: string }[]
+  skippedPlan: { seedId: string; reason: string }[]
+}
+
+export interface CaseSeedReport {
+  dryRun: boolean
+  source: string
+  setName: string
+  set: CaseSet | { name: string; revision: number; wouldCreate: true } | null
+  specs: CaseSeedSpecs
+  cases: CaseSeedCases
 }
 
 export interface HandSummary {

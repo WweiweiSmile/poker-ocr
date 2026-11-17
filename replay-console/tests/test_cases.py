@@ -90,6 +90,22 @@ def test_create_case_rejects_unknown_decision_point():
     assert unknown.value.code == "DECISION_NOT_FOUND"
 
 
+def test_create_case_rejects_bad_overrides():
+    service = _service()
+    with pytest.raises(ApiError) as not_object:
+        service.create_case({"canonicalId": 1, "decisionKey": "flop:2",
+                             "specId": 7, "overrides": ["action"]})
+    assert not_object.value.code == "INVALID_CASE_OVERRIDES"
+
+    with pytest.raises(ApiError) as unknown_key:
+        service.create_case({"canonicalId": 1, "decisionKey": "flop:2",
+                             "specId": 7, "overrides": {"bogus": 1}})
+    assert unknown_key.value.code == "INVALID_CASE_OVERRIDES"
+
+    service = _service()
+    service.create_case({"canonicalId": 1, "decisionKey": "flop:2",
+                         "specId": 7, "overrides": {"action": "fold"}})
+    assert service.case_repo.created[0]["overrides"] == {"action": "fold"}
 def test_create_case_requires_existing_spec():
     service = _service()
     with pytest.raises(ApiError) as missing_spec:

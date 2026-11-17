@@ -6,6 +6,7 @@ import datetime as dt
 import logging
 from typing import Any, Iterable
 
+from poker_ocr.buckets import BUCKET_ORDER
 from pymysql.err import IntegrityError
 
 from .canonical import (
@@ -441,6 +442,18 @@ class ImportedHandRepository:
                 WHERE user_id=%s AND source=%s AND external_uid=%s
                 LIMIT 1""",
             (self.user_id, source, uid[:128]))
+
+    def find_any_by_uid(self, external_uid: str | None) -> dict | None:
+        """只按 uid 找（seed 导入拿 ab_set 的 20261101-xxx 反查手牌）。"""
+        uid = (external_uid or "").strip()
+        if not uid:
+            return None
+        return self.db.one(
+            """SELECT id, source, fingerprint, external_uid
+                 FROM replay_imported_hands
+                WHERE user_id=%s AND external_uid=%s
+                ORDER BY id DESC LIMIT 1""",
+            (self.user_id, uid[:128]))
 
     def upsert(self, row: dict, *, batch_id: int | None = None) -> tuple[int, bool]:
         """幂等写入：优先按 (user, source, external_uid)，旧记录回退 fingerprint。
@@ -1831,14 +1844,144 @@ _INSERT_SOURCE_SQL = """
 
 
 class CaseRepository:
-    """`replay_case_sets` / `replay_cases` 的最小读写。
+    """`replay_case_sets` / `replay_cases` 的读写。
 
-    第 1 期只做「从某个决策点建一条实例案例」：案例集、批量建场景、冻结与
-    seed 导入仍由 #55 负责。这里不主动建「黄金集」，只保证有一张未冻结的
-    「待整理」集可以接住零散案例。
+    案例是「某个 canonical 手牌 + 某个决策点 + 写死的 spec_id」；案例集按
+    (name, revision) 分版本，`frozen_at` 一置该版本就只读，要改只能从它升
+    一个新 revision（`copy_set_to_new_revision`）。
     """
 
     DEFAULT_SET_NAME = "待整理"
+    # DDL 里的 DEFAULT 'golden' 只是占位：create_set 强制显式传 purpose，
+    # 不依赖库侧默认，避免「代码默认 exploration / 库默认 golden」两套口径。
+    CASE_SET_PURPOSES = ("golden", "regression", "exploration", "coverage")
+
+    _SET_SELECT = """SELECT s.*,
+              (SELECT COUNT(*) FROM replay_cases c
+                WHERE c.case_set_id = s.id) AS case_count,
+              (SELECT COUNT(*) FROM replay_cases c
+                WHERE c.case_set_id = s.id AND c.priority = 0) AS p0_count
+         FROM replay_case_sets s"""
+
+    def _frozen_error(self, row: dict) -> ApiError:
+        return ApiError(
+            "CASE_SET_FROZEN",
+            f"案例集 {row.get('name')} v{row.get('revision')} 已冻结，"
+            "不能再改；请从它建新版本（POST /api/case-sets/{id}/revisions）",
+            409)
+
+    def list_sets(self, *, limit: int = 200,
+                  name: str | None = None) -> list[dict]:
+        sql = self._SET_SELECT
+        params: list[Any] = []
+        if name:
+            sql += " WHERE s.name = %s"
+            params.append(name)
+        sql += " ORDER BY s.name, s.revision DESC LIMIT %s"
+        params.append(int(limit))
+        return self.db.query(sql, tuple(params))
+
+    def get_set(self, set_id: int) -> dict | None:
+        return self.db.one(self._SET_SELECT + " WHERE s.id = %s",
+                           (int(set_id),))
+
+    def require_set(self, set_id: int) -> dict:
+        row = self.get_set(set_id)
+        if row is None:
+            raise ApiError("CASE_SET_NOT_FOUND", f"案例集 {set_id} 不存在", 404)
+        return row
+
+    def require_unfrozen(self, set_id: int) -> dict:
+        row = self.require_set(set_id)
+        if row.get("frozen_at"):
+            raise self._frozen_error(row)
+        return row
+
+    def set_by_name_revision(self, name: str,
+                             revision: int = 1) -> dict | None:
+        return self.db.one(
+            self._SET_SELECT + " WHERE s.name = %s AND s.revision = %s",
+            (name, int(revision)))
+
+    def next_revision(self, name: str) -> int:
+        return int(self.db.scalar(
+            "SELECT COALESCE(MAX(revision), 0) + 1 FROM replay_case_sets"
+            " WHERE name = %s", (name,)) or 1)
+
+    def create_set(self, *, name: str, purpose: str) -> dict:
+        """建第 1 版案例集；同名已存在时报错（新版本走 revisions）。"""
+        clean = (name or "").strip()
+        if not clean:
+            raise ApiError("INVALID_CASE_SET", "案例集 name 不能为空", 422)
+        if len(clean) > 100:
+            raise ApiError("INVALID_CASE_SET",
+                           "案例集 name 最多 100 个字符", 422)
+        try:
+            new_id = int(self.db.execute(
+                """INSERT INTO replay_case_sets (revision, name, purpose)
+                   VALUES (1, %s, %s)""",
+                (clean, (purpose or "exploration")[:16])))
+        except IntegrityError as exc:
+            raise ApiError(
+                "CASE_SET_EXISTS",
+                f"案例集 {clean} 已存在；要改内容请从它建新版本", 409) from exc
+        row = self.get_set(new_id)
+        return row or {}
+
+    def update_set(self, set_id: int, *, name: str | None = None,
+                   purpose: str | None = None) -> dict:
+        self.require_unfrozen(set_id)
+        sets: list[str] = []
+        params: list[Any] = []
+        if name is not None:
+            clean = (name or "").strip()
+            if not clean or len(clean) > 100:
+                raise ApiError("INVALID_CASE_SET",
+                               "案例集 name 需为 1–100 个字符", 422)
+            sets.append("name=%s")
+            params.append(clean)
+        if purpose is not None:
+            sets.append("purpose=%s")
+            params.append((purpose or "exploration")[:16])
+        if sets:
+            params.append(int(set_id))
+            try:
+                self.db.execute(
+                    f"UPDATE replay_case_sets SET {', '.join(sets)} WHERE id=%s",
+                    tuple(params))
+            except IntegrityError as exc:
+                raise ApiError(
+                    "CASE_SET_EXISTS",
+                    f"案例集 {name} 已存在；要改内容请从它建新版本",
+                    409) from exc
+        return self.get_set(set_id) or {}
+
+    def freeze_set(self, set_id: int) -> dict:
+        row = self.require_set(set_id)
+        if row.get("frozen_at"):
+            raise self._frozen_error(row)
+        self.db.execute(
+            "UPDATE replay_case_sets SET frozen_at=%s WHERE id=%s",
+            (now_cn(), int(set_id)))
+        return self.get_set(set_id) or {}
+
+    def copy_set_to_new_revision(self, set_id: int) -> dict:
+        """把任一 revision（含已冻结）整体复制成下一个 revision（未冻结）。"""
+        row = self.require_set(set_id)
+        revision = self.next_revision(row["name"])
+        new_id = int(self.db.execute(
+            """INSERT INTO replay_case_sets (revision, name, purpose)
+               VALUES (%s, %s, %s)""",
+            (revision, row["name"], row.get("purpose") or "exploration")))
+        self.db.execute(
+            """INSERT INTO replay_cases
+                   (case_set_id, canonical_id, decision_key, spec_id, priority,
+                    overrides_json, status, note)
+               SELECT %s, canonical_id, decision_key, spec_id, priority,
+                      overrides_json, status, note
+                 FROM replay_cases WHERE case_set_id = %s""",
+            (new_id, int(set_id)))
+        return self.get_set(new_id) or {}
 
     def __init__(self, db: Database):
         self.db = db
@@ -1879,6 +2022,114 @@ class CaseRepository:
                 WHERE c.id = %s""",
             (int(case_id),))
 
+    def items(self, case_set_id: int) -> list[dict]:
+        """案例集详情用：案例 + 手牌摘要 + 决策点的桶维度。"""
+        from .versioning import CURRENT_RECONSTRUCT_VERSION
+
+        return self.db.query(
+            """SELECT c.*, s.name AS set_name, s.revision AS set_revision,
+                      s.frozen_at AS set_frozen_at,
+                      ch.hero_cards, ch.board, ch.hero_position,
+                      d.position_bucket, d.hand_tier, d.board_texture,
+                      d.pot_type, d.facing, d.opponent_profile,
+                      d.action_index
+                 FROM replay_cases c
+                 JOIN replay_case_sets s ON s.id = c.case_set_id
+                 LEFT JOIN replay_canonical_hands ch ON ch.id = c.canonical_id
+                 LEFT JOIN replay_decisions d
+                        ON d.canonical_id = c.canonical_id
+                       AND d.street = SUBSTRING_INDEX(c.decision_key, ':', 1)
+                       AND d.seq = CAST(SUBSTRING_INDEX(c.decision_key, ':', -1)
+                                        AS UNSIGNED)
+                       AND d.reconstruct_version = %s
+                WHERE c.case_set_id = %s
+                ORDER BY c.priority ASC, c.id ASC""",
+            (CURRENT_RECONSTRUCT_VERSION, int(case_set_id)))
+
+    def case_with_set(self, case_id: int) -> dict | None:
+        return self.db.one(
+            """SELECT c.*, s.name AS set_name, s.revision AS set_revision,
+                      s.frozen_at AS set_frozen_at
+                 FROM replay_cases c
+                 JOIN replay_case_sets s ON s.id = c.case_set_id
+                WHERE c.id = %s""",
+            (int(case_id),))
+
+    def _case_for_write(self, case_set_id: int, case_id: int) -> dict:
+        row = self.case_with_set(case_id)
+        if row is None or int(row["case_set_id"]) != int(case_set_id):
+            raise ApiError("CASE_NOT_FOUND", f"案例 {case_id} 不存在", 404)
+        if row.get("set_frozen_at"):
+            raise self._frozen_error({
+                "name": row.get("set_name"),
+                "revision": row.get("set_revision"),
+            })
+        return row
+
+    def update_case(self, case_set_id: int, case_id: int, *,
+                    spec_id: int | None = None, priority: int | None = None,
+                    status: str | None = None, note: str | None = None,
+                    overrides: dict | None = None) -> dict:
+        self._case_for_write(case_set_id, case_id)
+        sets: list[str] = []
+        params: list[Any] = []
+        if spec_id is not None:
+            sets.append("spec_id=%s")
+            params.append(int(spec_id))
+        if priority is not None:
+            sets.append("priority=%s")
+            params.append(int(priority))
+        if status is not None:
+            sets.append("status=%s")
+            params.append(status)
+        if note is not None:
+            sets.append("note=%s")
+            params.append((note or "").strip()[:255] or None)
+        if overrides is not None:
+            sets.append("overrides_json=%s")
+            params.append(json_dumps(overrides) if overrides else None)
+        if sets:
+            params.append(int(case_id))
+            self.db.execute(
+                f"UPDATE replay_cases SET {', '.join(sets)} WHERE id=%s",
+                tuple(params))
+        return self.get_by_id(case_id) or {}
+
+    def delete_case(self, case_set_id: int, case_id: int) -> None:
+        self._case_for_write(case_set_id, case_id)
+        self.db.execute("DELETE FROM replay_cases WHERE id=%s", (int(case_id),))
+
+    def decisions_for_bucket(self, bucket: dict, *, limit: int = 50,
+                             exclude: list[tuple[int, str, int]] | None = None
+                             ) -> list[dict]:
+        """按桶维度抽最近决策点（样例池：只取已回填 canonical 的）。"""
+        from .versioning import CURRENT_RECONSTRUCT_VERSION
+
+        where = ["d.canonical_id IS NOT NULL",
+                 "d.reconstruct_version = %s"]
+        params: list[Any] = [CURRENT_RECONSTRUCT_VERSION]
+        for dimension in BUCKET_ORDER:
+            values = [v for v in ((bucket or {}).get(dimension) or []) if v not in (None, "")]
+            if values:
+                marks = ", ".join(["%s"] * len(values))
+                where.append(f"d.{dimension} IN ({marks})")
+                params += list(values)
+        if exclude:
+            marks = ", ".join(["(%s,%s,%s)"] * len(exclude))
+            where.append(f"NOT ((d.canonical_id, d.street, d.seq) IN ({marks}))")
+            for canonical_id, street, seq in exclude:
+                params += [int(canonical_id), street, int(seq)]
+        params.append(int(limit))
+        return self.db.query(
+            f"""SELECT d.canonical_id, d.street, d.seq, d.action_index,
+                       d.position_bucket, d.hand_tier, d.board_texture,
+                       d.pot_type, d.facing, d.opponent_profile
+                  FROM replay_decisions d
+                 WHERE {' AND '.join(where)}
+                 ORDER BY d.id DESC
+                 LIMIT %s""",
+            tuple(params))
+
     def ensure_open_set(self) -> dict:
         """拿一张未冻结的「待整理」集；没有就建第 1 版。"""
         row = self.db.one(
@@ -1910,9 +2161,7 @@ class CaseRepository:
             raise ApiError("CASE_SET_NOT_FOUND",
                            f"案例集 {case_set_id} 不存在", 404)
         if case_set.get("frozen_at"):
-            raise ApiError("CASE_SET_FROZEN",
-                           f"案例集 {case_set['name']} v{case_set['revision']}"
-                           " 已冻结，不能再加案例", 409)
+            raise self._frozen_error(case_set)
         existing = self.get(case_set["id"], canonical_id, decision_key)
         if existing is not None:
             return existing, False

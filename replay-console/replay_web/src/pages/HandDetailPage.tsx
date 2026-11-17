@@ -11,7 +11,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate, useParams } from 'react-router-dom'
 import { api, errorMessage } from '../api'
 import type {
-  ComparisonDecision, DecisionMeta, HandAdvice, HandComparison,
+  CaseSetList, ComparisonDecision, DecisionMeta, HandAdvice, HandComparison,
   HandDeleteResult, HandDetail, Meta, Version, VersionBlock,
 } from '../types'
 import {
@@ -290,6 +290,8 @@ export default function HandDetailPage() {
   const [caseSpecId, setCaseSpecId] = useState<number | null>(null)
   const [casePriority, setCasePriority] = useState(1)
   const [caseNote, setCaseNote] = useState('')
+  const [caseSetId, setCaseSetId] = useState<number | null>(null)
+  const [bulkOpen, setBulkOpen] = useState(false)
   const [reviewVerdict, setReviewVerdict] = useState<'good' | 'bad' | 'unsure'>('unsure')
   const [reviewTags, setReviewTags] = useState<string[]>([])
   const [reviewNote, setReviewNote] = useState('')
@@ -310,6 +312,11 @@ export default function HandDetailPage() {
     queryFn: () => api.get('/specs?pageSize=100&status=active'),
     enabled: caseTarget !== null,
   })
+  const caseSets = useQuery<CaseSetList>({
+    queryKey: ['case-sets'],
+    queryFn: () => api.get('/case-sets'),
+    enabled: caseTarget !== null || bulkOpen,
+  })
 
   const caseCanonicalId = detail.data?.hand.canonicalId
     ?? detail.data?.canonical?.id ?? null
@@ -319,6 +326,7 @@ export default function HandDetailPage() {
       canonicalId: caseCanonicalId,
       decisionKey: caseTarget?.decisionKey ?? `${caseTarget?.street}:${caseTarget?.seq}`,
       specId: caseSpecId,
+      caseSetId: caseSetId ?? undefined,
       priority: casePriority,
       note: caseNote || undefined,
     }),
@@ -328,6 +336,24 @@ export default function HandDetailPage() {
       setCaseNote('')
       queryClient.invalidateQueries({ queryKey: ['hand', id] })
       queryClient.invalidateQueries({ queryKey: ['hands'] })
+    },
+    onError: (error) => message.error(errorMessage(error)),
+  })
+
+  const bulkCreateCases = useMutation({
+    mutationFn: () => api.post<{ created: number; existing: number; noSpec: string[] }>(
+      `/case-sets/${caseSetId}/hand-cases`,
+      { canonicalId: caseCanonicalId, priority: casePriority },
+    ),
+    onSuccess: (result) => {
+      const noSpec = result.noSpec || []
+      message.success(`整手全建：新增 ${result.created} 条，已存在 ${result.existing} 条`
+        + (noSpec.length ? `；${noSpec.length} 个决策点没匹配到期望` : ''))
+      setBulkOpen(false)
+      queryClient.invalidateQueries({ queryKey: ['hand', id] })
+      queryClient.invalidateQueries({ queryKey: ['hands'] })
+      queryClient.invalidateQueries({ queryKey: ['case-set', caseSetId] })
+      queryClient.invalidateQueries({ queryKey: ['case-sets'] })
     },
     onError: (error) => message.error(errorMessage(error)),
   })
@@ -470,10 +496,13 @@ export default function HandDetailPage() {
   const dimensionLabels = new Map<string, string>(
     (meta.data?.buckets || []).map((dimension) => [dimension.key, dimension.label]),
   )
+  const unfrozenSets = (caseSets.data?.items || []).filter((item) => !item.frozen)
+  const defaultSet = unfrozenSets.find((item) => item.name === '待整理') || unfrozenSets[0]
   const openCase = (decision: DecisionMeta) => {
     setCaseTarget(decision)
     setCaseNote('')
     setCasePriority(1)
+    if (caseSetId === null && defaultSet) setCaseSetId(defaultSet.id)
     if (caseSpecId === null && specs.data?.items.length) setCaseSpecId(specs.data.items[0].id)
   }
 
@@ -638,6 +667,12 @@ export default function HandDetailPage() {
           <div className="card-title">
             案例 <Tag className="mini-tag">{data.cases?.length || 0}</Tag>
             <span className="muted advice-hint">案例挂在 canonical 手牌上，按「街道:序号」指向具体决策点</span>
+            <Button
+              size="small" style={{ marginLeft: 'auto' }} disabled={!canonicalId}
+              onClick={() => setBulkOpen(true)}
+            >
+              整手全建
+            </Button>
           </div>
           {data.cases?.length ? (
             <div className="case-list">
@@ -933,6 +968,22 @@ export default function HandDetailPage() {
           {!canonicalId ? (
             <Alert type="warning" showIcon message="这手牌还没有 canonical 映射，先跑 013 回填再建案例" />
           ) : null}
+          <div>
+            <div className="muted">案例集</div>
+            <Select
+              style={{ width: '100%' }}
+              placeholder="默认放进「待整理」"
+              value={caseSetId ?? undefined}
+              onChange={(value) => setCaseSetId(value)}
+              options={(caseSets.data?.items || [])
+                .filter((item) => !item.frozen)
+                .map((item) => ({
+                  value: item.id,
+                  label: `${item.name} · v${item.revision}（${item.caseCount} 条）`,
+                }))}
+              notFoundContent="没有未冻结的案例集；先建一个"
+            />
+          </div>
           {specs.isLoading ? <Spin /> : specs.data?.items.length ? (
             <div>
               <div className="muted">期望（spec）</div>
@@ -965,6 +1016,47 @@ export default function HandDetailPage() {
             <div className="muted">备注</div>
             <Input.TextArea value={caseNote} onChange={(event) => setCaseNote(event.target.value)}
               autoSize={{ minRows: 2, maxRows: 4 }} placeholder="这条案例为什么值得留（可留空）" />
+          </div>
+        </Space>
+      </Modal>
+
+      <Modal
+        open={bulkOpen}
+        title="整手全建"
+        okText="建案例"
+        cancelText="取消"
+        confirmLoading={bulkCreateCases.isPending}
+        okButtonProps={{ disabled: !canonicalId || caseSetId === null }}
+        onOk={() => bulkCreateCases.mutate()}
+        onCancel={() => setBulkOpen(false)}
+      >
+        <Space direction="vertical" style={{ width: '100%' }} size={12}>
+          <div className="muted">
+            把当前这手牌的每个决策点都建成案例：自动挑最具体的 active 期望，写死 spec_id；
+            每个决策点用「优先级」统一设置。
+          </div>
+          <div>
+            <div className="muted">案例集</div>
+            <Select
+              style={{ width: '100%' }}
+              value={caseSetId ?? undefined}
+              placeholder="选择未冻结的案例集"
+              onChange={(value) => setCaseSetId(value)}
+              options={(caseSets.data?.items || [])
+                .filter((item) => !item.frozen)
+                .map((item) => ({
+                  value: item.id,
+                  label: `${item.name} · v${item.revision}`,
+                }))}
+            />
+          </div>
+          <div>
+            <div className="muted">优先级</div>
+            <Segmented
+              value={casePriority}
+              onChange={(value) => setCasePriority(Number(value))}
+              options={[{ label: 'P0 必过', value: 0 }, { label: 'P1', value: 1 }, { label: 'P2', value: 2 }]}
+            />
           </div>
         </Space>
       </Modal>

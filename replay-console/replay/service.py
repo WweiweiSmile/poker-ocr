@@ -14,12 +14,14 @@ import logging
 import re
 import threading
 from collections import Counter
+from pathlib import Path
 from typing import Any, Iterable
 
 from poker_ocr.advice import build_situation
 from poker_ocr.advice import AISettings
+from poker_ocr.buckets import bucket_label
 
-from . import library, specs
+from . import case_seed, cases as case_lib, library, specs
 from .config import Settings
 from .db import Database
 from .decisions import (
@@ -1291,8 +1293,30 @@ class ReplayService:
             "createdAt": iso(case.get("created_at")),
         }
 
-    def create_case(self, payload: dict) -> dict:
-        """从详情页某个决策点建一条案例（第 1 期最小可用；集/冻结在 #55）。"""
+    CASE_OVERRIDE_KEYS = ("action", "sizing", "freq", "note")
+
+    def _case_overrides(self, payload: dict) -> dict | None:
+        """案例级手工覆盖：只收已知键、限长，坏值直接拒，不静默丢弃。"""
+        raw = payload.get("overrides")
+        if raw is None:
+            return None
+        if not isinstance(raw, dict):
+            raise ApiError("INVALID_CASE_OVERRIDES",
+                           "overrides 必须是对象", 422)
+        unknown = [key for key in raw if key not in self.CASE_OVERRIDE_KEYS]
+        if unknown:
+            allowed = ", ".join(self.CASE_OVERRIDE_KEYS)
+            got = ", ".join(map(str, unknown))
+            raise ApiError(
+                "INVALID_CASE_OVERRIDES",
+                f"overrides 只接受 {allowed}；收到 {got}", 422)
+        if len(json.dumps(raw, ensure_ascii=False)) > 4000:
+            raise ApiError("INVALID_CASE_OVERRIDES",
+                           "overrides 太大（JSON ≤ 4000 字符）", 422)
+        return raw or None
+
+    def _case_target(self, payload: dict) -> tuple[int, str, int | None]:
+        """校验 (canonicalId, decisionKey, specId)，并确认决策点确实存在。"""
         canonical_id = payload.get("canonicalId")
         decision_key = str(payload.get("decisionKey") or "").strip()
         spec_id = payload.get("specId")
@@ -1307,9 +1331,10 @@ class ReplayService:
         if canonical is None:
             raise ApiError("HAND_NOT_FOUND",
                            f"canonical {canonical_id} 不存在", 404)
-        spec = self.spec_repo.get(int(spec_id))
-        if spec is None:
-            raise ApiError("SPEC_NOT_FOUND", f"期望 {spec_id} 不存在", 404)
+        if spec_id:
+            spec = self.spec_repo.get(int(spec_id))
+            if spec is None:
+                raise ApiError("SPEC_NOT_FOUND", f"期望 {spec_id} 不存在", 404)
         keys = {library.decision_key(row.get("street"), row.get("seq"))
                 for row in self.decision_repo.for_canonical(int(canonical_id))}
         if decision_key not in keys:
@@ -1326,19 +1351,429 @@ class ReplayService:
             else:
                 raise ApiError("DECISION_NOT_FOUND",
                                f"决策点 {decision_key} 不在这手牌上", 404)
-        priority = (int(payload["priority"])
-                    if payload.get("priority") is not None else 1)
+        return (int(canonical_id), decision_key,
+                int(spec_id) if spec_id else None)
+
+    @staticmethod
+    def _priority(payload: dict) -> int:
+        return (int(payload["priority"])
+                if payload.get("priority") is not None else 1)
+
+    def create_case(self, payload: dict) -> dict:
+        """从详情页某个决策点建一条案例（可指定案例集，默认「待整理」）。"""
+        canonical_id, decision_key, spec_id = self._case_target(payload)
         case, created = self.case_repo.create(
-            canonical_id=int(canonical_id), decision_key=decision_key,
+            canonical_id=canonical_id, decision_key=decision_key,
             spec_id=int(spec_id),
             case_set_id=(int(payload["caseSetId"])
                          if payload.get("caseSetId") else None),
-            priority=priority,
-            overrides=payload.get("overrides") if isinstance(
-                payload.get("overrides"), dict) else None,
+            priority=self._priority(payload),
+            overrides=self._case_overrides(payload),
             note=str(payload.get("note") or ""))
         case = self.case_repo.get_by_id(int(case["id"])) or case
         return {"created": created, "case": self._case_public(case)}
+
+    # ─────────────────────────── 案例集（#55） ───────────────────────────
+
+    def _case_item_public(self, case: dict) -> dict:
+        out = self._case_public(case)
+        bucket = case_lib.case_bucket(case)
+        out.update({
+            "street": case_lib.street_of(case),
+            "actionIndex": (int(case["action_index"])
+                            if case.get("action_index") is not None else None),
+            "bucket": bucket,
+            "bucketLabel": case_lib.label_of(bucket),
+            "hand": {
+                "heroCards": case.get("hero_cards") or "",
+                "board": case.get("board") or "",
+                "heroPosition": case.get("hero_position"),
+            },
+        })
+        return out
+
+    @staticmethod
+    def _case_set_summary(row: dict) -> dict:
+        count = int(row.get("case_count") or 0)
+        p0 = int(row.get("p0_count") or 0)
+        return {
+            "id": int(row["id"]),
+            "name": row.get("name") or "",
+            "revision": int(row.get("revision") or 1),
+            "purpose": row.get("purpose") or "exploration",
+            "frozen": bool(row.get("frozen_at")),
+            "frozenAt": iso(row.get("frozen_at")),
+            "createdAt": iso(row.get("created_at")),
+            "caseCount": count,
+            "p0Count": p0,
+            "p0Ratio": round(p0 / count, 4) if count else 0.0,
+        }
+
+    @staticmethod
+    def _case_set_name(value: Any) -> str:
+        name = str(value or "").strip()
+        if not name:
+            raise ApiError("INVALID_CASE_SET", "案例集名称不能为空", 422)
+        if len(name) > 100:
+            raise ApiError("INVALID_CASE_SET", "案例集名称最长 100 字符", 422)
+        return name
+
+    @staticmethod
+    def _case_set_purpose(value: Any, default: str = "exploration") -> str:
+        purpose = str(value or default).strip() or default
+        if purpose not in CaseRepository.CASE_SET_PURPOSES:
+            raise ApiError(
+                "INVALID_CASE_SET",
+                f"purpose 只能是 {' / '.join(CaseRepository.CASE_SET_PURPOSES)}",
+                422)
+        return purpose
+
+    def _case_set_detail(self, row: dict) -> dict:
+        items = [self._case_item_public(case)
+                 for case in self.case_repo.items(int(row["id"]))]
+        stats = case_lib.case_stats(items)
+        detail = self._case_set_summary(row)
+        detail.update({
+            "caseCount": stats["total"],
+            "p0Count": stats["p0"],
+            "p0Ratio": stats["p0Ratio"],
+            "items": items,
+            "stats": stats,
+        })
+        return detail
+
+    def list_case_sets(self, query: dict | None = None) -> dict:
+        query = query or {}
+        name = str(query.get("name") or "").strip() or None
+        limit = int(query.get("limit") or 200)
+        rows = self.case_repo.list_sets(limit=min(max(limit, 1), 500),
+                                        name=name)
+        return {"items": [self._case_set_summary(row) for row in rows]}
+
+    def get_case_set(self, set_id: int) -> dict:
+        row = self.case_repo.require_set(set_id)
+        return self._case_set_detail(row)
+
+    def create_case_set(self, payload: dict) -> dict:
+        name = self._case_set_name(payload.get("name"))
+        purpose = self._case_set_purpose(payload.get("purpose"))
+        row = self.case_repo.create_set(name=name, purpose=purpose)
+        return self._case_set_detail(row)
+
+    def patch_case_set(self, set_id: int, payload: dict) -> dict:
+        name = (self._case_set_name(payload["name"])
+                if payload.get("name") is not None else None)
+        purpose = (self._case_set_purpose(payload["purpose"])
+                   if payload.get("purpose") is not None else None)
+        row = self.case_repo.update_set(set_id, name=name, purpose=purpose)
+        return self._case_set_detail(row)
+
+    def freeze_case_set(self, set_id: int) -> dict:
+        row = self.case_repo.freeze_set(set_id)
+        return self._case_set_detail(row)
+
+    def create_case_set_revision(self, set_id: int, payload: dict) -> dict:
+        """冻结（或任意）revision → 复制成下一个 revision，再改新版本。"""
+        row = self.case_repo.copy_set_to_new_revision(set_id)
+        name = (self._case_set_name(payload["name"])
+                if payload.get("name") is not None else None)
+        purpose = (self._case_set_purpose(payload["purpose"])
+                   if payload.get("purpose") is not None else None)
+        if name is not None or purpose is not None:
+            row = self.case_repo.update_set(
+                int(row["id"]), name=name, purpose=purpose)
+        return self._case_set_detail(row)
+
+    def add_case_set_cases(self, set_id: int, payload: dict) -> dict:
+        """批量加案例：逐条校验，坏条目进 skipped，不整批回滚。"""
+        self.case_repo.require_unfrozen(set_id)
+        entries = payload.get("cases") or []
+        if not isinstance(entries, list) or not entries:
+            raise ApiError("INVALID_CASE_SET", "至少选择一条案例", 422)
+        created = existing = 0
+        skipped: list[dict] = []
+        for entry in entries:
+            try:
+                canonical_id, decision_key, spec_id = self._case_target(entry)
+                _, was_created = self.case_repo.create(
+                    canonical_id=canonical_id, decision_key=decision_key,
+                    spec_id=int(spec_id), case_set_id=int(set_id),
+                    priority=self._priority(entry),
+                    overrides=self._case_overrides(entry),
+                    note=str(entry.get("note") or ""))
+            except ApiError as exc:
+                skipped.append({
+                    "canonicalId": entry.get("canonicalId"),
+                    "decisionKey": entry.get("decisionKey"),
+                    "code": exc.code,
+                    "reason": exc.message,
+                })
+                continue
+            if was_created:
+                created += 1
+            else:
+                existing += 1
+        result = self.get_case_set(set_id)
+        result.update({"created": created, "existing": existing,
+                       "skipped": skipped})
+        return result
+
+    def patch_case_set_case(self, set_id: int, case_id: int,
+                            payload: dict) -> dict:
+        spec_id = payload.get("specId")
+        if spec_id is not None:
+            if self.spec_repo.get(int(spec_id)) is None:
+                raise ApiError("SPEC_NOT_FOUND", f"期望 {spec_id} 不存在", 404)
+        status = payload.get("status")
+        if status is not None and status not in ("draft", "active", "retired"):
+            raise ApiError("INVALID_CASE", "status 只能是 draft / active / retired",
+                           422)
+        self.case_repo.update_case(
+            set_id, case_id,
+            spec_id=(int(spec_id) if spec_id is not None else None),
+            priority=(int(payload["priority"])
+                      if payload.get("priority") is not None else None),
+            status=status,
+            note=(str(payload["note"]) if payload.get("note") is not None
+                  else None),
+            overrides=self._case_overrides(payload))
+        return self.get_case_set(set_id)
+
+    def delete_case_set_case(self, set_id: int, case_id: int) -> dict:
+        self.case_repo.delete_case(set_id, case_id)
+        return self.get_case_set(set_id)
+
+    def _active_specs(self) -> list[dict]:
+        specs_out: list[dict] = []
+        for row in self.spec_repo.list_latest():
+            if (row.get("status") or "") != "active":
+                continue
+            specs_out.append({
+                "id": int(row["id"]),
+                "name": row.get("name"),
+                "bucket": json_load(row.get("bucket_json"), {}) or {},
+            })
+        return specs_out
+
+    def build_hand_cases(self, set_id: int, payload: dict) -> dict:
+        """整手全建：每个决策点自动挑最具体的 active spec，写死 spec_id。"""
+        self.case_repo.require_unfrozen(set_id)
+        canonical_id = payload.get("canonicalId")
+        if not canonical_id:
+            raise ApiError("INVALID_CASE", "整手全建需要 canonicalId", 422)
+        if self.canonical_repo.get(int(canonical_id)) is None:
+            raise ApiError("HAND_NOT_FOUND",
+                           f"canonical {canonical_id} 不存在", 404)
+        decisions = self.decision_repo.for_canonical(int(canonical_id))
+        if not decisions:
+            raise ApiError("DECISION_NOT_FOUND",
+                           "这手牌还没有决策点；先跑回填再整手全建", 404)
+        rows = [{**row, "canonical_id": int(canonical_id)}
+                for row in decisions]
+        created, no_spec = self._auto_cases(
+            set_id, rows, priority=self._priority(payload), note="整手全建")
+        result = self.get_case_set(set_id)
+        result.update({"created": created,
+                       "existing": len(rows) - len(no_spec) - created,
+                       "noSpec": no_spec})
+        return result
+
+    def _auto_cases(self, set_id: int, rows: Iterable[dict], *, priority: int,
+                    note: str, limit: int | None = None,
+                    skip: set[tuple] | None = None) -> tuple[int, list[str]]:
+        """给一批决策点自动配最具体的 active spec，返回 (新建数, 没 spec 的键)。"""
+        active = self._active_specs()
+        skip = set(skip or ())
+        created = 0
+        no_spec: list[str] = []
+        for row in rows:
+            if limit is not None and created >= limit:
+                break
+            canonical_id = int(row["canonical_id"])
+            street = row.get("street")
+            seq = int(row.get("seq") or 0)
+            if (canonical_id, street, seq) in skip:
+                continue
+            key = library.decision_key(street, seq)
+            spec = case_lib.best_spec(case_lib.bucket_of_row(row), active)
+            if spec is None:
+                no_spec.append(key)
+                continue
+            _, was_created = self.case_repo.create(
+                canonical_id=canonical_id, decision_key=key,
+                spec_id=int(spec["id"]), case_set_id=int(set_id),
+                priority=priority, note=note)
+            if was_created:
+                created += 1
+                skip.add((canonical_id, street, seq))
+        return created, no_spec
+
+    def sample_case_set_cases(self, set_id: int, payload: dict) -> dict:
+        """按桶补样：从存档里按时间倒序抽符合条件的决策点建 draft 案例。"""
+        self.case_repo.require_unfrozen(set_id)
+        bucket = specs.validate_bucket(payload.get("bucket") or {})
+        count = int(payload.get("count") or 10)
+        if not 1 <= count <= 100:
+            raise ApiError("INVALID_CASE_SET", "count 只能是 1–100", 422)
+        priority = self._priority(payload)
+        taken = {
+            (int(item["canonical_id"]),
+             case_lib.street_of(item),
+             int(str(item["decision_key"]).split(":", 1)[1]))
+            for item in self.case_repo.items(set_id)
+        }
+        rows = self.case_repo.decisions_for_bucket(
+            bucket, limit=max(count * 4, count), exclude=sorted(taken))
+        created, no_spec = self._auto_cases(
+            set_id, rows, priority=priority, note="按桶补样", limit=count,
+            skip=taken)
+        result = self.get_case_set(set_id)
+        result.update({"created": created, "noSpec": no_spec})
+        return result
+
+    def _seed_target(self, case: dict) -> tuple[int, str]:
+        """ab_set 的 hand uid → (canonical_id, decision_key)。"""
+        hand = self.hand_repo.imports.find_any_by_uid(case["handUid"])
+        if hand is None:
+            raise ApiError(
+                "SEED_HAND_MISSING",
+                f"手牌 {case['handUid']} 不在导入库（先跑导入）", 404)
+        edge = self.canonical_repo.source_of(hand["source"], int(hand["id"]))
+        if edge is None or not edge.get("canonical_id"):
+            raise ApiError(
+                "SEED_CANONICAL_MISSING",
+                f"手牌 {case['handUid']} 还没回填 canonical（先跑回填）", 409)
+        canonical_id = int(edge["canonical_id"])
+        rows = self.decision_repo.for_canonical(canonical_id)
+        match = next(
+            (row for row in rows
+             if row.get("street") == case["street"]
+             and int(row.get("action_index") or -1) == case["actionIndex"]),
+            None)
+        if match is None:
+            raise ApiError(
+                "SEED_DECISION_MISSING",
+                f"决策点 {case['street']}#{case['actionIndex']} 不在 canonical "
+                f"{canonical_id} 上", 404)
+        return canonical_id, library.decision_key(match.get("street"),
+                                                  match.get("seq"))
+
+    def seed_case_sets(self, payload: dict) -> dict:
+        """把 ab_set.json 导成 seed 案例集；同名 + 同 revision 不重复建。"""
+        path = payload.get("path")
+        if path:
+            candidate = Path(str(path)).expanduser().resolve()
+            if not candidate.is_relative_to(case_seed.REPO_ROOT.resolve()):
+                raise ApiError(
+                    "INVALID_SEED_PATH",
+                    f"seed 文件必须在仓库内：{case_seed.REPO_ROOT}", 422)
+            path = str(candidate)
+        plan = case_seed.plan_seed(case_seed.load_ab_set(path))
+        set_name = str(payload.get("setName") or plan["setName"]).strip()
+        dry_run = bool(payload.get("dryRun"))
+        report: dict[str, Any] = {
+            "dryRun": dry_run,
+            "source": str(path or case_seed.AB_SET_PATH),
+            "setName": set_name,
+            "set": None,
+            "specs": {"created": [], "reused": [], "wouldCreate": [],
+                      "diverged": []},
+            "cases": {"created": [], "existing": [], "skipped": [],
+                      "wouldCreate": []},
+        }
+
+        set_row = self.case_repo.set_by_name_revision(set_name, 1)
+        if set_row is None:
+            if dry_run:
+                report["set"] = {"name": set_name, "revision": 1,
+                                 "wouldCreate": True}
+            else:
+                set_row = self.case_repo.create_set(name=set_name,
+                                                    purpose="golden")
+                report["set"] = self._case_set_summary(set_row)
+        else:
+            report["set"] = self._case_set_summary(set_row)
+
+        resolved: dict[str, dict] = {}
+        for planned in plan["specs"]:
+            name = planned["name"]
+            latest = self.spec_repo.latest(name)
+            if (latest is not None
+                    and specs.spec_from_row(latest) == planned["content"]):
+                resolved[name] = latest
+                report["specs"]["reused"].append(name)
+                continue
+            if dry_run:
+                report["specs"]["wouldCreate"].append(name)
+                continue
+            if latest is None:
+                spec_id = self.spec_repo.create(
+                    name=name, revision=1, status="active",
+                    content=planned["content"], note=planned["note"],
+                    supersedes=None)
+                self.spec_repo.activate(spec_id, name)
+            else:
+                # 同名已有别的版本：只追加一条 draft，不 activate ——
+                # 生效与否是人的决定，seed 不能把人工写的 active 顶掉。
+                spec_id = self.spec_repo.create(
+                    name=name, revision=int(latest["revision"]) + 1,
+                    status="draft", content=planned["content"],
+                    note=planned["note"], supersedes=int(latest["id"]))
+                report["specs"]["diverged"].append(name)
+            resolved[name] = self.spec_repo.get(spec_id) or {}
+            report["specs"]["created"].append(name)
+
+        frozen = bool((set_row or {}).get("frozen_at"))
+        for case in plan["cases"]:
+            seed_id = case["seedId"]
+            if frozen and not dry_run:
+                report["cases"]["skipped"].append({
+                    "seedId": seed_id,
+                    "reason": f"案例集 {set_name} v1 已冻结；请建新版本",
+                })
+                continue
+            try:
+                canonical_id, decision_key = self._seed_target(case)
+            except ApiError as exc:
+                report["cases"]["skipped"].append({
+                    "seedId": seed_id,
+                    "code": exc.code,
+                    "reason": exc.message,
+                })
+                continue
+            spec_row = resolved.get(case["specName"])
+            if dry_run:
+                report["cases"]["wouldCreate"].append({
+                    "seedId": seed_id, "canonicalId": canonical_id,
+                    "decisionKey": decision_key,
+                    "specName": case["specName"],
+                })
+                continue
+            if spec_row is None:
+                report["cases"]["skipped"].append({
+                    "seedId": seed_id,
+                    "reason": f"spec {case['specName']} 未落库",
+                })
+                continue
+            try:
+                _, was_created = self.case_repo.create(
+                    canonical_id=canonical_id, decision_key=decision_key,
+                    spec_id=int(spec_row["id"]), case_set_id=int(set_row["id"]),
+                    priority=case["priority"], note=case["note"])
+            except ApiError as exc:
+                report["cases"]["skipped"].append({
+                    "seedId": seed_id, "code": exc.code,
+                    "reason": exc.message,
+                })
+                continue
+            bucket = ("created" if was_created else "existing")
+            report["cases"][bucket].append({
+                "seedId": seed_id, "canonicalId": canonical_id,
+                "decisionKey": decision_key, "specName": case["specName"],
+            })
+
+        report["cases"]["skippedPlan"] = plan["skipped"]
+        return report
 
     def hand_replay(self, hand_id: int) -> dict:
         """瀑布流/牌桌共用的帧序列。优先读 ingest 时物化的 timeline。"""
