@@ -57,10 +57,16 @@ def _row(case_id, repeat_index=0, kind="call", score=95.0, source="model",
     }
 
 
+class _FakeOverrides:
+    def list(self, run_id):
+        return {}
+
+
 def _worker(rows):
     worker = RunWorker.__new__(RunWorker)
     worker.items = _FakeItems(rows)
     worker.runs = _FakeRuns()
+    worker.overrides = _FakeOverrides()
     worker.settings = SimpleNamespace()
     return worker
 
@@ -295,3 +301,70 @@ def test_finalize_coverage_counts_spec_buckets_with_array_values(monkeypatch):
     assert captured["items"][0]["bucket"] == bucket_label(
         {"street": ["flop"], "pot_type": ["single_raised"]})
     assert finished["status"] == "succeeded"
+
+# ─────────────── 人工改判叠加（#58） ───────────────
+
+def test_apply_override_recomputes_weighted_score():
+    scores = {"action": 1.0, "size": 1.0, "reason": 1.0,
+              "fact": 1.0, "stable": 1.0}
+    score, merged, hard = run_worker.apply_override(
+        scores, None, 100.0, {"scores": {"reason": 0.0}, "hardFail": None})
+    assert merged["reason"] == 0.0
+    assert merged["action"] == 1.0
+    assert score == 70.0 and hard is None
+
+
+def test_apply_override_can_add_hard_fail_and_is_capped():
+    scores = {"action": 1.0, "size": 1.0, "reason": 1.0,
+              "fact": 1.0, "stable": 1.0}
+    score, _merged, hard = run_worker.apply_override(
+        scores, None, 100.0,
+        {"scores": {"fact": 0.0}, "hardFail": "HF_HALLUCINATION"})
+    assert hard == "HF_HALLUCINATION"
+    assert score <= scoring.HF_CAP
+
+
+def test_apply_override_without_override_returns_machine_values():
+    scores = {"action": 1.0}
+    assert run_worker.apply_override(scores, None, 88.0, None) == (
+        88.0, scores, None)
+
+
+def test_aggregate_rows_applies_overrides_but_keeps_machine_rows():
+    rows = [
+        {"case_id": 1, "repeat_index": 0, "case_priority": 0, "spec_id": 1,
+         "source": "model", "score": 100.0,
+         "scores_json": json.dumps({"action": 1.0, "size": 1.0,
+                                    "reason": 1.0, "fact": 1.0,
+                                    "stable": 1.0}),
+         "hard_fail": None},
+        {"case_id": 2, "repeat_index": 0, "case_priority": 1, "spec_id": 1,
+         "source": "model", "score": 40.0,
+         "scores_json": json.dumps({"action": 0.0, "size": 0.0,
+                                    "reason": 0.0, "fact": 0.0,
+                                    "stable": 0.0}),
+         "hard_fail": None},
+    ]
+    overrides = {1: {"scores": {"reason": 0.0}, "hardFail": None}}
+    agg, agg_items, errors = run_worker.aggregate_rows(
+        rows, spec_buckets={1: "flop|srp"}, overrides=overrides)
+    assert errors == 0
+    assert [item["score"] for item in agg_items] == [70.0, 40.0]
+    assert agg["scored"] == 2 and agg["score"]["mean"] == 55.0
+    # 机器行本身没被改写
+    assert rows[0]["score"] == 100.0
+
+
+def test_aggregate_rows_counts_errors_and_skips_repeats():
+    rows = [
+        {"case_id": 1, "repeat_index": 0, "case_priority": 0, "spec_id": 1,
+         "source": "model", "score": 100.0,
+         "scores_json": json.dumps({"action": 1.0}), "hard_fail": None},
+        {"case_id": 1, "repeat_index": 1, "case_priority": 0, "spec_id": 1,
+         "source": "error", "score": None,
+         "scores_json": "{}", "hard_fail": "HF_ERROR"},
+    ]
+    agg, agg_items, errors = run_worker.aggregate_rows(
+        rows, spec_buckets={1: "flop|srp"})
+    assert errors == 1
+    assert len(agg_items) == 1 and agg["scored"] == 1

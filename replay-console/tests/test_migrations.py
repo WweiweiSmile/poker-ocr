@@ -135,3 +135,34 @@ def test_decision_alter_adds_nullable_columns_only():
 
     assert "ADD KEY idx_dec_canonical" in alter
     assert "ADD KEY idx_dec_bucket" in alter
+
+# ─────────────── 014：judge 改判留痕 ───────────────
+
+JUDGE_OVERRIDES = MIGRATIONS / "014_judge_overrides.sql"
+
+
+def test_judge_override_migration_applies_after_012():
+    stub, first, second = _run_twice()
+
+    assert "014_judge_overrides" in first
+    assert first.index("012_canonical_and_cases") < first.index(
+        "014_judge_overrides")
+    assert second == []
+    assert "014_judge_overrides" in stub.versions
+
+
+def test_judge_override_migration_only_adds_columns_and_creates_log():
+    text = JUDGE_OVERRIDES.read_text(encoding="utf-8")
+    for statement in _statements(text):
+        head = statement.lstrip().upper()
+        assert head.startswith("ALTER TABLE") or head.startswith(
+            "CREATE TABLE IF NOT EXISTS"), statement[:60]
+
+
+def test_judge_override_migration_adds_actor_columns():
+    text = JUDGE_OVERRIDES.read_text(encoding="utf-8")
+    assert "ADD COLUMN actor" in text
+    assert "ADD COLUMN source_json" in text
+    assert "ADD COLUMN updated_at" in text
+    assert "CREATE TABLE IF NOT EXISTS replay_judge_override_log" in text
+    assert "before_json" in text and "after_json" in text

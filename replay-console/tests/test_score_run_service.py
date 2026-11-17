@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from replay import run_worker, scoring
+from replay import judge, run_worker, scoring
 from replay.errors import ApiError
 from replay.service import ReplayService
 from replay.versioning import (
@@ -165,8 +165,52 @@ class _FakeRunRepo:
         row["cancel_requested"] = 1
         return row
 
+    def update_metrics(self, run_id, *, score=None, p0_pass_rate=None,
+                       coverage_rate=None, scored_cases=None, metrics=None):
+        row = self.require(run_id)
+        row["score"] = score
+        row["p0_pass_rate"] = p0_pass_rate
+        row["coverage_rate"] = coverage_rate
+        row["scored_cases"] = scored_cases
+        if metrics is not None:
+            row["metrics_json"] = json.dumps(metrics)
+        return 1
+
     def list(self, **kwargs):
         return list(self.rows.values())
+
+
+class _FakeOverrideRepo:
+    def __init__(self):
+        self.saved = {}
+        self.history = []
+
+    def get(self, run_id, case_id):
+        return self.saved.get((int(run_id), int(case_id)))
+
+    def list(self, run_id):
+        return {case: row for (rid, case), row in self.saved.items()
+                if rid == int(run_id)}
+
+    def log(self, run_id, case_id, limit=50):
+        return [row for row in self.history
+                if (row["runId"], row["caseId"]) == (int(run_id), int(case_id))]
+
+    def save(self, *, run_id, case_id, actor, note, override, before):
+        row = {"runId": int(run_id), "caseId": int(case_id), "actor": actor,
+               "note": note, "scores": override.get("scores") or {},
+               "hardFail": override.get("hardFail"), "machine": before or {}}
+        self.saved[(int(run_id), int(case_id))] = row
+        self.history.insert(0, {**row, "id": len(self.history) + 1,
+                                "before": before or {}, "after": override})
+        return row
+
+    def clear(self, *, run_id, case_id, actor, note, before):
+        self.saved.pop((int(run_id), int(case_id)), None)
+        self.history.insert(0, {"runId": int(run_id), "caseId": int(case_id),
+                                "id": len(self.history) + 1, "actor": actor,
+                                "note": note, "before": before or {},
+                                "after": None})
 
 
 class _FakeRunItemRepo:
@@ -175,7 +219,10 @@ class _FakeRunItemRepo:
 
     def public_item(self, row):
         return {"caseId": row["case_id"],
-                "repeatIndex": row["repeat_index"]}
+                "repeatIndex": row["repeat_index"],
+                "score": row.get("score"),
+                "scores": json.loads(row.get("scores_json") or "{}"),
+                "hardFail": row.get("hard_fail")}
 
     def list(self, run_id, reconstruct_version, **kwargs):
         return list(self.rows)
@@ -207,10 +254,14 @@ def _version_row(**overrides):
 def _service(cases, *, frozen=True, specs=None, version=None,
              monkeypatch=None, price_table=None):
     monkeypatch.setenv("TEST_AI_KEY", "sk-test")
+    monkeypatch.setenv("TEST_JUDGE_KEY", "sk-judge")
     service = ReplayService.__new__(ReplayService)
-    service.settings = SimpleNamespace(max_calls_per_job=2000,
-                                       console_user_id=1,
-                                       price_table=price_table or {})
+    service.settings = SimpleNamespace(
+        max_calls_per_job=2000, console_user_id=1,
+        price_table=price_table or {}, judge_model="judge-pro",
+        judge_base_url="https://judge.example/v1",
+        judge_api_key_ref="TEST_JUDGE_KEY", judge_timeout=30.0,
+        judge_thinking="disabled")
     service.case_repo = _FakeCaseRepo(cases, frozen=frozen)
     service.spec_repo = _FakeSpecRepo(
         specs if specs is not None else [
@@ -219,6 +270,7 @@ def _service(cases, *, frozen=True, specs=None, version=None,
     service.version_repo = _FakeVersionRepo(version or _version_row())
     service.run_repo = _FakeRunRepo()
     service.run_item_repo = _FakeRunItemRepo()
+    service.override_repo = _FakeOverrideRepo()
     service.run_worker = None
     return service
 
@@ -282,7 +334,10 @@ def test_create_freezes_snapshot_and_plan(monkeypatch):
     run_id, kwargs = service.run_repo.created[0]
     snapshot = kwargs["config_snapshot"]
     assert kwargs["spec_ids"] == [11]
-    assert kwargs["judge_version"] == scoring.JUDGE_VERSION
+    # 判定型号写进 judge_version（设计 §13-2），并随 run 冻结。
+    assert kwargs["judge_version"] == judge.judge_version("judge-pro")
+    assert snapshot["judge"]["model"] == "judge-pro"
+    assert snapshot["judge"]["temperature"] == 0.0
     assert kwargs["reconstruct_version"] == CURRENT_RECONSTRUCT_VERSION
     assert kwargs["total_cases"] == 2
     assert snapshot["caseSpecs"] == {"1": 11, "2": 11}
@@ -393,3 +448,140 @@ def test_settings_reject_bad_price_table(monkeypatch):
                        json.dumps({"m": {"in": 1.0, "out": 2.0}}))
     assert Settings.from_env(load=False).price_table == {
         "m": {"in": 1.0, "out": 2.0}}
+
+# ─────────────── judge / 人工改判（#58） ───────────────
+
+MACHINE_SCORES = {"action": 1.0, "size": 1.0, "reason": 0.5,
+                  "fact": 1.0, "stable": 1.0}
+
+
+def _finished_service(monkeypatch, *, status="succeeded", model="deepseek-flash"):
+    version = _version_row(model=model)
+    service = _service([_case(1, priority=0, spec_id=11)],
+                       version=version, monkeypatch=monkeypatch)
+    run_id = service.create_score_run({"caseSetId": 4, "versionId": 7})["id"]
+    run = service.run_repo.rows[run_id]
+    run["status"] = status
+    run["metrics_json"] = json.dumps({
+        "cases": 1, "scored": 1, "score": {"mean": 90.0},
+        "p0": {"total": 1, "passed": 1, "rate": 1.0},
+        "coverage": {"bucketTotal": 1, "reached": 1, "rate": 1.0},
+    })
+    rows = [{
+        "run_id": run_id, "case_id": 1, "repeat_index": 0,
+        "spec_id": 11, "case_priority": 0, "source": "model",
+        "score": 90.0, "scores_json": json.dumps(MACHINE_SCORES),
+        "hard_fail": None, "judge_json": json.dumps({
+            "mode": "llm", "status": "ok", "temperature": 0.0,
+            "requiredPoints": [], "forbiddenPoints": [], "citedFacts": [],
+            "hallucinated": False}),
+        "option_id": "o1", "kind": "call", "amount": None,
+        "reason": "我在按钮位，跟注", "facts_json": json.dumps({
+            "options": [{"id": "o1", "kind": "call"},
+                        {"id": "o2", "kind": "raise"}]}),
+        "error_msg": "",
+    }]
+    service.run_item_repo.rows = rows
+    return service, run_id, rows
+
+
+def test_meta_exposes_judge_model_and_blockers(monkeypatch):
+    service = _service([_case(1)], monkeypatch=monkeypatch)
+    out = service.score_run_meta()
+    assert out["judge"]["model"] == "judge-pro"
+    assert out["judge"]["temperature"] == 0.0
+    assert out["judgeVersion"] == judge.judge_version("judge-pro")
+    assert all(v["judgeRunnable"] for v in out["versions"])
+
+
+def test_create_rejects_when_judge_model_equals_model_under_test(monkeypatch):
+    service = _service([_case(1)], version=_version_row(model="judge-pro"),
+                       monkeypatch=monkeypatch)
+    with pytest.raises(ApiError) as err:
+        service.create_score_run({"caseSetId": 4, "versionId": 7})
+    assert err.value.code == "JUDGE_NOT_READY"
+    assert err.value.detail[0]["code"] == "JUDGE_SAME_MODEL"
+
+
+def test_override_changes_run_score_but_not_item_score(monkeypatch):
+    service, run_id, rows = _finished_service(monkeypatch)
+    out = service.save_score_run_override(
+        run_id, 1, {"scores": {"reason": 0.0}, "actor": "weiwei",
+                    "note": "理由其实没提对手范围"})
+    assert out["score"] == 90.0            # 机器原值不变
+    assert out["effective"]["score"] == 70.0
+    assert out["effective"]["overridden"] is True
+    assert out["override"]["actor"] == "weiwei"
+    assert out["overrideHistory"][0]["note"] == "理由其实没提对手范围"
+    assert rows[0]["score"] == 90.0
+    run = service.run_repo.rows[run_id]
+    assert run["score"] == 70.0            # 聚合分随改判变化
+    assert run["metrics_json"] and json.loads(
+        run["metrics_json"])["overrideCount"] == 1
+
+
+def test_override_rejects_unknown_dimension_and_bad_value(monkeypatch):
+    service, run_id, _rows = _finished_service(monkeypatch)
+    with pytest.raises(ApiError) as err:
+        service.save_score_run_override(run_id, 1, {"scores": {"nope": 1}})
+    assert err.value.code == "INVALID_OVERRIDE"
+    with pytest.raises(ApiError):
+        service.save_score_run_override(run_id, 1, {"scores": {"reason": 2}})
+    with pytest.raises(ApiError):
+        service.save_score_run_override(run_id, 1,
+                                        {"hardFail": "HF_UNKNOWN"})
+
+
+def test_override_rejected_while_run_is_running(monkeypatch):
+    service, run_id, _rows = _finished_service(monkeypatch, status="running")
+    with pytest.raises(ApiError) as err:
+        service.save_score_run_override(run_id, 1, {"scores": {"reason": 0}})
+    assert err.value.code == "RUN_NOT_FINISHED"
+
+
+def test_delete_override_restores_machine_score(monkeypatch):
+    service, run_id, _rows = _finished_service(monkeypatch)
+    service.save_score_run_override(run_id, 1, {"scores": {"reason": 0.0}})
+    out = service.delete_score_run_override(run_id, 1, {"note": "撤回"})
+    assert out["override"] is None
+    assert out["effective"]["overridden"] is False
+    assert out["effective"]["score"] == 90.0
+    assert service.run_repo.rows[run_id]["score"] == 90.0
+    assert out["overrideHistory"][0]["after"] is None
+
+
+def test_item_exposes_effective_and_history(monkeypatch):
+    service, run_id, _rows = _finished_service(monkeypatch)
+    service.save_score_run_override(run_id, 1, {"scores": {"fact": 0.0}})
+    out = service.score_run_item(run_id, 1, 0)
+    assert out["judge"]["temperature"] == 0.0
+    assert out["effective"]["scores"]["fact"] == 0.0
+    assert out["effective"]["scores"]["reason"] == 0.5
+    assert out["override"]["scores"]["fact"] == 0.0
+    assert out["overrideHistory"]
+
+
+def test_rejudge_compares_same_input_without_writing(monkeypatch):
+    service, run_id, rows = _finished_service(monkeypatch)
+    service.spec_repo.rows[11]["spec_json"] = json.dumps({
+        "required_points": [{"key": "position", "text": "按钮位", "weight": 1}],
+        "forbidden_points": []})
+    rows[0]["judge_json"] = json.dumps({
+        "mode": "llm", "status": "ok", "temperature": 0.0,
+        "requiredPoints": [{"key": "position", "text": "按钮位", "weight": 1,
+                            "status": "hit", "quote": "我在按钮位",
+                            "quoteFound": True}],
+        "forbiddenPoints": [], "citedFacts": [], "hallucinated": False})
+    import poker_ocr.advice as advice_mod
+    monkeypatch.setattr(advice_mod, "complete_json", lambda *a, **k: {
+        "requiredPoints": [{"key": "position", "status": "hit",
+                            "quote": "我在按钮位"}],
+        "forbiddenPoints": [], "citedFacts": [], "hallucinated": False})
+    out = service.rejudge_score_run_item(run_id, 1, 0)
+    assert out["consistent"] is True
+    assert out["after"]["temperature"] == 0.0
+    assert out["judgeVersion"] == judge.judge_version("judge-pro")
+    assert out["inputDigest"] == out["after"]["inputDigest"]
+    # 重判只读：原始行与聚合分都不动。
+    assert rows[0]["score"] == 90.0
+    assert service.run_repo.rows[run_id]["score"] is None

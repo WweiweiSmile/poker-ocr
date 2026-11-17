@@ -1262,6 +1262,8 @@ export interface ScoreRunVersionOption {
   reconstructVersion: string | null
   blockers: VersionBlocker[]
   runnable: boolean
+  judgeBlockers?: VersionBlocker[]
+  judgeRunnable?: boolean
 }
 
 export interface ScoreRunMeta {
@@ -1269,6 +1271,7 @@ export interface ScoreRunMeta {
   versions: ScoreRunVersionOption[]
   judgeVersion: string
   reconstructVersion: string
+  judge?: { model: string; version: string; promptVersion: string; temperature: number; timeout: number; blockers: VersionBlocker[]; ready: boolean }
   p0ExtraRepeats: number
   freqMinN: number
   maxCallsPerRun: number
@@ -1295,6 +1298,8 @@ export interface ScoreRunEstimate {
   casesWithoutSpec: number[]
   maxCalls: number
   overLimit: boolean
+  judge?: { model: string; version: string; ready: boolean; blockers: VersionBlocker[]; calls: number }
+  judgeReady?: boolean
 }
 
 export interface ScoreRunMetrics {
@@ -1352,6 +1357,85 @@ export interface ScoreRunScoreMap {
   stable?: number | null
 }
 
+export interface ScoreRunJudgePoint {
+  key: string
+  text: string
+  weight?: number
+  status?: string
+  quote?: string
+  quoteFound?: boolean
+}
+
+export interface ScoreRunJudgeCitedFact {
+  quote: string
+  status: string
+  fact?: string
+}
+
+export interface ScoreRunJudgeEvidence {
+  code?: string
+  hint?: string
+  quotes?: string[]
+  missingFacts?: string[]
+  forbiddenPoints?: string[]
+  forbiddenActions?: string[]
+  optionId?: string | null
+  optionIds?: string[]
+  source?: string
+  error?: string
+}
+
+export interface ScoreRunJudge {
+  schema?: string
+  mode?: string
+  status?: string
+  judgeVersion?: string
+  model?: string
+  promptVersion?: string
+  temperature?: number
+  inputDigest?: string
+  reasonMode?: string
+  requiredPoints?: ScoreRunJudgePoint[]
+  forbiddenPoints?: ScoreRunJudgePoint[]
+  matchedPoints?: string[]
+  missingPoints?: string[]
+  forbiddenHits?: string[]
+  citedFacts?: ScoreRunJudgeCitedFact[]
+  wrongFacts?: string[]
+  hallucinated?: boolean
+  optionIds?: string[]
+  error?: string
+  evidence?: ScoreRunJudgeEvidence
+}
+
+export interface ScoreRunEffective {
+  score: number | null
+  scores: ScoreRunScoreMap
+  hardFail: string | null
+  overridden: boolean
+}
+
+export interface ScoreRunOverride {
+  runId?: number
+  caseId?: number
+  actor: string
+  note: string
+  scores: ScoreRunScoreMap
+  hardFail: string | null
+  machine?: { score?: number | null; scores?: ScoreRunScoreMap; hardFail?: string | null }
+  createdAt: string | null
+  updatedAt: string | null
+}
+
+export interface ScoreRunOverrideLog {
+  id: number
+  actor: string
+  note: string
+  before: unknown
+  after: unknown
+  createdAt: string | null
+}
+
 export interface ScoreRunItem {
   runId: number
   caseId: number
@@ -1379,7 +1463,10 @@ export interface ScoreRunItem {
   facts?: Record<string, unknown>
   options?: { id?: string; label?: string; kind?: string; amount?: number | null }[]
   prompt?: { system?: string; user?: string; sha?: string }
-  judge?: Record<string, unknown>
+  judge?: ScoreRunJudge
+  effective?: ScoreRunEffective
+  override?: ScoreRunOverride | null
+  overrideHistory?: ScoreRunOverrideLog[]
 }
 
 export interface ScoreRunItems {

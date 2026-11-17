@@ -145,6 +145,7 @@ replay-console/
 │   ├── scoring.py             # 五维打分 / 六类硬失败 / 聚合与 Wilson 区间（纯逻辑）
 │   ├── run_repository.py      # replay_runs / replay_run_items 读写
 │   ├── run_worker.py          # 评分运行队列 worker：执行单元 + 评分 + 收尾
+│   ├── judge.py               # LLM judge（#58）：要点逐条判定 / evidence / 改判叠加（纯逻辑 + 单次调用）
 │   ├── canonical.py           # canonical 手牌归组：同内容判定 / content_group / primary（纯逻辑）
 │   ├── repository.py          # review_hands 只读 + 导入手牌 + replay_* 读写
 │   ├── service.py             # 手牌库/导入/详情/版本/任务/对比/导出/健康
@@ -153,14 +154,14 @@ replay-console/
 │   ├── api.py                 # FastAPI 路由 + SPA 托管
 │   ├── cases.py               # 案例桶推导 / 最具体 spec 选择 / 案例集统计
 │   ├── schemas.py             # 请求体
-│   └── migrations/001_init.sql … 011_*.sql, 012_canonical_and_cases.sql, 012_spot_specs.sql, 013_score_runs.sql
+│   └── migrations/001_init.sql … 013_score_runs.sql, 014_judge_overrides.sql
 ├── replay_web/                # React + Vite + AntD
 └── tests/                     # 决策点 / 引擎 / 版本 / API / 提示词 golden
 ```
 
-数据表：`replay_versions`、`replay_jobs`、`replay_job_hands`、`replay_decisions`、`replay_results`、`replay_marks`、`replay_imported_hands`、`replay_import_batches`、`replay_hand_deletions`、`replay_spot_specs`、`replay_canonical_hands`、`replay_hand_sources`、`replay_case_sets`、`replay_cases`、`replay_runs`、`replay_run_items`、`replay_judge_overrides`、`replay_schema_migrations`。全部是逻辑外键，不修改 `review_hands`。
+数据表：`replay_versions`、`replay_jobs`、`replay_job_hands`、`replay_decisions`、`replay_results`、`replay_marks`、`replay_imported_hands`、`replay_import_batches`、`replay_hand_deletions`、`replay_spot_specs`、`replay_canonical_hands`、`replay_hand_sources`、`replay_case_sets`、`replay_cases`、`replay_runs`、`replay_run_items`、`replay_judge_overrides`、`replay_judge_override_log`、`replay_schema_migrations`。全部是逻辑外键，不修改 `review_hands`。
 
-canonical 手牌：一手牌可以在复盘（`review`）、实时（`live`）、构造（`synthetic`）三边各有一条源记录（`replay_hand_sources`），同内容（底牌相同 + 公共牌相同 + 发生时间差 ≤ 30 分钟）的源记录挂到同一个 `replay_canonical_hands.id` 上，并列保存、互不覆盖。`primary_source` 默认 `review > live > synthetic`，可人工切换；`content_group` 是 `sha1(底牌|公共牌|日期)` 的归组键。归组规则在 `replay/canonical.py`（纯逻辑），SQL 读写与 primary 切换在 `repository.CanonicalHandRepository`（逐条自动提交，不开显式事务；中途失败只会留下无源记录的空 canonical 行，不影响读路径）。案例表（`replay_case_sets`、`replay_cases`）已接最小写路径：详情页每个决策点可建案例，默认落在「待整理」案例集；案例集页、批量建案例、冻结与 seed 已接：冻结后只读（改内容要建新 revision），seed 按 (case_set, canonical, decision_key) 幂等，spec 落在 `replay_spot_specs`。运行三张表：`replay_runs`/`replay_run_items` 已由评分运行写入（见 §4.5）；`replay_judge_overrides`（人工改判）仍是空表，留到接 LLM judge 时一起接。评分运行与旧 job 链路（`replay_jobs`/`replay_results`）互不干扰。
+canonical 手牌：一手牌可以在复盘（`review`）、实时（`live`）、构造（`synthetic`）三边各有一条源记录（`replay_hand_sources`），同内容（底牌相同 + 公共牌相同 + 发生时间差 ≤ 30 分钟）的源记录挂到同一个 `replay_canonical_hands.id` 上，并列保存、互不覆盖。`primary_source` 默认 `review > live > synthetic`，可人工切换；`content_group` 是 `sha1(底牌|公共牌|日期)` 的归组键。归组规则在 `replay/canonical.py`（纯逻辑），SQL 读写与 primary 切换在 `repository.CanonicalHandRepository`（逐条自动提交，不开显式事务；中途失败只会留下无源记录的空 canonical 行，不影响读路径）。案例表（`replay_case_sets`、`replay_cases`）已接最小写路径：详情页每个决策点可建案例，默认落在「待整理」案例集；案例集页、批量建案例、冻结与 seed 已接：冻结后只读（改内容要建新 revision），seed 按 (case_set, canonical, decision_key) 幂等，spec 落在 `replay_spot_specs`。运行四张表：`replay_runs`/`replay_run_items` 已由评分运行写入（见 §4.5）；`replay_judge_overrides`（人工改判，聚合优先、不覆盖机器原值）与 `replay_judge_override_log`（逐次改判留痕：谁/何时/从什么改成什么）随 #58 一起接上。评分运行与旧 job 链路（`replay_jobs`/`replay_results`）互不干扰。
 
 ---
 
@@ -221,7 +222,7 @@ canonical 手牌：一手牌可以在复盘（`review`）、实时（`live`）�
 
 聚合：总分取「重复 0 次」的案例均值，P0 通过率 = (P0 且无硬失败 且 `s_action=1`) / **本次 run 的 P0 案例总数**（没跑到/没出分的 P0 也算分母，否则通过率虚高），覆盖率 = 达到 `FREQ_MIN_N=15` 样本的桶数 / 有 active spec 的桶数（按 spec 的桶标签去重，空桶不计；分母是本次 run 开始时全部 active spec 的桶，不是恰好被冻结到的那些）。比例类给 Wilson 95% 区间，均值给正态近似；页面同时显示 n 与区间。
 
-**本次 run 的已知取舍**：#57 正文明确依据维先按退化口径——run 路径把 `required_points` 清空（judge 里记 `reasonMode: "action-support"`），`s_reason` 只判「理由是否提到该动作」，`cited_facts/wrong_facts` 也恒为 0。因此 `HF_HALLUCINATION`/`HF_FORBIDDEN_POINT` 在 run 路径不会触发，只有纯函数单测覆盖；要点加权、引用/错误事实与 §7.5 的频率达成率要等接 LLM judge 的票再接。硬失败证据目前只记 `code/optionId/source/optionIds`，还没有「引用原句/缺失 facts/命中禁令」三类证据。
+**LLM judge（#58）**：run 路径先用判定模型逐条判 `required_points` / `forbidden_points`（温度 0，`judge_version = llm-j1:<模型>` 冻结进 `config_snapshot.judge`），再走同一套五维合成；`s_reason` 用要点加权和，`s_fact` 用引用/缺失事实，`HF_HALLUCINATION` / `HF_FORBIDDEN_POINT` 在 run 路径真正生效。每条硬失败把 evidence 落进 `judge_json`：引用的原句 `quotes`、facts 里缺失的项 `missingFacts`、命中的禁令 `forbiddenPoints` / `forbiddenActions`，页面据此展示「为什么判它错」。judge 自己失败（超时、回复不是合法 JSON）时 fail open：退回 #57 的退化口径（`reasonMode: action-support`，不伪造硬失败，`judge_json.status=error` 且带 error 文本）。判定模型要求与被测模型不同、走最强档：`REPLAY_JUDGE_MODEL`（默认 `deepseek-v4-pro`）、`REPLAY_JUDGE_BASE_URL`（缺省回落 `AI_SERVER_BASE_URL`）、`REPLAY_JUDGE_API_KEY_REF`（默认 `AI_SERVER_API_KEY`）、`REPLAY_JUDGE_TIMEOUT`（默认 30 秒）、`REPLAY_JUDGE_THINKING`；不合规时创建页显示原因、`create_score_run` 直接 409 `JUDGE_NOT_READY`。人工改判写 `replay_judge_overrides`（唯一键 run+case，带 `actor` / `note` / `updated_at`），原始 `replay_run_items.score` 与 `judge_json` 一个字不动，聚合时优先取改判分；每次改判/撤回都追加一行 `replay_judge_override_log`（before/after）。抽屉里可看逐条判定与 evidence、保存/撤回改判，并可「重判（不写库）」比对一致性。语义口径见 `replay/judge.py` 顶部。
 
 采样与中断：每个案例跑 1 次，`priority=0` 的案例额外再跑 2 次（固定样本，不随机抽）；调用次数 = 案例数 + P0 数 × 2。取消是协作式的：已完成的案例照常计分，**没开跑就取消的单元不算「已完成」**（进度不会跳到 N/N），run 标 `partial` 并在 `error_msg` 里写「完成 X/Y 个案例；已按要求中断」；服务重启时 `running` 的 run 会被标成 `partial`，不冒充成功。案例缺决策点、或冻结的 spec 已被删时，不静默跳过也不换 spec：落一条 `source=error` 的 run_item（`HF_ERROR`，errorMsg 写明原因），run 因有 error 标 `partial`。
 

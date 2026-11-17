@@ -533,6 +533,24 @@ def create_app(settings: Settings | None = None,
                        request: Request):
         return service(request).score_run_item(run_id, case_id, repeat_index)
 
+    @app.post("/api/score-runs/{run_id}/items/{case_id}/override")
+    def save_score_run_override(run_id: int, case_id: int, body: dict,
+                                request: Request):
+        return service(request).save_score_run_override(run_id, case_id, body)
+
+    @app.delete("/api/score-runs/{run_id}/items/{case_id}/override")
+    def delete_score_run_override(run_id: int, case_id: int,
+                                  request: Request, body: dict | None = None):
+        return service(request).delete_score_run_override(
+            run_id, case_id, body or {})
+
+    @app.post(
+        "/api/score-runs/{run_id}/items/{case_id}/{repeat_index}/rejudge")
+    def rejudge_score_run_item(run_id: int, case_id: int, repeat_index: int,
+                               request: Request):
+        return service(request).rejudge_score_run_item(
+            run_id, case_id, repeat_index)
+
     # ─────────────── export ───────────────
 
     @app.get("/api/export")

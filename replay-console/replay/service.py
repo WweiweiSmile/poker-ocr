@@ -22,7 +22,8 @@ from poker_ocr.advice import build_situation
 from poker_ocr.advice import AISettings
 from poker_ocr.buckets import bucket_label
 
-from . import case_seed, cases as case_lib, library, run_worker, scoring, specs
+from . import (case_seed, cases as case_lib, judge, library, run_worker,
+               scoring, specs)
 from .config import Settings
 from .db import Database
 from .decisions import (
@@ -47,7 +48,9 @@ from .repository import (
     LiveAdviceRepository, MarkRepository, PairReviewRepository,
     ResultRepository, SpotSpecRepository, VersionRepository,
 )
-from .run_repository import RunItemRepository, RunRepository
+from .run_repository import (
+    JudgeOverrideRepository, RunItemRepository, RunRepository,
+)
 from .timeline import build_timeline
 from .flags import compute_flags, mask_for, parse_flags
 from .util import (
@@ -173,6 +176,7 @@ class ReplayService:
         self.case_repo = CaseRepository(db)
         self.run_repo = RunRepository(db)
         self.run_item_repo = RunItemRepository(db)
+        self.override_repo = JudgeOverrideRepository(db)
         self.run_worker = None
 
     # ─────────────────────────── 基础查询 ───────────────────────────
@@ -1640,6 +1644,20 @@ class ReplayService:
                 409, detail=blockers)
         return row
 
+    def _judge_public(self, cfg: dict | None = None, *,
+                      model_under_test: str | None = None) -> dict:
+        cfg = cfg or judge.judge_config(self.settings)
+        blockers = judge.judge_blockers(cfg, model_under_test=model_under_test)
+        return {
+            "model": cfg.get("model") or "",
+            "version": cfg.get("version") or "",
+            "promptVersion": cfg.get("promptVersion") or "",
+            "temperature": cfg.get("temperature"),
+            "timeout": cfg.get("timeout"),
+            "blockers": blockers,
+            "ready": not blockers,
+        }
+
     def score_run_meta(self) -> dict:
         """创建页需要的字典：可运行的案例集、版本、判定口径与单价。"""
         sets_out: list[dict] = []
@@ -1651,9 +1669,12 @@ class ReplayService:
             else:
                 summary["plan"] = None
             sets_out.append(summary)
+        judge_cfg = judge.judge_config(self.settings)
         versions_out: list[dict] = []
         for row in self.version_repo.list(include_archived=True):
             blockers = run_blockers(row)
+            judge_blockers = judge.judge_blockers(
+                judge_cfg, model_under_test=row.get("model"))
             versions_out.append({
                 "id": int(row["id"]),
                 "name": row.get("name"),
@@ -1663,11 +1684,15 @@ class ReplayService:
                 "reconstructVersion": row.get("reconstruct_version"),
                 "blockers": blockers,
                 "runnable": not blockers,
+                # 判定模型不能与被测模型同一个（设计 §13-2）。
+                "judgeBlockers": judge_blockers,
+                "judgeRunnable": not blockers and not judge_blockers,
             })
         return {
             "caseSets": sets_out,
             "versions": versions_out,
-            "judgeVersion": scoring.JUDGE_VERSION,
+            "judge": self._judge_public(judge_cfg),
+            "judgeVersion": judge_cfg["version"],
             "reconstructVersion": CURRENT_RECONSTRUCT_VERSION,
             "p0ExtraRepeats": run_worker.P0_EXTRA_REPEATS,
             "freqMinN": scoring.FREQ_MIN_N,
@@ -1690,6 +1715,9 @@ class ReplayService:
         price = run_worker.price_for(version.get("model"), self._price_table())
         est = run_worker.estimate_cost(plan["calls"], tokens, price)
         _case_specs, unmatched = self._case_spec_ids(cases)
+        judge_cfg = judge.judge_config(self.settings)
+        judge_public = self._judge_public(judge_cfg,
+                                          model_under_test=version.get("model"))
         return {
             "caseSet": self._case_set_summary(set_row),
             "version": {"id": version_id, "name": version.get("name"),
@@ -1708,6 +1736,9 @@ class ReplayService:
             "casesWithoutSpec": unmatched,
             "maxCalls": self.settings.max_calls_per_job,
             "overLimit": plan["calls"] > self.settings.max_calls_per_job,
+            # judge 每个单元也要调一次（判定与被测调用一一对应）。
+            "judge": {**judge_public, "calls": plan["calls"]},
+            "judgeReady": judge_public["ready"],
         }
 
     def _case_spec_ids(
@@ -1744,6 +1775,16 @@ class ReplayService:
         if not cases:
             raise ApiError("CASE_SET_EMPTY", "案例集没有案例", 422)
         version = self._require_ready_version(version_id)
+        judge_cfg = judge.judge_config(self.settings)
+        judge_blockers = judge.judge_blockers(
+            judge_cfg, model_under_test=version.get("model"))
+        if judge_blockers:
+            raise ApiError(
+                "JUDGE_NOT_READY",
+                "判定模型不可用：" + "、".join(
+                    str(b.get("message") or b.get("code"))
+                    for b in judge_blockers),
+                409, detail=judge_blockers)
 
         case_specs, missing = self._case_spec_ids(cases)
         if missing:
@@ -1799,7 +1840,8 @@ class ReplayService:
             "specIds": spec_ids,
             "specs": specs_meta,
             "caseSpecs": case_specs,
-            "judgeVersion": scoring.JUDGE_VERSION,
+            "judge": judge_cfg,
+            "judgeVersion": judge_cfg["version"],
             "reconstructVersion": CURRENT_RECONSTRUCT_VERSION,
             "plan": plan,
             "tokens": history or run_worker.DEFAULT_TOKENS,
@@ -1812,7 +1854,7 @@ class ReplayService:
             case_set_revision=int(set_row.get("revision") or 1),
             spec_ids=spec_ids,
             version_id=version_id,
-            judge_version=scoring.JUDGE_VERSION,
+            judge_version=judge_cfg["version"],
             reconstruct_version=CURRENT_RECONSTRUCT_VERSION,
             total_cases=len(cases),
             config_snapshot=snapshot,
@@ -1871,7 +1913,242 @@ class ReplayService:
             "prompt": json_load(row.get("prompt_json"), {}) or {},
             "judge": json_load(row.get("judge_json"), {}) or {},
         })
+        override = self.override_repo.get(run_id, case_id)
+        score, scores, hard_fail = run_worker.apply_override(
+            json_load(row.get("scores_json"), {}) or {},
+            row.get("hard_fail") or None,
+            (float(row["score"]) if row.get("score") is not None else None),
+            override)
+        # 机器判定原值仍在 score/scores/hardFail；人工改判只体现在
+        # effective 与聚合分上，不覆盖 run_items（设计 §7.2 / 验收第 5 条）。
+        item["effective"] = {
+            "score": score,
+            "scores": scores,
+            "hardFail": hard_fail,
+            "overridden": bool(override),
+        }
+        item["override"] = override
+        item["overrideHistory"] = self.override_repo.log(run_id, case_id)
         return item
+
+    def _run_metric_rows(self, run: dict) -> tuple[list[dict], dict[int, str]]:
+        config = json_load(run.get("config_snapshot"), {}) or {}
+        rows = self.run_item_repo.list(
+            int(run["id"]),
+            str(run.get("reconstruct_version") or CURRENT_RECONSTRUCT_VERSION),
+            limit=10000)
+        spec_buckets = {}
+        for spec in config.get("specs") or []:
+            try:
+                spec_buckets[int(spec["id"])] = bucket_label(
+                    spec.get("bucket") or {})
+            except (KeyError, TypeError, ValueError):
+                continue
+        return rows, spec_buckets
+
+    @staticmethod
+    def _override_actor(payload: dict | None, settings: Settings) -> str:
+        actor = str((payload or {}).get("actor") or "").strip()
+        if not actor:
+            actor = f"console:{settings.console_user_id or 'unknown'}"
+        return actor[:64]
+
+    @staticmethod
+    def _check_finished(run: dict) -> None:
+        status = str(run.get("status") or "")
+        if status in ("queued", "running"):
+            raise ApiError(
+                "RUN_NOT_FINISHED",
+                f"运行 #{run.get('id')} 还没结束（{status}），先等它跑完再改判",
+                409)
+
+    def _require_item_row(self, run: dict, case_id: int,
+                          repeat_index: int = 0) -> dict:
+        row = self.run_item_repo.get(
+            int(run["id"]), int(case_id), int(repeat_index),
+            str(run.get("reconstruct_version") or CURRENT_RECONSTRUCT_VERSION))
+        if row is None:
+            raise ApiError(
+                "RUN_ITEM_NOT_FOUND",
+                f"运行 {run['id']} 没有案例 {case_id} 的第 {repeat_index} 次结果",
+                404)
+        return row
+
+    def _validate_override_scores(self, raw: Any) -> dict:
+        if raw is None:
+            return {}
+        if not isinstance(raw, dict):
+            raise ApiError("INVALID_OVERRIDE", "scores 必须是对象", 422)
+        scores: dict[str, float | None] = {}
+        for dim, value in raw.items():
+            if dim not in scoring.DIMENSIONS:
+                raise ApiError(
+                    "INVALID_OVERRIDE",
+                    f"未知维度 {dim}；只认 {', '.join(scoring.DIMENSIONS)}",
+                    422)
+            if value is None:
+                scores[dim] = None
+                continue
+            try:
+                num = float(value)
+            except (TypeError, ValueError):
+                raise ApiError(
+                    "INVALID_OVERRIDE", f"维度 {dim} 的分数必须是 0–1 的数",
+                    422)
+            if not 0.0 <= num <= 1.0:
+                raise ApiError(
+                    "INVALID_OVERRIDE",
+                    f"维度 {dim} 的分数 {num} 超出 0–1", 422)
+            scores[dim] = round(num, 4)
+        return scores
+
+    @staticmethod
+    def _validate_override_hard_fail(raw: Any) -> str | None:
+        if raw is None or raw == "":
+            return None
+        code = str(raw)
+        if code not in scoring.HARD_FAIL_CODES:
+            raise ApiError(
+                "INVALID_OVERRIDE",
+                f"未知硬失败码 {code}；只认 {', '.join(scoring.HARD_FAIL_CODES)}",
+                422)
+        return code
+
+    def save_score_run_override(self, run_id: int, case_id: int,
+                                payload: dict | None = None) -> dict:
+        """人工改判：只写 replay_judge_overrides + 日志，不动 run_items。"""
+        payload = payload or {}
+        run = self.run_repo.require(run_id)
+        self._check_finished(run)
+        row = self._require_item_row(run, case_id)
+        changed = self._validate_override_scores(payload.get("scores"))
+        machine_scores = json_load(row.get("scores_json"), {}) or {}
+        merged = {dim: machine_scores.get(dim) for dim in scoring.DIMENSIONS
+                  if dim in machine_scores}
+        merged.update(changed)
+        if "hardFail" in payload:
+            hard_fail = self._validate_override_hard_fail(
+                payload.get("hardFail"))
+        else:
+            hard_fail = row.get("hard_fail") or None
+        before = {
+            "score": (float(row["score"])
+                      if row.get("score") is not None else None),
+            "scores": machine_scores,
+            "hardFail": row.get("hard_fail") or None,
+        }
+        self.override_repo.save(
+            run_id=int(run_id), case_id=int(case_id),
+            actor=self._override_actor(payload, self.settings),
+            note=str(payload.get("note") or ""),
+            override={"scores": merged, "hardFail": hard_fail},
+            before=before)
+        self._recompute_run_metrics(int(run_id))
+        return self.score_run_item(int(run_id), int(case_id), 0)
+
+    def delete_score_run_override(self, run_id: int, case_id: int,
+                                  payload: dict | None = None) -> dict:
+        payload = payload or {}
+        run = self.run_repo.require(run_id)
+        self._check_finished(run)
+        self._require_item_row(run, case_id)
+        before = self.override_repo.get(int(run_id), int(case_id))
+        if before is not None:
+            self.override_repo.clear(
+                run_id=int(run_id), case_id=int(case_id),
+                actor=self._override_actor(payload, self.settings),
+                note=str(payload.get("note") or ""), before=before)
+            self._recompute_run_metrics(int(run_id))
+        return self.score_run_item(int(run_id), int(case_id), 0)
+
+    def rejudge_score_run_item(self, run_id: int, case_id: int,
+                               repeat_index: int = 0) -> dict:
+        """重跑一次判定（temp 0）并与存下来的判定逐条比对；不写库。"""
+        run = self.run_repo.require(run_id)
+        row = self._require_item_row(run, case_id, repeat_index)
+        config = json_load(run.get("config_snapshot"), {}) or {}
+        version = self.version_repo.get(
+            int(run.get("version_id") or 0)) or {}
+        cfg = judge.judge_config(self.settings)
+        frozen = config.get("judge")
+        if isinstance(frozen, dict):
+            cfg = {**cfg, **{k: v for k, v in frozen.items()
+                             if v is not None}}
+        blockers = judge.judge_blockers(
+            cfg, model_under_test=version.get("model"))
+        if blockers:
+            raise ApiError(
+                "JUDGE_NOT_READY",
+                "判定模型不可用：" + "、".join(
+                    str(b.get("message") or b.get("code"))
+                    for b in blockers),
+                409, detail=blockers)
+        case_specs = config.get("caseSpecs") or {}
+        spec_id = case_specs.get(str(case_id)) or case_specs.get(case_id)
+        spec_row = self.spec_repo.get(int(spec_id)) if spec_id else None
+        if spec_row is None:
+            raise ApiError(
+                "SPEC_NOT_FOUND",
+                f"案例 {case_id} 冻结的 spec 已不存在，无法重判", 409)
+        spec = specs.spec_from_row(spec_row)
+        facts = json_load(row.get("facts_json"), {}) or {}
+        option_ids = [str(opt.get("id")) for opt in facts.get("options") or []
+                      if isinstance(opt, dict) and opt.get("id") is not None]
+        advice = {
+            "option_id": row.get("option_id"),
+            "kind": row.get("kind"),
+            "amount": (float(row["amount"])
+                       if row.get("amount") is not None else None),
+            "reason": row.get("reason") or "",
+            "source": row.get("source") or "",
+        }
+        try:
+            ai_settings = judge.build_settings(cfg)
+        except judge.JudgeUnavailable as exc:
+            raise ApiError("JUDGE_NOT_READY", str(exc), 409)
+        before = json_load(row.get("judge_json"), {}) or {}
+        after = judge.evaluate(
+            cfg, settings=ai_settings, spec=spec, advice=advice,
+            facts=facts, option_ids=option_ids, timeout=cfg.get("timeout"))
+        verdict = judge.compare_verdict(before, after)
+        result = judge.score_verdict(
+            after, spec=spec, advice=advice, option_ids=option_ids)
+        return {
+            "runId": int(run_id),
+            "caseId": int(case_id),
+            "repeatIndex": int(repeat_index),
+            **verdict,
+            "before": before,
+            "after": after,
+            "judgeVersion": after.get("judgeVersion"),
+            "inputDigest": after.get("inputDigest"),
+            "score": result["score"],
+            "scores": result["scores"],
+            "hardFail": result["hardFail"],
+        }
+
+    def _recompute_run_metrics(self, run_id: int) -> dict:
+        """改判后重算聚合分（run 级），item.score 保持机器原值。"""
+        run = self.run_repo.require(run_id)
+        metrics = json_load(run.get("metrics_json"), {}) or {}
+        rows, spec_buckets = self._run_metric_rows(run)
+        overrides = self.override_repo.list(int(run_id))
+        p0_total = int((metrics.get("p0") or {}).get("total") or 0) or None
+        bucket_total = int((metrics.get("coverage") or {}).get("bucketTotal")
+                           or 0)
+        agg, _items, errors = run_worker.aggregate_rows(
+            rows, spec_buckets=spec_buckets, bucket_total=bucket_total,
+            p0_total=p0_total, overrides=overrides)
+        merged = {**metrics, **agg, "errors": errors, "units": len(rows),
+                  "overrideCount": len(overrides)}
+        self.run_repo.update_metrics(
+            int(run_id),
+            score=agg["score"]["mean"],
+            p0_pass_rate=agg["p0"]["rate"],
+            coverage_rate=agg["coverage"]["rate"],
+            scored_cases=agg["scored"],
+            metrics=merged)
+        return merged
 
     def cancel_score_run(self, run_id: int) -> dict:
         row = self.run_repo.request_cancel(run_id)

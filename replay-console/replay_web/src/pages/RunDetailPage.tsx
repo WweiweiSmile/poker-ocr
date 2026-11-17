@@ -8,6 +8,7 @@ import { ArrowLeftOutlined, ReloadOutlined, StopOutlined } from '@ant-design/ico
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useParams } from 'react-router-dom'
 import { api, errorMessage } from '../api'
+import { JudgeCard, OverrideCard } from '../components/ScoreJudgePanel'
 import type { ScoreRun, ScoreRunItem, ScoreRunItems } from '../types'
 import {
   RUN_STATUS, ciText, formatDate, rateText, scoreText,
@@ -296,11 +297,8 @@ export default function RunDetailPage() {
               <Descriptions.Item label="来源">{detail.data.source || '—'}</Descriptions.Item>
             </Descriptions>
 
-            <Card size="small" title="判据证据（judge）">
-              <pre style={{ margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
-                {JSON.stringify(detail.data.judge || {}, null, 2)}
-              </pre>
-            </Card>
+            <OverrideCard runId={id} item={detail.data} />
+            <JudgeCard judge={detail.data.judge} />
 
             <Card size="small" title={`当时的选项（${options.length}）`}>
               <Table

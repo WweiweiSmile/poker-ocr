@@ -13,7 +13,7 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from typing import Any
 
 from . import cases as case_lib
-from . import scoring
+from . import judge, scoring
 from .config import Settings
 from .db import Database
 from .engine import RateLimiter, execute_unit
@@ -21,7 +21,9 @@ from .repository import (
     CaseRepository, DecisionRepository, LiveAdviceRepository,
     SpotSpecRepository, VersionRepository,
 )
-from .run_repository import RunItemRepository, RunRepository
+from .run_repository import (
+    JudgeOverrideRepository, RunItemRepository, RunRepository,
+)
 from .runner import _previous_stored_advice, decision_from_row
 from poker_ocr.buckets import bucket_label
 from .specs import spec_from_row
@@ -109,6 +111,7 @@ class RunWorker:
         self.current_run_id: int | None = None
         self.runs = RunRepository(db)
         self.items = RunItemRepository(db)
+        self.overrides = JudgeOverrideRepository(db)
         self.case_repo = CaseRepository(db)
         self.spec_repo = SpotSpecRepository(db)
         self.version_repo = VersionRepository(db, settings.console_user_id)
@@ -204,6 +207,21 @@ class RunWorker:
 
     # ─────────────── 单条 run ───────────────
 
+    def _judge_setup(self, run: dict, config: dict,
+                     version_model: str | None) -> tuple[dict, Any]:
+        """run 里冻结的 judge 配置优先；凭据缺失时返回 None（照常评分，按项 fail open）。"""
+        cfg = judge.judge_config(self.settings)
+        frozen = config.get("judge")
+        if isinstance(frozen, dict):
+            cfg.update({key: value for key, value in frozen.items()
+                        if value is not None})
+        settings = None
+        try:
+            settings = judge.build_settings(cfg)
+        except judge.JudgeUnavailable as exc:
+            log.warning("评分运行 #%s 的 judge 不可用：%s", run.get("id"), exc)
+        return cfg, settings
+
     def _execute(self, run: dict) -> None:
         run_id = int(run["id"])
         case_set_id = int(run["case_set_id"])
@@ -238,6 +256,8 @@ class RunWorker:
                         if (row.get("status") or "active") == "active"]
 
         config = json_load(run.get("config_snapshot"), {}) or {}
+        judge_cfg, judge_settings = self._judge_setup(run, config,
+                                                     version.get("model"))
         case_specs = {int(key): int(value) for key, value in
                       (config.get("caseSpecs") or {}).items()}
         # 覆盖率分母按设计 §7.3：有 active spec 的桶数，而不是本次 run 恰好
@@ -281,7 +301,7 @@ class RunWorker:
                 cancelled.set()
                 return None
             return self._run_unit(run, unit, ai_settings, version,
-                                  spec_ids)
+                                  spec_ids, judge_cfg, judge_settings)
 
         with ThreadPoolExecutor(max_workers=max(1, self.settings.unit_workers),
                                 thread_name_prefix="score-unit") as pool:
@@ -422,7 +442,8 @@ class RunWorker:
             (canonical_id, street, seq, reconstruct_version))
 
     def _run_unit(self, run: dict, unit: dict, ai_settings, version: dict,
-                  spec_ids: list[int]) -> bool:
+                  spec_ids: list[int], judge_cfg: dict | None = None,
+                  judge_settings: Any = None) -> bool:
         """跑一个单元并落 run_item；返回是否成功（含 HF_* 也算跑成功）。"""
         run_id = int(run["id"])
         case = unit["case"]
@@ -434,18 +455,21 @@ class RunWorker:
 
         if decision is None or spec is None:
             # 决策点/spec 缺：不花调用，直接落 error 行（仍算「跑到」）。
+            # #58：HF_ERROR 也要带 evidence，否则页面上看不到为什么判它错。
+            error_msg = unit.get("specError") or "案例没有可匹配的 spec"
             self.items.upsert(
                 run_id=run_id, case_id=case_id,
                 spec_id=unit.get("specId") or 0, repeat_index=repeat,
                 item={
                     "source": "error",
-                    "errorMsg": unit.get("specError")
-                              or "案例没有可匹配的 spec",
+                    "errorMsg": error_msg,
                     "hardFail": scoring.HF_ERROR, "scoresJson": "{}",
                     "score": None, "kind": None, "amount": None,
                     "optionId": None, "reason": "",
                     "factsJson": "{}",
-                    "promptJson": None, "judgeJson": None,
+                    "promptJson": None,
+                    "judgeJson": json_dumps(
+                        judge.error_judge_json(error_msg)),
                     "durationMs": 0,
                 })
             return False
@@ -476,22 +500,22 @@ class RunWorker:
             "reason": payload.get("reason_full") or payload.get("reason") or "",
             "source": payload.get("source") or "error",
         }
-        # #57：依据维先按退化口径（理由是否支持该动作），要点判定交给 judge 票。
-        score_spec = {**spec, "required_points": []}
-        result = scoring.score_case(
-            spec=score_spec, advice=advice, option_ids=option_ids,
-            pot=decision.pot, matched_points=[],
-            cited_facts=0, wrong_facts=0, repeat_kinds=None)
-
-        judge = {
+        # #58：先让 judge 逐条判要点/幻觉（温度 0、证据留档），再走同一套
+        # scoring 合成——失败时 judge 自己退化成 #57 的规则口径，不伪造 HF。
+        verdict = judge.evaluate(
+            judge_cfg or {}, settings=judge_settings, spec=spec,
+            advice=advice, facts=facts, option_ids=option_ids,
+            timeout=(judge_cfg or {}).get("timeout"))
+        result = judge.score_verdict(
+            verdict, spec=spec, advice=advice, option_ids=option_ids,
+            pot=decision.pot)
+        judge_json = {
+            **verdict,
             "optionIds": option_ids,
-            # #57 依据维先按退化口径（理由是否支持该动作）；要点加权等 judge 票。
-            "reasonMode": "action-support",
-            "matchedPoints": [],
-            "citedFacts": [],
-            "wrongFacts": [],
-            "evidence": _hard_fail_evidence(result["hardFail"], advice,
-                                            option_ids),
+            "evidence": judge.evidence(
+                result["hardFail"], verdict, advice=advice,
+                option_ids=option_ids, spec=spec,
+                error=payload.get("error_msg") or ""),
         }
         prompt_json = None
         if self.settings.store_prompts:
@@ -513,7 +537,7 @@ class RunWorker:
                 "source": payload.get("source") or "error",
                 "factsJson": payload.get("facts_json") or "{}",
                 "promptJson": prompt_json,
-                "judgeJson": json_dumps(judge),
+                "judgeJson": json_dumps(judge_json),
                 "scoresJson": json_dumps(result["scores"]),
                 "score": result["score"],
                 "hardFail": result["hardFail"],
@@ -563,25 +587,12 @@ class RunWorker:
             int(spec_id): bucket_label(spec.get("bucket") or {})
             for spec_id, spec in specs.items() if spec.get("bucket")
         }
-        agg_items: list[dict] = []
-        errors = 0
-        for row in rows:
-            if row.get("source") == "error":
-                errors += 1
-            if int(row["repeat_index"]) != 0:
-                continue
-            agg_items.append({
-                "priority": int(row.get("case_priority") or 0),
-                "bucket": spec_buckets.get(int(row.get("spec_id") or 0)),
-                "score": (float(row["score"])
-                          if row.get("score") is not None else None),
-                "scores": json_load(row.get("scores_json"), {}) or {},
-                "hardFail": row.get("hard_fail") or None,
-            })
         if not bucket_total:
             bucket_total = len(set(spec_buckets.values()))
-        agg = scoring.aggregate(agg_items, bucket_total=bucket_total,
-                                p0_total=p0_total or None)
+        overrides = self.overrides.list(run_id)
+        agg, agg_items, errors = aggregate_rows(
+            rows, spec_buckets=spec_buckets, bucket_total=bucket_total,
+            p0_total=p0_total or None, overrides=overrides)
 
         if canceled:
             status = "partial"
@@ -608,23 +619,74 @@ class RunWorker:
             scored_cases=agg["scored"],
             metrics={**agg, "canceled": canceled,
                      "doneCases": done_cases, "errors": errors,
-                     "units": len(rows)},
+                     "units": len(rows), "overrideCount": len(overrides)},
             error_msg=error_msg,
         )
         log.info("评分运行 #%s 结束 status=%s score=%s scored=%s",
                  run_id, status, agg["score"]["mean"], agg["scored"])
 
 
-def _hard_fail_evidence(code: str | None, advice: dict,
-                        option_ids: list[str]) -> dict:
-    if not code:
-        return {}
-    return {
-        "code": code,
-        "optionId": advice.get("option_id"),
-        "source": advice.get("source"),
-        "optionIds": option_ids,
-    }
+def apply_override(scores: dict, hard_fail: str | None, score: float | None,
+                   override: dict | None) -> tuple[float | None, dict, str | None]:
+    """把人工改判叠加到一次机器判定上；返回 (score, scores, hardFail)。
+
+    只影响展示与聚合：调用方不得把它写回 replay_run_items（原始分不覆盖）。
+    override 的形状与 JudgeOverrideRepository 的 public 行一致。
+    """
+    merged = dict(scores or {})
+    fail = hard_fail or None
+    if not override:
+        return score, merged, fail
+    changed = False
+    given = override.get("scores") or {}
+    for dim in scoring.DIMENSIONS:
+        if dim in given:
+            merged[dim] = given[dim]
+            changed = True
+    if "hardFail" in override:
+        new_fail = override.get("hardFail") or None
+        if new_fail != fail:
+            fail = new_fail
+            changed = True
+    if not changed:
+        return score, merged, fail
+    if score is None and not any(merged.get(dim) is not None
+                                 for dim in scoring.DIMENSIONS):
+        return None, merged, fail
+    total, _weight = scoring.weighted_total(merged)
+    if fail:
+        total = min(total, scoring.HF_CAP)
+    return round(total, 2), merged, fail
+
+
+def aggregate_rows(rows: list[dict], *, spec_buckets: dict[int, str],
+                   bucket_total: int = 0, p0_total: int | None = None,
+                   overrides: dict[int, dict] | None = None
+                   ) -> tuple[dict, list[dict], int]:
+    """run_items（+人工改判）→ 聚合指标；worker 收尾与改判重算共用。"""
+    overrides = overrides or {}
+    agg_items: list[dict] = []
+    errors = 0
+    for row in rows:
+        if row.get("source") == "error":
+            errors += 1
+        if int(row["repeat_index"]) != 0:
+            continue
+        case_id = int(row["case_id"])
+        score = (float(row["score"]) if row.get("score") is not None else None)
+        score, scores, hard_fail = apply_override(
+            json_load(row.get("scores_json"), {}) or {},
+            row.get("hard_fail") or None, score, overrides.get(case_id))
+        agg_items.append({
+            "priority": int(row.get("case_priority") or 0),
+            "bucket": spec_buckets.get(int(row.get("spec_id") or 0)),
+            "score": score,
+            "scores": scores,
+            "hardFail": hard_fail,
+        })
+    agg = scoring.aggregate(agg_items, bucket_total=bucket_total,
+                            p0_total=p0_total or None)
+    return agg, agg_items, errors
 
 
 def _error_payload(message: str) -> dict:

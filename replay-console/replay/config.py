@@ -54,6 +54,19 @@ def _int(value: str | None, default: int, low: int | None = None,
     return out
 
 
+def _judge_timeout(value: str | None) -> float:
+    """REPLAY_JUDGE_TIMEOUT：配错直接炸，不静默退回默认。"""
+    if value is None or not value.strip():
+        return 30.0
+    try:
+        timeout = float(value)
+    except ValueError:
+        raise ValueError(f"REPLAY_JUDGE_TIMEOUT 不是数字：{value!r}") from None
+    if timeout <= 0:
+        raise ValueError("REPLAY_JUDGE_TIMEOUT 必须大于 0")
+    return timeout
+
+
 def _float(value: str | None, default: float | None) -> float | None:
     if value is None or value.strip() == "":
         return default
@@ -180,6 +193,13 @@ class Settings:
     stale_seconds: int = 120
     auto_migrate: bool = True
 
+    # judge（#58）：独立模型 + 温度 0；型号进 judge_version，随 run 冻结。
+    judge_model: str = "deepseek-v4-pro"
+    judge_base_url: str = ""
+    judge_api_key_ref: str = "AI_SERVER_API_KEY"
+    judge_timeout: float = 30.0
+    judge_thinking: str = "disabled"
+
     store_prompts: bool = True
     retention_days: int = 365
     default_repeat: int = 1
@@ -233,6 +253,16 @@ class Settings:
             heartbeat_seconds=_int(os.environ.get("REPLAY_HEARTBEAT_SECONDS"), 10, 2, 120),
             stale_seconds=_int(os.environ.get("REPLAY_STALE_SECONDS"), 120, 10),
             auto_migrate=_truthy(os.environ.get("REPLAY_AUTO_MIGRATE"), True),
+            judge_model=(os.environ.get("REPLAY_JUDGE_MODEL")
+                         or "deepseek-v4-pro").strip(),
+            judge_base_url=(os.environ.get("REPLAY_JUDGE_BASE_URL")
+                            or os.environ.get("AI_SERVER_BASE_URL")
+                            or "").strip(),
+            judge_api_key_ref=(os.environ.get("REPLAY_JUDGE_API_KEY_REF")
+                               or "AI_SERVER_API_KEY").strip(),
+            judge_timeout=_judge_timeout(os.environ.get("REPLAY_JUDGE_TIMEOUT")),
+            judge_thinking=(os.environ.get("REPLAY_JUDGE_THINKING")
+                            or "disabled").strip(),
             store_prompts=_truthy(os.environ.get("REPLAY_STORE_PROMPTS"), True),
             retention_days=_int(os.environ.get("REPLAY_RETENTION_DAYS"), 365, 0),
             default_repeat=_int(os.environ.get("REPLAY_DEFAULT_REPEAT"), 1, 1, 5),
@@ -240,6 +270,13 @@ class Settings:
             log_file=log_file, static_dir=static_dir,
             loaded_env_files=tuple(files),
         )
+        # judge 配置错了必须启动就炸：静默退回默认会让整批评审口径静默变化。
+        if not settings.judge_model:
+            raise ValueError("REPLAY_JUDGE_MODEL 不能为空")
+        if not settings.judge_api_key_ref:
+            raise ValueError("REPLAY_JUDGE_API_KEY_REF 不能为空")
+        if settings.judge_thinking not in ("", "enabled", "disabled"):
+            raise ValueError("REPLAY_JUDGE_THINKING 只能是 enabled / disabled / 空")
         # 便于启动日志说明 DB 配置从哪来（不打印密码）
         settings.callback_env_path = callback_default
         return settings
@@ -264,6 +301,8 @@ class Settings:
             "timeoutSeconds": self.model_timeout,
             "maxCallsPerJob": self.max_calls_per_job,
             "maxQueueDepth": self.max_queue_depth,
+            "judgeModel": self.judge_model,
+            "judgeTimeoutSeconds": self.judge_timeout,
             "storePrompts": self.store_prompts,
             "retentionDays": self.retention_days,
             "defaultRepeat": self.default_repeat,

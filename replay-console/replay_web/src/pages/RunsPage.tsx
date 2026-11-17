@@ -206,6 +206,9 @@ export default function RunsPage() {
             <Descriptions.Item label="预计成本">{costText(estimate.data)}</Descriptions.Item>
             <Descriptions.Item label="判定版本">
               {meta.data?.judgeVersion || '—'} / {meta.data?.reconstructVersion || '—'}
+              {estimate.data.judge ? (
+                <Tag style={{ marginLeft: 6 }}>judge {estimate.data.judge.model}</Tag>
+              ) : null}
             </Descriptions.Item>
           </Descriptions>
         ) : null}
@@ -223,6 +226,15 @@ export default function RunsPage() {
                 我知道这次运行会超过单次上限
               </Checkbox>
             )}
+          />
+        ) : null}
+        {estimate.data && estimate.data.judgeReady === false ? (
+          <Alert
+            type="error"
+            showIcon
+            style={{ marginTop: 8 }}
+            message="判定模型不可用，先配好 REPLAY_JUDGE_*"
+            description={(estimate.data.judge?.blockers || []).map((item) => item.message).join('；')}
           />
         ) : null}
         {estimate.data && !estimate.data.runnable ? (

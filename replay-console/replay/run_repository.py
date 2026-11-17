@@ -118,6 +118,22 @@ class RunRepository:
              scored_cases, json_dumps(metrics) if metrics is not None else None,
              (error_msg or "")[:500], int(run_id))) or 0)
 
+    def update_metrics(self, run_id: int, *, score: float | None = None,
+                       p0_pass_rate: float | None = None,
+                       coverage_rate: float | None = None,
+                       scored_cases: int | None = None,
+                       metrics: dict | None = None) -> int:
+        """人工改判后只重算聚合并回写；不动 status / finished_at。"""
+        return int(self.db.execute(
+            """UPDATE replay_runs
+                  SET score=%s, p0_pass_rate=%s, coverage_rate=%s,
+                      scored_cases=COALESCE(%s, scored_cases),
+                      metrics_json=%s
+                WHERE id=%s""",
+            (score, p0_pass_rate, coverage_rate, scored_cases,
+             json_dumps(metrics) if metrics is not None else None,
+             int(run_id))) or 0)
+
     def recover_interrupted(self) -> int:
         """worker 启动时把上一进程留下的 running 标 partial，不算成功。"""
         return int(self.db.execute(
@@ -305,3 +321,96 @@ class RunItemRepository:
             "durationMs": int(row.get("duration_ms") or 0),
             "createdAt": iso(row.get("created_at")),
         }
+
+class JudgeOverrideRepository:
+    """replay_judge_overrides + replay_judge_override_log（#58 人工改判）。
+
+    原始判定（run_items.judge_json / score）从不被覆盖：这里只存「人工复核后
+    的口径」，聚合与页面展示时优先取它。每次改动都往 log 追加一条，
+    留「谁、什么时候、从什么改成什么」。
+    """
+
+    def __init__(self, db: Database):
+        self.db = db
+
+    @staticmethod
+    def _public(row: dict) -> dict:
+        return {
+            "runId": int(row["run_id"]),
+            "caseId": int(row["case_id"]),
+            "actor": row.get("actor") or "",
+            "note": row.get("note") or "",
+            "scores": json_load(row.get("scores_json"), {}) or {},
+            "hardFail": row.get("hard_fail") or None,
+            "machine": json_load(row.get("source_json"), {}) or {},
+            "createdAt": iso(row.get("created_at")),
+            "updatedAt": iso(row.get("updated_at")),
+        }
+
+    def get(self, run_id: int, case_id: int) -> dict | None:
+        row = self.db.one(
+            "SELECT * FROM replay_judge_overrides"
+            " WHERE run_id=%s AND case_id=%s",
+            (int(run_id), int(case_id)))
+        return self._public(row) if row else None
+
+    def list(self, run_id: int) -> dict[int, dict]:
+        rows = self.db.query(
+            "SELECT * FROM replay_judge_overrides WHERE run_id=%s"
+            " ORDER BY case_id", (int(run_id),))
+        return {int(row["case_id"]): self._public(row) for row in rows}
+
+    def log(self, run_id: int, case_id: int,
+            limit: int = 50) -> list[dict]:
+        rows = self.db.query(
+            "SELECT * FROM replay_judge_override_log"
+            " WHERE run_id=%s AND case_id=%s ORDER BY id DESC LIMIT %s",
+            (int(run_id), int(case_id), int(limit)))
+        return [{
+            "id": int(row["id"]),
+            "actor": row.get("actor") or "",
+            "note": row.get("note") or "",
+            "before": json_load(row.get("before_json"), {}) or {},
+            "after": json_load(row.get("after_json"), {}) or {},
+            "createdAt": iso(row.get("created_at")),
+        } for row in rows]
+
+    def save(self, *, run_id: int, case_id: int, actor: str, note: str,
+             override: dict, before: dict | None) -> dict:
+        self.db.execute(
+            """INSERT INTO replay_judge_overrides
+                   (run_id, case_id, scores_json, hard_fail, actor, note,
+                    source_json)
+               VALUES (%s,%s,%s,%s,%s,%s,%s)
+               ON DUPLICATE KEY UPDATE
+                 scores_json=VALUES(scores_json),
+                 hard_fail=VALUES(hard_fail),
+                 actor=VALUES(actor),
+                 note=VALUES(note),
+                 source_json=VALUES(source_json)""",
+            (int(run_id), int(case_id), json_dumps(override.get("scores") or {}),
+             override.get("hardFail"), (actor or "")[:64], (note or "")[:2000],
+             json_dumps(before) if before is not None else None))
+        self.db.execute(
+            """INSERT INTO replay_judge_override_log
+                   (run_id, case_id, actor, note, before_json, after_json)
+               VALUES (%s,%s,%s,%s,%s,%s)""",
+            (int(run_id), int(case_id), (actor or "")[:64],
+             (note or "")[:2000],
+             json_dumps(before) if before is not None else None,
+             json_dumps(override)))
+        return self.get(run_id, case_id) or {}
+
+    def clear(self, *, run_id: int, case_id: int, actor: str,
+              note: str, before: dict | None) -> None:
+        self.db.execute(
+            "DELETE FROM replay_judge_overrides"
+            " WHERE run_id=%s AND case_id=%s",
+            (int(run_id), int(case_id)))
+        self.db.execute(
+            """INSERT INTO replay_judge_override_log
+                   (run_id, case_id, actor, note, before_json, after_json)
+               VALUES (%s,%s,%s,%s,%s,NULL)""",
+            (int(run_id), int(case_id), (actor or "")[:64],
+             (note or "")[:2000],
+             json_dumps(before) if before is not None else None))
