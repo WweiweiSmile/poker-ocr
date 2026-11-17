@@ -83,6 +83,29 @@ def test_timeline_marks_missing_amount_as_derived():
     assert bet["derived"] is True
 
 
+def test_flags_unknown_action_is_not_ai_diff():
+    """英雄动作缺录（bucket=未知动作）不是「AI 与实际行动分歧」。
+
+    回填出来的决策点 actual 为 None，重新 ingest 时 classify 会写「未知动作」；
+    把它当 AI_DIFF 等于把缺数据算成模型出错。
+    """
+    row = normalize_live_hand(live_rec())
+    analysis = analyze_hand({**row, "id": 0})
+    advices = [
+        {"street": "preflop", "action_index": 3,
+         "option": {"id": "fold", "kind": "fold"},
+         "bucket": "未知动作", "source": "model",
+         "prompt_sha256": "abc", "context": {"opponent_reads": []}},
+    ]
+    mask, details, _score = compute_flags(row, analysis, advices)
+    assert not mask & FLAG_BITS["AI_DIFF"]
+    assert "AI_DIFF" not in details
+
+    advices[0]["bucket"] = "动作不同"
+    mask, details, _score = compute_flags(row, analysis, advices)
+    assert mask & FLAG_BITS["AI_DIFF"]
+
+
 def test_flags_ai_diff_and_prompt_missing():
     row = normalize_live_hand(live_rec())
     analysis = analyze_hand({**row, "id": 0})

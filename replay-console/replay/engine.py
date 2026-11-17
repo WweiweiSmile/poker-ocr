@@ -21,7 +21,9 @@ from poker_ocr.opponent_profile import (
     OpponentRead, PooledStats, TENDENCY_PCT_FIELDS,
 )
 
-from .decisions import DecisionPoint, call_amount, decision_facts
+from .decisions import (
+    UNKNOWN_ACTION, DecisionPoint, call_amount, decision_facts,
+)
 from .util import cards_of
 
 log = logging.getLogger("replay.engine")
@@ -48,7 +50,7 @@ def classify(new_kind: str | None, new_amt: float | None,
     静默算成模型出错，压低一致率。一致率的分母也会剔除这一类。
     """
     if not act_kind:
-        return "未知动作"
+        return UNKNOWN_ACTION
     nk = "raise" if new_kind == "allin" else new_kind
     ak = "raise" if act_kind == "allin" else act_kind
     if nk == ak:

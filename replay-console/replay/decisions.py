@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import dataclasses
+import math
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -28,6 +29,10 @@ INVALID = "invalid"
 APPROX = "approx"
 EXACT = "exact"
 QUALITY_RANK = {INVALID: 0, APPROX: 1, EXACT: 2}
+
+# 英雄动作缺录时的一致率分类：没有可比的动作，所有比较口径都把它排除在外
+# （engine.classify 用它代替「动作不同」，service 的一致率分母剔除它）。
+UNKNOWN_ACTION = "未知动作"
 
 
 def call_amount(to_call: float | None, hero_stack: float | None) -> float:
@@ -338,17 +343,25 @@ class MissingActionPoint:
 
 
 def _as_float(value: object) -> float | None:
-    """advice 来自任意 JSON：非数值一律当缺（fail open，绝不抛）。"""
+    """advice 来自任意 JSON：非数值一律当缺（fail open，绝不抛）。
+
+    NaN / Infinity 也算缺：JSON 里字符串 "NaN" 能转成 float("nan")，而
+    `abs(nan - x) > 0.05` 恒为 False —— 留着会让底池比对静默「对上」。
+    """
     if isinstance(value, bool) or not isinstance(value, (int, float, str)):
         return None
     try:
-        return float(value)
+        number = float(value)
     except (TypeError, ValueError):
         return None
+    return number if math.isfinite(number) else None
 
 
 def _as_int(value: object) -> int | None:
+    """action_index 是动作下标：非整数一律当缺，不做 12.9 → 12 的截断。"""
     if isinstance(value, bool):
+        return None
+    if isinstance(value, float) and not value.is_integer():
         return None
     try:
         return int(value)  # type: ignore[arg-type]

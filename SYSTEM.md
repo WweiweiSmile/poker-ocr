@@ -409,6 +409,8 @@ nv tools/import_case_seed.py --no-migrate          # 加 --dry-run 只预演
 # 把「英雄动作缺录」的线上 advice 回填成决策点（#55；不编造动作，只补缺口）
 nv tools/backfill_advice_decisions.py --dry-run    # 去掉 --dry-run 才写库
 #   --hand-id 1000000000320 只看一手；--no-profiles 不读画像库
+#   --refresh-stale 重算 enrichment 过期的旧批次：flags 还写 INVALID 但决策点已有，
+#                 或时间线 decision 帧的 decisionId 还是 null（一手坏数据不影响其余）
 
 # 策略表（默认 hand-tuned；切换必须用真环境变量，写 .env 不生效）
 nv -m poker_ocr.strategy_tables --profile sourced   # 生效 profile + 每张表来源/是否回落

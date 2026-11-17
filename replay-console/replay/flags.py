@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from typing import Iterable
 
+from .decisions import UNKNOWN_ACTION
 from .util import json_load
 
 FLAG_BITS = {
@@ -89,6 +90,11 @@ def compute_flags(row: dict, analysis,
         if not advice:
             continue
         bucket = advice.get("bucket")
+        # 「未知动作」= 英雄动作没录上，没有可比的动作：既不算分歧，也不再拿
+        # option 去对 actual（actual 本来就是 None）。与一致率分母同口径，
+        # 见 replay/decisions.UNKNOWN_ACTION。
+        if bucket == UNKNOWN_ACTION:
+            continue
         if bucket and bucket not in ("一致", "same"):
             mark("AI_DIFF", f"{decision.street} AI 与实际行动{bucket}")
             break

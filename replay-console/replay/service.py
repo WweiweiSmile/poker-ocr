@@ -25,8 +25,8 @@ from . import case_seed, cases as case_lib, library, specs
 from .config import Settings
 from .db import Database
 from .decisions import (
-    APPROX, EXACT, INVALID, HandAnalysis, analyze_hand, call_amount, cards_of,
-    decision_facts, hand_fingerprint, snapshot_to_dict,
+    APPROX, EXACT, INVALID, UNKNOWN_ACTION, HandAnalysis, analyze_hand,
+    call_amount, cards_of, decision_facts, hand_fingerprint, snapshot_to_dict,
 )
 from .engine import (
     audit, classify, decision_to_public, fmt_option, summarize_version,
@@ -173,9 +173,14 @@ class ReplayService:
     # ─────────────────────────── 基础查询 ───────────────────────────
 
     def analyze(self, row: dict) -> HandAnalysis:
+        advices = row.get("advices") if isinstance(row.get("advices"), list) else None
         key = (int(row.get("id") or 0), iso(row.get("updated_at")),
                row.get("hero_cards"), row.get("board"),
-               bool(row.get("streets")), CURRENT_RECONSTRUCT_VERSION)
+               bool(row.get("streets")), CURRENT_RECONSTRUCT_VERSION,
+               # advices 会改决策点（补「英雄动作缺录」的点），必须进 key：
+               # 先按无 advices 的行算过，再拿带 advices 的行重算会命中旧结果。
+               tuple((str(a.get("street") or ""), a.get("action_index"))
+                     for a in (advices or []) if isinstance(a, dict)))
         with self._lock:
             cached = self._analysis_cache.get(key)
         if cached is not None:
@@ -916,7 +921,7 @@ class ReplayService:
             "issues": errors[:50],
         }
 
-    def refresh_enrichment(self, hand_id: int) -> None:
+    def refresh_enrichment(self, hand_id: int) -> bool:
         """重算时间线 / 标记 / 复盘分（决策点被回填后必须重算，否则 flags 过期）。
 
         get_row 刻意不取 payload_json（大字段），但重建靠 payload 里的 advices
@@ -924,18 +929,33 @@ class ReplayService:
         """
         row = self.hand_repo.get_row(int(hand_id))
         if not row:
-            return
+            return False
         row = dict(row)
         if not isinstance(row.get("advices"), list):
             payload = self.import_repo.get_payload(int(hand_id))
             advices = payload.get("advices") if isinstance(payload, dict) else None
             if isinstance(advices, list):
                 row["advices"] = advices
-        self._apply_enrichment(int(hand_id), row, self.analyze(row))
+        analysis = self.analyze(row)
+        # 时间线里的 decisionId 是详情页从帧跳决策行的唯一线索：ingest 会传
+        # 这份映射，重算不传就会把已物化的帧洗成 null（回填过的手牌全部丢链接）。
+        persisted = self.decision_repo.for_hand(int(hand_id),
+                                                analysis.fingerprint)
+        decision_ids = {
+            (street, int(item.get("action_index") or 0)): int(item["id"])
+            for (street, _seq), item in persisted.items()
+            if item.get("id") is not None
+        }
+        return self._apply_enrichment(int(hand_id), row, analysis,
+                                      decision_ids)
 
     def _apply_enrichment(self, hand_id: int, row: dict, analysis: HandAnalysis,
-                          decision_ids: dict | None = None) -> None:
-        """物化时间线 + 深挖标记；失败不阻塞手牌入库。"""
+                          decision_ids: dict | None = None) -> bool:
+        """物化时间线 + 深挖标记；失败不阻塞手牌入库。
+
+        返回是否写成功：ingest 忽略它（失败也不该拦入库），重算路径要拿它
+        区分「已经补好」和「又失败了」，不能把失败算成已重算。
+        """
         try:
             advices = self.live_advice_repo.list_for_hand(hand_id)
             timeline = build_timeline(row, analysis, advices,
@@ -945,8 +965,10 @@ class ReplayService:
                 hand_id, timeline=timeline, flag_mask=flag_mask,
                 flags=flags, review_score=score,
                 record_schema=str(row.get("record_schema") or "hand.v2"))
+            return True
         except Exception:  # noqa: BLE001
             log.exception("手牌 %s 时间线/标记生成失败；手牌已入库", hand_id)
+            return False
 
     @staticmethod
     def _hero_roster(roster: list[dict], hero_position: str | None) -> list[dict]:
@@ -2985,7 +3007,7 @@ class ReplayService:
                 version["violations"][str(tag)] += 1
         for version in versions.values():
             # 实际动作缺录的决策点记「未知动作」：没有可比的动作，不进分母
-            unknown = version["bucket"].get("未知动作", 0)
+            unknown = version["bucket"].get(UNKNOWN_ACTION, 0)
             scored = max(version["n"] - unknown, 0)
             version["unknown"] = unknown
             version["scored"] = scored

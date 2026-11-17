@@ -47,7 +47,8 @@ for path in (str(ROOT), str(CONSOLE)):
         sys.path.insert(0, path)
 
 from poker_ocr.opponent_profile import load_profile_store  # noqa: E402
-from replay.backfill import fill_decisions  # noqa: E402
+from replay.backfill import (fill_decisions,  # noqa: E402
+                            refresh_stale_enrichment)
 from replay.config import Settings  # noqa: E402
 from replay.db import Database  # noqa: E402
 from replay.decisions import (analyze_hand, hand_to_input,  # noqa: E402
@@ -194,23 +195,11 @@ def main() -> int:
                 continue
             applied.append(entry)
 
-        refreshed = 0
+        stale = {"refreshed": 0, "pending": [], "failed": []}
         if args.refresh_stale:
-            # 历史回填（本行为上线前跑的批次）留下了过期 flags：手牌现在有
-            # 决策点，flags 却还写着 INVALID（典型是「没有 hero 决策点」）。
-            rows = db.query(
-                "SELECT h.id FROM replay_imported_hands h"
-                " WHERE h.deleted_at IS NULL"
-                "   AND h.flags_json LIKE %s"
-                "   AND EXISTS (SELECT 1 FROM replay_decisions d"
-                "                WHERE d.hand_id = h.id)",
-                ('%"INVALID"%',))
-            for row in rows:
-                if args.dry_run:
-                    print(f"  ~ {row['id']} flags 过期，需要重算")
-                else:
-                    service.refresh_enrichment(int(row["id"]))
-                refreshed += 1
+            stale = refresh_stale_enrichment(db, service, dry_run=args.dry_run)
+            for item in stale["failed"]:
+                print(f"  ✗ {item['handId']} REFRESH_ERROR {item['reason']}")
 
         filled = {}
         if not args.dry_run:
@@ -226,8 +215,16 @@ def main() -> int:
                       f"ai={d['actionIndex']} pot={d['pot']} toCall={d['toCall']}")
         for item in skipped:
             print(f"  ✗ {item['handId']} {item['code']} {item['reason']}")
-        if refreshed:
-            print(f"时间线/flags：重算 {refreshed} 手")
+        if args.refresh_stale:
+            if args.dry_run:
+                for hand_id in stale["pending"]:
+                    print(f"  ~ {hand_id} enrichment 过期，需要重算")
+                print(f"时间线/flags：需要重算 {len(stale['pending'])} 手"
+                      "（flags 还写 INVALID，或时间线还没挂 decisionId）")
+            else:
+                print(f"时间线/flags：重算 {stale['refreshed']} 手"
+                      + (f"，失败 {len(stale['failed'])} 手"
+                         if stale["failed"] else ""))
         if filled:
             print(f"canonical/桶：更新 {filled.get('updated', 0)} 行，"
                   f"未映射 {filled.get('unmapped_hand', 0)} 手，"

@@ -355,6 +355,59 @@ def fill_decisions(db: Any, mapping: Mapping | None, *,
 
 # ──────────────────────────── 对账 ────────────────────────────
 
+_STALE_ENRICHMENT_SQL = """
+    SELECT h.id
+      FROM replay_imported_hands h
+     WHERE h.deleted_at IS NULL
+       AND EXISTS (SELECT 1 FROM replay_decisions d WHERE d.hand_id = h.id)
+       AND (h.flags_json LIKE %s OR h.timeline_json LIKE %s)
+     ORDER BY h.id
+"""
+# flags 还停在「没有英雄决策点」，或时间线里的 decision 帧还没挂上 decisionId。
+_STALE_FLAGS_PATTERN = '%"INVALID"%'
+_STALE_TIMELINE_PATTERN = '%"decisionId":null%'
+
+
+def refresh_stale_enrichment(db: Any, service: Any, *,
+                             dry_run: bool = False) -> dict:
+    """重算 enrichment 已经过期的手牌（回填决策点之后）。
+
+    两种过期签名，任一命中就重算：
+
+    - ``flags`` 还写着 ``INVALID``（「没有 hero 决策点」），其实决策点已经有了；
+    - 时间线里的 decision 帧 ``decisionId`` 还是 null（帧是导入时物化的，那时
+      决策点还没落库），详情页因此跳不到决策行。
+
+    只挑签名命中的手牌，不改其它手；重算走 ``refresh_enrichment`` 一条路。
+
+    与回填主循环同一条铁律：一手坏数据不能中断整批 —— 重算要走 analyze / 写
+    timeline，任何一手抛异常只记一行并继续。
+    """
+    rows = db.query(_STALE_ENRICHMENT_SQL,
+                    (_STALE_FLAGS_PATTERN, _STALE_TIMELINE_PATTERN))
+    refreshed = 0
+    pending: list[int] = []
+    failed: list[dict] = []
+    for row in rows:
+        hand_id = int(row["id"])
+        if dry_run:
+            pending.append(hand_id)
+            continue
+        try:
+            ok = service.refresh_enrichment(hand_id)
+        except Exception as exc:  # noqa: BLE001 —— 一手坏数据不能中断整批
+            log.exception("重算手牌 %s 的时间线/flags 失败", hand_id)
+            failed.append({"handId": hand_id,
+                           "reason": f"{type(exc).__name__}: {exc}"})
+            continue
+        if not ok:
+            failed.append({"handId": hand_id,
+                           "reason": "ENRICHMENT_FAILED 时间线写库失败（见日志）"})
+            continue
+        refreshed += 1
+    return {"refreshed": refreshed, "pending": pending, "failed": failed}
+
+
 def collect_stats(db: Any) -> dict:
     by_source = {str(r["source"]): int(r["n"])
                  for r in db.query(_SOURCES_BY_SOURCE_SQL)}

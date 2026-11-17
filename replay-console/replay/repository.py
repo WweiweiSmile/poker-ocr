@@ -1075,7 +1075,11 @@ class LiveAdviceRepository:
 
     def link_decision(self, hand_id: int, street: str, action_index: int,
                       decision_id: int) -> int:
-        """把线上建议行挂到决策点；只补空挂，绝不覆盖已有 decision_id。"""
+        """把线上建议行挂到决策点；只补空挂，绝不覆盖已有 decision_id。
+
+        street 列宽 10、取值只有 preflop/flop/turn/river，截断对这四个值无影响，
+        只为不因脏值让 UPDATE 抛错（脏值本来就匹配不到行）。
+        """
         return int(self.db.execute(
             """UPDATE replay_live_advices SET decision_id=%s
                 WHERE hand_id=%s AND street=%s AND action_index=%s

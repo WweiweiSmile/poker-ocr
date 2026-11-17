@@ -173,6 +173,53 @@ def test_advices_read_from_payload_json_row():
     assert hand_fingerprint(h) == hand_fingerprint(hand_to_input({**row, "payload_json": "{}"}))
 
 
+def test_fractional_action_index_is_not_truncated():
+    """advice 的 action_index 是下标：12.9 不能悄悄变成 12（会挂错决策点）。"""
+    analysis = analyze_hand(hand(advices=[advice("river", 12.9, 16.0, 0.0)]))
+    assert analysis.decision_count == 4
+    assert not any(d.backfilled for d in analysis.decisions)
+
+
+def test_refresh_stale_continues_after_a_bad_hand():
+    """一手坏数据不能让整批重算停摆（fail open，与回填主循环同一条）。"""
+    from replay.backfill import refresh_stale_enrichment
+
+    class DB:
+        def query(self, sql, params=()):
+            assert "INVALID" in params[0]
+            assert "决定" not in params[1]       # 参数就是两个 SQL 模式
+            assert params[1] == '%"decisionId":null%'
+            return [{"id": 1}, {"id": 2}, {"id": 3}]
+
+    class Service:
+        def __init__(self):
+            self.seen = []
+
+        def refresh_enrichment(self, hand_id):
+            if hand_id == 2:
+                raise RuntimeError("boom")
+            self.seen.append(hand_id)
+            return hand_id != 3                  # 3 = 写库失败但不抛
+
+    service = Service()
+    out = refresh_stale_enrichment(DB(), service)
+    assert service.seen == [1, 3]
+    assert out["refreshed"] == 1             # 3 没写成功，不能算已重算
+    assert [item["handId"] for item in out["failed"]] == [2, 3]
+
+    dry = refresh_stale_enrichment(DB(), Service(), dry_run=True)
+    assert dry["pending"] == [1, 2, 3]
+    assert dry["refreshed"] == 0
+
+
+def test_nan_advice_values_are_treated_as_missing():
+    """字符串 "NaN" 能转成 float("nan")，比对时恒「不超容差」——必须当缺。"""
+    data = hand(advices=[advice("river", 12, "NaN", "NaN")])
+    analysis = analyze_hand(data)
+    assert analysis.decision_count == 4
+    assert not any(d.backfilled for d in analysis.decisions)
+
+
 def test_refresh_enrichment_reads_advices_from_payload():
     """get_row 不取 payload_json，重算时必须自己把 advices 补进 row。
 
@@ -191,20 +238,36 @@ def test_refresh_enrichment_reads_advices_from_payload():
         def get_payload(self, hand_id):
             return {"advices": snapshot}
 
+    class DecisionRepo:
+        def for_hand(self, hand_id, fingerprint=None):
+            return {
+                ("preflop", 1): {"id": 11, "action_index": 3},
+                ("river", 2): {"id": 12, "action_index": 12},
+                ("river", 3): {"id": None, "action_index": 13},
+            }
+
     seen = {}
+
+    class Analysis:
+        fingerprint = "fp"
 
     def fake_analyze(row):
         seen["advices"] = row.get("advices")
-        return "analysis"
+        return Analysis()
 
     def fake_apply(hand_id, row, analysis, decision_ids=None):
-        seen["applied"] = (hand_id, analysis)
+        seen["applied"] = (hand_id, analysis, decision_ids)
 
     service.hand_repo = HandRepo()
     service.import_repo = ImportRepo()
+    service.decision_repo = DecisionRepo()
     service.analyze = fake_analyze
     service._apply_enrichment = fake_apply
 
     service.refresh_enrichment(7)
     assert seen["advices"] == snapshot
-    assert seen["applied"] == (7, "analysis")
+    hand_id, analysis, decision_ids = seen["applied"]
+    assert hand_id == 7
+    assert analysis is seen["applied"][1]
+    # 帧里的 decisionId 只能从这份映射来；重算不传会把时间线洗成 null。
+    assert decision_ids == {("preflop", 3): 11, ("river", 12): 12}
