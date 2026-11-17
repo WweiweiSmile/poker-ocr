@@ -124,6 +124,11 @@ class FakeService:
         self._check()
         return {"items": [{"id": 1, "source": "review", "status": "succeeded"}]}
 
+    def create_case(self, payload):
+        self._check()
+        self.calls.append(("create_case", payload))
+        return {"created": True, "case": {"id": 1, **payload}}
+
     def delete_hands(self, payload):
         self._check()
         self.calls.append(("delete_hands", payload))
@@ -318,6 +323,23 @@ def test_delete_hands_routes(client):
 
     empty = test_client.post("/api/hands/delete", json={"handIds": []})
     assert empty.status_code == 422
+
+
+def test_create_case_route(client):
+    test_client, fake = client
+    response = test_client.post("/api/cases", json={
+        "canonicalId": 2000000000001, "decisionKey": "flop:2", "specId": 7,
+        "priority": 0, "note": "顶对强踢不该弃牌",
+    })
+    assert response.status_code == 200
+    assert response.json()["created"] is True
+    call = fake.calls[-1]
+    assert call[0] == "create_case"
+    assert call[1]["decisionKey"] == "flop:2"
+    assert call[1]["priority"] == 0
+
+    missing = test_client.post("/api/cases", json={"canonicalId": 1})
+    assert missing.status_code == 422
 
 
 def test_ingest_and_experiment_routes(client):

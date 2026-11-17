@@ -19,7 +19,7 @@ from typing import Any, Iterable
 from poker_ocr.advice import build_situation
 from poker_ocr.advice import AISettings
 
-from . import specs
+from . import library, specs
 from .config import Settings
 from .db import Database
 from .decisions import (
@@ -34,10 +34,13 @@ from .importer import (
     SOURCE_LABELS, SOURCE_LIVE, SOURCE_REVIEW, normalize_live_hand,
     parse_hand_text,
 )
+from .canonical import CANONICAL_HAND_ID_BASE
 from .repository import (
     HAND_SOURCE_DB, HAND_SOURCE_LABELS, HAND_SOURCE_LIVE, HAND_SOURCE_REVIEW,
-    DecisionMarkRepository, DecisionRepository, ExperimentRepository,
-    HandRepository, HandSetRepository, ImportBatchRepository, JobRepository,
+    IMPORTED_HAND_ID_BASE, CaseRepository, CanonicalHandRepository,
+    DecisionMarkRepository,
+    DecisionRepository, ExperimentRepository, HandRepository,
+    HandSetRepository, ImportBatchRepository, JobRepository,
     LiveAdviceRepository, MarkRepository, PairReviewRepository,
     ResultRepository, SpotSpecRepository, VersionRepository,
 )
@@ -93,6 +96,46 @@ def _parse_date(value: Any) -> dt.datetime | None:
         return None
 
 
+def _group_filters(query: dict) -> dict:
+    """把 URL 查询串解析成 `library.matches_filters` 需要的形状。"""
+    source_values = {library.LEGACY_SOURCES.get(s.lower())
+                     for s in _as_list(query.get("source"))}
+    source_values.discard(None)
+    flag_names = parse_flags(query.get("flags"))
+    try:
+        min_score = (int(query["minScore"])
+                     if query.get("minScore") not in (None, "") else None)
+    except (TypeError, ValueError):
+        min_score = None
+    try:
+        not_run_days = (int(query["notRunDays"])
+                        if query.get("notRunDays") not in (None, "") else None)
+    except (TypeError, ValueError):
+        not_run_days = None
+    buckets = {}
+    for dimension in library.DIMENSIONS:
+        values = {v for v in _as_list(query.get(dimension)) if v}
+        if values:
+            buckets[dimension] = values
+    return {
+        "favorite": _parse_bool(query.get("favorite")),
+        "sources": source_values,
+        "positions": {p.upper() for p in _as_list(query.get("position"))},
+        "results": {p.lower() for p in _as_list(query.get("result"))},
+        "tags": [t.lower() for t in _as_list(query.get("tag"))],
+        "qualities": {q.lower() for q in _as_list(query.get("quality"))},
+        "hasRun": _parse_bool(query.get("hasRun")),
+        "hasCase": _parse_bool(query.get("hasCase")),
+        "flagMask": mask_for(flag_names),
+        "minScore": min_score,
+        "keyword": str(query.get("keyword") or "").strip().lower(),
+        "dateFrom": _parse_date(query.get("dateFrom")),
+        "dateTo": _parse_date(query.get("dateTo")),
+        "notRunDays": not_run_days,
+        "buckets": buckets,
+    }
+
+
 def _median_or_none(values: list[float]) -> float | None:
     m = median(values)
     return round(m, 1) if m is not None else None
@@ -122,6 +165,8 @@ class ReplayService:
         self.hand_set_repo = HandSetRepository(db, settings.console_user_id)
         self.spec_repo = SpotSpecRepository(db)
         self.pair_review_repo = PairReviewRepository(db, settings.console_user_id)
+        self.canonical_repo = CanonicalHandRepository(db)
+        self.case_repo = CaseRepository(db)
 
     # ─────────────────────────── 基础查询 ───────────────────────────
 
@@ -347,33 +392,214 @@ class ReplayService:
     # ─────────────────────────── 手牌库 ───────────────────────────
 
     def list_hands(self, query: dict) -> dict:
-        rows = self.hand_repo.list_rows()
-        analyses = {int(r["id"]): self.analyze(r) for r in rows}
-        last_runs = self._last_run_map([int(r["id"]) for r in rows])
-        filtered = self._filter_rows(rows, analyses, last_runs, query)
-        filtered = self._sort_rows(filtered, analyses, last_runs,
-                                   query.get("sort") or "created_at",
-                                   query.get("order") or "desc")
+        """手牌库列表：以 canonical 为一行，同内容多来源合并展示。
+
+        旧实现把 1058 条手牌的全列（含 streets/villains/table_roster）拖回来，
+        再逐手重建成 1082 个 HandAnalysis；远程 MySQL 上首屏要 9–15 秒。
+        现在只读轻量列 + 决策聚合（约 2.6 秒），来源边由 canonical 表给出。
+        """
+        rows = self.hand_repo.list_light_rows()
+        rows_by_id = {int(r["id"]): r for r in rows}
+        visible_keys = {(library.canonical_source(r), int(r["id"])) for r in rows}
+        groups = library.build_groups(
+            self.canonical_repo.list_all(),
+            self.canonical_repo.all_sources(),
+            visible_keys)
+        stats, buckets = self._decision_index()
+        case_counts = self.case_repo.counts_by_canonical()
+        last_runs = self._last_run_map(
+            [int(s["source_hand_id"]) for g in groups for s in g["visibleSources"]])
+        filters = _group_filters(query)
+
+        items = []
+        for group in groups:
+            item = self._group_item(group, rows_by_id, stats, buckets,
+                                    case_counts, last_runs)
+            if library.matches_filters(item, filters):
+                items.append(item)
+        items.sort(key=lambda g: library.sort_value(
+            g, str(query.get("sort") or "created_at").lower()),
+            reverse=(str(query.get("order") or "desc").lower() != "asc"))
+
         page = max(1, int(query.get("page") or 1))
         page_size = min(200, max(1, int(query.get("pageSize")
                                        or self.settings.default_page_size)))
-        total = len(filtered)
-        page_rows = filtered[(page - 1) * page_size: page * page_size]
-        duplicate_groups = self._duplicate_groups(rows)
-        items = []
-        for row in page_rows:
-            hand_id = int(row["id"])
-            items.append(self._row_item(
-                row, analyses[hand_id], last_runs.get(hand_id),
-                duplicate_groups.get(hand_id)))
         return {
-            "total": total,
+            "total": len(items),
+            "handTotal": sum(int(i.get("sourceCount") or 0) for i in items),
             "page": page,
             "pageSize": page_size,
-            "items": items,
+            "items": items[(page - 1) * page_size: page * page_size],
             "filters": query,
             "tagOptions": self._tag_options(rows),
         }
+
+    def _decision_index(self) -> tuple[dict[int, dict],
+                                       dict[int, dict[str, set[str]]]]:
+        """canonical 决策数 / approx 数 / 七桶取值，一次轻量查询算完。"""
+        grouped: dict[int, list[dict]] = {}
+        for row in self.decision_repo.canonical_decisions():
+            grouped.setdefault(int(row["canonical_id"]), []).append(row)
+        stats: dict[int, dict] = {}
+        buckets: dict[int, dict[str, set[str]]] = {}
+        for cid, rows in grouped.items():
+            stats[cid], buckets[cid] = library.decision_stats(rows)
+        return stats, buckets
+
+    def _advices_for_source(self, hand_id: int, row: dict) -> list[dict]:
+        """线上建议优先读 replay_live_advices（有 prompt/raw 的规范表）；
+        旧记录没有拆表时，再回退 payload_json 里的 advices。"""
+        try:
+            live_rows = self.live_advice_repo.list_for_hand(hand_id)
+        except Exception:  # noqa: BLE001
+            log.exception("读取线上建议失败；回退 payload")
+            live_rows = []
+        advices = [self._advice_public(advice) for advice in live_rows]
+        if not advices and row.get("source") in (HAND_SOURCE_LIVE,
+                                                 HAND_SOURCE_REVIEW):
+            payload = self.import_repo.get_payload(hand_id)
+            value = payload.get("advices") if isinstance(payload, dict) else None
+            if isinstance(value, list):
+                advices = [self._advice_public(a) for a in value
+                           if isinstance(a, dict)]
+        return advices
+
+    def _source_item(self, source: dict, rows_by_id: dict[int, dict],
+                     *, detail: bool = False) -> dict:
+        """列表与详情共用的单来源摘要；详情多带复盘只读字段。"""
+        source_id = int(source["source_hand_id"])
+        row = rows_by_id.get(source_id) or {}
+        name = str(source.get("source") or "")
+        item = {
+            **library.group_source_item(source, source_id),
+            "canonicalSource": name,
+            "sourceLabel": library.SOURCE_LABELS.get(name, name),
+            "title": row.get("title")
+            or self._default_title({**row, "id": source_id}),
+            "result": row.get("result") or "unknown",
+            "resultAmount": row.get("result_amount"),
+            "createdAt": iso(row.get("created_at")),
+        }
+        if detail:
+            item.update({
+                "heroThought": row.get("hero_thought"),
+                "analyzeStatus": row.get("analyze_status"),
+                "reviewScore": int(row.get("review_score") or 0),
+                "mark": self._mark(row),
+                "advices": self._advices_for_source(source_id, row),
+            })
+        else:
+            item["externalId"] = row.get("external_id")
+        return item
+
+    def _group_item(self, group: dict, rows_by_id: dict[int, dict],
+                    stats: dict[int, dict],
+                    buckets: dict[int, dict[str, set[str]]],
+                    case_counts: dict[int, int],
+                    last_runs: dict[int, dict]) -> dict:
+        canonical_id = (int(group["canonicalId"])
+                        if group.get("canonicalId") else None)
+        canonical = group["canonical"]
+        sources = [s for s in group["visibleSources"]
+                   if int(s["source_hand_id"]) in rows_by_id]
+        if not sources:
+            sources = group["visibleSources"]
+        representative = next(
+            (s for s in sources if int(s["source_hand_id"])
+             == int(group["representative"]["source_hand_id"])),
+            sources[0])
+        hand_id = int(representative["source_hand_id"])
+        row = rows_by_id.get(hand_id) or {}
+        stat = (stats.get(canonical_id) if canonical_id else None) or {
+            "count": 0, "approx": 0, "quality": "invalid"}
+        bucket_values = (buckets.get(canonical_id) if canonical_id else None) or {}
+
+        marks = [self._mark(r) for r in
+                 (rows_by_id.get(int(s["source_hand_id"])) or {}
+                  for s in sources)]
+        favorite = any(m["favorite"] for m in marks)
+        mark_tags: list[str] = []
+        for mark in marks:
+            for tag in mark["tags"]:
+                if tag not in mark_tags:
+                    mark_tags.append(tag)
+        source_items = [self._source_item(source, rows_by_id)
+                        for source in sources]
+        run_items = [(last_runs.get(int(s["source_hand_id"])), int(
+            s["source_hand_id"])) for s in sources]
+        latest_run = None
+        for run, _sid in run_items:
+            if run and (latest_run is None or
+                        (run.get("at") or "") > (latest_run.get("at") or "")):
+                latest_run = run
+        flags: dict = {}
+        flag_mask = 0
+        review_score = 0
+        for source in sources:
+            source_row = rows_by_id.get(int(source["source_hand_id"])) or {}
+            flag_mask |= int(source_row.get("flag_mask") or 0)
+            review_score = max(review_score,
+                               int(source_row.get("review_score") or 0))
+            for name, value in (json_load(source_row.get("flags_json"), {})
+                                or {}).items():
+                flags.setdefault(name, value)
+        hand = {
+            "id": hand_id,
+            "canonicalId": canonical_id,
+            "groupSize": len(sources),
+            "sourceCount": len(sources),
+            "sources": source_items,
+            "source": row.get("source") or HAND_SOURCE_DB,
+            "sourceLabel": library.SOURCE_LABELS.get(
+                str(representative.get("source") or ""), ""),
+            "canonicalSource": str(representative.get("source") or ""),
+            "externalId": row.get("external_id"),
+            "importBatchId": row.get("batch_id"),
+            "title": row.get("title") or canonical.get("title")
+            or self._default_title({**row, "id": hand_id}),
+            "heroCards": row.get("hero_cards")
+            or canonical.get("hero_cards") or "",
+            "board": row.get("board") or canonical.get("board") or "",
+            "boardByStreet": split_board(row.get("board")
+                                         or canonical.get("board")),
+            "heroPosition": row.get("hero_position")
+            or canonical.get("hero_position"),
+            "tableSize": int(row.get("table_size") or 0),
+            "heroStackBb": row.get("hero_stack_bb"),
+            "bombPotBb": row.get("bomb_pot_bb") or 0,
+            "bombPot": bool(row.get("bomb_pot_bb")),
+            "result": row.get("result") or "unknown",
+            "resultAmount": row.get("result_amount"),
+            "potType": row.get("pot_type"),
+            "heroTags": json_load(row.get("hero_tags"), []) or [],
+            "favorite": favorite,
+            "markTags": mark_tags,
+            "markStatus": marks[0]["status"] if marks else "todo",
+            "markNote": marks[0]["note"] if marks else "",
+            "decisionCount": int(stat["count"]),
+            "approxCount": int(stat["approx"]),
+            "quality": stat["quality"],
+            "warnings": [],
+            "invalidReason": None,
+            "duplicate": len(sources) > 1,
+            "duplicateIds": [int(s["source_hand_id"]) for s in sources],
+            "fingerprint": canonical.get("content_group") or "",
+            "hasRun": latest_run is not None,
+            "lastRun": latest_run,
+            "lastRunAt": (latest_run or {}).get("at"),
+            "flagMask": flag_mask,
+            "flags": flags,
+            "reviewScore": review_score,
+            "caseCount": int(case_counts.get(canonical_id) or 0)
+            if canonical_id else 0,
+            "buckets": {name: sorted(values)
+                        for name, values in bucket_values.items()},
+            "bucketChips": library.bucket_values(bucket_values),
+            "createdAt": iso(row.get("created_at")),
+            "updatedAt": iso(row.get("updated_at")),
+            "userId": row.get("user_id"),
+        }
+        return hand
 
     def _tag_options(self, rows: list[dict]) -> list[str]:
         tags = set(DEFAULT_TAGS)
@@ -865,35 +1091,128 @@ class ReplayService:
             "bucket": advice.get("bucket"),
         }
 
+    def _canonical_for_hand(self, hand_id: int) -> tuple[dict | None,
+                                                         list[dict]]:
+        """源手牌 id 或 canonical id → (canonical 行, 全部来源边)。"""
+        hand_id = int(hand_id)
+        if hand_id >= CANONICAL_HAND_ID_BASE:
+            canonical = self.canonical_repo.get(hand_id)
+            if canonical is None:
+                return None, []
+            return canonical, self.canonical_repo.sources(hand_id)
+        edges = self.canonical_repo.for_hand(hand_id)
+        want = "live" if hand_id >= IMPORTED_HAND_ID_BASE else "review"
+        edge = next((e for e in edges if str(e.get("source")) == want),
+                    edges[0] if edges else None)
+        if edge is None:
+            return None, []
+        canonical = self.canonical_repo.get(int(edge["canonical_id"]))
+        if canonical is None:
+            return None, []
+        return canonical, self.canonical_repo.sources(int(edge["canonical_id"]))
+
+    def resolve_hand_id(self, hand_id: int) -> int:
+        """canonical id → 可读的源手牌 id（瀑布流/对比等旧路由用）。"""
+        hand_id = int(hand_id)
+        if hand_id < CANONICAL_HAND_ID_BASE:
+            return hand_id
+        _canonical, sources = self._canonical_for_hand(hand_id)
+        for source in sources:
+            source_id = int(source["source_hand_id"])
+            if self.hand_repo.get_row(source_id) is not None:
+                return source_id
+        raise ApiError("HAND_NOT_FOUND",
+                       f"手牌 {hand_id} 没有可见来源", 404)
+
+    def _dedupe_source_decisions(self, rows: list[dict],
+                                 source_order: dict[int, int]) -> dict:
+        """同一决策点被多个来源各写一行时，取来源优先级最高的那一行。"""
+        out: dict[tuple[str, int], dict] = {}
+        for row in rows:
+            hand_id = int(row.get("hand_id") or 0)
+            rank = source_order.get(hand_id)
+            if rank is None:
+                continue
+            key = (str(row.get("street")), int(row.get("seq") or 0))
+            current = out.get(key)
+            if current is None or rank < source_order.get(
+                    int(current.get("hand_id") or 0), 99):
+                out[key] = row
+        return out
+
     def get_hand(self, hand_id: int) -> dict:
-        row = self.hand_repo.get_row(hand_id)
-        if row is None:
-            raise ApiError("HAND_NOT_FOUND", f"手牌 {hand_id} 不存在或已删除", 404)
+        """详情：canonical 维度并列全部来源，决策点时间线以代表来源重建。"""
+        hand_id = int(hand_id)
+        canonical, sources = self._canonical_for_hand(hand_id)
+        source_rows: dict[int, dict] = {}
+        visible: list[dict] = []
+        for source in sources:
+            source_id = int(source["source_hand_id"])
+            source_row = self.hand_repo.get_row(source_id)
+            if source_row is not None:
+                source_rows[source_id] = source_row
+                visible.append(source)
+        if canonical is not None and not visible:
+            raise ApiError("HAND_NOT_FOUND",
+                           f"手牌 {hand_id} 的来源都已删除或隐藏", 404)
+        if canonical is None:
+            row = self.hand_repo.get_row(hand_id)
+            if row is None:
+                raise ApiError("HAND_NOT_FOUND",
+                               f"手牌 {hand_id} 不存在或已删除", 404)
+            source_rows = {hand_id: row}
+            canonical = {"id": None, "content_group": None,
+                         "hero_cards": row.get("hero_cards"),
+                         "board": row.get("board"),
+                         "hero_position": row.get("hero_position"),
+                         "title": row.get("title")}
+            visible = [{"source": library.canonical_source(row),
+                        "source_hand_id": hand_id, "is_primary": 1}]
+        representative = next((s for s in visible if s.get("is_primary")),
+                              visible[0])
+        representative_id = int(representative["source_hand_id"])
+        row = source_rows[representative_id]
         analysis = self.analyze(row)
-        # 线上建议优先读 replay_live_advices（有 prompt/raw 的规范表）；
-        # 旧记录没有拆表时，再回退 payload_json 里的 advices。
-        try:
-            live_rows = self.live_advice_repo.list_for_hand(hand_id)
-        except Exception:  # noqa: BLE001
-            log.exception("读取线上建议失败；回退 payload")
-            live_rows = []
-        advices: list[dict] = [
-            self._advice_public(item) for item in live_rows
-        ]
-        if not advices and row.get("source") in (HAND_SOURCE_LIVE,
-                                                 HAND_SOURCE_REVIEW):
-            payload = self.import_repo.get_payload(hand_id)
-            value = payload.get("advices") if isinstance(payload, dict) else None
-            if isinstance(value, list):
-                advices = [self._advice_public(a) for a in value
-                           if isinstance(a, dict)]
-        all_rows = self.hand_repo.list_rows()
-        analyses = {int(r["id"]): self.analyze(r) for r in all_rows}
-        dup_groups = self._duplicate_groups(all_rows)
-        last_runs = self._last_run_map([hand_id])
-        item = self._row_item(row, analysis, last_runs.get(hand_id),
-                              dup_groups.get(hand_id))
-        persisted = self.decision_repo.for_hand(hand_id, analysis.fingerprint)
+        canonical_id = canonical.get("id")
+
+        source_order = {int(s["source_hand_id"]): index
+                        for index, s in enumerate(visible)}
+        if canonical_id:
+            persisted = self._dedupe_source_decisions(
+                self.decision_repo.for_canonical(int(canonical_id)),
+                source_order)
+        else:
+            persisted = self.decision_repo.for_hand(
+                representative_id, analysis.fingerprint)
+
+        stats, bucket_index = library.decision_stats(persisted.values())
+        stats_map = ({int(canonical_id): stats} if canonical_id else {})
+        case_rows: list[dict] = []
+        bucket_map = ({int(canonical_id): bucket_index} if canonical_id else {})
+        last_runs = self._last_run_map(list(source_order))
+        group = {
+            "canonicalId": canonical_id,
+            "canonical": canonical,
+            "sources": visible,
+            "visibleSources": visible,
+            "representative": representative,
+        }
+        item = self._group_item(group, source_rows, stats_map, bucket_map,
+                                {}, last_runs)
+        if canonical_id:
+            case_rows = (self.case_repo.list_for_canonical(int(canonical_id))
+                         if canonical_id else [])
+            item["caseCount"] = len(case_rows)
+
+        # 多来源并列：每个来源的原始摘要 + 复盘记录（只读展示）。
+        source_details = [self._source_item(source, source_rows, detail=True)
+                          for source in visible]
+        item["sources"] = source_details
+        item["sourceCount"] = len(source_details)
+        item["groupSize"] = len(source_details)
+
+        advices = self._advices_for_source(representative_id, row)
+
         raw_streets = json_load(row.get("streets"), []) or []
         streets = self._streets_public(raw_streets, analysis)
         decision_ids = [int(p["id"]) for p in persisted.values()
@@ -904,23 +1223,23 @@ class ReplayService:
             p = persisted.get((d.street, d.seq))
             mark = marks.get(int(p["id"])) if p and p.get("id") is not None else None
             decisions.append(self._decision_public(d, p, mark))
-        dup_items = []
-        for other in (dup_groups.get(hand_id) or []):
-            if int(other) == hand_id:
-                continue
-            other_row = next((r for r in all_rows if int(r["id"]) == int(other)), None)
-            if other_row:
-                dup_items.append({
-                    "id": int(other),
-                    "title": other_row.get("title") or self._default_title(other_row),
-                    "createdAt": iso(other_row.get("created_at")),
-                })
+        duplicates = [{
+            "id": source["handId"],
+            "title": source["title"],
+            "createdAt": source["createdAt"],
+        } for source in source_details if source["handId"] != item["id"]]
+        cases = [self._case_public(case) for case in
+                 (case_rows if canonical_id else [])]
         return {
             "hand": item,
+            "canonical": (self.canonical_public(canonical, source_details)
+                          if canonical_id else None),
+            "sources": source_details,
+            "cases": cases,
             "streets": streets,
             "decisions": decisions,
             "advices": advices,
-            "duplicates": dup_items,
+            "duplicates": duplicates,
             "mark": self._mark(row),
             "reconstruction": {
                 "quality": analysis.quality,
@@ -935,8 +1254,95 @@ class ReplayService:
             },
         }
 
+    def canonical_public(self, canonical: dict, sources: list[dict]) -> dict:
+        return {
+            "id": int(canonical["id"]),
+            "contentGroup": canonical.get("content_group"),
+            "primarySource": canonical.get("primary_source"),
+            "heroCards": canonical.get("hero_cards") or "",
+            "board": canonical.get("board") or "",
+            "heroPosition": canonical.get("hero_position"),
+            "startedAt": iso(canonical.get("started_at")),
+            "sourceCount": len(sources),
+        }
+
+    def _case_public(self, case: dict) -> dict:
+        spec = None
+        if case.get("spec_id"):
+            try:
+                spec = self.spec_repo.get(int(case["spec_id"]))
+            except Exception:  # noqa: BLE001 - spec 被删也应能显示案例
+                spec = None
+        return {
+            "id": int(case["id"]),
+            "caseSetId": int(case["case_set_id"]),
+            "caseSetName": case.get("set_name"),
+            "caseSetRevision": case.get("set_revision"),
+            "frozen": bool(case.get("set_frozen_at")),
+            "canonicalId": int(case["canonical_id"]),
+            "decisionKey": case.get("decision_key"),
+            "specId": int(case["spec_id"]) if case.get("spec_id") else None,
+            "specName": (spec or {}).get("name"),
+            "priority": int(case.get("priority") or 0),
+            "p0": int(case.get("priority") or 0) == 0,
+            "status": case.get("status") or "draft",
+            "note": case.get("note") or "",
+            "overrides": json_load(case.get("overrides_json"), {}) or {},
+            "createdAt": iso(case.get("created_at")),
+        }
+
+    def create_case(self, payload: dict) -> dict:
+        """从详情页某个决策点建一条案例（第 1 期最小可用；集/冻结在 #55）。"""
+        canonical_id = payload.get("canonicalId")
+        decision_key = str(payload.get("decisionKey") or "").strip()
+        spec_id = payload.get("specId")
+        if not canonical_id:
+            raise ApiError("INVALID_CASE", "建案例需要 canonicalId", 422)
+        if not re.fullmatch(r"(preflop|flop|turn|river):\d+", decision_key):
+            raise ApiError("INVALID_CASE",
+                           "decisionKey 形如 flop:2（街道:seq）", 422)
+        if not spec_id:
+            raise ApiError("SPEC_REQUIRED", "建案例需要选择一个期望（spec）", 422)
+        canonical = self.canonical_repo.get(int(canonical_id))
+        if canonical is None:
+            raise ApiError("HAND_NOT_FOUND",
+                           f"canonical {canonical_id} 不存在", 404)
+        spec = self.spec_repo.get(int(spec_id))
+        if spec is None:
+            raise ApiError("SPEC_NOT_FOUND", f"期望 {spec_id} 不存在", 404)
+        keys = {library.decision_key(row.get("street"), row.get("seq"))
+                for row in self.decision_repo.for_canonical(int(canonical_id))}
+        if decision_key not in keys:
+            # 旧重建只写了加工后的决策点、没落 replay_decisions；用代表来源
+            # 重放一次确认时间线上确有这个点，避免“页面上有、点建案例 404”。
+            for edge in self.canonical_repo.sources(int(canonical_id)):
+                row = self.hand_repo.get_row(int(edge["source_hand_id"]))
+                if row is None:
+                    continue
+                rebuilt = self.analyze(row)
+                if decision_key in {library.decision_key(d.street, d.seq)
+                                    for d in rebuilt.decisions}:
+                    break
+            else:
+                raise ApiError("DECISION_NOT_FOUND",
+                               f"决策点 {decision_key} 不在这手牌上", 404)
+        priority = (int(payload["priority"])
+                    if payload.get("priority") is not None else 1)
+        case, created = self.case_repo.create(
+            canonical_id=int(canonical_id), decision_key=decision_key,
+            spec_id=int(spec_id),
+            case_set_id=(int(payload["caseSetId"])
+                         if payload.get("caseSetId") else None),
+            priority=priority,
+            overrides=payload.get("overrides") if isinstance(
+                payload.get("overrides"), dict) else None,
+            note=str(payload.get("note") or ""))
+        case = self.case_repo.get_by_id(int(case["id"])) or case
+        return {"created": created, "case": self._case_public(case)}
+
     def hand_replay(self, hand_id: int) -> dict:
         """瀑布流/牌桌共用的帧序列。优先读 ingest 时物化的 timeline。"""
+        hand_id = self.resolve_hand_id(hand_id)
         row = self.hand_repo.get_row(hand_id)
         if row is None:
             raise ApiError("HAND_NOT_FOUND", f"手牌 {hand_id} 不存在或已删除", 404)
@@ -1105,6 +1511,12 @@ class ReplayService:
                          mark: dict | None = None) -> dict:
         return {
             "id": persisted.get("id") if persisted else None,
+            "canonicalId": (persisted.get("canonical_id") if persisted else None),
+            "decisionKey": library.decision_key(d.street, d.seq),
+            "buckets": ({dimension: persisted.get(dimension)
+                         for dimension in library.DIMENSIONS
+                         if persisted.get(dimension) not in (None, "")}
+                        if persisted else {}),
             "street": d.street,
             "seq": d.seq,
             "actionIndex": d.action_index,
@@ -2652,6 +3064,7 @@ class ReplayService:
         return True
 
     def hand_comparison(self, hand_id: int, query: dict) -> dict:
+        hand_id = self.resolve_hand_id(hand_id)
         row = self.hand_repo.get_row(hand_id)
         if row is None:
             raise ApiError("HAND_NOT_FOUND", f"手牌 {hand_id} 不存在或已删除", 404)
@@ -2838,10 +3251,12 @@ class ReplayService:
     # ─────────────────────────── meta / health ───────────────────────────
 
     def meta(self) -> dict:
-        rows = self.hand_repo.list_rows()
+        # 只读轻量列：meta 在每次页面加载时都要，不能为了 source 计数把
+        # 1058 条 streets 全拖回来（远程库上那是 9 秒）。
+        rows = self.hand_repo.list_light_rows()
         total = len(rows)
         favorite = sum(1 for r in rows if r.get("mark_favorite"))
-        source_counts = Counter((r.get("source") or HAND_SOURCE_DB) for r in rows)
+        source_counts = Counter(library.canonical_source(r) for r in rows)
         versions = self.version_repo.list(False)
         last_job = self.job_repo.list(page=1, page_size=1)[1]
         defaults = {"versionIds": [], "repeat": self.settings.default_repeat}
@@ -2868,12 +3283,11 @@ class ReplayService:
             },
             "tags": self._tag_options(rows),
             "handSources": [
-                {"value": source,
-                 "label": HAND_SOURCE_LABELS.get(source, source),
+                {"value": source, "label": library.SOURCE_LABELS[source],
                  "count": source_counts.get(source, 0)}
-                for source in (HAND_SOURCE_DB, HAND_SOURCE_REVIEW,
-                               HAND_SOURCE_LIVE)
+                for source in ("review", "live", "synthetic")
             ],
+            "buckets": library.meta_vocab(),
             "markStatuses": list(MARK_STATUSES),
             "runStatuses": list(RUN_STATUSES),
             "limits": {

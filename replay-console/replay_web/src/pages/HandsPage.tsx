@@ -10,7 +10,7 @@ import {
   ThunderboltOutlined, UploadOutlined,
 } from '@ant-design/icons'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useNavigate, useSearchParams } from 'react-router-dom'
+import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import dayjs from 'dayjs'
 import { api, errorMessage, toQuery } from '../api'
 import type { HandDeleteResult, HandsPage, HandSet, HandSetList, HandSummary, Meta } from '../types'
@@ -265,18 +265,18 @@ export default function HandsPage() {
                 </Tooltip>
               ) : null}
               {hand.duplicate ? (
-                <Tooltip title={`与 ${hand.duplicateIds.filter((id) => id !== hand.id).join(', ')} 内容重复`}>
-                  <Tag className="mini-tag" color="purple">重复</Tag>
+                <Tooltip title={`同内容共 ${hand.groupSize || hand.sourceCount || 2} 条来源：${(hand.sources || []).map((item) => `#${item.handId} ${item.sourceLabel}`).join(' · ')}`}>
+                  <Tag className="mini-tag" color="purple">同组 {hand.groupSize || hand.sourceCount} 条</Tag>
                 </Tooltip>
               ) : null}
             </div>
             <div className="hand-cell-sub mono">
               #{hand.id}
-              {hand.source !== 'db' ? (
-                <Tag className="mini-tag source-tag" color={SOURCE_COLORS[hand.source] || 'default'}>
-                  {hand.sourceLabel}
+              {(hand.sources?.length ? hand.sources : [{ source: hand.source, sourceLabel: hand.sourceLabel }]).map((source, index) => (
+                <Tag key={`${source.source}-${index}`} className="mini-tag source-tag" color={SOURCE_COLORS[source.source] || 'default'}>
+                  {source.sourceLabel}
                 </Tag>
-              ) : null}
+              ))}
               {hand.externalId ? <span className="hand-external-id">{hand.externalId}</span> : null}
             </div>
           </div>
@@ -408,8 +408,10 @@ export default function HandsPage() {
   ]
 
   const selectedIds = selected.map(Number)
-  const activeFilterCount = ['favorite', 'source', 'position', 'result', 'tag', 'hasRun', 'quality', 'keyword',
-    'dateFrom', 'dateTo', 'flags', 'minScore'].filter((key) => searchParams.get(key)).length
+  const activeFilterCount = ['favorite', 'source', 'position', 'result', 'tag', 'hasCase', 'hasRun',
+    'quality', 'keyword', 'dateFrom', 'dateTo', 'flags', 'minScore',
+    ...(meta.data?.buckets || []).map((bucket) => bucket.key)]
+    .filter((key) => searchParams.get(key)).length
   const favoriteCount = meta.data?.favoriteCount ?? 0
   const maxCalls = meta.data?.limits.maxCallsPerJob || 2000
 
@@ -533,6 +535,20 @@ export default function HandsPage() {
           </div>
 
           <div className="filter-field">
+            <label>已有案例</label>
+            <Select
+              allowClear
+              placeholder="全部"
+              value={searchParams.get('hasCase') || undefined}
+              onChange={(value) => setFilter('hasCase', value)}
+              options={[
+                { value: '1', label: '已建案例' },
+                { value: '0', label: '还没案例' },
+              ]}
+            />
+          </div>
+
+          <div className="filter-field">
             <label>标签</label>
             <Select
               mode="multiple"
@@ -573,6 +589,20 @@ export default function HandsPage() {
               ]}
             />
           </div>
+
+          {(meta.data?.buckets || []).map((dimension) => (
+            <div className="filter-field" key={dimension.key}>
+              <label>{dimension.label}</label>
+              <Select
+                mode="multiple"
+                allowClear
+                placeholder="全部"
+                value={(searchParams.get(dimension.key) || '').split(',').filter(Boolean)}
+                onChange={(value) => setFilter(dimension.key, value)}
+                options={dimension.options}
+              />
+            </div>
+          ))}
 
           <div className="filter-field">
             <label>深挖标记</label>
@@ -642,7 +672,8 @@ export default function HandsPage() {
         <div className="library-main">
           <div className="table-toolbar">
             <div className="table-summary">
-              共 <strong>{hands.data?.total ?? 0}</strong> 手
+              共 <strong>{hands.data?.total ?? 0}</strong> 组
+              {hands.data?.handTotal ? <span className="muted"> / {hands.data.handTotal} 手来源</span> : null}
               {selectedIds.length ? <span className="select-summary"> · 已选 {selectedIds.length}</span> : null}
             </div>
             <div className="table-summary-muted">
@@ -658,6 +689,34 @@ export default function HandsPage() {
               columns={columns}
               size="middle"
               scroll={{ x: 980 }}
+              expandable={{
+                rowExpandable: (hand) => (hand.sources?.length || 0) > 1,
+                expandedRowRender: (hand) => (
+                  <div className="source-expand">
+                    {(hand.sources || []).map((source) => (
+                      <div className="source-expand-row"
+                           key={`${source.source}-${source.handId}`}>
+                        <Tag className="mini-tag"
+                             color={SOURCE_COLORS[source.source] || 'default'}>
+                          {source.sourceLabel}
+                        </Tag>
+                        <span className="mono">#{source.handId}</span>
+                        {source.primary
+                          ? <Tag className="mini-tag" color="blue">主来源</Tag> : null}
+                        <span className="source-expand-title">{source.title}</span>
+                        <span className="muted">
+                          {source.resultAmount !== null && source.resultAmount !== undefined
+                            ? formatBB(source.resultAmount) : '—'}
+                        </span>
+                        <Link to={`/hands/${source.handId}`}
+                              onClick={(event) => event.stopPropagation()}>
+                          查看该来源
+                        </Link>
+                      </div>
+                    ))}
+                  </div>
+                ),
+              }}
               rowSelection={{
                 selectedRowKeys: selected,
                 onChange: setSelected,
@@ -668,7 +727,7 @@ export default function HandsPage() {
                 pageSize: hands.data?.pageSize || pageSize,
                 total: hands.data?.total || 0,
                 showSizeChanger: true,
-                showTotal: (total) => `共 ${total} 手`,
+                showTotal: (total) => `共 ${total} 组`,
                 pageSizeOptions: [20, 50, 100],
               }}
               onChange={onTableChange}

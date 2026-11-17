@@ -147,6 +147,18 @@ class HandDelete(APIModel):
     handIds: list[int] = Field(min_length=1, max_length=1000)
 
 
+class CaseCreate(APIModel):
+    """从详情页某决策点建一条实例案例（第 1 期最小可用）。"""
+
+    canonicalId: int
+    decisionKey: str = Field(min_length=3, max_length=48)
+    specId: int
+    caseSetId: int | None = None
+    priority: int = Field(1, ge=0, le=9)
+    overrides: dict[str, Any] | None = None
+    note: str | None = Field(default=None, max_length=255)
+
+
 class VersionCreate(APIModel):
     name: str | None = None
     provider: str = "deepseek"

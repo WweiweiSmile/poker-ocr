@@ -20,7 +20,7 @@ from .db import Database
 from .errors import ApiError
 from .runner import Runner
 from .schemas import (
-    DecisionMark, ExperimentCreate, ExperimentOutcome, ExperimentRun,
+    CaseCreate, DecisionMark, ExperimentCreate, ExperimentOutcome, ExperimentRun,
     HandDelete, HandSetCreate, HandSetItems, HandSetPatch, ImportHands,
     IngestHands, MarkPatch, PairReviewPatch, RunCreate, RunPreview,
     SpecPatch, SpecWrite, VersionClone, VersionCreate, VersionMetaPatch,
@@ -235,6 +235,11 @@ def create_app(settings: Settings | None = None,
     @app.post("/api/hands/delete")
     def delete_hands(body: HandDelete, request: Request):
         return service(request).delete_hands(
+            body.model_dump(exclude_unset=True))
+
+    @app.post("/api/cases")
+    def create_case(body: CaseCreate, request: Request):
+        return service(request).create_case(
             body.model_dump(exclude_unset=True))
 
     @app.get("/api/imports")

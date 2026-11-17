@@ -19,8 +19,70 @@ export interface LastRun {
   repeat: number
 }
 
+export interface HandSource {
+  source: 'review' | 'live' | 'synthetic' | string
+  canonicalSource: string
+  sourceHandId: number
+  handId: number
+  label: string
+  sourceLabel: string
+  primary: boolean
+  visible: boolean
+  title: string
+  result: string
+  resultAmount: number | null
+  createdAt: string | null
+  heroThought: string | null
+  analyzeStatus: string | null
+  reviewScore: number
+  mark: Mark
+  advices?: HandAdvice[]
+}
+
+export interface BucketOption {
+  value: string
+  label: string
+}
+
+export interface BucketDimension {
+  key: string
+  label: string
+  options: BucketOption[]
+}
+
+export interface CaseItem {
+  id: number
+  caseSetId: number
+  caseSetName: string | null
+  caseSetRevision: number | null
+  frozen: boolean
+  canonicalId: number
+  decisionKey: string
+  specId: number | null
+  specName: string | null
+  priority: number
+  p0: boolean
+  status: string
+  note: string
+  overrides: Record<string, unknown>
+  createdAt: string | null
+}
+
 export interface HandSummary {
   id: number
+  // 多来源并列：canonicalId 为同一手牌的内容组 id；旧单行手牌可能为 null。
+  canonicalId?: number | null
+  canonicalSource?: string
+  groupSize?: number
+  sourceCount?: number
+  sources?: HandSource[]
+  caseCount?: number
+  buckets?: Record<string, string[]>
+  bucketChips?: {
+    dimension: string
+    label: string
+    values: { value: string; label: string }[]
+  }[]
   source: 'db' | 'review' | 'live' | string
   sourceLabel: string
   externalId: string | null
@@ -92,6 +154,9 @@ export interface DecisionMeta {
   actual: ActualAction
   review?: DecisionReview | null
   snapshot?: Record<string, unknown>
+  canonicalId?: number | null
+  decisionKey?: string
+  buckets?: Record<string, string>
 }
 
 export interface StreetAction {
@@ -160,8 +225,22 @@ export interface HandAdvice {
   } | null
 }
 
+export interface CanonicalHand {
+  id: number
+  contentGroup: string | null
+  primarySource: string | null
+  heroCards: string
+  board: string
+  heroPosition: string | null
+  startedAt: string | null
+  sourceCount: number
+}
+
 export interface HandDetail {
   hand: HandSummary
+  canonical?: CanonicalHand | null
+  sources?: HandSource[]
+  cases?: CaseItem[]
   streets: StreetBlock[]
   decisions: DecisionMeta[]
   // 导入实时日志时并入手牌的「当时 AI 建议」；旧记录没有该字段。
@@ -476,6 +555,7 @@ export interface Meta {
   }
   tags: string[]
   handSources?: { value: string; label: string; count: number }[]
+  buckets?: BucketDimension[]
   markStatuses: string[]
   runStatuses: RunStatus[]
   limits: {
@@ -490,6 +570,7 @@ export interface Meta {
 
 export interface HandsPage {
   total: number
+  handTotal?: number
   page: number
   pageSize: number
   items: HandSummary[]

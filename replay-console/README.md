@@ -28,7 +28,7 @@
 
 | 设计目标 | 实现 |
 | --- | --- |
-| G1 一个入口看全部可重跑手牌 | 手牌库：底牌/公共牌/位置/筹码/结果/决策点数/最近重跑/爆炸底池标记；筛选、分页、排序、URL 可分享 |
+| G1 一个入口看全部可重跑手牌 | 手牌库：按 canonical 归组，同内容多来源显示「同组 N 条」并可展开并列查看；底牌/公共牌/位置/筹码/结果/决策点数/最近重跑/爆炸底池标记；七桶维度筛选、分页、排序、URL 可分享 |
 | G2 任意一手牌逐街看多版本建议 | 手牌详情：行动街时间线、D1/D2 锚点、每决策点实际动作 + N 个版本的 option/amount/reason/重复分布 |
 | G3 收藏典型手牌并一键全部重跑 | 星标收藏、标签、结论、状态；收藏夹一键重跑；选中多手/当前筛选批量重跑 |
 | G4 结果永久可追溯 | 每条结果关联版本快照（模型、采样参数、中文 lean prompt_version、advice_version、桌风 sha、engine commit）与任务快照；旧 `skills`/`lean-rules` 版本只读 |
@@ -39,6 +39,8 @@
 
 - **重建质量分级**：`exact` / `approx` / `invalid`，页面徽标 + 原因；
 - **手牌导入**：手牌库支持导入两种来源——**复盘手牌**（`review_hands` 导出的 JSON/JSONL）和**实时日志手牌记录**（`hands.json` 或 `live.states.jsonl`）；自动识别、预览计数、按内容幂等去重；
+- **多来源并列**：同一手牌在复盘/实时/构造三边各有一条源记录时，列表与详情都按 canonical 并列展示，复盘来源的结论只读；
+- **从决策点建案例**：详情页每条决策点都可建一条案例（选期望/P0-P2/备注），案例集、冻结与 seed 留给 #55；
 - **删除手牌**：列表行内、勾选批量、详情页均可删除；导入手牌软删除（重新导入可恢复），`review_hands` 手牌仅在控制台隐藏，不修改生产业务表；
 - **去重**：按手牌内容指纹识别；批量任务默认跳过重复，保留较新的一手；
 - **成本与时间预估**：调用单元、预计耗时、超过单任务上限需显式确认；
@@ -153,7 +155,7 @@ replay-console/
 
 数据表：`replay_versions`、`replay_jobs`、`replay_job_hands`、`replay_decisions`、`replay_results`、`replay_marks`、`replay_imported_hands`、`replay_import_batches`、`replay_hand_deletions`、`replay_spot_specs`、`replay_canonical_hands`、`replay_hand_sources`、`replay_case_sets`、`replay_cases`、`replay_runs`、`replay_run_items`、`replay_judge_overrides`、`replay_schema_migrations`。全部是逻辑外键，不修改 `review_hands`。
 
-canonical 手牌：一手牌可以在复盘（`review`）、实时（`live`）、构造（`synthetic`）三边各有一条源记录（`replay_hand_sources`），同内容（底牌相同 + 公共牌相同 + 发生时间差 ≤ 30 分钟）的源记录挂到同一个 `replay_canonical_hands.id` 上，并列保存、互不覆盖。`primary_source` 默认 `review > live > synthetic`，可人工切换；`content_group` 是 `sha1(底牌|公共牌|日期)` 的归组键。归组规则在 `replay/canonical.py`（纯逻辑），SQL 读写与 primary 切换在 `repository.CanonicalHandRepository`（逐条自动提交，不开显式事务；中途失败只会留下无源记录的空 canonical 行，不影响读路径）。案例/运行五张表（`replay_case_sets`、`replay_cases`、`replay_runs`、`replay_run_items`、`replay_judge_overrides`）已建空表，第 2 期才接线。
+canonical 手牌：一手牌可以在复盘（`review`）、实时（`live`）、构造（`synthetic`）三边各有一条源记录（`replay_hand_sources`），同内容（底牌相同 + 公共牌相同 + 发生时间差 ≤ 30 分钟）的源记录挂到同一个 `replay_canonical_hands.id` 上，并列保存、互不覆盖。`primary_source` 默认 `review > live > synthetic`，可人工切换；`content_group` 是 `sha1(底牌|公共牌|日期)` 的归组键。归组规则在 `replay/canonical.py`（纯逻辑），SQL 读写与 primary 切换在 `repository.CanonicalHandRepository`（逐条自动提交，不开显式事务；中途失败只会留下无源记录的空 canonical 行，不影响读路径）。案例表（`replay_case_sets`、`replay_cases`）已接最小写路径：详情页每个决策点可建案例，默认落在「待整理」案例集；案例集页、批量建案例、冻结与 seed 仍属 #55。运行/判定三张表（`replay_runs`、`replay_run_items`、`replay_judge_overrides`）仍是空表，第 2 期接线。
 
 ---
 
@@ -201,14 +203,15 @@ canonical 手牌：一手牌可以在复盘（`review`）、实时（`live`）�
 | --- | --- | --- |
 | GET | `/api/meta` | 手牌数、收藏数、版本数、默认版本/重复、健康摘要 |
 | GET | `/api/health` | DB、review_hands、AI Key、worker、队列、schema |
-| GET | `/api/hands` | 筛选/分页/排序（`favorite`, `source`, `position`, `result`, `tag`, `hasRun`, `quality`, `keyword`, `dateFrom`, `dateTo`, `page`, `pageSize`） |
+| GET | `/api/hands` | 按 canonical 归组的手牌库；`total` 是组数、`handTotal` 是可见源手牌数。筛选/分页/排序：`favorite`, `source`(review/live/synthetic), `position`, `result`, `tag`, `hasRun`, `hasCase`, `flags`, `minScore`, `quality`, `keyword`, `dateFrom`, `dateTo`, `notRunDays`, 七桶 `street`/`position_bucket`/`hand_tier`/`board_texture`/`pot_type`/`facing`/`opponent_profile`, `page`, `pageSize`, `sort`, `order`；每行带 `sources[]`、`groupSize`、`buckets`、`caseCount` |
 | POST | `/api/hands/import` | 导入复盘/实时手牌；先 `dryRun=true` 预览，再落库 |
 | GET | `/api/imports` | 最近导入批次（来源、计数、状态、错误） |
-| GET | `/api/hands/{id}` | 详情 + 行动街 + 决策点元数据 |
-| GET | `/api/hands/{id}/comparison` | `versionIds=1,2&jobId=...` 多版本对比 |
+| GET | `/api/hands/{id}` | 详情 + 行动街 + 决策点元数据；`id` 可传 canonical id 或任一源手牌 id，返回 `canonical`、`sources`（含只读复盘结论）、`cases` |
+| GET | `/api/hands/{id}/comparison` | `versionIds=1,2&jobId=...` 多版本对比（同样接受 canonical id） |
 | PATCH | `/api/hands/{id}/mark` | 收藏/标签/状态/结论 |
 | DELETE | `/api/hands/{id}` | 删除单只手牌（导入手牌软删除；review_hands 仅隐藏） |
 | POST | `/api/hands/delete` | 批量删除，body `{"handIds":[1,2]}`，最多 1000 手 |
+| POST | `/api/cases` | 从决策点建案例：`{canonicalId, decisionKey:"flop:2", specId, caseSetId?, priority?, overrides?, note?}`；返回 `{created, case}`，已存在则返回已有案例 |
 | GET | `/api/versions` | 版本列表（`includeArchived=1`） |
 | POST | `/api/versions` | 新建 |
 | POST | `/api/versions/import-env` | 从当前 `.env` + `.table_dy` 导入 |
@@ -238,7 +241,7 @@ canonical 手牌：一手牌可以在复盘（`review`）、实时（`live`）�
 {"error": {"code": "VERSION_STALE", "message": "…", "detail": {}}}
 ```
 
-常见错误码：`HAND_NOT_FOUND`、`VERSION_NOT_FOUND`、`VERSION_ARCHIVED`、`VERSION_STALE`、`INVALID_VERSION_CONFIG`、`AI_KEY_MISSING`、`TOO_MANY_CALLS`、`JOB_QUEUE_FULL`、`JOB_NOT_CANCELABLE`、`DB_UNAVAILABLE`、`EXPORT_EMPTY`。
+常见错误码：`HAND_NOT_FOUND`、`INVALID_CASE`、`DECISION_NOT_FOUND`、`CASE_SET_NOT_FOUND`、`CASE_SET_FROZEN`、`SPEC_REQUIRED`、`VERSION_NOT_FOUND`、`VERSION_ARCHIVED`、`VERSION_STALE`、`INVALID_VERSION_CONFIG`、`AI_KEY_MISSING`、`TOO_MANY_CALLS`、`JOB_QUEUE_FULL`、`JOB_NOT_CANCELABLE`、`DB_UNAVAILABLE`、`EXPORT_EMPTY`。
 
 期望库错误码：`INVALID_SPEC`、`INVALID_SPEC_SCHEMA`、`INVALID_SPEC_BUCKET`、`INVALID_SPEC_DIMENSION`、`INVALID_SPEC_VALUE`、`INVALID_SPEC_ACTION`、`INVALID_SPEC_SIZING`、`INVALID_SPEC_FREQ`、`INVALID_SPEC_POINT`、`INVALID_SPEC_STATUS`、`INVALID_SPEC_DIFF`、`SPEC_NOT_FOUND`、`SPEC_NAME_TAKEN`、`SPEC_NAME_IMMUTABLE`、`SPEC_NOT_LATEST`、`SPEC_ACTIVE`、`SPEC_REVISION_CONFLICT`。
 
@@ -269,7 +272,7 @@ curl -s http://127.0.0.1:8010/api/hands/import \
 - `allowInvalid=false`（默认）：跳过缺底牌/行动线/bb 的不可重跑手牌；
 - `includePartial` / `includeMidHand`：仅实时日志，保留截断手牌/翻后接管手牌。
 
-落库后，导入手牌使用 `1e12` 起的独立 id 段，和 `review_hands` 一起出现在手牌库；来源筛选区分 **复盘库 / 导入·复盘 / 导入·实时**。收藏、决策点、重跑结果与原生手牌共用同一套 `replay_*` 表。
+落库后，导入手牌使用 `1e12` 起的独立 id 段，和 `review_hands` 一起出现在手牌库；来源筛选按 canonical 来源分为 **复盘 / 实时 / 构造**，同内容多来源在列表显示「同组 N 条」、详情并列。收藏、决策点、重跑结果与原生手牌共用同一套 `replay_*` 表。
 
 详细字段映射与样例见 [`docs/导入手牌-格式说明.md`](docs/导入手牌-格式说明.md)。
 

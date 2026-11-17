@@ -599,3 +599,118 @@ h1, h2, h3, p { margin: 0; }
 
 .pair-prompt-grid { display: grid; grid-template-columns: 1fr; gap: 10px; }
 .pair-prompt-grid .prompt-pre.small { max-height: 28vh; font-size: 11px; }
+
+/* 手牌库 #53：多来源并列 / 决策点时间线 / 案例 */
+.sources-card,
+.cases-card,
+.timeline-card { margin-bottom: 16px; }
+
+.sources-card .card-title,
+.cases-card .card-title,
+.timeline-card .card-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.source-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.source-item {
+  border: 1px solid var(--border, #e5e7eb);
+  border-radius: 10px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  background: var(--panel, #fff);
+}
+
+.source-item.primary { border-color: #d4a017; }
+
+.source-item-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.source-item-title { font-weight: 600; }
+.source-item-meta { display: flex; gap: 12px; color: #6b7280; font-size: 12px; }
+.source-item-readonly {
+  background: var(--panel-muted, #f8fafc);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.readonly-label { font-size: 11px; letter-spacing: .04em; color: #6b7280; text-transform: uppercase; }
+.star-inline { color: #d4a017; }
+
+.case-list { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+.case-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 13px; }
+
+.timeline-list { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+.timeline-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  border: 1px solid var(--border, #e5e7eb);
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+.timeline-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; flex: 1 1 420px; }
+.timeline-buckets { max-width: 100%; }
+
+/* 手牌库列表：展开同一 canonical 的多个来源 */
+.source-expand {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 4px 8px 8px 36px;
+}
+
+.source-expand-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12.5px;
+}
+
+.source-expand-title {
+  color: var(--text-2, #555);
+}
+
+.source-expand-row .muted {
+  color: var(--text-3, #8a8a8a);
+  margin-left: auto;
+}
+
+.source-advices {
+  margin-top: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.source-advice {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.source-advice-reason {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 260px;
+}
