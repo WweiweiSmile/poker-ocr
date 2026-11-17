@@ -978,3 +978,90 @@ export interface ExperimentPairs {
     p0Regressions: number
   }
 }
+
+// ─────────────── 期望库（spot spec） ───────────────
+
+export interface SpecOption {
+  value: string | number
+  label: string
+}
+
+export interface SpecDimension {
+  key: string
+  label: string
+  values: SpecOption[]
+}
+
+export interface SpecMeta {
+  schema: string
+  dimensions: SpecDimension[]
+  actions: SpecOption[]
+  sizingUnits: SpecOption[]
+  statuses: SpecOption[]
+}
+
+export interface SpecBand {
+  unit: string
+  min: number
+  max: number
+}
+
+export interface SpecFreq {
+  action: string
+  min: number
+  max: number
+}
+
+export interface SpecPoint {
+  key: string
+  text: string
+  weight?: number
+}
+
+export interface SpotSpec {
+  id: number
+  name: string
+  revision: number
+  status: 'draft' | 'active'
+  schema: string
+  bucket: Record<string, Array<string | number>>
+  bucketLabel: string
+  allowedActions: string[]
+  forbiddenActions: string[]
+  sizing: SpecBand[] | SpecBand | null
+  freq: SpecFreq | null
+  requiredPoints: SpecPoint[]
+  forbiddenPoints: SpecPoint[]
+  rationale: string
+  note: string
+  supersedes: number | null
+  createdAt: string | null
+  revisionCount: number | null
+  activeRevisionId: number | null
+}
+
+export interface SpotSpecList {
+  items: SpotSpec[]
+  total: number
+}
+
+export interface SpotSpecHistory {
+  name: string
+  items: SpotSpec[]
+}
+
+export interface SpecChange {
+  section: 'bucket' | 'actions' | 'sizing' | 'freq' | 'points' | 'rationale'
+  kind: 'added' | 'removed' | 'changed'
+  label: string
+  field?: string
+  key?: string
+  before: unknown
+  after: unknown
+}
+
+export interface SpecDiff {
+  from: SpotSpec | null
+  to: SpotSpec
+  changes: SpecChange[]
+}

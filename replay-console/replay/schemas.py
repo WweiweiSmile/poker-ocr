@@ -90,6 +90,37 @@ class HandSetItems(APIModel):
     expect: dict[str, Any] | None = None
 
 
+class SpecWrite(APIModel):
+    """创建 / 派生期望（§4.1）。
+
+    `extra="forbid"` 是刻意的：非法维度键、`min_n` 之类门槛字段必须 422，
+    不能静默丢弃。嵌套的 bucket/sizing/freq 由 `replay.specs` 做词表校验。
+    """
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    schema_version: str | None = Field(default=None, alias="schema")
+    name: str | None = Field(default=None, max_length=120)
+    status: Literal["draft", "active"] = "draft"
+    note: str | None = Field(default=None, max_length=2000)
+    bucket: Any = None
+    allowedActions: list[str] | None = None
+    forbiddenActions: list[str] | None = None
+    sizing: Any = None
+    freq: Any = None
+    requiredPoints: list[dict[str, Any]] | None = None
+    forbiddenPoints: list[dict[str, Any]] | None = None
+    rationale: str | None = Field(default=None, max_length=4000)
+
+
+class SpecPatch(APIModel):
+    """期望只允许改状态；改内容必须走新 revision。"""
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    status: Literal["draft", "active"]
+
+
 class PairReviewPatch(APIModel):
     preferred: Literal["A", "B", "same", "unsure"]
     tags: list[str] | None = None

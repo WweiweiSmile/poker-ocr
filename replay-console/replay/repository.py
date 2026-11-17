@@ -1594,3 +1594,81 @@ class ResultRepository:
                WHERE created_at < DATE_SUB(NOW(3), INTERVAL %s DAY)
                  AND (prompt_system IS NOT NULL OR prompt_user IS NOT NULL
                       OR raw_response IS NOT NULL)""", (days,))
+
+
+# ─────────────────────────── 期望库（spot spec） ───────────────────────────
+
+_SPEC_CHAIN = """
+       (SELECT COUNT(*) FROM replay_spot_specs x
+         WHERE x.name = s.name) AS revision_count,
+       (SELECT x.id FROM replay_spot_specs x
+         WHERE x.name = s.name AND x.status = 'active'
+         ORDER BY x.revision DESC LIMIT 1) AS active_revision_id"""
+
+
+class SpotSpecRepository:
+    """`replay_spot_specs` 的读写：revision 只增不改，旧行只读。"""
+
+    def __init__(self, db: Database):
+        self.db = db
+
+    def create(self, *, name: str, revision: int, status: str,
+               content: dict, note: str | None,
+               supersedes: int | None) -> int:
+        bucket = content["bucket"]
+        spec = {key: value for key, value in content.items()
+                if key != "bucket"}
+        try:
+            return self.db.execute(
+                """INSERT INTO replay_spot_specs
+                     (name, revision, status, bucket_json, spec_json, note,
+                      supersedes)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+                (name, revision, status, json_dumps(bucket),
+                 json_dumps(spec), note or None, supersedes))
+        except IntegrityError as exc:
+            raise ApiError(
+                "SPEC_REVISION_CONFLICT",
+                f"期望 {name} 的 revision {revision} 已存在（并发保存？请重试）",
+                409) from exc
+
+    def get(self, spec_id: int) -> dict | None:
+        return self.db.one(
+            f"SELECT s.*,{_SPEC_CHAIN} FROM replay_spot_specs s "
+            "WHERE s.id=%s", (spec_id,))
+
+    def latest(self, name: str) -> dict | None:
+        return self.db.one(
+            f"SELECT s.*,{_SPEC_CHAIN} FROM replay_spot_specs s "
+            "WHERE s.name=%s ORDER BY s.revision DESC LIMIT 1", (name,))
+
+    def by_name(self, name: str) -> list[dict]:
+        return self.db.query(
+            f"SELECT s.*,{_SPEC_CHAIN} FROM replay_spot_specs s "
+            "WHERE s.name=%s ORDER BY s.revision DESC", (name,))
+
+    def list_latest(self) -> list[dict]:
+        return self.db.query(
+            f"""SELECT s.*,{_SPEC_CHAIN}
+                  FROM replay_spot_specs s
+                  JOIN (SELECT name, MAX(revision) AS revision
+                          FROM replay_spot_specs GROUP BY name) m
+                    ON m.name = s.name AND m.revision = s.revision
+                 ORDER BY s.name""")
+
+    def activate(self, spec_id: int, name: str) -> int:
+        """把该 revision 置 active，同名的旧 active 退回 draft（单条 SQL）。"""
+        return self.db.execute(
+            """UPDATE replay_spot_specs
+                  SET status = CASE WHEN id = %s THEN 'active' ELSE 'draft' END
+                WHERE name = %s AND (id = %s OR status = 'active')""",
+            (spec_id, name, spec_id))
+
+    def set_status(self, spec_id: int, status: str) -> int:
+        return self.db.execute(
+            "UPDATE replay_spot_specs SET status=%s WHERE id=%s",
+            (status, spec_id))
+
+    def delete(self, spec_id: int) -> int:
+        return self.db.execute(
+            "DELETE FROM replay_spot_specs WHERE id=%s", (spec_id,))

@@ -138,18 +138,19 @@ replay-console/
 │   ├── importer.py            # 复盘 / 实时日志手牌 → 统一内部行
 │   ├── versioning.py          # 版本不可变配置哈希 / advice_version / 桌风
 │   ├── engine.py              # 规则审计、动作分类、模型调用重试、重复分布聚合
+│   ├── specs.py               # 场景期望 §4.1 词表 / 校验 / revision diff（纯逻辑）
 │   ├── repository.py          # review_hands 只读 + 导入手牌 + replay_* 读写
 │   ├── service.py             # 手牌库/导入/详情/版本/任务/对比/导出/健康
 │   ├── runner.py              # DB 队列 worker + 线程池 + 断点恢复
 │   ├── worker.py              # 可选独立 worker 进程
 │   ├── api.py                 # FastAPI 路由 + SPA 托管
 │   ├── schemas.py             # 请求体
-│   └── migrations/001_init.sql, 002_imported_hands.sql, 003_hand_deletions.sql
+│   └── migrations/001_init.sql … 011_*.sql, 012_spot_specs.sql
 ├── replay_web/                # React + Vite + AntD
 └── tests/                     # 决策点 / 引擎 / 版本 / API / 提示词 golden
 ```
 
-数据表：`replay_versions`、`replay_jobs`、`replay_job_hands`、`replay_decisions`、`replay_results`、`replay_marks`、`replay_imported_hands`、`replay_import_batches`、`replay_hand_deletions`、`replay_schema_migrations`。全部是逻辑外键，不修改 `review_hands`。
+数据表：`replay_versions`、`replay_jobs`、`replay_job_hands`、`replay_decisions`、`replay_results`、`replay_marks`、`replay_imported_hands`、`replay_import_batches`、`replay_hand_deletions`、`replay_spot_specs`、`replay_schema_migrations`。全部是逻辑外键，不修改 `review_hands`。
 
 ---
 
@@ -218,6 +219,15 @@ replay-console/
 | POST | `/api/runs/{id}/cancel` | 取消 |
 | POST | `/api/runs/{id}/retry-failed` | 只重跑失败/未完成手牌 |
 | GET | `/api/export?jobId=...&format=csv|markdown` | 导出 |
+| GET | `/api/specs/meta` | 期望库词表（七个桶维度、动作、尺度单位、状态） |
+| GET | `/api/specs` | 期望列表（每个名字取最新 revision；`status` 取 active / draft，`q` 关键词） |
+| POST | `/api/specs` | 新建期望 = 插入 v1（`status` 默认 draft） |
+| GET | `/api/specs/{id}` | 单个 revision |
+| POST | `/api/specs/{id}/revisions` | 从最新 revision 派生新版本；旧行只读 |
+| PATCH | `/api/specs/{id}` | 只改 `status`（生效会退回同名旧 active） |
+| DELETE | `/api/specs/{id}` | 只删最新且非生效的 revision |
+| GET | `/api/specs/{id}/history` | 同名全部 revision（最新在前） |
+| GET | `/api/specs/{id}/diff?against=` | 与上一版（或指定 revision）的变更清单 |
 
 错误统一为：
 
@@ -226,6 +236,8 @@ replay-console/
 ```
 
 常见错误码：`HAND_NOT_FOUND`、`VERSION_NOT_FOUND`、`VERSION_ARCHIVED`、`VERSION_STALE`、`INVALID_VERSION_CONFIG`、`AI_KEY_MISSING`、`TOO_MANY_CALLS`、`JOB_QUEUE_FULL`、`JOB_NOT_CANCELABLE`、`DB_UNAVAILABLE`、`EXPORT_EMPTY`。
+
+期望库错误码：`INVALID_SPEC`、`INVALID_SPEC_SCHEMA`、`INVALID_SPEC_BUCKET`、`INVALID_SPEC_DIMENSION`、`INVALID_SPEC_VALUE`、`INVALID_SPEC_ACTION`、`INVALID_SPEC_SIZING`、`INVALID_SPEC_FREQ`、`INVALID_SPEC_POINT`、`INVALID_SPEC_STATUS`、`INVALID_SPEC_DIFF`、`SPEC_NOT_FOUND`、`SPEC_NAME_TAKEN`、`SPEC_NAME_IMMUTABLE`、`SPEC_NOT_LATEST`、`SPEC_ACTIVE`、`SPEC_REVISION_CONFLICT`。
 
 ### 5.1 导入手牌
 
@@ -380,6 +392,8 @@ CI=true ../nv -m pytest tests -q
 - 导入：复盘 JSON/JSONL、实时 `hands.json`/原始日志、自动识别、partial/中途接管过滤、去重/更新/不可重跑、预览不写库；
 - 删除：单删/批量删除、导入手牌软删除、review_hands 仅隐藏、missing 返回、参数校验；
 - API：meta、校验错误、收藏、创建任务、错误 envelope、导出头、导入与删除路由；
+- 期望库：§4.1 校验（未知维度/非法单位/`min_n` 门槛字段 fail fast）、规范化、revision diff；
+- 期望库版本语义：保存即新 revision、旧 revision 只读、只能从最新派生、单 active 互斥、只删最新草稿；
 - 提示词 golden：改动提示词但未 bump `ADVICE_VERSION` 时失败。
 
 前端类型检查与构建：

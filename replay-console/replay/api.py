@@ -23,7 +23,7 @@ from .schemas import (
     DecisionMark, ExperimentCreate, ExperimentOutcome, ExperimentRun,
     HandDelete, HandSetCreate, HandSetItems, HandSetPatch, ImportHands,
     IngestHands, MarkPatch, PairReviewPatch, RunCreate, RunPreview,
-    VersionClone, VersionCreate, VersionMetaPatch,
+    SpecPatch, SpecWrite, VersionClone, VersionCreate, VersionMetaPatch,
 )
 from .service import ReplayService
 
@@ -284,6 +284,49 @@ def create_app(settings: Settings | None = None,
     @app.post("/api/hand-sets/{set_id}/freeze")
     def freeze_hand_set(set_id: int, request: Request):
         return service(request).freeze_hand_set(set_id)
+
+    # ─────────────── 期望库（spot spec） ───────────────
+    # /meta 必须注册在 /{spec_id} 之前，否则 "meta" 会被当成路径参数。
+
+    @app.get("/api/specs/meta")
+    def spec_meta(request: Request):
+        return service(request).spec_meta()
+
+    @app.get("/api/specs")
+    def list_specs(request: Request):
+        return service(request).list_specs(dict(request.query_params))
+
+    @app.post("/api/specs")
+    def create_spec(body: SpecWrite, request: Request):
+        return service(request).create_spec(
+            body.model_dump(by_alias=True, exclude_unset=True))
+
+    @app.get("/api/specs/{spec_id}")
+    def get_spec(spec_id: int, request: Request):
+        return service(request).get_spec(spec_id)
+
+    @app.post("/api/specs/{spec_id}/revisions")
+    def create_spec_revision(spec_id: int, body: SpecWrite, request: Request):
+        return service(request).create_spec_revision(
+            spec_id, body.model_dump(by_alias=True, exclude_unset=True))
+
+    @app.patch("/api/specs/{spec_id}")
+    def patch_spec(spec_id: int, body: SpecPatch, request: Request):
+        return service(request).patch_spec(
+            spec_id, body.model_dump(exclude_unset=True))
+
+    @app.delete("/api/specs/{spec_id}")
+    def delete_spec(spec_id: int, request: Request):
+        return service(request).delete_spec_revision(spec_id)
+
+    @app.get("/api/specs/{spec_id}/history")
+    def spec_history(spec_id: int, request: Request):
+        return service(request).spec_history(spec_id)
+
+    @app.get("/api/specs/{spec_id}/diff")
+    def spec_diff(spec_id: int, request: Request,
+                  against: int | None = None):
+        return service(request).spec_diff(spec_id, against)
 
     @app.get("/api/experiments/{experiment_id}/pairs")
     def experiment_pairs(experiment_id: int, request: Request):

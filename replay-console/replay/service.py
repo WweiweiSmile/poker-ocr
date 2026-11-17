@@ -19,6 +19,7 @@ from typing import Any, Iterable
 from poker_ocr.advice import build_situation
 from poker_ocr.advice import AISettings
 
+from . import specs
 from .config import Settings
 from .db import Database
 from .decisions import (
@@ -38,7 +39,7 @@ from .repository import (
     DecisionMarkRepository, DecisionRepository, ExperimentRepository,
     HandRepository, HandSetRepository, ImportBatchRepository, JobRepository,
     LiveAdviceRepository, MarkRepository, PairReviewRepository,
-    ResultRepository, VersionRepository,
+    ResultRepository, SpotSpecRepository, VersionRepository,
 )
 from .timeline import build_timeline
 from .flags import compute_flags, mask_for, parse_flags
@@ -119,6 +120,7 @@ class ReplayService:
         self.result_repo = ResultRepository(db)
         self.live_advice_repo = LiveAdviceRepository(db)
         self.hand_set_repo = HandSetRepository(db, settings.console_user_id)
+        self.spec_repo = SpotSpecRepository(db)
         self.pair_review_repo = PairReviewRepository(db, settings.console_user_id)
 
     # ─────────────────────────── 基础查询 ───────────────────────────
@@ -1777,6 +1779,156 @@ class ReplayService:
         if row is None:
             raise ApiError("HAND_SET_NOT_FOUND", f"手牌集 {set_id} 不存在", 404)
         return self.get_hand_set(set_id)
+
+    # ─────────────────────────── 期望库（spot spec） ───────────────────────────
+
+    def spec_meta(self) -> dict:
+        return specs.meta()
+
+    def _spec_row(self, spec_id: int) -> dict:
+        row = self.spec_repo.get(spec_id)
+        if row is None:
+            raise ApiError("SPEC_NOT_FOUND", f"期望 {spec_id} 不存在", 404)
+        return row
+
+    @staticmethod
+    def _spec_content(payload: dict) -> dict:
+        """API 的 camelCase → §4.1 的 snake_case，再交给纯校验。"""
+        return specs.validate_spec({
+            "schema": payload.get("schema"),
+            "bucket": payload.get("bucket"),
+            "allowed_actions": payload.get("allowedActions"),
+            "forbidden_actions": payload.get("forbiddenActions"),
+            "sizing": payload.get("sizing"),
+            "freq": payload.get("freq"),
+            "required_points": payload.get("requiredPoints"),
+            "forbidden_points": payload.get("forbiddenPoints"),
+            "rationale": payload.get("rationale"),
+        })
+
+    @staticmethod
+    def _public_spec_row(row: dict) -> dict:
+        return specs.public_spec(
+            row,
+            revision_count=row.get("revision_count"),
+            active_revision_id=row.get("active_revision_id"))
+
+    def get_spec(self, spec_id: int) -> dict:
+        return self._public_spec_row(self._spec_row(spec_id))
+
+    def list_specs(self, query: dict | None = None) -> dict:
+        query = query or {}
+        status = str(query.get("status") or "").strip()
+        if status and status not in specs.SPEC_STATUSES:
+            raise ApiError("INVALID_SPEC_STATUS",
+                           "status 只能是 active / draft", 422)
+        keyword = str(query.get("q") or "").strip().lower()
+        items = [self._public_spec_row(row)
+                 for row in self.spec_repo.list_latest()]
+        if status == "active":
+            items = [item for item in items if item["status"] == "active"]
+        elif status == "draft":
+            items = [item for item in items if item["status"] == "draft"]
+        if keyword:
+            items = [item for item in items
+                     if keyword in item["name"].lower()
+                     or keyword in item["bucketLabel"].lower()]
+        # 按桶分组展示：同一桶的标签排在一起，桶内按名字。
+        items.sort(key=lambda item: (item["bucketLabel"], item["name"]))
+        return {"items": items, "total": len(items)}
+
+    def spec_history(self, spec_id: int) -> dict:
+        row = self._spec_row(spec_id)
+        rows = self.spec_repo.by_name(row["name"])
+        active_id = next((int(item["id"]) for item in rows
+                          if item["status"] == "active"), None)
+        items = [specs.public_spec(item, revision_count=len(rows),
+                                   active_revision_id=active_id)
+                 for item in rows]
+        return {"name": row["name"], "items": items}
+
+    def spec_diff(self, spec_id: int,
+                  against_id: int | None = None) -> dict:
+        row = self._spec_row(spec_id)
+        other_id = (int(against_id) if against_id is not None
+                    else row.get("supersedes"))
+        if other_id is None:
+            return {"from": None, "to": self._public_spec_row(row),
+                    "changes": []}
+        other = self._spec_row(other_id)
+        if other["name"] != row["name"]:
+            raise ApiError("INVALID_SPEC_DIFF",
+                           "只能比较同名期望的两个 revision", 422)
+        return {
+            "from": self._public_spec_row(other),
+            "to": self._public_spec_row(row),
+            "changes": specs.diff_specs(specs.spec_from_row(other),
+                                        specs.spec_from_row(row)),
+        }
+
+    def create_spec(self, payload: dict) -> dict:
+        name = specs.validate_name(payload.get("name"))
+        status = specs.validate_status(payload.get("status") or "draft")
+        note = specs.validate_note(payload.get("note"))
+        content = self._spec_content(payload)
+        if self.spec_repo.latest(name) is not None:
+            raise ApiError(
+                "SPEC_NAME_TAKEN",
+                f"期望 {name!r} 已存在；编辑请从最新 revision 派生", 409)
+        spec_id = self.spec_repo.create(
+            name=name, revision=1, status=status, content=content,
+            note=note, supersedes=None)
+        if status == "active":
+            self.spec_repo.activate(spec_id, name)
+        return self.get_spec(spec_id)
+
+    def create_spec_revision(self, spec_id: int, payload: dict) -> dict:
+        base = self._spec_row(spec_id)
+        latest = self.spec_repo.latest(base["name"])
+        if latest is None or int(latest["id"]) != int(base["id"]):
+            version = f"v{latest['revision']}" if latest else "?"
+            raise ApiError(
+                "SPEC_NOT_LATEST",
+                f"只能从最新 revision（{version}）派生；旧 revision 只读", 409)
+        name = payload.get("name")
+        if name is not None and specs.validate_name(name) != base["name"]:
+            raise ApiError("SPEC_NAME_IMMUTABLE",
+                           "revision 不能改名；改名请新建期望", 422)
+        status = specs.validate_status(payload.get("status") or "draft")
+        note = specs.validate_note(payload.get("note"))
+        content = self._spec_content(payload)
+        new_id = self.spec_repo.create(
+            name=base["name"], revision=int(latest["revision"]) + 1,
+            status=status, content=content, note=note,
+            supersedes=int(base["id"]))
+        if status == "active":
+            self.spec_repo.activate(new_id, base["name"])
+        return self.get_spec(new_id)
+
+    def patch_spec(self, spec_id: int, payload: dict) -> dict:
+        row = self._spec_row(spec_id)
+        if set(payload) - {"status"} or "status" not in payload:
+            raise ApiError(
+                "INVALID_SPEC",
+                "PATCH 只支持修改 status；改内容请新建 revision", 422)
+        status = specs.validate_status(payload["status"])
+        if status == "active":
+            self.spec_repo.activate(spec_id, row["name"])
+        else:
+            self.spec_repo.set_status(spec_id, "draft")
+        return self.get_spec(spec_id)
+
+    def delete_spec_revision(self, spec_id: int) -> dict:
+        row = self._spec_row(spec_id)
+        latest = self.spec_repo.latest(row["name"])
+        if latest is None or int(latest["id"]) != int(row["id"]):
+            raise ApiError("SPEC_NOT_LATEST",
+                           "只能删除最新 revision；旧 revision 只读", 409)
+        if row["status"] == "active":
+            raise ApiError("SPEC_ACTIVE",
+                           "生效中的期望不能删除；先停用再删", 409)
+        deleted = self.spec_repo.delete(spec_id)
+        return {"name": row["name"], "deletedRevisions": int(deleted or 0)}
 
     # ─────────────────────────── 离线 A/B 实验 ───────────────────────────
 
