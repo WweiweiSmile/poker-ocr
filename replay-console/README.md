@@ -41,6 +41,7 @@
 - **手牌导入**：手牌库支持导入两种来源——**复盘手牌**（`review_hands` 导出的 JSON/JSONL）和**实时日志手牌记录**（`hands.json` 或 `live.states.jsonl`）；自动识别、预览计数、按内容幂等去重；
 - **多来源并列**：同一手牌在复盘/实时/构造三边各有一条源记录时，列表与详情都按 canonical 并列展示，复盘来源的结论只读；
 - **从决策点建案例**：详情页每条决策点都可建一条案例（选期望/P0-P2/备注）；案例集页可新建/改名/冻结 revision，seed 由 `tools/import_case_seed.py` 从 `tools/ab_set.json` 幂等导入；
+- **评分运行**：选「冻结案例集 × 版本」建 run，创建页先给案例数/P0/预计调用/token/成本，确认后跑；结果落 `replay_runs`/`replay_run_items`，页面给总分（含 95% 区间）、P0 通过率、覆盖率、硬失败清单与逐条明细，可定位到具体案例与当时的选项；中断的 run 标「部分完成」；
 - **删除手牌**：列表行内、勾选批量、详情页均可删除；导入手牌软删除（重新导入可恢复），`review_hands` 手牌仅在控制台隐藏，不修改生产业务表；
 - **去重**：按手牌内容指纹识别；批量任务默认跳过重复，保留较新的一手；
 - **成本与时间预估**：调用单元、预计耗时、超过单任务上限需显式确认；
@@ -141,21 +142,25 @@ replay-console/
 │   ├── versioning.py          # 版本不可变配置哈希 / advice_version / 桌风
 │   ├── engine.py              # 规则审计、动作分类、模型调用重试、重复分布聚合
 │   ├── specs.py               # 场景期望 §4.1 词表 / 校验 / revision diff（纯逻辑）
+│   ├── scoring.py             # 五维打分 / 六类硬失败 / 聚合与 Wilson 区间（纯逻辑）
+│   ├── run_repository.py      # replay_runs / replay_run_items 读写
+│   ├── run_worker.py          # 评分运行队列 worker：执行单元 + 评分 + 收尾
 │   ├── canonical.py           # canonical 手牌归组：同内容判定 / content_group / primary（纯逻辑）
 │   ├── repository.py          # review_hands 只读 + 导入手牌 + replay_* 读写
 │   ├── service.py             # 手牌库/导入/详情/版本/任务/对比/导出/健康
 │   ├── runner.py              # DB 队列 worker + 线程池 + 断点恢复
 │   ├── worker.py              # 可选独立 worker 进程
 │   ├── api.py                 # FastAPI 路由 + SPA 托管
+│   ├── cases.py               # 案例桶推导 / 最具体 spec 选择 / 案例集统计
 │   ├── schemas.py             # 请求体
-│   └── migrations/001_init.sql … 011_*.sql, 012_canonical_and_cases.sql, 012_spot_specs.sql
+│   └── migrations/001_init.sql … 011_*.sql, 012_canonical_and_cases.sql, 012_spot_specs.sql, 013_score_runs.sql
 ├── replay_web/                # React + Vite + AntD
 └── tests/                     # 决策点 / 引擎 / 版本 / API / 提示词 golden
 ```
 
 数据表：`replay_versions`、`replay_jobs`、`replay_job_hands`、`replay_decisions`、`replay_results`、`replay_marks`、`replay_imported_hands`、`replay_import_batches`、`replay_hand_deletions`、`replay_spot_specs`、`replay_canonical_hands`、`replay_hand_sources`、`replay_case_sets`、`replay_cases`、`replay_runs`、`replay_run_items`、`replay_judge_overrides`、`replay_schema_migrations`。全部是逻辑外键，不修改 `review_hands`。
 
-canonical 手牌：一手牌可以在复盘（`review`）、实时（`live`）、构造（`synthetic`）三边各有一条源记录（`replay_hand_sources`），同内容（底牌相同 + 公共牌相同 + 发生时间差 ≤ 30 分钟）的源记录挂到同一个 `replay_canonical_hands.id` 上，并列保存、互不覆盖。`primary_source` 默认 `review > live > synthetic`，可人工切换；`content_group` 是 `sha1(底牌|公共牌|日期)` 的归组键。归组规则在 `replay/canonical.py`（纯逻辑），SQL 读写与 primary 切换在 `repository.CanonicalHandRepository`（逐条自动提交，不开显式事务；中途失败只会留下无源记录的空 canonical 行，不影响读路径）。案例表（`replay_case_sets`、`replay_cases`）已接最小写路径：详情页每个决策点可建案例，默认落在「待整理」案例集；案例集页、批量建案例、冻结与 seed 已接：冻结后只读（改内容要建新 revision），seed 按 (case_set, canonical, decision_key) 幂等，spec 落在 `replay_spot_specs`。运行/判定三张表（`replay_runs`、`replay_run_items`、`replay_judge_overrides`）仍是空表，第 2 期接线。
+canonical 手牌：一手牌可以在复盘（`review`）、实时（`live`）、构造（`synthetic`）三边各有一条源记录（`replay_hand_sources`），同内容（底牌相同 + 公共牌相同 + 发生时间差 ≤ 30 分钟）的源记录挂到同一个 `replay_canonical_hands.id` 上，并列保存、互不覆盖。`primary_source` 默认 `review > live > synthetic`，可人工切换；`content_group` 是 `sha1(底牌|公共牌|日期)` 的归组键。归组规则在 `replay/canonical.py`（纯逻辑），SQL 读写与 primary 切换在 `repository.CanonicalHandRepository`（逐条自动提交，不开显式事务；中途失败只会留下无源记录的空 canonical 行，不影响读路径）。案例表（`replay_case_sets`、`replay_cases`）已接最小写路径：详情页每个决策点可建案例，默认落在「待整理」案例集；案例集页、批量建案例、冻结与 seed 已接：冻结后只读（改内容要建新 revision），seed 按 (case_set, canonical, decision_key) 幂等，spec 落在 `replay_spot_specs`。运行三张表：`replay_runs`/`replay_run_items` 已由评分运行写入（见 §4.5）；`replay_judge_overrides`（人工改判）仍是空表，留到接 LLM judge 时一起接。评分运行与旧 job 链路（`replay_jobs`/`replay_results`）互不干扰。
 
 ---
 
@@ -198,6 +203,30 @@ canonical 手牌：一手牌可以在复盘（`review`）、实时（`live`）�
 
 ---
 
+### 4.5 评分运行（#56 / #57）
+
+一次 run = **一个冻结案例集 revision × 一组冻结 spec revision × 一个版本 × 判定版本 × 重建版本**，五个都写进 `replay_runs.config_snapshot`；案例在创建时按「维度最多者胜、平手取最近创建」写死 `spec_id`，run 跑完也不会因为 spec 后续编辑而改变口径。
+
+单案例五维打分（`replay/scoring.py`，纯函数）：
+
+| 维度 | 权重 | 口径 |
+| --- | --- | --- |
+| 动作 `s_action` | 35 | 建议动作 ∈ spec 的 `allowed_actions` 且 ∉ `forbidden_actions` 得 1；与英雄实际动作的比较只作展示，实际动作是 `未知动作`（回填点/缺录）时记空、不算分歧 |
+| 尺寸 `s_size` | 15 | `fold/check/call` 恒 1；`bet/raise/allin` 落带内 1，带外 `max(0, 1 - 距离/带宽)`（带宽 0 用 0.1 兜底）；多条带取最小值；`pot<=0` 时底池比例带不参与，`bb<=0` 时 BB 带不参与 |
+| 依据 `s_reason` | 30 | 命中 `required_points` 的加权和 / 总权重；要点为空时退化为「理由是否提到该动作」0/1 |
+| 事实 `s_fact` | 15 | `1 - 错误事实项/引用事实项`；没引用事实记 1（fail open） |
+| 稳定 `s_stable` | 5 | 同案例 3 次建议动作的一致率；没抽样时整维不进分母 |
+
+`score = Σ W·s / Σ W`；命中硬失败封顶 40。硬失败六码：`HF_OPTION`（option 不在该决策点选项里）、`HF_FALLBACK`（不是模型给的建议）、`HF_FORBIDDEN_ACTION`、`HF_FORBIDDEN_POINT`、`HF_HALLUCINATION`（把 facts 里没有的具体事实当依据）、`HF_ERROR`（调用异常）。事实说错只扣 `s_fact`，不算硬失败。
+
+聚合：总分取「重复 0 次」的案例均值，P0 通过率 = (P0 且无硬失败 且 `s_action=1`) / P0 数，覆盖率 = 达到 `FREQ_MIN_N=15` 样本的桶数 / 有 active spec 的桶数（桶按 spec 的桶标签去重，空桶不计）。比例类给 Wilson 95% 区间，均值给正态近似。
+
+采样与中断：每个案例跑 1 次，`priority=0` 的案例额外再跑 2 次（固定样本，不随机抽）；调用次数 = 案例数 + P0 数 × 2。取消是协作式的：已完成的案例照常计分，run 标 `partial` 并在 `error_msg` 里写「完成 X/Y 个案例；已按要求中断」；服务重启时 `running` 的 run 会被标成 `partial`，不冒充成功。
+
+成本估算：`calls × token`，token 优先用该版本在 `replay_results` 的历史均值，没有就用默认 2000 in / 300 out；单价来自 `REPLAY_PRICE_TABLE`（JSON：`{"<model>": {"in": 元/百万, "out": 元/百万}}`），没配就显示「未知单价」而不是编一个数。
+
+---
+
 ## 5. API 速查
 
 | 方法 | 路径 | 说明 |
@@ -225,6 +254,14 @@ canonical 手牌：一手牌可以在复盘（`review`）、实时（`live`）�
 | POST | `/api/case-sets/{id}/hand-cases` | 整手全建 `{canonicalId, priority?}`：每个决策点自动挑最具体的 active 期望 |
 | POST | `/api/case-sets/{id}/sample` | 按桶补样 `{bucket:{维度:[值]}, count?, priority?}`，按时间倒序抽决策点 |
 | POST | `/api/case-sets/seed` | 把 `tools/ab_set.json` 导成 seed 案例集：`{path?, setName?, dryRun?}`；幂等，`dryRun` 只预演 |
+| GET | `/api/score-runs/meta` | 创建页字典：冻结案例集（带计划调用数）、版本（带 blockers/runnable）、判定/重建版本、单价模型 |
+| POST | `/api/score-runs/estimate` | 预估 `{caseSetId, versionId}` → 案例数/P0/调用次数/token/成本，以及 `runnable` 与缺 spec 的案例 |
+| GET | `/api/score-runs` | 评分运行列表（`caseSetId`/`status`/`limit`） |
+| POST | `/api/score-runs` | 建 run：`{caseSetId, versionId}`；未冻结 409、缺 spec 422、超上限 422 |
+| GET | `/api/score-runs/{id}` | 单次 run：状态、总分/P0/覆盖率/metrics、config 快照 |
+| POST | `/api/score-runs/{id}/cancel` | 请求中断（协作式，跑完当前单元就停，run 标 partial） |
+| GET | `/api/score-runs/{id}/items` | 逐条结果（`only=hardfail`、`limit`/`offset`），带计数摘要 |
+| GET | `/api/score-runs/{id}/items/{caseId}/{repeatIndex}` | 单条明细：建议、五维分、judge 证据、当时的 options、facts、prompt |
 | GET | `/api/versions` | 版本列表（`includeArchived=1`） |
 | POST | `/api/versions` | 新建 |
 | POST | `/api/versions/import-env` | 从当前 `.env` + `.table_dy` 导入 |
@@ -254,7 +291,7 @@ canonical 手牌：一手牌可以在复盘（`review`）、实时（`live`）�
 {"error": {"code": "VERSION_STALE", "message": "…", "detail": {}}}
 ```
 
-常见错误码：`HAND_NOT_FOUND`、`INVALID_CASE`、`DECISION_NOT_FOUND`、`CASE_SET_NOT_FOUND`、`CASE_SET_FROZEN`、`CASE_SET_EXISTS`、`INVALID_CASE_SET`、`SPEC_REQUIRED`、`SEED_HAND_MISSING`、`SEED_CANONICAL_MISSING`、`SEED_DECISION_MISSING`、`INVALID_SEED_PATH`、`VERSION_NOT_FOUND`、`VERSION_ARCHIVED`、`VERSION_STALE`、`INVALID_VERSION_CONFIG`、`AI_KEY_MISSING`、`TOO_MANY_CALLS`、`JOB_QUEUE_FULL`、`JOB_NOT_CANCELABLE`、`DB_UNAVAILABLE`、`EXPORT_EMPTY`。
+常见错误码：`HAND_NOT_FOUND`、`INVALID_CASE`、`DECISION_NOT_FOUND`、`CASE_SET_NOT_FOUND`、`CASE_SET_FROZEN`、`CASE_SET_EXISTS`、`INVALID_CASE_SET`、`SPEC_REQUIRED`、`SEED_HAND_MISSING`、`SEED_CANONICAL_MISSING`、`SEED_DECISION_MISSING`、`INVALID_SEED_PATH`、`VERSION_NOT_FOUND`、`VERSION_ARCHIVED`、`VERSION_STALE`、`VERSION_NOT_RUNNABLE`、`CASE_SET_NOT_FROZEN`、`CASE_SET_EMPTY`、`CASE_NO_SPEC`、`RUN_NOT_FOUND`、`RUN_ITEM_NOT_FOUND`、`INVALID_RUN`、`RUN_TOO_LARGE`、`INVALID_VERSION_CONFIG`、`AI_KEY_MISSING`、`TOO_MANY_CALLS`、`JOB_QUEUE_FULL`、`JOB_NOT_CANCELABLE`、`DB_UNAVAILABLE`、`EXPORT_EMPTY`。
 
 期望库错误码：`INVALID_SPEC`、`INVALID_SPEC_SCHEMA`、`INVALID_SPEC_BUCKET`、`INVALID_SPEC_DIMENSION`、`INVALID_SPEC_VALUE`、`INVALID_SPEC_ACTION`、`INVALID_SPEC_SIZING`、`INVALID_SPEC_FREQ`、`INVALID_SPEC_POINT`、`INVALID_SPEC_STATUS`、`INVALID_SPEC_DIFF`、`SPEC_NOT_FOUND`、`SPEC_NAME_TAKEN`、`SPEC_NAME_IMMUTABLE`、`SPEC_NOT_LATEST`、`SPEC_ACTIVE`、`SPEC_REVISION_CONFLICT`。
 

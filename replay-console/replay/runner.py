@@ -57,7 +57,7 @@ def _previous_stored_advice(rows, decision):
     )
 
 
-def _decision_from_row(row: dict) -> DecisionPoint:
+def decision_from_row(row: dict) -> DecisionPoint:
     snap = snapshot_from_json(row.get("snapshot_json") or "{}")
     warnings = json_load(row.get("warnings"), []) or []
     return DecisionPoint(
@@ -72,6 +72,10 @@ def _decision_from_row(row: dict) -> DecisionPoint:
         quality=row.get("quality") or "approx",
         warnings=warnings,
     )
+
+
+# 旧名保留：Runner 内部与既有测试还在用。
+_decision_from_row = decision_from_row
 
 
 class Runner:

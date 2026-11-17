@@ -399,6 +399,10 @@ nv extract_table.py run --img images/... --out /tmp/rois.json
 # 复盘控制台（后端 :8010，托管 replay_web/dist 构建产物）
 cd replay-console && ./start.sh
 #   前端开发态：cd replay-console/replay_web && pnpm dev
+#   评分运行（#56/#57）：页面 /runs 选「冻结案例集 × 可运行版本」，先看预估调用数/成本再跑
+curl -s -X POST localhost:8010/api/score-runs/estimate \
+  -H 'Content-Type: application/json' -d '{"caseSetId":4,"versionId":13}'
+#   成本单价（元/百万 token，可选）：REPLAY_PRICE_TABLE='{"deepseek-flash":{"in":1,"out":2}}'
 
 # 手牌导出 / outbox 同步
 nv tools/export_live_hands.py

@@ -11,6 +11,7 @@ import hashlib
 import io
 import json
 import logging
+import os
 import re
 import threading
 from collections import Counter
@@ -21,7 +22,7 @@ from poker_ocr.advice import build_situation
 from poker_ocr.advice import AISettings
 from poker_ocr.buckets import bucket_label
 
-from . import case_seed, cases as case_lib, library, specs
+from . import case_seed, cases as case_lib, library, run_worker, scoring, specs
 from .config import Settings
 from .db import Database
 from .decisions import (
@@ -46,6 +47,7 @@ from .repository import (
     LiveAdviceRepository, MarkRepository, PairReviewRepository,
     ResultRepository, SpotSpecRepository, VersionRepository,
 )
+from .run_repository import RunItemRepository, RunRepository
 from .timeline import build_timeline
 from .flags import compute_flags, mask_for, parse_flags
 from .util import (
@@ -169,6 +171,9 @@ class ReplayService:
         self.pair_review_repo = PairReviewRepository(db, settings.console_user_id)
         self.canonical_repo = CanonicalHandRepository(db)
         self.case_repo = CaseRepository(db)
+        self.run_repo = RunRepository(db)
+        self.run_item_repo = RunItemRepository(db)
+        self.run_worker = None
 
     # ─────────────────────────── 基础查询 ───────────────────────────
 
@@ -1593,6 +1598,318 @@ class ReplayService:
                 "bucket": json_load(row.get("bucket_json"), {}) or {},
             })
         return specs_out
+
+    # ───────────────────────── 评分运行（#57） ─────────────────────────
+
+    @staticmethod
+    def _price_table() -> dict:
+        """价目表：环境变量 REPLAY_PRICE_TABLE（JSON，元/百万 token）。"""
+        raw = os.environ.get("REPLAY_PRICE_TABLE") or ""
+        if not raw.strip():
+            return {}
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            log.warning("REPLAY_PRICE_TABLE 不是合法 JSON，成本估算按未知单价处理")
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    @staticmethod
+    def _run_id(payload: dict, key: str, label: str) -> int:
+        try:
+            return int(payload.get(key))
+        except (TypeError, ValueError):
+            raise ApiError("INVALID_RUN", f"需要 {key}（{label}）", 422) from None
+
+    def _require_ready_version(self, version_id: int) -> dict:
+        row = self.version_repo.get(version_id)
+        if row is None:
+            raise ApiError("VERSION_NOT_FOUND", f"版本 {version_id} 不存在", 404)
+        blockers = run_blockers(row)
+        if blockers:
+            raise ApiError(
+                "VERSION_NOT_RUNNABLE",
+                "版本不可运行：" + "、".join(
+                    str(b.get("message") or b.get("code"))
+                    for b in blockers),
+                409, detail=blockers)
+        return row
+
+    def score_run_meta(self) -> dict:
+        """创建页需要的字典：可运行的案例集、版本、判定口径与单价。"""
+        sets_out: list[dict] = []
+        for row in self.case_repo.list_sets(limit=200):
+            summary = self._case_set_summary(row)
+            if summary["frozen"]:
+                summary["plan"] = run_worker.plan_counts(
+                    summary["caseCount"], summary["p0Count"])
+            else:
+                summary["plan"] = None
+            sets_out.append(summary)
+        versions_out: list[dict] = []
+        for row in self.version_repo.list(include_archived=True):
+            blockers = run_blockers(row)
+            versions_out.append({
+                "id": int(row["id"]),
+                "name": row.get("name"),
+                "model": row.get("model"),
+                "archived": bool(row.get("archived")),
+                "adviceVersion": row.get("advice_version"),
+                "reconstructVersion": row.get("reconstruct_version"),
+                "blockers": blockers,
+                "runnable": not blockers,
+            })
+        return {
+            "caseSets": sets_out,
+            "versions": versions_out,
+            "judgeVersion": scoring.JUDGE_VERSION,
+            "reconstructVersion": CURRENT_RECONSTRUCT_VERSION,
+            "p0ExtraRepeats": run_worker.P0_EXTRA_REPEATS,
+            "freqMinN": scoring.FREQ_MIN_N,
+            "maxCallsPerRun": self.settings.max_calls_per_job,
+            "priceModels": sorted(self._price_table().keys()),
+        }
+
+    def estimate_score_run(self, payload: dict) -> dict:
+        """创建前估算：案例数、P0 数、调用次数、token 与成本。"""
+        set_id = self._run_id(payload, "caseSetId", "案例集")
+        version_id = self._run_id(payload, "versionId", "版本")
+        set_row = self.case_repo.require_set(set_id)
+        cases = self.case_repo.items(set_id)
+        plan = run_worker.plan_calls(cases) if cases else run_worker.plan_counts(
+            int(set_row.get("case_count") or 0),
+            int(set_row.get("p0_count") or 0))
+        version = self._require_ready_version(version_id)
+        history = self.run_repo.avg_tokens(version_id)
+        tokens = history or run_worker.DEFAULT_TOKENS
+        price = run_worker.price_for(version.get("model"), self._price_table())
+        est = run_worker.estimate_cost(plan["calls"], tokens, price)
+        _case_specs, unmatched = self._case_spec_ids(cases)
+        return {
+            "caseSet": self._case_set_summary(set_row),
+            "version": {"id": version_id, "name": version.get("name"),
+                        "model": version.get("model")},
+            **plan, **est,
+            "tokens": {
+                "in": round(float(tokens.get("tokensIn") or 0), 0),
+                "out": round(float(tokens.get("tokensOut") or 0), 0),
+            },
+            "tokensSource": "history" if history else "default",
+            "price": price,
+            "priceMissing": price is None,
+            "frozen": bool(set_row.get("frozen_at")),
+            "runnable": bool(set_row.get("frozen_at")) and not unmatched,
+            "casesWithoutSpec": unmatched,
+        }
+
+    def _case_spec_ids(
+            self, cases: list[dict]) -> tuple[dict[str, int], list[int]]:
+        """案例 → spec id：案例写死的优先，否则按桶匹配 active spec。
+
+        返回 (case_id → spec_id, 匹配不到 spec 的 case_id 列表)。
+        """
+        active = self._active_specs()
+        case_specs: dict[str, int] = {}
+        missing: list[int] = []
+        for case in cases:
+            spec_id = case.get("spec_id")
+            if not spec_id:
+                spec = case_lib.best_spec(case_lib.case_bucket(case), active)
+                spec_id = int(spec["id"]) if spec else None
+            if not spec_id:
+                missing.append(int(case["id"]))
+                continue
+            case_specs[str(int(case["id"]))] = int(spec_id)
+        return case_specs, missing
+
+    def create_score_run(self, payload: dict) -> dict:
+        """冻结「案例集 revision × spec revisions × 版本 × 判定 × 重建」建 run。"""
+        set_id = self._run_id(payload, "caseSetId", "案例集")
+        version_id = self._run_id(payload, "versionId", "版本")
+        set_row = self.case_repo.require_set(set_id)
+        if not set_row.get("frozen_at"):
+            raise ApiError(
+                "CASE_SET_NOT_FROZEN",
+                f"案例集 {set_row.get('name')} v{set_row.get('revision')} "
+                "还没冻结；评分运行只跑冻结版本（先冻结）", 409)
+        cases = self.case_repo.items(set_id)
+        if not cases:
+            raise ApiError("CASE_SET_EMPTY", "案例集没有案例", 422)
+        version = self._require_ready_version(version_id)
+
+        case_specs, missing = self._case_spec_ids(cases)
+        if missing:
+            raise ApiError(
+                "CASE_NO_SPEC",
+                f"{len(missing)} 个案例匹配不到 active spec；先补 spec 再建运行",
+                422, detail={"caseIds": missing})
+        spec_ids = sorted(set(case_specs.values()))
+
+        plan = run_worker.plan_calls(cases)
+        if plan["calls"] > self.settings.max_calls_per_job:
+            raise ApiError(
+                "RUN_TOO_LARGE",
+                f"预计调用 {plan['calls']} 次，超过单次上限 "
+                f"{self.settings.max_calls_per_job}", 422, detail=plan)
+
+        specs_meta: list[dict] = []
+        for spec_id in spec_ids:
+            row = self.spec_repo.get(spec_id)
+            if row is None:
+                raise ApiError("SPEC_NOT_FOUND",
+                               f"spec {spec_id} 不存在", 409)
+            specs_meta.append({
+                "id": int(row["id"]),
+                "name": row.get("name"),
+                "revision": int(row.get("revision") or 1),
+                "bucket": json_load(row.get("bucket_json"), {}) or {},
+            })
+
+        history = self.run_repo.avg_tokens(version_id)
+        price = run_worker.price_for(version.get("model"), self._price_table())
+        snapshot = {
+            "caseSet": {
+                "id": set_id,
+                "name": set_row.get("name"),
+                "revision": int(set_row.get("revision") or 1),
+                "frozenAt": iso(set_row.get("frozen_at")),
+            },
+            "version": {
+                "id": version_id,
+                "name": version.get("name"),
+                "model": version.get("model"),
+                "configHash": version.get("config_hash"),
+                "adviceVersion": version.get("advice_version"),
+                "reconstructVersion": version.get("reconstruct_version"),
+                "contextMode": version.get("context_mode"),
+                "tableStatsMode": version.get("table_stats_mode"),
+            },
+            "specIds": spec_ids,
+            "specs": specs_meta,
+            "caseSpecs": case_specs,
+            "judgeVersion": scoring.JUDGE_VERSION,
+            "reconstructVersion": CURRENT_RECONSTRUCT_VERSION,
+            "plan": plan,
+            "tokens": history or run_worker.DEFAULT_TOKENS,
+            "tokensSource": "history" if history else "default",
+            "price": price,
+            "createdAt": iso(now_cn()),
+        }
+        run_id = self.run_repo.create(
+            case_set_id=set_id,
+            case_set_revision=int(set_row.get("revision") or 1),
+            spec_ids=spec_ids,
+            version_id=version_id,
+            judge_version=scoring.JUDGE_VERSION,
+            reconstruct_version=CURRENT_RECONSTRUCT_VERSION,
+            total_cases=len(cases),
+            config_snapshot=snapshot,
+        )
+        if self.run_worker is not None:
+            try:
+                self.run_worker.wake()
+            except Exception:  # noqa: BLE001
+                log.exception("唤醒评分 worker 失败")
+        return self._run_public(self.run_repo.get(run_id) or {})
+
+    def list_score_runs(self, query: dict | None = None) -> dict:
+        query = query or {}
+        limit = int(query.get("limit") or 50)
+        rows = self.run_repo.list(
+            limit=min(max(limit, 1), 200),
+            case_set_id=(int(query["caseSetId"])
+                         if query.get("caseSetId") else None),
+            status=(str(query.get("status") or "") or None),
+        )
+        return {"items": [self._run_public(row) for row in rows]}
+
+    def get_score_run(self, run_id: int) -> dict:
+        return self._run_public(self.run_repo.require(run_id))
+
+    def score_run_items(self, run_id: int, query: dict | None = None) -> dict:
+        query = query or {}
+        run = self.run_repo.require(run_id)
+        limit = min(max(int(query.get("limit") or 200), 1), 1000)
+        offset = max(int(query.get("offset") or 0), 0)
+        only_fail = str(query.get("only") or "") == "hardfail"
+        rows = self.run_item_repo.list(
+            run_id, str(run.get("reconstruct_version")
+                        or CURRENT_RECONSTRUCT_VERSION),
+            only_hardfail=only_fail, limit=limit, offset=offset)
+        return {
+            "items": [self.run_item_repo.public_item(row) for row in rows],
+            "counts": self.run_item_repo.counts(run_id),
+            "limit": limit,
+            "offset": offset,
+        }
+
+    def score_run_item(self, run_id: int, case_id: int,
+                       repeat_index: int = 0) -> dict:
+        run = self.run_repo.require(run_id)
+        row = self.run_item_repo.get(
+            run_id, case_id, repeat_index,
+            str(run.get("reconstruct_version") or CURRENT_RECONSTRUCT_VERSION))
+        if row is None:
+            raise ApiError("RUN_ITEM_NOT_FOUND",
+                           f"运行 {run_id} 没有案例 {case_id} 的第 "
+                           f"{repeat_index} 次结果", 404)
+        item = self.run_item_repo.public_item(row)
+        facts = json_load(row.get("facts_json"), {}) or {}
+        item.update({
+            "facts": facts,
+            "options": facts.get("options") or [],
+            "prompt": json_load(row.get("prompt_json"), {}) or {},
+            "judge": json_load(row.get("judge_json"), {}) or {},
+        })
+        return item
+
+    def cancel_score_run(self, run_id: int) -> dict:
+        row = self.run_repo.request_cancel(run_id)
+        if self.run_worker is not None:
+            try:
+                self.run_worker.wake()
+            except Exception:  # noqa: BLE001
+                log.exception("唤醒评分 worker 失败")
+        return self._run_public(row)
+
+    @staticmethod
+    def _run_public(row: dict) -> dict:
+        config = json_load(row.get("config_snapshot"), {}) or {}
+        metrics = json_load(row.get("metrics_json"), {}) or {}
+        return {
+            "id": int(row["id"]),
+            "status": row.get("status") or "queued",
+            "caseSet": {
+                "id": int(row["case_set_id"]),
+                "name": row.get("set_name"),
+                "revision": int(row.get("case_set_revision") or 1),
+                "frozen": bool(row.get("set_frozen_at")),
+            },
+            "version": {
+                "id": int(row["version_id"]),
+                "name": row.get("version_name"),
+                "model": row.get("version_model"),
+            },
+            "judgeVersion": row.get("judge_version"),
+            "reconstructVersion": row.get("reconstruct_version"),
+            "specIds": json_load(row.get("spec_ids_json"), []) or [],
+            "totalCases": int(row.get("total_cases") or 0),
+            "doneCases": int(row.get("done_cases") or 0),
+            "scoredCases": int(row.get("scored_cases") or 0),
+            "score": (float(row["score"])
+                      if row.get("score") is not None else None),
+            "p0PassRate": (float(row["p0_pass_rate"])
+                           if row.get("p0_pass_rate") is not None else None),
+            "coverageRate": (float(row["coverage_rate"])
+                             if row.get("coverage_rate") is not None else None),
+            "metrics": metrics,
+            "config": config,
+            "cancelRequested": bool(row.get("cancel_requested")),
+            "error": row.get("error_msg") or "",
+            "createdAt": iso(row.get("created_at")),
+            "startedAt": iso(row.get("started_at")),
+            "finishedAt": iso(row.get("finished_at")),
+        }
 
     def build_hand_cases(self, set_id: int, payload: dict) -> dict:
         """整手全建：每个决策点自动挑最具体的 active spec，写死 spec_id。"""

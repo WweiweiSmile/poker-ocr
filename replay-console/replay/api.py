@@ -18,6 +18,7 @@ from . import range_ab
 from .config import Settings
 from .db import Database
 from .errors import ApiError
+from .run_worker import RunWorker
 from .runner import Runner
 from .schemas import (
     CaseCreate, CaseHandCases, CaseSample, CaseSeed, CaseSetCasePatch,
@@ -86,21 +87,28 @@ def create_app(settings: Settings | None = None,
             except Exception:  # noqa: BLE001
                 log.exception("清理旧 prompt 失败")
         runner = None
+        score_worker = None
         run_worker = settings.worker_enabled if start_worker is None else start_worker
         service = ReplayService(settings, db, runner=None)
         if run_worker:
             runner = Runner(settings, db)
             service.runner = runner
             runner.start()
+            score_worker = RunWorker(settings, db)
+            service.run_worker = score_worker
+            score_worker.start()
         app.state.settings = settings
         app.state.db = db
         app.state.service = service
         app.state.runner = runner
+        app.state.score_worker = score_worker
         log.info("replay console 启动：db=%s/%s worker=%s",
                  settings.db_host, settings.db_name, bool(runner))
         yield
         if runner is not None:
             runner.stop()
+        if score_worker is not None:
+            score_worker.stop()
         try:
             db.close()
         except Exception:  # noqa: BLE001
@@ -487,6 +495,43 @@ def create_app(settings: Settings | None = None,
     @app.post("/api/runs/{job_id}/retry-failed")
     def retry_failed(job_id: int, request: Request):
         return service(request).retry_failed(job_id)
+
+    # ─────────────── 评分运行（#57） ───────────────
+    # 与旧 job 链路 /api/runs 分开命名，互不影响。
+
+    @app.get("/api/score-runs/meta")
+    def score_run_meta(request: Request):
+        return service(request).score_run_meta()
+
+    @app.post("/api/score-runs/estimate")
+    def estimate_score_run(body: dict, request: Request):
+        return service(request).estimate_score_run(body)
+
+    @app.get("/api/score-runs")
+    def list_score_runs(request: Request):
+        return service(request).list_score_runs(dict(request.query_params))
+
+    @app.post("/api/score-runs")
+    def create_score_run(body: dict, request: Request):
+        return service(request).create_score_run(body)
+
+    @app.get("/api/score-runs/{run_id}")
+    def get_score_run(run_id: int, request: Request):
+        return service(request).get_score_run(run_id)
+
+    @app.post("/api/score-runs/{run_id}/cancel")
+    def cancel_score_run(run_id: int, request: Request):
+        return service(request).cancel_score_run(run_id)
+
+    @app.get("/api/score-runs/{run_id}/items")
+    def score_run_items(run_id: int, request: Request):
+        return service(request).score_run_items(
+            run_id, dict(request.query_params))
+
+    @app.get("/api/score-runs/{run_id}/items/{case_id}/{repeat_index}")
+    def score_run_item(run_id: int, case_id: int, repeat_index: int,
+                       request: Request):
+        return service(request).score_run_item(run_id, case_id, repeat_index)
 
     # ─────────────── export ───────────────
 

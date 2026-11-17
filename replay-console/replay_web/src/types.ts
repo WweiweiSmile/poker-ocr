@@ -1234,3 +1234,156 @@ export interface SpecDiff {
   to: SpotSpec
   changes: SpecChange[]
 }
+
+// ─────────────── 评分运行（#57） ───────────────
+
+export interface ScoreRunPlan {
+  cases: number
+  p0: number
+  calls: number
+  extraPerP0: number
+}
+
+export interface ScoreRunCaseSetOption extends CaseSet {
+  plan: ScoreRunPlan | null
+}
+
+export interface VersionBlocker {
+  code: string
+  message: string
+}
+
+export interface ScoreRunVersionOption {
+  id: number
+  name: string
+  model: string | null
+  archived: boolean
+  adviceVersion: string | null
+  reconstructVersion: string | null
+  blockers: VersionBlocker[]
+  runnable: boolean
+}
+
+export interface ScoreRunMeta {
+  caseSets: ScoreRunCaseSetOption[]
+  versions: ScoreRunVersionOption[]
+  judgeVersion: string
+  reconstructVersion: string
+  p0ExtraRepeats: number
+  freqMinN: number
+  maxCallsPerRun: number
+  priceModels: string[]
+}
+
+export interface ScoreRunEstimate {
+  caseSet: CaseSet
+  version: { id: number; name: string | null; model: string | null }
+  cases: number
+  p0: number
+  calls: number
+  extraPerP0: number
+  tokensIn: number
+  tokensOut: number
+  cost: number | null
+  currency?: string
+  tokens: { in: number; out: number }
+  tokensSource: 'history' | 'default'
+  price: { in: number; out: number } | null
+  priceMissing: boolean
+  frozen: boolean
+  runnable: boolean
+  casesWithoutSpec: number[]
+}
+
+export interface ScoreRunMetrics {
+  cases?: number
+  scored?: number
+  score?: { n: number; mean: number | null; lo: number | null; hi: number | null }
+  p0?: { total: number; passed: number; rate: number | null; ci: [number, number] | null }
+  hardFail?: { count: number; rate: number | null; ci: [number, number] | null }
+  coverage?: { bucketTotal: number; reached: number; rate: number | null }
+  canceled?: boolean
+  doneCases?: number
+  errors?: number
+  units?: number
+}
+
+export interface ScoreRun {
+  id: number
+  status: RunStatus
+  caseSet: { id: number; name: string | null; revision: number; frozen: boolean }
+  version: { id: number; name: string | null; model: string | null }
+  judgeVersion: string | null
+  reconstructVersion: string | null
+  specIds: number[]
+  totalCases: number
+  doneCases: number
+  scoredCases: number
+  score: number | null
+  p0PassRate: number | null
+  coverageRate: number | null
+  metrics: ScoreRunMetrics
+  config: Record<string, unknown>
+  cancelRequested: boolean
+  error: string
+  createdAt: string | null
+  startedAt: string | null
+  finishedAt: string | null
+}
+
+export interface ScoreRunList {
+  items: ScoreRun[]
+}
+
+export interface ScoreRunAdvice {
+  optionId: string | null
+  kind: string | null
+  amount: number | null
+  reason: string
+}
+
+export interface ScoreRunScoreMap {
+  action?: number | null
+  size?: number | null
+  reason?: number | null
+  fact?: number | null
+  stable?: number | null
+}
+
+export interface ScoreRunItem {
+  runId: number
+  caseId: number
+  specId: number | null
+  repeatIndex: number
+  canonicalId: number | null
+  decisionKey: string | null
+  street: string
+  actionIndex: number | null
+  priority: number
+  p0: boolean
+  bucket: Record<string, unknown>
+  bucketLabel: string
+  hand: { heroCards: string; board: string; heroPosition: string | null }
+  comparable: boolean
+  advice: ScoreRunAdvice
+  source: string | null
+  score: number | null
+  scores: ScoreRunScoreMap
+  hardFail: string | null
+  errorMsg: string
+  durationMs: number
+  createdAt: string | null
+  // 详情接口追加
+  facts?: Record<string, unknown>
+  options?: { id?: string; label?: string; kind?: string; amount?: number | null }[]
+  prompt?: { system?: string; user?: string; sha?: string }
+  judge?: Record<string, unknown>
+}
+
+export interface ScoreRunItems {
+  items: ScoreRunItem[]
+  counts: { items: number; cases: number; fails: number; errors: number }
+  limit: number
+  offset: number
+}
+
