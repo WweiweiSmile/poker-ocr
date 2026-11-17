@@ -327,6 +327,20 @@ def test_create_reports_cases_without_spec(monkeypatch):
     assert err.value.detail["caseIds"] == [1, 2]
 
 
+def test_create_freezes_spec_freq_into_snapshot(monkeypatch):
+    """频次目标要冻进快照：热点报表的口径必须可复现（设计 §6/§8）。"""
+    cases = [_case(1)]
+    specs = [{**_spec_row(11, {"street": ["flop"]}),
+              "spec_json": json.dumps({
+                  "schema": "spot_spec.v1",
+                  "freq": {"action": "raise", "min": 0.3, "max": 0.5}})}]
+    service = _service(cases, specs=specs, monkeypatch=monkeypatch)
+    service.create_score_run({"caseSetId": 4, "versionId": 7})
+    _, kwargs = service.run_repo.created[0]
+    assert kwargs["config_snapshot"]["specs"][0]["freq"] == {
+        "action": "raise", "min": 0.3, "max": 0.5}
+
+
 def test_create_freezes_snapshot_and_plan(monkeypatch):
     cases = [_case(1, priority=0, spec_id=11), _case(2, priority=1)]
     service = _service(cases, monkeypatch=monkeypatch)

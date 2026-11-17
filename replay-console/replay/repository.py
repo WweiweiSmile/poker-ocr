@@ -1857,6 +1857,20 @@ _INSERT_SOURCE_SQL = """
 """
 
 
+def _bucket_where(bucket: dict | None) -> tuple[list[str], list[Any]]:
+    """七维桶的 SQL 条件：维间 AND、维内 IN；空维度 = 通配。"""
+    where: list[str] = []
+    params: list[Any] = []
+    for dimension in BUCKET_ORDER:
+        values = [v for v in ((bucket or {}).get(dimension) or [])
+                  if v not in (None, "")]
+        if values:
+            marks = ", ".join(["%s"] * len(values))
+            where.append(f"d.{dimension} IN ({marks})")
+            params += list(values)
+    return where, params
+
+
 class CaseRepository:
     """`replay_case_sets` / `replay_cases` 的读写。
 
@@ -2119,15 +2133,10 @@ class CaseRepository:
         """按桶维度抽最近决策点（样例池：只取已回填 canonical 的）。"""
         from .versioning import CURRENT_RECONSTRUCT_VERSION
 
+        where, params = _bucket_where(bucket)
         where = ["d.canonical_id IS NOT NULL",
-                 "d.reconstruct_version = %s"]
-        params: list[Any] = [CURRENT_RECONSTRUCT_VERSION]
-        for dimension in BUCKET_ORDER:
-            values = [v for v in ((bucket or {}).get(dimension) or []) if v not in (None, "")]
-            if values:
-                marks = ", ".join(["%s"] * len(values))
-                where.append(f"d.{dimension} IN ({marks})")
-                params += list(values)
+                 "d.reconstruct_version = %s"] + where
+        params = [CURRENT_RECONSTRUCT_VERSION] + params
         if exclude:
             marks = ", ".join(["(%s,%s,%s)"] * len(exclude))
             where.append(f"NOT ((d.canonical_id, d.street, d.seq) IN ({marks}))")
@@ -2142,6 +2151,38 @@ class CaseRepository:
                  WHERE {' AND '.join(where)}
                  ORDER BY d.id DESC
                  LIMIT %s""",
+            tuple(params))
+
+    def candidates_for_bucket(self, case_set_id: int, bucket: dict, *,
+                              limit: int = 50, offset: int = 0) -> list[dict]:
+        """存档里按桶找可补样的决策点，并标出它是否已在该案例集里。
+
+        与 `decisions_for_bucket` 的区别：带上手牌展示信息（hero/board），以及
+        案例集成员标记（`case_id`）——补样页要「能选」，所以得看得见手牌。
+        """
+        from .versioning import CURRENT_RECONSTRUCT_VERSION
+
+        bucket_where, bucket_params = _bucket_where(bucket)
+        where = ["d.canonical_id IS NOT NULL",
+                 "d.reconstruct_version = %s"] + bucket_where
+        params: list[Any] = [int(case_set_id), CURRENT_RECONSTRUCT_VERSION]
+        params += bucket_params
+        params += [int(limit), int(offset)]
+        return self.db.query(
+            f"""SELECT d.canonical_id, d.street, d.seq, d.action_index,
+                       d.position_bucket, d.hand_tier, d.board_texture,
+                       d.pot_type, d.facing, d.opponent_profile,
+                       ch.hero_cards, ch.board, ch.hero_position,
+                       c.id AS case_id
+                  FROM replay_decisions d
+                  JOIN replay_canonical_hands ch ON ch.id = d.canonical_id
+                  LEFT JOIN replay_cases c
+                         ON c.case_set_id = %s
+                        AND c.canonical_id = d.canonical_id
+                        AND c.decision_key = CONCAT(d.street, ':', d.seq)
+                 WHERE {' AND '.join(where)}
+                 ORDER BY d.id DESC
+                 LIMIT %s OFFSET %s""",
             tuple(params))
 
     def ensure_open_set(self) -> dict:

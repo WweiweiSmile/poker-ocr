@@ -37,6 +37,14 @@ export function formatAmount(value: number | null | undefined): string {
   return Number.isInteger(number) ? String(number) : number.toFixed(2).replace(/0+$/, '').replace(/\.$/, '')
 }
 
+/** 建议动作 + 金额：fold/check 不带金额；没有动作为「—」。 */
+export function adviceText(kind?: string | null, amount?: number | null): string {
+  if (!kind) return '—'
+  if (kind === 'fold' || kind === 'check') return kind
+  if (amount === null || amount === undefined) return kind
+  return `${kind} ${amount}`
+}
+
 export function formatDate(value?: string | null, withTime = true): string {
   if (!value) return '—'
   return dayjs(value).format(withTime ? 'MM-DD HH:mm' : 'YYYY-MM-DD')

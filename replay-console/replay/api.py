@@ -314,6 +314,11 @@ def create_app(settings: Settings | None = None,
         return service(request).sample_case_set_cases(
             set_id, body.model_dump(exclude_unset=True))
 
+    @app.get("/api/case-sets/{set_id}/candidates")
+    def case_candidates(set_id: int, request: Request):
+        return service(request).case_candidates(
+            set_id, dict(request.query_params))
+
     @app.get("/api/imports")
     def list_imports(request: Request):
         return service(request).list_imports(dict(request.query_params))
@@ -522,6 +527,10 @@ def create_app(settings: Settings | None = None,
     @app.post("/api/score-runs/{run_id}/cancel")
     def cancel_score_run(run_id: int, request: Request):
         return service(request).cancel_score_run(run_id)
+
+    @app.get("/api/score-runs/{run_id}/hotspots")
+    def score_run_hotspots(run_id: int, request: Request):
+        return service(request).score_run_hotspots(run_id)
 
     @app.get("/api/score-runs/{run_id}/items")
     def score_run_items(run_id: int, request: Request):

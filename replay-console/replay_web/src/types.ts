@@ -1474,5 +1474,87 @@ export interface ScoreRunItems {
   counts: { items: number; cases: number; fails: number; errors: number }
   limit: number
   offset: number
+  sorted?: 'priority' | 'score'
+  /** `sort=score` 时参与排序的条目数（按改判后的有效分）；其它排序为 null。 */
+  total?: number | null
+  /** 已达下钻上限，排序只覆盖上限内的条目（页面上要明说）。 */
+  truncated?: boolean
 }
 
+
+// ─────────────── 偏差热点（#59） ───────────────
+
+export interface HotspotFreqCell {
+  action: string
+  min: number | null
+  max: number | null
+  status: 'absent' | 'insufficient' | 'met' | 'missed'
+  n: number
+  observed: number | null
+  score: number | null
+  ci: [number, number] | null
+}
+
+export interface HotspotRow {
+  specId: number
+  specName: string
+  bucket: Record<string, Array<string | number>>
+  bucketLabel: string
+  n: number
+  scored: number
+  insufficient: boolean
+  mean: number | null
+  scoreCi: { n: number; lo: number | null; hi: number | null }
+  delta: number | null
+  hardFail: { count: number; rate: number | null; ci: [number, number] | null }
+  freq: HotspotFreqCell | null
+  dev: number | null
+  severity: number | null
+  /** 偏差用的口径：频次目标可判定时用 freq，否则退回均分。 */
+  basis: 'freq' | 'mean' | null
+}
+
+export interface HotspotSummary {
+  freqMinN: number
+  specs: number
+  cases: number
+  scored: number
+  insufficient: number
+  score: { n: number; mean: number | null; lo: number | null; hi: number | null }
+  attainment: {
+    met: number
+    missed: number
+    judged: number
+    rate: number | null
+    ci: [number, number] | null
+  }
+  bucketsWithHardFail: number
+}
+
+export interface HotspotReport {
+  run: ScoreRun
+  summary: HotspotSummary
+  rows: HotspotRow[]
+}
+
+export interface CaseCandidate {
+  canonicalId: number
+  decisionKey: string
+  street: string
+  seq: number
+  actionIndex: number | null
+  bucket: Record<string, Array<string | number>>
+  bucketLabel: string
+  hand: { heroCards: string; board: string; heroPosition: string | null }
+  specId: number | null
+  specName: string
+  inSet: boolean
+}
+
+export interface CaseCandidates {
+  caseSet: { id: number; name: string | null; revision: number; frozen: boolean }
+  bucket: Record<string, Array<string | number>>
+  items: CaseCandidate[]
+  limit: number
+  offset: number
+}

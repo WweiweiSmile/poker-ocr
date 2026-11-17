@@ -11,19 +11,14 @@ import { api, errorMessage } from '../api'
 import { JudgeCard, OverrideCard } from '../components/ScoreJudgePanel'
 import type { ScoreRun, ScoreRunItem, ScoreRunItems } from '../types'
 import {
-  RUN_STATUS, ciText, formatDate, rateText, scoreText,
+  RUN_STATUS, adviceText as amountText, ciText, formatDate, rateText,
+  scoreText,
 } from '../lib/format'
 
 const { Text } = Typography
 
 function kindText(kind: string | null | undefined) {
   return kind || '—'
-}
-
-function amountText(kind: string | null | undefined, amount: number | null | undefined) {
-  if (kind === 'fold' || kind === 'check' || !kind) return kindText(kind)
-  if (amount === null || amount === undefined) return kindText(kind)
-  return `${kind} ${amount}`
 }
 
 export function scoreTags(scores: ScoreRunItem['scores']) {

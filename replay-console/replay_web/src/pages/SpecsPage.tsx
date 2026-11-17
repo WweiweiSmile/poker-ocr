@@ -6,6 +6,7 @@ import {
 import type { ColumnsType } from 'antd/es/table'
 import { AimOutlined, PlusOutlined } from '@ant-design/icons'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useSearchParams } from 'react-router-dom'
 import { api, errorMessage, toQuery } from '../api'
 import type {
   SpecBand, SpecChange, SpecDiff, SpecMeta, SpecOption, SpotSpec,
@@ -486,6 +487,10 @@ export default function SpecsPage() {
   const [q, setQ] = useState('')
   const [editor, setEditor] = useState<{ open: boolean; spec: SpotSpec | null }>({ open: false, spec: null })
   const [historySpec, setHistorySpec] = useState<SpotSpec | null>(null)
+  // 偏差热点「改 spec」带着 ?revise=<id> 跳进来：直接打开派生表单，
+  // 内容与桶都预填成当前这一版，省掉一次手动查找。
+  const [searchParams, setSearchParams] = useSearchParams()
+  const reviseId = Number(searchParams.get('revise') || 0)
 
   const metaQuery = useQuery<SpecMeta>({
     queryKey: ['spec-meta'],
@@ -498,6 +503,25 @@ export default function SpecsPage() {
   })
   const meta = metaQuery.data
   const items = listQuery.data?.items || []
+  // 列表只给最新 revision；热点可能冻结在旧 revision 上，按 id 单独取一次。
+  const reviseQuery = useQuery<SpotSpec>({
+    queryKey: ['spec', reviseId],
+    queryFn: () => api.get(`/specs/${reviseId}`),
+    enabled: !!reviseId && !!listQuery.data,
+    retry: false,
+  })
+
+  useEffect(() => {
+    if (!reviseId) return
+    const target = items.find((item) => item.id === reviseId) || reviseQuery.data
+    if (target) {
+      setEditor({ open: true, spec: target })
+      setSearchParams({}, { replace: true })
+      return
+    }
+    // 找不到（已删除）就清掉参数，别把一次静默无操作留在地址栏里。
+    if (reviseQuery.isError) setSearchParams({}, { replace: true })
+  }, [reviseId, items, reviseQuery.data, reviseQuery.isError, setSearchParams])
 
   const groups = useMemo(() => {
     const map = new Map<string, SpotSpec[]>()

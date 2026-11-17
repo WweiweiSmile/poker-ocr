@@ -244,12 +244,25 @@ class RunItemRepository:
         return {(int(r["case_id"]), int(r["repeat_index"])) for r in rows}
 
     def list(self, run_id: int, reconstruct_version: str, *,
-             only_hardfail: bool = False, limit: int = 200,
-             offset: int = 0) -> list[dict]:
+             only_hardfail: bool = False, spec_id: int | None = None,
+             repeat_index: int | None = None,
+             limit: int = 200, offset: int = 0) -> list[dict]:
+        """列一次运行的条目。
+
+        `spec_id` / `repeat_index` 是偏差热点的下钻过滤：一行就是一个 spec
+        桶，且只看首次建议（repeat 0）。**不在这里按分数排序**——排序要把
+        人工改判后的有效分算进去，那是 `service.score_run_items` 的事。
+        """
         sql = _ITEM_SELECT
         params: list[Any] = [reconstruct_version, int(run_id)]
         if only_hardfail:
             sql += " AND i.hard_fail IS NOT NULL AND i.hard_fail <> ''"
+        if spec_id is not None:
+            sql += " AND i.spec_id = %s"
+            params.append(int(spec_id))
+        if repeat_index is not None:
+            sql += " AND i.repeat_index = %s"
+            params.append(int(repeat_index))
         sql += " ORDER BY c.priority ASC, i.case_id ASC, i.repeat_index ASC"
         sql += " LIMIT %s OFFSET %s"
         params.extend([int(limit), int(offset)])

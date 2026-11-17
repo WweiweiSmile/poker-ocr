@@ -6,6 +6,7 @@ import {
   DeploymentUnitOutlined,
   ExperimentOutlined,
   FundOutlined,
+  HeatMapOutlined,
   SettingOutlined,
   SwapOutlined,
   ThunderboltOutlined,
@@ -27,6 +28,7 @@ import CaseSetsPage from './pages/CaseSetsPage'
 import CaseSetDetailPage from './pages/CaseSetDetailPage'
 import RunsPage from './pages/RunsPage'
 import RunDetailPage from './pages/RunDetailPage'
+import HotspotsPage from './pages/HotspotsPage'
 import SpecsPage from './pages/SpecsPage'
 import ExperimentPairsPage from './pages/ExperimentPairsPage'
 import JobsPage from './pages/JobsPage'
@@ -56,6 +58,7 @@ const NAV = [
   { to: '/sets', label: '手牌集', icon: <DatabaseOutlined />, hint: '挑选回归集、冻结 revision' },
   { to: '/case-sets', label: '案例集', icon: <AimOutlined />, hint: '决策点 × 期望、冻结成版本' },
   { to: '/runs', label: '评分运行', icon: <FundOutlined />, hint: '案例集 × 版本，五维打分' },
+  { to: '/hotspots', label: '偏差热点', icon: <HeatMapOutlined />, hint: '按桶看偏差、下钻、建期望' },
   { to: '/specs', label: '期望库', icon: <AimOutlined />, hint: '按桶分组的行为规范与 revision' },
   { to: '/range-ab', label: '范围 A/B', icon: <SwapOutlined />, hint: '旧路径 vs 事件模型' },
   { to: '/jobs', label: '复跑任务', icon: <ThunderboltOutlined />, hint: '进度、取消、重试' },
@@ -212,6 +215,7 @@ export default function App() {
                 <Route path="/case-sets/:setId" element={<CaseSetDetailPage />} />
                 <Route path="/runs" element={<RunsPage />} />
                 <Route path="/runs/:runId" element={<RunDetailPage />} />
+                <Route path="/hotspots" element={<HotspotsPage />} />
                 <Route path="/specs" element={<SpecsPage />} />
                 <Route path="/experiments" element={<ExperimentsPage />} />
                 <Route path="/experiments/:experimentId" element={<ExperimentDetailPage />} />

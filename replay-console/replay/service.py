@@ -20,10 +20,10 @@ from typing import Any, Iterable
 
 from poker_ocr.advice import build_situation
 from poker_ocr.advice import AISettings
-from poker_ocr.buckets import bucket_label
+from poker_ocr.buckets import BUCKET_ORDER, bucket_label
 
-from . import (case_seed, cases as case_lib, judge, library, run_worker,
-               scoring, specs)
+from . import (case_seed, cases as case_lib, hotspots, judge, library,
+               run_worker, scoring, specs)
 from .config import Settings
 from .db import Database
 from .decisions import (
@@ -69,6 +69,8 @@ log = logging.getLogger("replay.service")
 DEFAULT_TAGS = ["典型", "边界", "漏点", "坚果"]
 MARK_STATUSES = ("todo", "confirmed", "disputed")
 RUN_STATUSES = ("queued", "running", "succeeded", "partial", "failed", "canceled")
+# 下钻一次最多取这么多条再排序；超过就显式标 truncated，不静默截断。
+_DRILLDOWN_CAP = 5000
 
 
 def _as_list(value: Any) -> list[str]:
@@ -1816,6 +1818,9 @@ class ReplayService:
                 "name": row.get("name"),
                 "revision": int(row.get("revision") or 1),
                 "bucket": json_load(row.get("bucket_json"), {}) or {},
+                # 频次目标也冻进快照：报表的「实际 vs 目标带」必须能复现，
+                # 不能因为后来删了 revision 就悄悄换成均分口径。
+                "freq": (json_load(row.get("spec_json"), {}) or {}).get("freq"),
             })
 
         history = self.run_repo.avg_tokens(version_id)
@@ -1884,16 +1889,51 @@ class ReplayService:
         limit = self._query_int(query.get("limit"), 200, low=1, high=1000)
         offset = self._query_int(query.get("offset"), 0, low=0)
         only_fail = str(query.get("only") or "") == "hardfail"
-        rows = self.run_item_repo.list(
-            run_id, str(run.get("reconstruct_version")
-                        or CURRENT_RECONSTRUCT_VERSION),
-            only_hardfail=only_fail, limit=limit, offset=offset)
+        spec_id = self._query_int(query.get("specId"), None, low=1)
+        repeat_index = self._query_int(query.get("repeat"), None, low=0, high=9)
+        sort = str(query.get("sort") or "priority")
+        if sort not in ("priority", "score"):
+            raise ApiError("INVALID_SORT", "sort 只能是 priority / score", 422)
+        reconstruct_version = str(run.get("reconstruct_version")
+                                  or CURRENT_RECONSTRUCT_VERSION)
+        total = None
+        if sort == "score":
+            # 「最差优先」必须按**改判后的有效分**排，所以先在内存里全取本桶
+            # 条目再排；否则改判过的条目会按原始分卡在前面，跟报表口径打架。
+            rows = self.run_item_repo.list(
+                run_id, reconstruct_version, only_hardfail=only_fail,
+                spec_id=spec_id, repeat_index=repeat_index,
+                limit=_DRILLDOWN_CAP, offset=0)
+            overrides = self.override_repo.list(run_id)
+            rows.sort(key=lambda row: self._drilldown_key(row, overrides))
+            total = len(rows)
+            rows = rows[offset:offset + limit]
+        else:
+            rows = self.run_item_repo.list(
+                run_id, reconstruct_version, only_hardfail=only_fail,
+                spec_id=spec_id, repeat_index=repeat_index,
+                limit=limit, offset=offset)
         return {
             "items": [self.run_item_repo.public_item(row) for row in rows],
             "counts": self.run_item_repo.counts(run_id),
             "limit": limit,
             "offset": offset,
+            "sorted": sort,
+            "total": total,
+            "truncated": total is not None and total >= _DRILLDOWN_CAP,
         }
+
+    @staticmethod
+    def _drilldown_key(row: dict, overrides: dict[int, dict]) -> tuple:
+        """下钻排序键：硬失败优先，未出分垫底、再按有效分升序。"""
+        raw = row.get("score")
+        score, _scores, hard_fail = run_worker.apply_override(
+            json_load(row.get("scores_json"), {}) or {},
+            row.get("hard_fail") or None,
+            (float(raw) if raw is not None else None),
+            overrides.get(int(row["case_id"])))
+        return (hard_fail is None, score is None,
+                (score if score is not None else 0.0), int(row["case_id"]))
 
     def score_run_item(self, run_id: int, case_id: int,
                        repeat_index: int = 0) -> dict:
@@ -1930,6 +1970,145 @@ class ReplayService:
         item["override"] = override
         item["overrideHistory"] = self.override_repo.log(run_id, case_id)
         return item
+
+    def score_run_hotspots(self, run_id: int) -> dict:
+        """偏差热点（#59）：把一次运行的逐条结果按 spec 桶聚合成报表。
+
+        口径全部复用现成常量：首次建议（repeat 0）、人工改判后的有效分、
+        `scoring.freq_score` 的频率判定、`scoring.FREQ_MIN_N` 的样本门槛。
+        不另立阈值，也不在这里做告警/卡点。
+        """
+        run = self.run_repo.require(run_id)
+        config = json_load(run.get("config_snapshot"), {}) or {}
+        rows = self._all_run_items(run)
+        overrides = self.override_repo.list(int(run["id"]))
+        spec_meta: dict[int, dict] = {}
+        for snapshot in config.get("specs") or []:
+            try:
+                spec_id = int(snapshot["id"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            # 频次以创建 run 时冻结的快照为准（老 run 没存 freq 才按 id 回读
+            # revision 行：revision 只增不改，读回即是当时那一版）。
+            spec_row = (self.spec_repo.get(spec_id)
+                        if self.spec_repo is not None else None)
+            normalized = specs.spec_from_row(spec_row) if spec_row else {}
+            bucket = snapshot.get("bucket") or normalized.get("bucket") or {}
+            freq = (snapshot.get("freq") if "freq" in snapshot
+                    else normalized.get("freq"))
+            spec_meta[spec_id] = {
+                "id": spec_id,
+                "name": snapshot.get("name") or (spec_row or {}).get("name") or "",
+                "bucket": bucket,
+                "bucketLabel": bucket_label(bucket),
+                "freq": freq,
+            }
+
+        items: list[dict] = []
+        for row in rows:
+            if int(row["repeat_index"]) != 0:
+                continue
+            score, scores, hard_fail = run_worker.apply_override(
+                json_load(row.get("scores_json"), {}) or {},
+                row.get("hard_fail") or None,
+                (float(row["score"]) if row.get("score") is not None else None),
+                overrides.get(int(row["case_id"])))
+            kind = row.get("option_kind") or None
+            items.append({
+                "specId": int(row.get("spec_id") or 0),
+                "score": score,
+                "scores": scores,
+                "hardFail": hard_fail,
+                "kind": kind,
+                "comparable": bool(kind) and row.get("source") != "error",
+            })
+
+        metrics = json_load(run.get("metrics_json"), {}) or {}
+        global_mean = (metrics.get("score") or {}).get("mean")
+        if global_mean is None:
+            # 老 run 没写 metrics 时用同一批条目现算，保证 delta 有基准
+            global_mean = scoring.mean_ci(
+                [float(item["score"]) for item in items
+                 if item["score"] is not None])["mean"]
+        report = hotspots.hotspot_rows(
+            items, spec_meta, global_mean=global_mean)
+        return {
+            "run": self._run_public(run),
+            "summary": hotspots.summarize(items, report),
+            "rows": report,
+        }
+
+    def _all_run_items(self, run: dict) -> list[dict]:
+        """分页取回一次运行的全部条目：报表必须覆盖全量，不能静默截断。"""
+        run_id = int(run["id"])
+        reconstruct_version = str(
+            run.get("reconstruct_version") or CURRENT_RECONSTRUCT_VERSION)
+        rows: list[dict] = []
+        page = 2000
+        offset = 0
+        while True:
+            batch = self.run_item_repo.list(
+                run_id, reconstruct_version, limit=page, offset=offset)
+            rows.extend(batch)
+            if len(batch) < page:
+                return rows
+            offset += page
+
+    def case_candidates(self, set_id: int, query: dict | None = None) -> dict:
+        """从存档按桶找「可补样」的决策点：看得见手牌、标出已在集内。"""
+        query = query or {}
+        set_row = self.case_repo.require_set(set_id)
+        bucket: dict[str, list[str]] = {}
+        for dimension in BUCKET_ORDER:
+            raw = query.get(dimension)
+            if raw is None:
+                continue
+            # 查询串里同维多值用逗号；缺省维度 = 通配（与其他桶口径一致）
+            values = [v.strip() for v in str(raw).split(",")]
+            values = [v for v in values if v]
+            if values:
+                bucket[dimension] = values
+        limit = self._query_int(query.get("limit"), 50, low=1, high=200)
+        offset = self._query_int(query.get("offset"), 0, low=0)
+        rows = self.case_repo.candidates_for_bucket(
+            set_id, bucket, limit=limit, offset=offset)
+        active = self._active_specs()
+        items = []
+        for row in rows:
+            observed = case_lib.bucket_of_row(row)
+            spec = case_lib.best_spec(observed, active)
+            items.append({
+                "canonicalId": int(row["canonical_id"]),
+                "decisionKey": library.decision_key(
+                    row.get("street"), int(row.get("seq") or 0)),
+                "street": row.get("street"),
+                "seq": int(row.get("seq") or 0),
+                "actionIndex": (int(row["action_index"])
+                                if row.get("action_index") is not None
+                                else None),
+                "bucket": observed,
+                "bucketLabel": case_lib.label_of(observed),
+                "hand": {
+                    "heroCards": row.get("hero_cards") or "",
+                    "board": row.get("board") or "",
+                    "heroPosition": row.get("hero_position"),
+                },
+                "specId": int(spec["id"]) if spec else None,
+                "specName": (spec or {}).get("name") or "",
+                "inSet": row.get("case_id") is not None,
+            })
+        return {
+            "caseSet": {
+                "id": int(set_row["id"]),
+                "name": set_row.get("name"),
+                "revision": int(set_row.get("revision") or 1),
+                "frozen": bool(set_row.get("frozen_at")),
+            },
+            "bucket": bucket,
+            "items": items,
+            "limit": limit,
+            "offset": offset,
+        }
 
     def _run_metric_rows(self, run: dict) -> tuple[list[dict], dict[int, str]]:
         config = json_load(run.get("config_snapshot"), {}) or {}

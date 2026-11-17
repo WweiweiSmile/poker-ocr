@@ -222,6 +222,8 @@ canonical 手牌：一手牌可以在复盘（`review`）、实时（`live`）�
 
 聚合：总分取「重复 0 次」的案例均值，P0 通过率 = (P0 且无硬失败 且 `s_action=1`) / **本次 run 的 P0 案例总数**（没跑到/没出分的 P0 也算分母，否则通过率虚高），覆盖率 = 达到 `FREQ_MIN_N=15` 样本的桶数 / 有 active spec 的桶数（按 spec 的桶标签去重，空桶不计；分母是本次 run 开始时全部 active spec 的桶，不是恰好被冻结到的那些）。比例类给 Wilson 95% 区间，均值给正态近似；页面同时显示 n 与区间。
 
+**偏差热点（#59）**：`GET /api/score-runs/{id}/hotspots` 把一次运行按 **spec 桶**聚合（spec 的 bucket/freq 在建 run 时已冻结，同桶不同 spec 不混算），每行同时给 `n`、均分与 95% 区间、硬失败数与 Wilson 区间、频率「实际 vs 目标带」；`severity = dev × √n`，`dev` 有可判定频次时按「离带中点几个半带宽」算、否则按 `(100−均分)/50`，都封顶 3。样本 `n < FREQ_MIN_N(15)` 的桶标 `insufficient`，不进频率达成率的分子/分母；总览的达成率同样带 Wilson 区间。页面 `/hotspots` 下钻到「桶 → 案例（只看 `repeat=0`、硬失败优先、分数升序）→ 条目」，并可从热点建/改 spec（预填七维桶；新建默认生效，否则案例按桶匹配不到它）、按桶从存档补样进案例集（同集 + 同一手牌 + 同一决策点幂等）。每行的偏差会标出口径（频次口径 / 均分口径），口径切换不隐藏。不做告警、不做 CI 卡点。
+
 **LLM judge（#58）**：run 路径先用判定模型逐条判 `required_points` / `forbidden_points`（温度 0，`judge_version = llm-j1:<模型>` 冻结进 `config_snapshot.judge`），再走同一套五维合成；`s_reason` 用要点加权和，`s_fact` 用引用/缺失事实，`HF_HALLUCINATION` / `HF_FORBIDDEN_POINT` 在 run 路径真正生效。每条硬失败把 evidence 落进 `judge_json`：引用的原句 `quotes`、facts 里缺失的项 `missingFacts`、命中的禁令 `forbiddenPoints` / `forbiddenActions`，页面据此展示「为什么判它错」。judge 自己失败（超时、回复不是合法 JSON）时 fail open：退回 #57 的退化口径（`reasonMode: action-support`，不伪造硬失败，`judge_json.status=error` 且带 error 文本）。判定模型要求与被测模型不同、走最强档：`REPLAY_JUDGE_MODEL`（默认 `deepseek-v4-pro`）、`REPLAY_JUDGE_BASE_URL`（缺省回落 `AI_SERVER_BASE_URL`）、`REPLAY_JUDGE_API_KEY_REF`（默认 `AI_SERVER_API_KEY`）、`REPLAY_JUDGE_TIMEOUT`（默认 30 秒）、`REPLAY_JUDGE_THINKING`；不合规时创建页显示原因、`create_score_run` 直接 409 `JUDGE_NOT_READY`。人工改判写 `replay_judge_overrides`（唯一键 run+case，带 `actor` / `note` / `updated_at`），原始 `replay_run_items.score` 与 `judge_json` 一个字不动，聚合时优先取改判分；每次改判/撤回都追加一行 `replay_judge_override_log`（before/after）。抽屉里可看逐条判定与 evidence、保存/撤回改判，并可「重判（不写库）」比对一致性。语义口径见 `replay/judge.py` 顶部。
 
 采样与中断：每个案例跑 1 次，`priority=0` 的案例额外再跑 2 次（固定样本，不随机抽）；调用次数 = 案例数 + P0 数 × 2。取消是协作式的：已完成的案例照常计分，**没开跑就取消的单元不算「已完成」**（进度不会跳到 N/N），run 标 `partial` 并在 `error_msg` 里写「完成 X/Y 个案例；已按要求中断」；服务重启时 `running` 的 run 会被标成 `partial`，不冒充成功。案例缺决策点、或冻结的 spec 已被删时，不静默跳过也不换 spec：落一条 `source=error` 的 run_item（`HF_ERROR`，errorMsg 写明原因），run 因有 error 标 `partial`。
@@ -255,6 +257,7 @@ canonical 手牌：一手牌可以在复盘（`review`）、实时（`live`）�
 | PATCH | `/api/case-sets/{id}/cases/{caseId}` | 改案例的 spec/优先级/状态/备注（冻结后 409） |
 | DELETE | `/api/case-sets/{id}/cases/{caseId}` | 删案例（冻结后 409） |
 | POST | `/api/case-sets/{id}/hand-cases` | 整手全建 `{canonicalId, priority?}`：每个决策点自动挑最具体的 active 期望 |
+| GET | `/api/case-sets/{id}/candidates` | 按桶找「可补样」决策点（#59）：`street`/`position_bucket`/… 单值或逗号多值、`limit`/`offset`；带手牌摘要、`inSet`（已在集内）与自动匹配到的 active `specId` |
 | POST | `/api/case-sets/{id}/sample` | 按桶补样 `{bucket:{维度:[值]}, count?, priority?}`，按时间倒序抽决策点 |
 | POST | `/api/case-sets/seed` | 把 `tools/ab_set.json` 导成 seed 案例集：`{path?, setName?, dryRun?}`；幂等，`dryRun` 只预演 |
 | GET | `/api/score-runs/meta` | 创建页字典：冻结案例集（带计划调用数）、版本（带 blockers/runnable）、判定/重建版本、单价模型 |
@@ -263,7 +266,8 @@ canonical 手牌：一手牌可以在复盘（`review`）、实时（`live`）�
 | POST | `/api/score-runs` | 建 run：`{caseSetId, versionId}`；未冻结 409、缺 spec 422、超上限 422 |
 | GET | `/api/score-runs/{id}` | 单次 run：状态、总分/P0/覆盖率/metrics、config 快照 |
 | POST | `/api/score-runs/{id}/cancel` | 请求中断（协作式，跑完当前单元就停，run 标 partial） |
-| GET | `/api/score-runs/{id}/items` | 逐条结果（`only=hardfail`、`limit`/`offset`），带计数摘要 |
+| GET | `/api/score-runs/{id}/items` | 逐条结果（`only=hardfail`、`specId` 按桶下钻、`repeat` 只看首次建议、`sort=score` 硬失败优先且按改判后的有效分升序（响应带 `total`/`truncated`）、`limit`/`offset`），带计数摘要 |
+| GET | `/api/score-runs/{id}/hotspots` | 偏差热点（#59）：按 spec 桶聚合的 n / 均分+CI / 硬失败率+CI / 频率达成 / `severity`，外加总览 `summary` |
 | GET | `/api/score-runs/{id}/items/{caseId}/{repeatIndex}` | 单条明细：建议、五维分、judge 证据、当时的 options、facts、prompt |
 | GET | `/api/versions` | 版本列表（`includeArchived=1`） |
 | POST | `/api/versions` | 新建 |
