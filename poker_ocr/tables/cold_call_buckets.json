@@ -1,0 +1,169 @@
+{
+  "schema": 1,
+  "kind": "cold_call_buckets",
+  "version": "v1",
+  "source": "docs/冷跟先验-按人数分桶-草案.md §2.2（票 #77 评审通过；票 #78 落库）",
+  "note": "冷跟先验的『按入池人数分档』token 表：n_way = 开池者 + 该座位之前（不含自己）自愿进池的翻前 call/limp/all-in-call + 自己，tier = min(4, max(2, n_way))。2 人池档是 ranges.py 里的现状表（COLD_CALL_IP/OOP），这里不重复抄写，只在 expected 里钉住数值；3/4 人池档的 token 是本文件的唯一来源。token 语法与 poker_ocr/preflop_ranges.expand 一致，逐 token 展开成 169 键、权重全 1；档位是嵌套子集（只删不加）。",
+  "tiers": {
+    "IP": {
+      "2": {
+        "tokens": null,
+        "baseline": "COLD_CALL_IP",
+        "expected": {
+          "combos": 268,
+          "width_pct": 20.21,
+          "keys": 52
+        },
+        "note": "现状表（ranges.py）；票 #78 不改动"
+      },
+      "3": {
+        "tokens": [
+          "22",
+          "33",
+          "44",
+          "55",
+          "66",
+          "77",
+          "88",
+          "99",
+          "TT",
+          "JJ",
+          "A2s-AQs",
+          "KTs",
+          "KJs",
+          "KQs",
+          "QTs",
+          "QJs",
+          "JTs",
+          "T9s",
+          "98s",
+          "87s",
+          "76s",
+          "65s",
+          "54s",
+          "97s",
+          "86s",
+          "75s",
+          "KQo",
+          "KJo",
+          "T9o"
+        ],
+        "expected": {
+          "combos": 200,
+          "width_pct": 15.08,
+          "keys": 39
+        }
+      },
+      "4": {
+        "tokens": [
+          "22",
+          "33",
+          "44",
+          "55",
+          "66",
+          "77",
+          "88",
+          "99",
+          "TT",
+          "A2s-AQs",
+          "KTs",
+          "KJs",
+          "KQs",
+          "JTs",
+          "T9s",
+          "98s",
+          "87s",
+          "76s",
+          "65s",
+          "54s",
+          "KQo"
+        ],
+        "expected": {
+          "combos": 150,
+          "width_pct": 11.31,
+          "keys": 31
+        }
+      }
+    },
+    "OOP": {
+      "2": {
+        "tokens": null,
+        "baseline": "COLD_CALL_OOP",
+        "expected": {
+          "combos": 222,
+          "width_pct": 16.74,
+          "keys": 45
+        },
+        "note": "现状表（ranges.py）；票 #78 不改动"
+      },
+      "3": {
+        "tokens": [
+          "22",
+          "33",
+          "44",
+          "55",
+          "66",
+          "77",
+          "88",
+          "99",
+          "TT",
+          "A2s-AQs",
+          "KTs",
+          "KJs",
+          "KQs",
+          "QTs",
+          "QJs",
+          "JTs",
+          "T9s",
+          "98s",
+          "87s",
+          "76s",
+          "65s",
+          "54s",
+          "KQo",
+          "KJo"
+        ],
+        "expected": {
+          "combos": 170,
+          "width_pct": 12.82,
+          "keys": 34
+        }
+      },
+      "4": {
+        "tokens": [
+          "22",
+          "33",
+          "44",
+          "55",
+          "66",
+          "77",
+          "88",
+          "99",
+          "A2s",
+          "A3s",
+          "A4s",
+          "A5s",
+          "ATs",
+          "AJs",
+          "AQs",
+          "KQs",
+          "KJs",
+          "QJs",
+          "QTs",
+          "JTs",
+          "98s",
+          "87s",
+          "76s",
+          "65s",
+          "54s",
+          "KQo"
+        ],
+        "expected": {
+          "combos": 128,
+          "width_pct": 9.65,
+          "keys": 26
+        }
+      }
+    }
+  }
+}

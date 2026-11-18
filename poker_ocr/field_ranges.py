@@ -27,6 +27,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from . import cold_call_tiers
 from . import range_flow
 from .hand_track import FLOP, PREFLOP, RIVER, TURN, ActionRecord, HandSnapshot
 from .positions import BB, POSITIONS_BY_TABLE_SIZE, SB
@@ -44,6 +45,10 @@ class OpponentRangeSpec:
     note: str = ""
     # 翻后动作序列（时间顺序）。空 = 这手还没有可用的翻后动作，退回旧口径。
     events: tuple[range_flow.ActionEvent, ...] = field(default=())
+    # 冷跟先验用哪一档（票 #78）。非冷跟座位为 None；冷跟座位但人数读不出
+    # 时为 `ColdCall(tier=None)` —— 此时 prior_id 无 _n 后缀（= 现状数值），
+    # 事实里标「未定」，不能当成 2 人池。
+    cold_call: "cold_call_tiers.ColdCall | None" = None
 
 
 @dataclass(frozen=True)
@@ -555,6 +560,14 @@ def resolve(snap: HandSnapshot) -> Field:
         mode = _mode(snap, opp, warnings)
         if mode == "fold":
             continue
+        # 冷跟先验按「这个座位冷跟那一刻的入池人数」分档（票 #78）。人数取
+        # 翻前动作线，不取当前帧在局人数：冷跟是翻前动作，翻后有人弃牌不该
+        # 把同一手牌的档位改松。动作线不足 → tier=None，prior 保持无后缀
+        # （现状数值），由事实块标「未定」——绝不拿 2 人池冒充。
+        cold: cold_call_tiers.ColdCall | None = None
+        if role == "cold_call" and prior_id:
+            cold = cold_call_tiers.tier_for_seat(snap, opp.seat_id)
+            prior_id = cold_call_tiers.with_tier(prior_id, cold.tier)
         seat_events = event_map.get(opp.seat_id, ())
         if mode == "unacted" and snap.street != PREFLOP and not seat_events:
             warnings.append(
@@ -570,6 +583,7 @@ def resolve(snap: HandSnapshot) -> Field:
             role=role,
             note=note,
             events=seat_events,
+            cold_call=cold,
         ))
 
     # 短码的有效筹码会把范围整体拉宽/拉窄；表仍可用，但要标注近似。

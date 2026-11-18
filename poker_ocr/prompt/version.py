@@ -129,5 +129,13 @@ from __future__ import annotations
 # ex.tight_passive（ledger/exploit.json）；渲染器在基础行之后追加至多一行
 # 「修正:」，未知画像按设计 Q26 走松系；aggression 里与 ex.station 重复的
 # 跟注站尺寸/诈唬句改为指向修正行。只更新 golden hash。
-PROMPT_VERSION = "lean-zh-2026-11-18.1"
+# 2026-11-19.1：冷跟先验按入池人数分档（#78，父规格 #74）——翻前冷跟不再是
+# 一张表通吃：开池者+已进池的人+跟注者共 2/3/4 人池各一档，4 人以上归 4 人
+# 池，取自 poker_ocr/tables/cold_call_buckets.json（数值出处
+# docs/冷跟先验-按人数分桶-草案.md §2.2，票 #77 评审通过）。2 人池数值逐位
+# 不变（IP 268 combo/20.21%、OOP 222/16.74%）。提示词改两处：翻后对手范围
+# 逐家行前缀「冷跟先验 N 人池档（X%）」，翻前面对加注的宽度串带上档位；
+# 人数读不出（缺翻前动作线）时 prior 保持现状数值并标「入池人数未定」，
+# 不猜档、也不退随机牌（退随机牌会把 behind 压更低，方向相反）。
+PROMPT_VERSION = "lean-zh-2026-11-19.1"
 PROMPT_LANGUAGE = "zh"

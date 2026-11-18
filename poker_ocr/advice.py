@@ -952,6 +952,14 @@ def _opponent_facts(edge) -> dict:
     }
     if label:
         item["label"] = label
+    # 冷跟先验用哪一档（票 #78）。tier=None 表示入池人数读不出、按现状
+    # 2 人池数值算 —— 复盘看 facts 时必须能区分「真的 2 人池」和「未定」。
+    cold = getattr(edge, "cold_call", None)
+    if cold is not None:
+        from .cold_call_tiers import fact_payload
+        payload = fact_payload(cold, getattr(edge, "cold_call_prior_width", None))
+        if payload:
+            item["cold_call"] = payload
     comp = getattr(edge, "composition", None)
     if comp is not None:
         item["composition"] = {

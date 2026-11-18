@@ -110,6 +110,15 @@ def _range_group_zh(name: str | None) -> str:
     return _RANGE_GROUP_ZH.get(key, name or "未知")
 
 
+def _cold_call_payload(edge) -> dict:
+    """冷跟座位的档位块（与 advice facts 的 `cold_call.label` 同一份文案）。"""
+    cold = getattr(edge, "cold_call", None)
+    if cold is None:
+        return {}
+    from ...cold_call_tiers import fact_payload
+    return fact_payload(cold, getattr(edge, "cold_call_prior_width", None))
+
+
 def _composition_zh(edge) -> str:
     """范围的成牌/听牌/空气分区。没有事件模型的数据时返回空串。"""
     comp = getattr(edge, "composition", None)
@@ -288,11 +297,22 @@ def render_ranges_zh(sit: Situation) -> list[str]:
     for edge in shown:
         composition = _composition_zh(edge)
         detail = composition + "；" if composition else ""
+        # 冷跟先验用哪一档（票 #78）：人数越多范围越紧，宽度必须一起给出，
+        # 否则「范围 ≈15%」会被当成翻前 20% 那张表。tier=None → 写「未定」。
+        cold = _cold_call_payload(edge)
+        if cold:
+            detail = f"冷跟先验 {cold['label']}；" + detail
         position = edge.position or edge.seat_id
         lead = max(0.0, 1.0 - edge.behind - edge.tie)
         index = _edge_index(hr.opponents, edge)
         refs: list[dict] = []
         if index >= 0:
+            if cold:
+                refs.append({
+                    "ns": "facts",
+                    "path": f"hand_ranges.opponents[{index}].cold_call.label",
+                    "text": cold["label"],
+                })
             refs.append({
                 "ns": "facts",
                 "path": f"hand_ranges.opponents[{index}].behind",
