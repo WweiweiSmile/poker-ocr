@@ -91,10 +91,6 @@ class ColdCall:
     def known(self) -> bool:
         return self.tier is not None
 
-    @property
-    def suffix(self) -> str:
-        return tier_suffix(self.tier)
-
 
 UNDETERMINED = ColdCall(tier=None, basis=BASIS_UNDETERMINED)
 
@@ -103,7 +99,24 @@ UNDETERMINED = ColdCall(tier=None, basis=BASIS_UNDETERMINED)
 
 @lru_cache(maxsize=4)
 def _table() -> Mapping[str, Any]:
+    """读静态表并校验形状；坏了就抛，别静默退成「范围未知」。
+
+    fail open 的边界是**运行期缺数据**（没有翻前动作线等），不是静态表
+    本身坏了：表缺字段/版本不对属于部署错误，应该在启动或单测就炸出来
+    （与 `poker_ocr/strategy_tables.py:116-117` 同一惯例）。
+    """
     raw = json.loads(TABLE_FILE.read_text(encoding="utf-8"))
+    if not isinstance(raw, Mapping):
+        raise ValueError(f"{TABLE_FILE}: 顶层应为对象，实际 {type(raw).__name__}")
+    schema = raw.get("schema")
+    if schema != 1:
+        raise ValueError(f"{TABLE_FILE}: 不支持的 schema {schema!r}（应为 1）")
+    kind = raw.get("kind")
+    if kind != "cold_call_buckets":
+        raise ValueError(
+            f"{TABLE_FILE}: kind 应为 'cold_call_buckets'，实际 {kind!r}")
+    if not isinstance(raw.get("tiers"), Mapping):
+        raise ValueError(f"{TABLE_FILE}: 缺 tiers 对象")
     return raw
 
 
@@ -169,11 +182,6 @@ def preflop_entry_order(snap: Any) -> tuple[str, ...]:
     return tuple(order)
 
 
-def _seat_key(seat_id: str | None) -> str:
-    """hero 的动作记录没有 seat_id，调用方用 HERO_SEAT 显式指代。"""
-    return HERO_SEAT if str(seat_id or "").strip() == HERO_SEAT else str(seat_id or "")
-
-
 def tier_for_seat(snap: Any, seat_id: str | None) -> ColdCall:
     """某座位**冷跟那一刻**的入池人数 → 档位。
 
@@ -181,7 +189,7 @@ def tier_for_seat(snap: Any, seat_id: str | None) -> ColdCall:
     已经进池的人 + 开池者 + 它自己，才是它冷跟时面对的人数。找不到它的
     跟注、或整手没有翻前动作序列 → `UNDETERMINED`（不猜）。
     """
-    key = _seat_key(seat_id)
+    key = str(seat_id or "")   # hero 的动作没有 seat_id，用 HERO_SEAT 占位
     order = preflop_entry_order(snap)
     index = -1
     for position in range(len(order) - 1, -1, -1):   # 最后一次跟注
@@ -190,7 +198,11 @@ def tier_for_seat(snap: Any, seat_id: str | None) -> ColdCall:
             break
     if index < 0:
         return UNDETERMINED
-    n_way = 1 + index + 1
+    # 人数 = 开池者 + 该座位之前已经进池的**其它**座位（去重）+ 自己。
+    # 不能拿下标直接当人数：同一个座位可能先补齐（0.5）再加注后再跟，
+    # 它自己前一次 call 也在 `order` 里，下标会把这一次算成「另一个
+    # 入池的人」，2 人池被错升成 3 人池（P0-1）。
+    n_way = 1 + len(set(order[:index]) - {key}) + 1
     tier = tier_from_n_way(n_way)
     if tier is None:
         return UNDETERMINED
@@ -263,7 +275,9 @@ def tier_label_zh(cold: ColdCall | None) -> str:
     if cold is None:
         return ""
     if not cold.known:
-        return "入池人数未定，按 2 人池档"
+        # 不能说「按 2 人池档」：那会被读成「确认是 2 人池」。档位确实没读
+        # 出来，只是沿用未分档的现状数值（= 2 人池那张表）。
+        return "入池人数未定，沿用未分档先验"
     return f"{int(cold.tier)} 人池档"
 
 
@@ -284,9 +298,22 @@ def fact_payload(cold: ColdCall | None, prior_width_pct: float | None) -> dict:
     }
 
 
+def edge_payload(edge: Any) -> dict:
+    """一条对手边（`HandVsRanges` / `RangeSpec`）的档位块。
+
+    复盘 facts（`advice._opponent_facts`）与提示词（`prompt.user.ranges`）
+    共用这一份，不要各自再写一遍 getattr + `fact_payload`。
+    """
+    cold = getattr(edge, "cold_call", None)
+    if cold is None:
+        return {}
+    return fact_payload(cold, getattr(edge, "cold_call_prior_width", None))
+
+
 __all__ = [
     "BASIS_ACTION_ORDER", "BASIS_UNDETERMINED", "ColdCall", "HERO_SEAT",
-    "TABLE_FILE", "TIER_MAX", "TIER_MIN", "UNDETERMINED", "fact_payload",
+    "TABLE_FILE", "TIER_MAX", "TIER_MIN", "UNDETERMINED", "edge_payload",
+    "fact_payload",
     "parse_range_id", "preflop_entry_order", "reset_cache", "tier_for_n_way",
     "tier_for_seat",
     "tier_from_n_way", "tier_label_zh", "tier_suffix", "tokens_for", "with_tier",

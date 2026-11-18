@@ -159,6 +159,42 @@ def test_tiers_are_nested_subsets() -> None:
 # ------------------------------------------------------- id 形态 / 档位选择
 
 
+def test_broken_table_fails_fast() -> None:
+    """静态表坏了要 fail fast 并点名文件，不能静默退成「范围未知」。
+
+    fail open 的边界是**运行期缺数据**，不是静态表本身坏了：表坏了应当在
+    启动/单测就炸出来（`poker_ocr/strategy_tables.py:116-117` 同一惯例）。
+    """
+    import tempfile
+
+    original = cold_call_tiers.TABLE_FILE
+    bad_docs = (
+        ({"kind": "cold_call_buckets", "tiers": {}}, "缺 schema"),
+        ({"schema": 2, "kind": "cold_call_buckets", "tiers": {}}, "schema=2"),
+        ({"schema": 1, "tiers": {}}, "缺 kind"),
+        ({"schema": 1, "kind": "range_flow", "tiers": {}}, "kind 错"),
+        ({"schema": 1, "kind": "cold_call_buckets"}, "缺 tiers"),
+    )
+    try:
+        for doc, why in bad_docs:
+            with tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / "cold_call_buckets.json"
+                path.write_text(json.dumps(doc, ensure_ascii=False),
+                                encoding="utf-8")
+                cold_call_tiers.TABLE_FILE = path
+                cold_call_tiers.reset_cache()
+                try:
+                    cold_call_tiers.tokens_for("IP", 3)
+                except ValueError as exc:
+                    check(str(path) in str(exc),
+                          f"{why}: 错误消息应点名文件：{exc}")
+                else:
+                    check(False, f"{why}: 坏表应抛 ValueError")
+    finally:
+        cold_call_tiers.TABLE_FILE = original
+        cold_call_tiers.reset_cache()
+
+
 def test_range_id_shapes() -> None:
     """id 形态：COLD_CALL_{IP|OOP}[_vs_{bucket}][_n{3|4}]；位置轴仍同宽。"""
     cases = {
@@ -234,6 +270,39 @@ def test_tier_selection_counts_entrants_at_action_time() -> None:
     cold = cold_call_tiers.tier_for_seat(no_pre, "co")
     check(cold.tier is None and cold.basis == cold_call_tiers.BASIS_UNDETERMINED,
           f"没有翻前动作线时应未定，实际 {cold}")
+
+
+def test_self_completion_does_not_inflate_tier() -> None:
+    """SB 先补齐 0.5 再跟加注：它自己前面那次跟注不能算成「另一个入池的人」。
+
+    回归 P0-1：旧实现拿最后一次跟注在动作线里的**下标**当人数，SB 的两次
+    call 会让它从 2 人池错升 3 人池（先验从 16.74% 变成 12.82%）。
+    """
+    s = snap(hero_pos="BTN", preflop=(
+        act("hero", "BTN", "raise", 6.0, hero=True),
+        act("sb", "SB", "call", 0.5),      # SB 补齐
+        act("sb", "SB", "call", 6.0),      # 面对加注再跟
+    ), opponents=(opp("sb", "SB"),))
+    cold = cold_call_tiers.tier_for_seat(s, "sb")
+    check(cold.tier == 2 and cold.n_way == 2,
+          f"同一个座位的两次跟注只算自己一次，实际 {cold}")
+    prior_id = cold_call_tiers.with_tier("COLD_CALL_OOP_vs_LP", cold.tier)
+    check(prior_id == "COLD_CALL_OOP_vs_LP",
+          f"2 人池应无 _n 后缀，实际 {prior_id}")
+    ran = ranges.get(prior_id)
+    check(ran is not None and abs(ran.width_pct - 16.74) < 0.01,
+          f"2 人池宽度应保持现状 16.74%，"
+          f"实际 {getattr(ran, 'width_pct', None)}")
+    # 去重只去自己：前面别的座位仍要计数（三人池的第二个跟注者 = 3 人池）。
+    three = snap(hero_pos="BTN", preflop=(
+        act("hero", "BTN", "raise", 6.0, hero=True),
+        act("co", "CO", "call", 6.0),
+        act("sb", "SB", "call", 0.5),
+        act("sb", "SB", "call", 6.0),
+    ), opponents=(opp("co", "CO"), opp("sb", "SB")))
+    third = cold_call_tiers.tier_for_seat(three, "sb")
+    check(third.tier == 3 and third.n_way == 3,
+          f"三人池里第二个跟注者（SB 自己两次 call）应为 3 人池，实际 {third}")
 
 
 def test_hero_call_is_counted_through_placeholder() -> None:

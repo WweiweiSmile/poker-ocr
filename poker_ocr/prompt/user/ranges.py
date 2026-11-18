@@ -112,11 +112,8 @@ def _range_group_zh(name: str | None) -> str:
 
 def _cold_call_payload(edge) -> dict:
     """冷跟座位的档位块（与 advice facts 的 `cold_call.label` 同一份文案）。"""
-    cold = getattr(edge, "cold_call", None)
-    if cold is None:
-        return {}
-    from ...cold_call_tiers import fact_payload
-    return fact_payload(cold, getattr(edge, "cold_call_prior_width", None))
+    from ...cold_call_tiers import edge_payload
+    return edge_payload(edge)
 
 
 def _composition_zh(edge) -> str:

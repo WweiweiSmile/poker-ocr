@@ -14,13 +14,13 @@
 同一批**已录的真实决策点**上，同一套统一口径（`hand_vs_ranges._monte_carlo`
 整组拒绝重抽 + 对手范围 + `range_flow` 事件收窄），只换一个变量：冷跟先验。
 
-  · **现状单桶**：`ranges.get(spec.prior_id)` —— `COLD_CALL_IP` 20.21% /
-    `COLD_CALL_OOP` 16.74%，所有入池人数共用一个桶（`poker_ocr/ranges.py:262`
-    与 `:269`；`get()` 的 `COLD_CALL_` 分支在 `:380-386` 只认 IP/OOP，
-    `_vs_<开池位置>` 后缀被丢弃）。
-  · **按人数分桶**：同一个冷跟座位，按它**跟注时已经在池里的人数**（开池者
-    + 它之前所有自愿进池的跟注/溜入 + 它自己）取档，`n_way` 2/3/4 各一档；
-    `n_way=2` 就是现状数值（票 #78 的验收要求：2 人池不许变）。
+  · **现状单桶**：把生产 prior_id 的档位后缀摘掉再 `ranges.get()` ——
+    `COLD_CALL_IP` 20.21% / `COLD_CALL_OOP` 16.74%，所有入池人数共用一个桶
+    （`poker_ocr/ranges.py:262` 与 `:269`）。
+  · **按人数分桶**：直接用生产的 prior_id（`field_ranges.py:569` 已按
+    `tier_for_seat` 接上 `_n3/_n4`，人数读不出时无后缀 = 现状数值），
+    `n_way` 2/3/4 各一档；`n_way=2` 就是现状数值（票 #78 的验收要求：
+    2 人池不许变）。
 
 两臂用**同一个随机种子**跑 `_monte_carlo`（common random numbers），所以差值
 不是两次独立抽样的噪声，而是「同一组随机数、换一套先验」的配对差。
@@ -45,7 +45,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from poker_ocr import board_range, field_ranges, hand_vs_ranges, range_flow, ranges  # noqa: E402
+from poker_ocr import (  # noqa: E402
+    board_range, cold_call_tiers, field_ranges, hand_vs_ranges, range_flow,
+    ranges,
+)
 from poker_ocr.coach import parse_cards, read_hand  # noqa: E402
 from tools.replay_live_decisions import build_snap, find_state  # noqa: E402
 
@@ -58,56 +61,29 @@ TIER_ORDER = ("强成牌", "超对", "顶对强踢", "顶对弱踢", "中底对"
 
 # ───────────────────────── 三档草案 ─────────────────────────
 #
+# token 列表的**唯一来源**是 `poker_ocr/tables/cold_call_buckets.json`（运行时
+# 也从这里读）；本工具不再抄一份，避免两处漂移。2 人池 = 现状表，不重写。
 # 形式：token 列表（`preflop_ranges.expand` 语法），逐 token 展开成 169 键 →
 # combo 权重全 1。三档是**嵌套**的：tier3 ⊂ tier2、tier4 ⊂ tier3，只删不加。
 # 每一档都写明「删掉了什么类别、为什么」，见
 # `docs/冷跟先验-按人数分桶-草案.md` §3。
 
-UNCHANGED = None              # tier2 = 现状，不重写
 
-DRAFT: dict[tuple[str, int], tuple[str, ...] | None] = {
-    # 2 人池：只开池者 + 这一个跟注者。保持现状（票 #78 验收）。
-    ("IP", 2): UNCHANGED,
-    ("OOP", 2): UNCHANGED,
-    # 3 人池：开池者 + 已有 1 家进池。删掉被统治的弱同花宽张
-    # （K7s–K9s / Q7s–Q9s / J7s–J8s / T7s–T8s）与较弱的两张非同花
-    # （QJo / JTo / K9o 系列），保留小对子、同花 A、同花连张/一隔张。
-    ("IP", 3): (
-        "22", "33", "44", "55", "66", "77", "88", "99", "TT", "JJ",
-        "A2s-AQs", "KTs", "KJs", "KQs", "QTs", "QJs", "JTs",
-        "T9s", "98s", "87s", "76s", "65s", "54s",
-        "97s", "86s", "75s",
-        "KQo", "KJo", "T9o",
-    ),
-    ("OOP", 3): (
-        "22", "33", "44", "55", "66", "77", "88", "99", "TT",
-        "A2s-AQs", "KTs", "KJs", "KQs", "QTs", "QJs", "JTs", "T9s",
-        "98s", "87s", "76s", "65s", "54s",
-        "KQo", "KJo",
-    ),
-    # 4+ 人池：开池者 + 已有 ≥2 家进池。再删一隔张（97s/86s/75s）与
-    # 最弱的两张非同花（KJo/T9o），对子收到 TT。
-    ("IP", 4): (
-        "22", "33", "44", "55", "66", "77", "88", "99", "TT",
-        "A2s-AQs", "KTs", "KJs", "KQs", "JTs",
-        "T9s", "98s", "87s", "76s", "65s", "54s",
-        "KQo",
-    ),
-    # OOP 再收紧一档的地方是「被统治的弱 A 同花」（A6s–A9s：踢脚不够、
-    # 中顶对就输给更大的 A），只留 A2s–A5s（顺子潜力）与 ATs+。
-    ("OOP", 4): (
-        "22", "33", "44", "55", "66", "77", "88", "99",
-        "A2s", "A3s", "A4s", "A5s", "ATs", "AJs", "AQs",
-        "KQs", "KJs", "QJs", "QTs", "JTs",
-        "98s", "87s", "76s", "65s", "54s",
-        "KQo",
-    ),
-}
+def draft_tokens(ip_oop: str, tier: int) -> tuple[str, ...] | None:
+    """该侧该档的草案 token；2 人池返回 None（= 现状表，不重写）。"""
+    if tier <= cold_call_tiers.TIER_MIN:
+        return None
+    tokens = cold_call_tiers.tokens_for(ip_oop, tier)
+    if not tokens:
+        raise ValueError(
+            f"cold_call_buckets.json 缺 {ip_oop} n{tier} 的 tokens："
+            "草案表与运行时表已漂移")
+    return tokens
 
 
 def build_draft_range(ip_oop: str, tier: int) -> ranges.Range:
     """把草案 token 列表变成 `ranges.Range`（等权 combo）。"""
-    tokens = DRAFT[(ip_oop, tier)]
+    tokens = draft_tokens(ip_oop, tier)
     if tokens is None:
         raise ValueError("tier2 是现状，不从这里构造")
     keys = ranges.expand_tokens(tokens)
@@ -129,12 +105,12 @@ _DRAFT_CACHE: dict[tuple[str, int], ranges.Range] = {}
 def draft_range(ip_oop: str, tier: int) -> ranges.Range:
     key = (ip_oop, tier if tier >= 3 else 2)
     if key not in _DRAFT_CACHE:
-        if DRAFT[(ip_oop, key[1])] is None:      # 理论上不会进：tier2 走现状
+        if draft_tokens(*key) is None:           # tier2 走现状表
             cur = ranges.get(f"COLD_CALL_{ip_oop}_vs_LP")
             assert cur is not None
             _DRAFT_CACHE[key] = cur
         else:
-            _DRAFT_CACHE[key] = build_draft_range(ip_oop, key[1])
+            _DRAFT_CACHE[key] = build_draft_range(*key)
     return _DRAFT_CACHE[key]
 
 
@@ -187,40 +163,24 @@ def load_records(path: Path) -> tuple[list[dict], int]:
     return records, bad
 
 
-def _preflop_calls(snap) -> list[str]:
-    """翻前按顺序的「进池」动作座位（call / all-in-call），hero 用 __hero__。"""
-    seats: list[str] = []
-    for rec in snap.streets:
-        if rec.street != "preflop":
-            continue
-        for action in rec.actions:
-            if action.action != "call":
-                continue
-            seats.append("__hero__" if action.is_hero else str(action.seat_id))
-    return seats
-
-
 def _seat_tiers(snap, cold_seats: list[str]) -> tuple[dict[str, int], bool]:
     """每个冷跟座位跟注时的入池人数 → 档位 2/3/4（上限 4）。
 
-    `n_way = 1（开池者）+ 它之前（含自己）所有进池的跟注/溜入`。
-    拿不到动作顺序时退回「当前在局人数」，并标 fallback。
+    直接调用生产实现 `cold_call_tiers.tier_for_seat`（同一条
+    `preflop_entry_order` → 档位映射），不再自己重写一套。生产在人数读不出
+    时返回 None（不猜档，P0-1 的修复也只在这里）；本工具要报「实际会走哪张
+    表」，所以按 2 人池（现状无后缀）计并标 fallback。
     """
-    calls = _preflop_calls(snap)
-    if not calls:
-        active = sum(1 for o in snap.opponents if not o.folded) + 1
-        return {seat: min(4, max(2, active)) for seat in cold_seats}, True
+    order = cold_call_tiers.preflop_entry_order(snap)
     out: dict[str, int] = {}
-    fallback = False
+    fallback = not order
     for seat in cold_seats:
-        try:
-            rank = calls.index(seat) + 1
-        except ValueError:
-            active = sum(1 for o in snap.opponents if not o.folded) + 1
-            out[seat] = min(4, max(2, active))
+        cold = cold_call_tiers.tier_for_seat(snap, seat)
+        if cold.tier is None:
+            out[seat] = int(cold_call_tiers.tier_for_n_way(2).tier)
             fallback = True
-            continue
-        out[seat] = min(4, max(2, 1 + rank))
+        else:
+            out[seat] = cold.tier
     return out, fallback
 
 
@@ -321,11 +281,13 @@ def _built_ranges(point: Point, arm: str) -> tuple[list, int]:
         if not spec.prior_id:
             continue
         prior = None
-        if spec.role == "cold_call" and arm == "bucket":
-            tier = point.seat_tier.get(spec.seat_id, 2)
-            ip_oop = "IP" if "_IP_" in spec.prior_id.upper() else "OOP"
-            prior = (ranges.get(spec.prior_id) if tier <= 2
-                     else draft_range(ip_oop, tier))
+        if spec.role == "cold_call":
+            # 生产已经把档位后缀接在 prior_id 上（field_ranges.py:569）。基线
+            # 臂要的是「不分桶的现状先验」，先摘掉后缀；分桶臂直接用生产 id，
+            # 这样测的就是线上真正会走的那张表。
+            rid = (spec.prior_id if arm == "bucket"
+                   else cold_call_tiers.with_tier(spec.prior_id, None))
+            prior = ranges.get(rid)
         else:
             prior = ranges.get(spec.prior_id)
         if prior is None:
@@ -405,14 +367,16 @@ def draft_widths() -> list[dict]:
         for tier in (3, 4):
             rows.append({"arm": f"{ip_oop} tier{tier}",
                          "range": draft_range(ip_oop, tier),
-                         "tokens": DRAFT[(ip_oop, tier)], "note": "草案"})
+                         "tokens": draft_tokens(ip_oop, tier),
+                         "note": "草案"})
     return rows
 
 
 def tier_keys(ip_oop: str, tier: int) -> set[str]:
-    if tier <= 2:
+    tokens = draft_tokens(ip_oop, tier)
+    if tokens is None:
         return set(ranges.expand_tokens(ranges._RULE_TOKENS[f"COLD_CALL_{ip_oop}"]))
-    return set(ranges.expand_tokens(DRAFT[(ip_oop, tier)]))
+    return set(ranges.expand_tokens(tokens))
 
 
 def grid_markdown(ip_oop: str) -> list[str]:
