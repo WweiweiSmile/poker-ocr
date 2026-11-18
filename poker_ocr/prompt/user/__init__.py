@@ -27,6 +27,7 @@ from .preflop import render_preflop_zh
 from .price import render_price_zh
 from .profiles import render_profiles_zh
 from .quality import render_data_quality_zh
+from .rules import render_rules_zh
 from .situation import render_current_state_zh
 from .strength import render_hand_strength_zh
 
@@ -62,6 +63,14 @@ def render_facts_zh(sit) -> str:
 
     with section("strength") as sec:
         sec.extend(render_hand_strength_zh(sit))
+    if sec.lines:
+        lines.append("")
+        lines.extend(sec.lines)
+
+    # ── 规则台账（spec #63）：书为准的 intent/size，最多两行 ──
+    # 空台账返回空列表 -> 一个字节都不加（空行、标题都不留）。
+    with section("rules") as sec:
+        sec.extend(render_rules_zh(sit))
     if sec.lines:
         lines.append("")
         lines.extend(sec.lines)
