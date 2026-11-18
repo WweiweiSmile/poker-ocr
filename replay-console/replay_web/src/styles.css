@@ -70,6 +70,12 @@ h1, h2, h3, p { margin: 0; }
 .nav-copy { display: flex; flex-direction: column; gap: 2px; font-size: 13px; }
 .nav-hint { font-size: 10px; color: #66837c; }
 .nav-item.active .nav-hint { color: #94b9b0; }
+.nav-group { display: flex; flex-direction: column; gap: 4px; }
+.nav-group + .nav-group, .nav + .nav-group { margin-top: 14px; padding-top: 14px; border-top: 1px solid rgba(255, 255, 255, .08); }
+.legacy-banner { margin: 0 0 16px; }
+.nav-group-label {
+  padding: 0 12px 4px; font-size: 10px; letter-spacing: 1.4px; color: #5f7c75; text-transform: uppercase;
+}
 .sidebar-stats {
   display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; padding: 16px 6px;
   margin-top: 22px; border-top: 1px solid rgba(255, 255, 255, .08);

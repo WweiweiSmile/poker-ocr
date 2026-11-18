@@ -372,8 +372,9 @@ A/B 的 baseline 也可以用这份线上 prompt 做 `stored` 重放。
 
 幂等键是 `(user_id, source, external_uid)`；补了 advice/context 不会重复入库。
 手牌列表新增「深挖」列（`review_score` + 标记），可按 `flags` / `minScore` 筛选；
-左侧 **手牌集** 可把选中的手牌冻结成回归集，实验详情 → **成对复盘** 逐决策点
-看 A/B 理由并记 A/B/same/unsure。
+旧链路的 **手牌集**（逐手冻结的回归集）和 **A/B 实验** 已按 #61 收进
+`/legacy` 只读页：能翻历史数据，不再有新建/冻结/运行/打分按钮。新链路请用
+**案例集 → 运行 → 偏差**；接口本身没动，仍可用下面的 curl 建实验。
 
 版本新增 `contextMode` / `tableStatsMode`（`none/snapshot/recompute`）：
 `snapshot` 时重跑会注入 **线上那一刻** 的 `opponent_reads` / `table_stats`，
@@ -415,8 +416,8 @@ curl -s 'http://127.0.0.1:8010/api/experiments/1/results?split=dev'
 curl -s -X PATCH http://127.0.0.1:8010/api/decisions/123/mark   -H 'Content-Type: application/json'   -d '{"verdict":"bad","tags":["河牌薄价值"],"note":"对手是跟注站"}'
 ```
 
-前端入口：左侧 **A/B 实验** → 新建（选 baseline/variant、来源、dev 比例、重复次数）
-→ 运行 → 按 dev/holdout 看每版本 `n/agreement/bucket/违规`；手牌详情每个决策点
+前端入口（只读）：`/legacy/experiments` → 选实验看每版本 `n/agreement/bucket/违规`、
+按 dev/holdout 切分；手牌详情每个决策点
 右侧 **复盘** 可记 `good/bad/unsure` + 标签 + 备注，A/B 结果页会汇总 review。
 版本管理里新增 `contextMode` / `tableStatsMode` 两个下拉，新版本默认 `snapshot`。
 
