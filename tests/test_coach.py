@@ -81,7 +81,7 @@ def test_read_hand() -> None:
           f"AsTh on Jc8dKd 应 弱听 4 outs（卡顺），实际 {r.tier} {r.outs}")
 
 
-def test_two_overcards_get_future_outs() -> None:
+def test_overcard_outs_get_future_outs() -> None:
     """两高张不是听牌，但对当前顶对有 6 张反超 outs；不能记 0。
 
     AJ 在 T76 上：A/J 各 3 张，四二法则 24%。分档仍是空气（不触发听牌的
@@ -708,7 +708,7 @@ def main() -> int:
     tests = [
         test_texture,
         test_read_hand,
-        test_two_overcards_get_future_outs,
+        test_overcard_outs_get_future_outs,
         test_relative_strength_by_board,
         test_tptk_dry_bets_two_thirds,
         test_tptk_wet_bets_half,
