@@ -62,6 +62,7 @@ class WorkbenchService:
                  spawn=None,
                  supervisor: LiveSupervisor | None = None,
                  window_resizer=None,
+                 window_info=None,
                  preflight_context: PreflightContext | None = None,
                  overlay: OverlayController | None = None,
                  log=None) -> None:
@@ -80,6 +81,8 @@ class WorkbenchService:
         self.overlay = overlay or OverlayController(log=log)
         # 一键调整窗口（测试注入假实现，避免真的动用户浏览器）
         self._resize_window = window_resizer or sources.resize_window
+        # 窗口解析同理：测试注入假实现，避免真的去枚举系统窗口
+        self._window_info = window_info or sources.window_info
         self.ctx = preflight_context or PreflightContext(
             root=self.root, runs_dir=self.runs_dir)
         self._log = log or (lambda _msg: None)
@@ -248,7 +251,7 @@ class WorkbenchService:
     def pin_window(self, workspace_id: str) -> dict:
         doc = self.store.get(workspace_id)
         game = self._game_window_spec(doc)
-        info = sources.window_info(game) if game else None
+        info = self._window_info(game) if game else None
         if not info:
             raise WorkbenchError(
                 "解析不到游戏窗口：当前源不是窗口，且工作区没填「窗口 → 游戏窗口」",
@@ -284,7 +287,7 @@ class WorkbenchService:
             raise WorkbenchError(
                 "没有游戏窗口：先在「窗口」里填 title:... / index:N，"
                 "或把源改成 window:", status=400)
-        info = sources.window_info(game)
+        info = self._window_info(game)
         if not info:
             raise WorkbenchError(
                 f"解析不到窗口：{sources.normalize_window_spec(game)}",
@@ -332,7 +335,7 @@ class WorkbenchService:
                 "没有游戏窗口：先在「窗口」里填 title:... / index:N，"
                 "或把源改成 window:", status=400)
         profile = self._profile(doc)
-        info = sources.window_info(game)
+        info = self._window_info(game)
         if not info:
             raise WorkbenchError(
                 f"解析不到窗口：{sources.normalize_window_spec(game)}",
@@ -724,9 +727,9 @@ class WorkbenchService:
         # 点击仍落在浏览器窗口）。窗口源未填时自动跟随源。
         game = self._game_window_spec(doc)
         if game:
-            window = sources.window_info(game) or window
+            window = self._window_info(game) or window
         elif window is None:
-            window = sources.window_info(
+            window = self._window_info(
                 str((doc.get("source") or {}).get("spec") or ""))
         if window:
             win = {"x": window["x"], "y": window["y"],

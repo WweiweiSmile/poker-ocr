@@ -880,9 +880,16 @@ def test_configure_window_reports_position_mismatch() -> None:
                 "after": {"x": 122, "y": 78, "w": 736, "h": 839,
                           "owner": "Microsoft Edge", "title": "知乎"}}
 
+    def fake_window_info(spec):
+        # 窗口解析也走注入：`id:2354` 在本机不一定枚举得到，
+        # 用例只关心「解析成功后的位置/尺寸判定」，不关心真实窗口。
+        return {"index": 0, "owner": "Microsoft Edge", "title": "WePoker-H5",
+                "window_id": 2354, "x": 0, "y": 33, "w": 736, "h": 838}
+
     svc = WorkbenchService(
         root=ROOT, workspaces_dir=tmp / "ws", runs_dir=tmp / "runs",
-        preflight_context=_ctx(tmp), window_resizer=offset_resize)
+        preflight_context=_ctx(tmp), window_resizer=offset_resize,
+        window_info=fake_window_info)
     doc = svc.create_workspace({
         "from_profile": str(PROFILE),
         "source": {"kind": "window", "spec": "window:title:WePoker-H5"},
