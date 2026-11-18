@@ -1,8 +1,8 @@
-"""规则段：把命中台账的规则压成 1–2 行中文（spec #63 / 票 67）。
+"""规则段：把命中台账的规则压成 1–3 行中文（spec #63 / 票 67、71）。
 
     load_ledger() -> facts_snapshot(sit) -> match_rules(include_exploit=False)
 
-**渲染契约**（写死在 issue #67；#69/#70/#71 只往 `ledger/` 加 JSON，不改这里）：
+**渲染契约**（写死在 issue #67；#69/#70 只往 `ledger/` 加 JSON；#71 追加画像修正行）：
 
   · intent 行：`规则: <node> → <动作中文>（<why>）[书 p<page>]`
     动作中文：check→过牌 call→跟注 fold→弃牌 raise→加注 bet→下注 allin→全下。
@@ -23,9 +23,16 @@
     cbet_size_hu）此时顶上，仍然只出一行尺寸。
   · intent 的动作是过牌/跟注/弃牌时不出尺寸行：规则 15（转牌吓人牌）命中
     「过牌控池」的同时牌面尺寸规则也会命中，P 一个 1/3 池会自相矛盾。
+  · 画像修正行（#71）：基础命中且至少渲染出一行基础行后，追加最多 1 行
+    `修正: <node>（<why>）[书 p<page>]`。规则来自 `exploit.json` 的 `ex.*`，
+    不参与 `match_rules(include_exploit=False)` 的普通匹配。基础零命中 → 不加
+    修正行、也不占行；已知画像但没有 `ex.*` 命中 → 不猜、不加行。
+  · 画像未知（facts 没有 `opponent_archetype` 或值为 `unknown`）按设计 Q26
+    走松系：固定回退 `ex.loose`，行首写成「修正: 画像未知，按松系处理 → …」，
+    不声称已识别画像。
   · 零命中返回 `[]`：不产生空行、不产生标题（组装函数见空列表就不加分隔符）。
-  · 总行数 ≤2，整段 ≤800 字（按各行字符数累计，不含段内分隔换行）；
-    超了从尾部丢行（intent 比 size 先保）。
+  · 总行数 ≤3（基础 2 + 修正 1），整段 ≤800 字（按各行字符数累计，不含段内
+    分隔换行）；超了从尾部丢行，修正行优先级最低、先丢（intent 比 size 先保）。
 
 **fail open**（语料坏了也不能把 OCR 主循环搞挂，见 AGENTS.md 铁律）：
 
@@ -44,8 +51,8 @@
     也不留尾空格。
   · 同槽位多条命中（`coexist_with` 白名单）：取 `len(preconditions)` 最多的一条
     （更具体优先）；平手取 id 升序的第一条（`match_rules` 已按 id 排序）。
-  · `slot == "why"` 不单独出行：why 已经拼进 intent 行的括号里，#71 再谈
-    独立的「为什么」行。
+  · `slot == "why"` 不单独出行：why 已经拼进 intent 行的括号里，不单开
+    「为什么」行。
   · size 行独立渲染：只命中 size 时照样出行（契约按槽位各自成立）。
 """
 
@@ -57,8 +64,11 @@ from typing import Any
 from ...rules import facts_snapshot, load_ledger, match_rules
 from ...strategy_tables import table
 
-MAX_LINES = 2
+MAX_LINES = 3
 MAX_CHARS = 800
+EXPLOIT_PREFIX = "ex."
+UNKNOWN_ARCHETYPE = "unknown"
+UNKNOWN_ARCHETYPE_FALLBACK = "ex.loose"
 
 ACTION_ZH = {
     "check": "过牌",
@@ -84,7 +94,7 @@ SIZE_LABELS = {
 
 
 def render_rules_zh(sit) -> list[str]:
-    """返回规则段的 0–2 行；任何读不出的东西都退化成「没这行」。"""
+    """返回规则段的 0–3 行；任何读不出的东西都退化成「没这行」。"""
     try:
         rules = load_ledger()
         facts = facts_snapshot(sit)
@@ -108,6 +118,13 @@ def render_rules_zh(sit) -> list[str]:
         text = _size_text(size.size, facts)
         if text is not None:
             lines.append(_size_line(size, text))
+
+    # 修正行只依附在已渲染的基础行上：基础零命中、或基础行全都没渲染出来
+    # （例如只有 size 槽且尺寸表解析失败）时不产生一条悬空的修正。
+    if hits and lines:
+        correction = _exploit_line(facts, rules)
+        if correction is not None:
+            lines.append(correction)
 
     return _within_budget(lines)
 
@@ -149,6 +166,44 @@ def _size_line(rule, text: str) -> str:
     return f"尺寸: {rule.node} → {text}{tail}"
 
 
+def _exploit_line(facts: dict, rules: tuple) -> str | None:
+    """按画像挑一条 `ex.*` 修正规则；挑不出就 None（不猜）。
+
+    已知画像只认 `match_rules(include_exploit=True)` 里真正命中的 `ex.*`：
+    例如 lag 的 vpip 不到 45 时 `ex.loose` 不命中，就不给修正行，而不是
+    按「名字像松系」硬套。未知画像按设计 Q26 固定回退松系。
+    """
+    archetype = facts.get("opponent_archetype")
+    known = isinstance(archetype, str) and archetype != UNKNOWN_ARCHETYPE
+    if known:
+        try:
+            matched = match_rules(facts, rules, include_exploit=True)
+        except Exception:  # noqa: BLE001 - 旁路失败就不出声
+            return None
+        exploit = tuple(rule for rule in matched if rule.id.startswith(EXPLOIT_PREFIX))
+        rule = _pick(exploit, "intent")
+        if rule is None:
+            return None
+        return _correction_line(rule, unknown=False)
+
+    rule = next((rule for rule in rules if rule.id == UNKNOWN_ARCHETYPE_FALLBACK), None)
+    if rule is None:
+        return None
+    return _correction_line(rule, unknown=True)
+
+
+def _correction_line(rule, *, unknown: bool) -> str:
+    node = rule.node
+    if unknown:
+        # node 形如「松系：打紧，中牌再出手」，去掉画像标签，避免把回退
+        # 写成「已识别为松系」。
+        label, sep, rest = node.partition("：")
+        if sep:
+            node = rest
+        return f"修正: 画像未知，按松系处理 → {node}（{rule.why}）{_page_suffix(rule.source)}"
+    return f"修正: {node}（{rule.why}）{_page_suffix(rule.source)}"
+
+
 def _page_suffix(source: Any) -> str:
     """`[书 p30]`；页码缺失（measured 规则）就整段省略，不编页码。
 
@@ -160,6 +215,9 @@ def _page_suffix(source: Any) -> str:
     page = source.get("page")
     if isinstance(page, bool) or not isinstance(page, int) or page < 1:
         return ""
+    end = source.get("page_end")
+    if isinstance(end, int) and not isinstance(end, bool) and end > page:
+        return f"[书 p{page}-{end}]"
     return f"[书 p{page}]"
 
 
@@ -297,7 +355,7 @@ def _positive(value: Any) -> float | None:
 # ─────────────────────────── 预算 ───────────────────────────
 
 def _within_budget(lines: list[str]) -> list[str]:
-    """≤2 行、整段 ≤800 字；超了从尾部丢（intent 比 size 优先）。"""
+    """≤3 行、整段 ≤800 字；超了从尾部丢（修正行先丢，intent 比 size 优先）。"""
     kept = lines[:MAX_LINES]
     while kept and sum(len(line) for line in kept) + len(kept) - 1 > MAX_CHARS:
         kept.pop()
