@@ -106,7 +106,9 @@ SUITES = ["test_positions.py", "test_env.py", "test_coach.py",
           # 票 #50（桶维度收成单一函数 bucket_of）新增套件
           "test_buckets.py",
           # 票 #64（规则台账骨架与校验器）新增套件
-          "test_rules_ledger.py"]
+          "test_rules_ledger.py",
+          # 票 #66（复盘案例集扩容：真实记录锚点）新增套件
+          "test_build_ab_cases.py"]
 
 
 def main() -> int:
