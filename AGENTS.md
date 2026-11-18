@@ -53,9 +53,13 @@ nv -m uvicorn api:app --port 8000                # 单图识别服务
 nv -m poker_ocr.live --profile config/table_wpk_live.json \
     --initial-blinds 1/2 --out logs/live.states.jsonl          # 实时链路 + Web 看板 :8020
 nv tools/hand_recognition_audit.py --top 20 --html logs/audit.html # 手牌识别倒查
-cd replay-console && ./start.sh                                # 复盘控制台 :8010
+cd replay-console && ./start.sh                                # 复盘控制台 :8010（/runs = 评分运行 #56/#57，五维打分）
+nv tools/import_case_seed.py --no-migrate                      # 案例集 seed（幂等，先跑 --dry-run）
+nv tools/backfill_advice_decisions.py --dry-run                # 英雄动作缺录 → 决策点回填（#55）
+nv tools/backfill_advice_decisions.py --refresh-stale --dry-run  # 重算回填后过期的 flags / 时间线 decisionId
 nv -m poker_ocr.strategy_tables --profile sourced # 策略表生效/回落情况
 nv tools/export_strategy_tables.py --check        # JSON↔代码逐值一致
+nv tools/export_rules.py --check                  # 规则台账静态校验（空台账 0 条也通过）
 ```
 
 ## 改提示词必须三步走（有 golden test 兜底）

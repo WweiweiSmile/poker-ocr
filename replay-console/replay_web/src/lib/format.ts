@@ -1,5 +1,5 @@
 import dayjs from 'dayjs'
-import type { Quality, RunStatus } from '../types'
+import type { Quality, RunStatus, ScoreRunEstimate } from '../types'
 
 export function cardsFromString(text?: string | null): string[] {
   const value = (text || '').trim()
@@ -37,6 +37,14 @@ export function formatAmount(value: number | null | undefined): string {
   return Number.isInteger(number) ? String(number) : number.toFixed(2).replace(/0+$/, '').replace(/\.$/, '')
 }
 
+/** 建议动作 + 金额：fold/check 不带金额；没有动作为「—」。 */
+export function adviceText(kind?: string | null, amount?: number | null): string {
+  if (!kind) return '—'
+  if (kind === 'fold' || kind === 'check') return kind
+  if (amount === null || amount === undefined) return kind
+  return `${kind} ${amount}`
+}
+
 export function formatDate(value?: string | null, withTime = true): string {
   if (!value) return '—'
   return dayjs(value).format(withTime ? 'MM-DD HH:mm' : 'YYYY-MM-DD')
@@ -66,6 +74,29 @@ export const RUN_STATUS: Record<RunStatus, { label: string; color: string }> = {
   partial: { label: '部分完成', color: 'warning' },
   failed: { label: '失败', color: 'error' },
   canceled: { label: '已取消', color: 'default' },
+}
+
+export function scoreText(value: number | null | undefined) {
+  if (value === null || value === undefined) return '—'
+  return (Math.round(value * 10) / 10).toFixed(1)
+}
+
+export function rateText(value: number | null | undefined) {
+  if (value === null || value === undefined) return '—'
+  return `${(Math.round(value * 1000) / 10).toFixed(1)}%`
+}
+
+/** 置信区间按百分比展示；null（样本不足）时不显示。 */
+export function ciText(ci?: [number, number] | null): string | undefined {
+  if (!ci) return undefined
+  return `[${rateText(ci[0])}, ${rateText(ci[1])}]`
+}
+
+export function costText(estimate: ScoreRunEstimate) {
+  if (estimate.cost === null || estimate.cost === undefined) {
+    return estimate.priceMissing ? '未知单价（未配 REPLAY_PRICE_TABLE）' : '—'
+  }
+  return `¥${estimate.cost.toFixed(4)}`
 }
 
 export function scopeLabel(scope?: string | null): string {

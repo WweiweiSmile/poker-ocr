@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import {
-  App, Button, Card, DatePicker, Divider, Dropdown, Empty, Input, Modal, Segmented,
+  App, Button, Card, DatePicker, Divider, Dropdown, Empty, Input, Segmented,
   Select, Space, Table, Tag, Tooltip,
 } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
@@ -10,10 +10,10 @@ import {
   ThunderboltOutlined, UploadOutlined,
 } from '@ant-design/icons'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useNavigate, useSearchParams } from 'react-router-dom'
+import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import dayjs from 'dayjs'
 import { api, errorMessage, toQuery } from '../api'
-import type { HandDeleteResult, HandsPage, HandSet, HandSetList, HandSummary, Meta } from '../types'
+import type { HandDeleteResult, HandsPage, HandSummary, Meta } from '../types'
 import {
   BoardCards, HandCards, QualityBadge,
 } from '../components/CardChips'
@@ -54,8 +54,6 @@ export default function HandsPage() {
   const [selected, setSelected] = useState<React.Key[]>([])
   const [modal, setModal] = useState<null | 'hands' | 'favorites' | 'filter'>(null)
   const [importOpen, setImportOpen] = useState(false)
-  const [setOpen, setSetOpen] = useState(false)
-  const [targetSetId, setTargetSetId] = useState<number | null>(null)
   const [keywordDraft, setKeywordDraft] = useState(searchParams.get('keyword') || '')
 
   const queryString = searchParams.toString()
@@ -69,22 +67,6 @@ export default function HandsPage() {
     queryFn: () => api.get(`/hands${toQuery({ ...query, page, pageSize })}`),
   })
   const meta = useQuery<Meta>({ queryKey: ['meta'], queryFn: () => api.get('/meta') })
-  const handSets = useQuery<HandSetList>({
-    queryKey: ['hand-sets'],
-    queryFn: () => api.get('/hand-sets'),
-    enabled: setOpen,
-  })
-  const addToSet = useMutation({
-    mutationFn: ({ setId, handIds }: { setId: number; handIds: number[] }) =>
-      api.post<HandSet>(`/hand-sets/${setId}/items`, { handIds }),
-    onSuccess: () => {
-      message.success('已加入手牌集')
-      setSetOpen(false)
-      setTargetSetId(null)
-      queryClient.invalidateQueries({ queryKey: ['hand-sets'] })
-    },
-    onError: (error) => message.error(errorMessage(error)),
-  })
   const tagOptions = hands.data?.tagOptions || meta.data?.tags || []
   const sourceOptions = meta.data?.handSources?.length
     ? meta.data.handSources.map((item) => ({
@@ -265,18 +247,18 @@ export default function HandsPage() {
                 </Tooltip>
               ) : null}
               {hand.duplicate ? (
-                <Tooltip title={`与 ${hand.duplicateIds.filter((id) => id !== hand.id).join(', ')} 内容重复`}>
-                  <Tag className="mini-tag" color="purple">重复</Tag>
+                <Tooltip title={`同内容共 ${hand.groupSize || hand.sourceCount || 2} 条来源：${(hand.sources || []).map((item) => `#${item.handId} ${item.sourceLabel}`).join(' · ')}`}>
+                  <Tag className="mini-tag" color="purple">同组 {hand.groupSize || hand.sourceCount} 条</Tag>
                 </Tooltip>
               ) : null}
             </div>
             <div className="hand-cell-sub mono">
               #{hand.id}
-              {hand.source !== 'db' ? (
-                <Tag className="mini-tag source-tag" color={SOURCE_COLORS[hand.source] || 'default'}>
-                  {hand.sourceLabel}
+              {(hand.sources?.length ? hand.sources : [{ source: hand.source, sourceLabel: hand.sourceLabel }]).map((source, index) => (
+                <Tag key={`${source.source}-${index}`} className="mini-tag source-tag" color={SOURCE_COLORS[source.source] || 'default'}>
+                  {source.sourceLabel}
                 </Tag>
-              ) : null}
+              ))}
               {hand.externalId ? <span className="hand-external-id">{hand.externalId}</span> : null}
             </div>
           </div>
@@ -408,8 +390,10 @@ export default function HandsPage() {
   ]
 
   const selectedIds = selected.map(Number)
-  const activeFilterCount = ['favorite', 'source', 'position', 'result', 'tag', 'hasRun', 'quality', 'keyword',
-    'dateFrom', 'dateTo', 'flags', 'minScore'].filter((key) => searchParams.get(key)).length
+  const activeFilterCount = ['favorite', 'source', 'position', 'result', 'tag', 'hasCase', 'hasRun',
+    'quality', 'keyword', 'dateFrom', 'dateTo', 'flags', 'minScore',
+    ...(meta.data?.buckets || []).map((bucket) => bucket.key)]
+    .filter((key) => searchParams.get(key)).length
   const favoriteCount = meta.data?.favoriteCount ?? 0
   const maxCalls = meta.data?.limits.maxCallsPerJob || 2000
 
@@ -533,6 +517,20 @@ export default function HandsPage() {
           </div>
 
           <div className="filter-field">
+            <label>已有案例</label>
+            <Select
+              allowClear
+              placeholder="全部"
+              value={searchParams.get('hasCase') || undefined}
+              onChange={(value) => setFilter('hasCase', value)}
+              options={[
+                { value: '1', label: '已建案例' },
+                { value: '0', label: '还没案例' },
+              ]}
+            />
+          </div>
+
+          <div className="filter-field">
             <label>标签</label>
             <Select
               mode="multiple"
@@ -573,6 +571,20 @@ export default function HandsPage() {
               ]}
             />
           </div>
+
+          {(meta.data?.buckets || []).map((dimension) => (
+            <div className="filter-field" key={dimension.key}>
+              <label>{dimension.label}</label>
+              <Select
+                mode="multiple"
+                allowClear
+                placeholder="全部"
+                value={(searchParams.get(dimension.key) || '').split(',').filter(Boolean)}
+                onChange={(value) => setFilter(dimension.key, value)}
+                options={dimension.options}
+              />
+            </div>
+          ))}
 
           <div className="filter-field">
             <label>深挖标记</label>
@@ -642,7 +654,8 @@ export default function HandsPage() {
         <div className="library-main">
           <div className="table-toolbar">
             <div className="table-summary">
-              共 <strong>{hands.data?.total ?? 0}</strong> 手
+              共 <strong>{hands.data?.total ?? 0}</strong> 组
+              {hands.data?.handTotal ? <span className="muted"> / {hands.data.handTotal} 手来源</span> : null}
               {selectedIds.length ? <span className="select-summary"> · 已选 {selectedIds.length}</span> : null}
             </div>
             <div className="table-summary-muted">
@@ -658,6 +671,34 @@ export default function HandsPage() {
               columns={columns}
               size="middle"
               scroll={{ x: 980 }}
+              expandable={{
+                rowExpandable: (hand) => (hand.sources?.length || 0) > 1,
+                expandedRowRender: (hand) => (
+                  <div className="source-expand">
+                    {(hand.sources || []).map((source) => (
+                      <div className="source-expand-row"
+                           key={`${source.source}-${source.handId}`}>
+                        <Tag className="mini-tag"
+                             color={SOURCE_COLORS[source.source] || 'default'}>
+                          {source.sourceLabel}
+                        </Tag>
+                        <span className="mono">#{source.handId}</span>
+                        {source.primary
+                          ? <Tag className="mini-tag" color="blue">主来源</Tag> : null}
+                        <span className="source-expand-title">{source.title}</span>
+                        <span className="muted">
+                          {source.resultAmount !== null && source.resultAmount !== undefined
+                            ? formatBB(source.resultAmount) : '—'}
+                        </span>
+                        <Link to={`/hands/${source.handId}`}
+                              onClick={(event) => event.stopPropagation()}>
+                          查看该来源
+                        </Link>
+                      </div>
+                    ))}
+                  </div>
+                ),
+              }}
               rowSelection={{
                 selectedRowKeys: selected,
                 onChange: setSelected,
@@ -668,7 +709,7 @@ export default function HandsPage() {
                 pageSize: hands.data?.pageSize || pageSize,
                 total: hands.data?.total || 0,
                 showSizeChanger: true,
-                showTotal: (total) => `共 ${total} 手`,
+                showTotal: (total) => `共 ${total} 组`,
                 pageSizeOptions: [20, 50, 100],
               }}
               onChange={onTableChange}
@@ -700,15 +741,6 @@ export default function HandsPage() {
           <span>已选 <strong>{selectedIds.length}</strong> 手</span>
           <Space size={8}>
             <Button size="small" onClick={() => setSelected([])}>取消选择</Button>
-            <Button
-              size="small"
-              onClick={() => {
-                setTargetSetId(handSets.data?.items?.[0]?.id ?? null)
-                setSetOpen(true)
-              }}
-            >
-              加入手牌集
-            </Button>
             <Button
               size="small"
               danger
@@ -746,38 +778,6 @@ export default function HandsPage() {
           queryClient.invalidateQueries({ queryKey: ['health'] })
         }}
       />
-
-      <Modal
-        open={setOpen}
-        title={`把 ${selectedIds.length} 手加入手牌集`}
-        okText="加入"
-        cancelText="取消"
-        confirmLoading={addToSet.isPending}
-        onCancel={() => setSetOpen(false)}
-        onOk={() => {
-          if (!targetSetId) {
-            message.warning('先在「手牌集」页新建一个集合')
-            return
-          }
-          addToSet.mutate({ setId: targetSetId, handIds: selectedIds })
-        }}
-      >
-        <Select
-          style={{ width: '100%' }}
-          placeholder="选择手牌集"
-          value={targetSetId ?? undefined}
-          onChange={setTargetSetId}
-          options={(handSets.data?.items || []).map((item) => ({
-            value: item.id,
-            label: `${item.name} · v${item.revision} · ${item.handCount} 手`,
-          }))}
-        />
-        {!handSets.data?.items?.length ? (
-          <p className="muted" style={{ marginTop: 8 }}>
-            还没有手牌集。<Button type="link" style={{ padding: 0 }} onClick={() => navigate('/sets')}>去新建</Button>
-          </p>
-        ) : null}
-      </Modal>
     </div>
   )
 }

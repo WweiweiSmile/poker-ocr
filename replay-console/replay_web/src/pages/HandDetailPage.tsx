@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import {
-  Alert, App, Button, Card, Divider, Empty, Input, Modal, Popover, Select,
-  Skeleton, Space, Spin, Switch, Tag, Tooltip,
+  Alert, App, Button, Card, Divider, Empty, Input, Modal, Popover, Segmented,
+  Select, Skeleton, Space, Spin, Switch, Tag, Tooltip,
 } from 'antd'
 import {
   ArrowLeftOutlined, DeleteOutlined, PlayCircleOutlined, ReloadOutlined,
@@ -11,7 +11,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate, useParams } from 'react-router-dom'
 import { api, errorMessage } from '../api'
 import type {
-  ComparisonDecision, DecisionMeta, HandAdvice, HandComparison,
+  CaseSetList, ComparisonDecision, DecisionMeta, HandAdvice, HandComparison,
   HandDeleteResult, HandDetail, Meta, Version, VersionBlock,
 } from '../types'
 import {
@@ -286,6 +286,12 @@ export default function HandDetailPage() {
   const [status, setStatus] = useState<'todo' | 'confirmed' | 'disputed'>('todo')
   const [note, setNote] = useState('')
   const [reviewTarget, setReviewTarget] = useState<DecisionMeta | null>(null)
+  const [caseTarget, setCaseTarget] = useState<DecisionMeta | null>(null)
+  const [caseSpecId, setCaseSpecId] = useState<number | null>(null)
+  const [casePriority, setCasePriority] = useState(1)
+  const [caseNote, setCaseNote] = useState('')
+  const [caseSetId, setCaseSetId] = useState<number | null>(null)
+  const [bulkOpen, setBulkOpen] = useState(false)
   const [reviewVerdict, setReviewVerdict] = useState<'good' | 'bad' | 'unsure'>('unsure')
   const [reviewTags, setReviewTags] = useState<string[]>([])
   const [reviewNote, setReviewNote] = useState('')
@@ -300,6 +306,57 @@ export default function HandDetailPage() {
     queryFn: () => api.get('/versions?includeArchived=1'),
   })
   const meta = useQuery<Meta>({ queryKey: ['meta'], queryFn: () => api.get('/meta') })
+
+  const specs = useQuery<{ items: { id: number; name: string }[] }>({
+    queryKey: ['specs', 'case-create'],
+    queryFn: () => api.get('/specs?pageSize=100&status=active'),
+    enabled: caseTarget !== null,
+  })
+  const caseSets = useQuery<CaseSetList>({
+    queryKey: ['case-sets'],
+    queryFn: () => api.get('/case-sets'),
+    enabled: caseTarget !== null || bulkOpen,
+  })
+
+  const caseCanonicalId = detail.data?.hand.canonicalId
+    ?? detail.data?.canonical?.id ?? null
+
+  const createCase = useMutation({
+    mutationFn: () => api.post<{ created: boolean }>('/cases', {
+      canonicalId: caseCanonicalId,
+      decisionKey: caseTarget?.decisionKey ?? `${caseTarget?.street}:${caseTarget?.seq}`,
+      specId: caseSpecId,
+      caseSetId: caseSetId ?? undefined,
+      priority: casePriority,
+      note: caseNote || undefined,
+    }),
+    onSuccess: (result: { created: boolean }) => {
+      message.success(result.created ? '案例已创建' : '这条决策点已有案例，已跳到已有记录')
+      setCaseTarget(null)
+      setCaseNote('')
+      queryClient.invalidateQueries({ queryKey: ['hand', id] })
+      queryClient.invalidateQueries({ queryKey: ['hands'] })
+    },
+    onError: (error) => message.error(errorMessage(error)),
+  })
+
+  const bulkCreateCases = useMutation({
+    mutationFn: () => api.post<{ created: number; existing: number; noSpec: string[] }>(
+      `/case-sets/${caseSetId}/hand-cases`,
+      { canonicalId: caseCanonicalId, priority: casePriority },
+    ),
+    onSuccess: (result) => {
+      const noSpec = result.noSpec || []
+      message.success(`整手全建：新增 ${result.created} 条，已存在 ${result.existing} 条`
+        + (noSpec.length ? `；${noSpec.length} 个决策点没匹配到期望` : ''))
+      setBulkOpen(false)
+      queryClient.invalidateQueries({ queryKey: ['hand', id] })
+      queryClient.invalidateQueries({ queryKey: ['hands'] })
+      queryClient.invalidateQueries({ queryKey: ['case-set', caseSetId] })
+      queryClient.invalidateQueries({ queryKey: ['case-sets'] })
+    },
+    onError: (error) => message.error(errorMessage(error)),
+  })
 
   const comparison = useQuery<HandComparison>({
     queryKey: ['hand-comparison', id, selectedVersions],
@@ -348,7 +405,7 @@ export default function HandDetailPage() {
   }
 
   const saveMark = useMutation({
-    mutationFn: () => api.patch(`/hands/${id}/mark`, {
+    mutationFn: (handId: number) => api.patch(`/hands/${handId}/mark`, {
       favorite: markFavorite, tags, status, note,
     }),
     onSuccess: () => {
@@ -361,9 +418,10 @@ export default function HandDetailPage() {
   })
 
   const toggleFavorite = useMutation({
-    mutationFn: (favorite: boolean) => api.patch(`/hands/${id}/mark`, { favorite }),
-    onSuccess: (_data, favorite) => {
-      setMarkFavorite(favorite)
+    mutationFn: ({ handId, favorite }: { handId: number; favorite: boolean }) =>
+      api.patch(`/hands/${handId}/mark`, { favorite }),
+    onSuccess: (_data, variables) => {
+      setMarkFavorite(variables.favorite)
       queryClient.invalidateQueries({ queryKey: ['hand', id] })
       queryClient.invalidateQueries({ queryKey: ['hands'] })
       queryClient.invalidateQueries({ queryKey: ['meta'] })
@@ -372,9 +430,9 @@ export default function HandDetailPage() {
   })
 
   const deleteMutation = useMutation({
-    mutationFn: () => api.delete<HandDeleteResult>(`/hands/${id}`),
+    mutationFn: (handId: number) => api.delete<HandDeleteResult>(`/hands/${handId}`),
     onSuccess: () => {
-      message.success(`手牌 #${id} 已删除`)
+      message.success(`手牌 #${hand.id} 已删除`)
       queryClient.invalidateQueries({ queryKey: ['hands'] })
       queryClient.invalidateQueries({ queryKey: ['meta'] })
       queryClient.invalidateQueries({ queryKey: ['health'] })
@@ -385,14 +443,14 @@ export default function HandDetailPage() {
 
   const confirmDelete = () => {
     modal.confirm({
-      title: `删除手牌 #${id}`,
+      title: `删除手牌 #${hand.id}`,
       content: '导入手牌会软删除，已跑结果保留；复盘手牌只会从控制台隐藏，不会修改 review_hands。',
       okText: '删除',
       okButtonProps: { danger: true },
       cancelText: '取消',
       async onOk() {
         try {
-          await deleteMutation.mutateAsync()
+          await deleteMutation.mutateAsync(hand.id)
         } catch {
           throw new Error('delete failed')
         }
@@ -424,8 +482,29 @@ export default function HandDetailPage() {
   }
   const data = detail.data
   const hand = data.hand
+  const detailHandId = hand.id
+  const canonicalId = hand.canonicalId ?? data.canonical?.id ?? null
+  const sourceItems = data.sources || []
+  const bucketLabels = new Map<string, string>()
+  for (const dimension of meta.data?.buckets || []) {
+    for (const option of dimension.options) {
+      bucketLabels.set(`${dimension.label}:${option.value}`, option.label)
+    }
+  }
   const versionItems = versions.data?.items || []
   const blocked = data.reconstruction.quality === 'invalid'
+  const dimensionLabels = new Map<string, string>(
+    (meta.data?.buckets || []).map((dimension) => [dimension.key, dimension.label]),
+  )
+  const unfrozenSets = (caseSets.data?.items || []).filter((item) => !item.frozen)
+  const defaultSet = unfrozenSets.find((item) => item.name === '待整理') || unfrozenSets[0]
+  const openCase = (decision: DecisionMeta) => {
+    setCaseTarget(decision)
+    setCaseNote('')
+    setCasePriority(1)
+    if (caseSetId === null && defaultSet) setCaseSetId(defaultSet.id)
+    if (caseSpecId === null && specs.data?.items.length) setCaseSpecId(specs.data.items[0].id)
+  }
 
   const scrollToDecision = (seq: number) => {
     document.getElementById(`decision-${seq}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
@@ -477,15 +556,15 @@ export default function HandDetailPage() {
             <Space>
               <button
                 className={`star-btn big${markFavorite ? ' on' : ''}`}
-                onClick={() => toggleFavorite.mutate(!markFavorite)}
+                onClick={() => toggleFavorite.mutate({ handId: detailHandId, favorite: !markFavorite })}
                 aria-label="收藏"
               >
                 {markFavorite ? <StarFilled /> : <StarOutlined />}
               </button>
-              <Button icon={<PlayCircleOutlined />} onClick={() => navigate(`/hands/${id}/replay`)}>
+              <Button icon={<PlayCircleOutlined />} onClick={() => navigate(`/hands/${detailHandId}/replay`)}>
                 瀑布流回放
               </Button>
-              <Button icon={<PlayCircleOutlined />} onClick={() => navigate(`/hands/${id}/replay?mode=table`)}>
+              <Button icon={<PlayCircleOutlined />} onClick={() => navigate(`/hands/${detailHandId}/replay?mode=table`)}>
                 牌桌回放
               </Button>
               <Button type="primary" icon={<ThunderboltOutlined />} disabled={blocked} onClick={() => setRerunOpen(true)}>
@@ -513,6 +592,152 @@ export default function HandDetailPage() {
           }
         />
       ) : null}
+
+      {sourceItems.length ? (
+        <Card className="sources-card" bordered={false}>
+          <div className="card-title">
+            来源并列 <Tag className="mini-tag">{sourceItems.length}</Tag>
+            {canonicalId ? <span className="mono muted">canonical #{canonicalId}</span> : null}
+            <span className="muted advice-hint">同一手牌内容在不同来源各存一份；复盘结论只读，控制台不改写 review_hands</span>
+          </div>
+          <div className="source-grid">
+            {sourceItems.map((source) => (
+              <div key={`${source.source}-${source.handId}`} className={`source-item${source.primary ? ' primary' : ''}`}>
+                <div className="source-item-head">
+                  <Tag color={source.source === 'review' ? 'cyan' : source.source === 'live' ? 'geekblue' : 'purple'}>
+                    {source.sourceLabel}
+                  </Tag>
+                  {source.primary ? <Tag color="gold">主来源</Tag> : null}
+                  <span className="mono muted">#{source.handId}</span>
+                  {source.mark.favorite ? <StarFilled className="star-inline" /> : null}
+                </div>
+                <div className="source-item-title">{source.title}</div>
+                <div className="source-item-meta">
+                  <span>{source.resultAmount !== null && source.resultAmount !== undefined
+                    ? `${formatBB(source.resultAmount)} BB` : '结果未知'}</span>
+                  <span>{formatDate(source.createdAt, false)}</span>
+                </div>
+                <div className="source-item-readonly">
+                  <div className="readonly-label">复盘结论（只读）</div>
+                  <div className="muted">
+                    {source.analyzeStatus ? `解析：${source.analyzeStatus}` : '无解析状态'}
+                    {source.reviewScore ? ` · 深挖分 ${source.reviewScore}` : ''}
+                  </div>
+                  {source.heroThought ? <div>想法：{source.heroThought}</div> : null}
+                  {source.advices?.length ? (
+                    <div className="source-advices">
+                      <div className="readonly-label">
+                        实时 payload · AI 建议 {source.advices.length} 条
+                      </div>
+                      {source.advices.slice(0, 3).map((advice, index) => (
+                        <div className="source-advice" key={advice.id ?? index}>
+                          <span className="mono">{advice.street || '—'}</span>
+                          <span>{advice.option?.label || advice.option?.id || '—'}</span>
+                          {advice.option?.amount !== null && advice.option?.amount !== undefined
+                            ? <span className="mono">{advice.option.amount}BB</span> : null}
+                          {advice.reason
+                            ? <span className="muted source-advice-reason">{advice.reason}</span>
+                            : null}
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
+                {(source.mark.note || source.mark.tags?.length) ? (
+                  <div className="source-item-readonly">
+                    <div className="readonly-label">控制台标记（可编辑）</div>
+                    {source.mark.note ? <div>{source.mark.note}</div> : null}
+                    {source.mark.tags?.length ? (
+                      <Space size={4} wrap>{source.mark.tags.map((tag) => <Tag key={tag} className="mini-tag">{tag}</Tag>)}</Space>
+                    ) : null}
+                  </div>
+                ) : null}
+                <Button size="small" type="link" style={{ padding: 0 }}
+                  onClick={() => navigate(`/hands/${source.handId}`)}>
+                  查看该来源
+                </Button>
+              </div>
+            ))}
+          </div>
+        </Card>
+      ) : null}
+
+      {canonicalId ? (
+        <Card className="cases-card" bordered={false}>
+          <div className="card-title">
+            案例 <Tag className="mini-tag">{data.cases?.length || 0}</Tag>
+            <span className="muted advice-hint">案例挂在 canonical 手牌上，按「街道:序号」指向具体决策点</span>
+            <Button
+              size="small" style={{ marginLeft: 'auto' }} disabled={!canonicalId}
+              onClick={() => setBulkOpen(true)}
+            >
+              整手全建
+            </Button>
+          </div>
+          {data.cases?.length ? (
+            <div className="case-list">
+              {data.cases.map((item) => (
+                <div className="case-row" key={item.id}>
+                  <Tag color="blue">{item.decisionKey}</Tag>
+                  <Tag color={item.p0 ? 'red' : 'default'}>{item.p0 ? 'P0' : `P${item.priority}`}</Tag>
+                  <span>{item.specName || '（spec 已删除）'}</span>
+                  <span className="muted">{item.caseSetName || '未命名案例集'} rev.{item.caseSetRevision}</span>
+                  {item.frozen ? <Tag className="mini-tag">已冻结</Tag> : <Tag className="mini-tag">草稿</Tag>}
+                  {item.note ? <span className="muted">{item.note}</span> : null}
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="muted">还没有案例。在下面的决策点时间线里点「建案例」。</div>
+          )}
+        </Card>
+      ) : null}
+
+      <Card className="timeline-card" bordered={false}>
+        <div className="card-title">
+          决策点时间线 <Tag className="mini-tag">{data.decisions.length}</Tag>
+          <span className="muted advice-hint">每个决策点都能建案例；「看对比」跳到下方逐街对比</span>
+        </div>
+        {data.decisions.length ? (
+          <div className="timeline-list">
+            {data.decisions.map((decision, index) => (
+              <div className="timeline-row" key={decision.id ?? index}>
+                <div className="timeline-head">
+                  <Tag color="blue">{STREET_NAMES[decision.street] || decision.street} D{decision.seq + 1}</Tag>
+                  <span className="mono muted">{decision.decisionKey || `${decision.street}:${decision.seq}`}</span>
+                  <QualityBadge quality={decision.quality} />
+                  {decision.actual?.label ? <span>实际 {decision.actual.label}</span> : null}
+                  <span className="muted">底池 {formatAmount(decision.pot)} · 需跟 {formatAmount(decision.toCall)}</span>
+                </div>
+                <Space size={4} wrap className="timeline-buckets">
+                  {Object.entries(decision.buckets || {}).map(([dimension, value]) => (
+                    <Tag key={dimension} className="mini-tag">
+                      {dimensionLabels.get(dimension) || dimension}：{bucketLabels.get(`${dimensionLabels.get(dimension) || dimension}:${value}`) || value}
+                    </Tag>
+                  ))}
+                  {(hand.bucketChips || []).length && !Object.keys(decision.buckets || {}).length ? (
+                    <span className="muted">桶标签未落库（旧决策点）</span>
+                  ) : null}
+                </Space>
+                <Space size={4}>
+                  <Button size="small" onClick={() => scrollToDecision(decision.seq)}>看对比</Button>
+                  <Button size="small" type="primary" ghost
+                    disabled={!canonicalId || !decision.decisionKey}
+                    onClick={() => openCase(decision)}>
+                    建案例
+                  </Button>
+                  <Button size="small" type="link" style={{ padding: 0 }}
+                    onClick={() => navigate(`/hands/${detailHandId}/replay`)}>
+                    旧重跑/回放
+                  </Button>
+                </Space>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="没有可重建的决策点" />
+        )}
+      </Card>
 
       <div className="detail-grid">
         <Card className="mark-card" bordered={false}>
@@ -550,7 +775,7 @@ export default function HandDetailPage() {
               placeholder="例如：转牌应该弃牌，理由…"
             />
           </div>
-          <Button type="primary" block onClick={() => saveMark.mutate()} loading={saveMark.isPending}>
+          <Button type="primary" block onClick={() => saveMark.mutate(detailHandId)} loading={saveMark.isPending}>
             保存
           </Button>
         </Card>
@@ -625,7 +850,7 @@ export default function HandDetailPage() {
                   {advice.promptMissing ? <Tag color="orange" className="mini-tag">prompt 缺失</Tag> : null}
                   {advice.bucket ? <BucketTag bucket={advice.bucket} /> : null}
                   <Button size="small" type="link" style={{ padding: 0 }}
-                    onClick={() => navigate(`/hands/${id}/replay`)}>
+                    onClick={() => navigate(`/hands/${detailHandId}/replay`)}>
                     看回放 / Prompt
                   </Button>
                 </div>
@@ -727,10 +952,119 @@ export default function HandDetailPage() {
         </div>
       </Modal>
 
+      <Modal
+        open={caseTarget !== null}
+        title={caseTarget
+          ? `建案例 · ${STREET_NAMES[caseTarget.street] || caseTarget.street} D${caseTarget.seq + 1}`
+          : '建案例'}
+        okText="建案例"
+        cancelText="取消"
+        confirmLoading={createCase.isPending}
+        okButtonProps={{ disabled: !canonicalId || !caseSpecId }}
+        onOk={() => createCase.mutate()}
+        onCancel={() => setCaseTarget(null)}
+      >
+        <Space direction="vertical" style={{ width: '100%' }} size={12}>
+          {!canonicalId ? (
+            <Alert type="warning" showIcon message="这手牌还没有 canonical 映射，先跑 013 回填再建案例" />
+          ) : null}
+          <div>
+            <div className="muted">案例集</div>
+            <Select
+              style={{ width: '100%' }}
+              placeholder="默认放进「待整理」"
+              value={caseSetId ?? undefined}
+              onChange={(value) => setCaseSetId(value)}
+              options={(caseSets.data?.items || [])
+                .filter((item) => !item.frozen)
+                .map((item) => ({
+                  value: item.id,
+                  label: `${item.name} · v${item.revision}（${item.caseCount} 条）`,
+                }))}
+              notFoundContent="没有未冻结的案例集；先建一个"
+            />
+          </div>
+          {specs.isLoading ? <Spin /> : specs.data?.items.length ? (
+            <div>
+              <div className="muted">期望（spec）</div>
+              <Select
+                style={{ width: '100%' }}
+                placeholder="选择这条案例要校验的期望"
+                value={caseSpecId ?? undefined}
+                onChange={(value) => setCaseSpecId(value)}
+                options={specs.data.items.map((spec) => ({ value: spec.id, label: `#${spec.id} ${spec.name}` }))}
+              />
+            </div>
+          ) : (
+            <Alert
+              type="warning"
+              showIcon
+              message="还没有 active 状态的期望"
+              description="案例必须绑定 spec；先去「规格」建一条并激活。"
+              action={<Button size="small" onClick={() => navigate('/specs')}>去规格</Button>}
+            />
+          )}
+          <div>
+            <div className="muted">优先级</div>
+            <Segmented
+              value={casePriority}
+              onChange={(value) => setCasePriority(Number(value))}
+              options={[{ label: 'P0 必过', value: 0 }, { label: 'P1', value: 1 }, { label: 'P2', value: 2 }]}
+            />
+          </div>
+          <div>
+            <div className="muted">备注</div>
+            <Input.TextArea value={caseNote} onChange={(event) => setCaseNote(event.target.value)}
+              autoSize={{ minRows: 2, maxRows: 4 }} placeholder="这条案例为什么值得留（可留空）" />
+          </div>
+        </Space>
+      </Modal>
+
+      <Modal
+        open={bulkOpen}
+        title="整手全建"
+        okText="建案例"
+        cancelText="取消"
+        confirmLoading={bulkCreateCases.isPending}
+        okButtonProps={{ disabled: !canonicalId || caseSetId === null }}
+        onOk={() => bulkCreateCases.mutate()}
+        onCancel={() => setBulkOpen(false)}
+      >
+        <Space direction="vertical" style={{ width: '100%' }} size={12}>
+          <div className="muted">
+            把当前这手牌的每个决策点都建成案例：自动挑最具体的 active 期望，写死 spec_id；
+            每个决策点用「优先级」统一设置。
+          </div>
+          <div>
+            <div className="muted">案例集</div>
+            <Select
+              style={{ width: '100%' }}
+              value={caseSetId ?? undefined}
+              placeholder="选择未冻结的案例集"
+              onChange={(value) => setCaseSetId(value)}
+              options={(caseSets.data?.items || [])
+                .filter((item) => !item.frozen)
+                .map((item) => ({
+                  value: item.id,
+                  label: `${item.name} · v${item.revision}`,
+                }))}
+            />
+          </div>
+          <div>
+            <div className="muted">优先级</div>
+            <Segmented
+              value={casePriority}
+              onChange={(value) => setCasePriority(Number(value))}
+              options={[{ label: 'P0 必过', value: 0 }, { label: 'P1', value: 1 }, { label: 'P2', value: 2 }]}
+            />
+          </div>
+        </Space>
+      </Modal>
+
       <RunModal
         open={rerunOpen}
         scope="hands"
-        handIds={[id]}
+        handIds={[detailHandId]}
         onClose={() => setRerunOpen(false)}
         title={`重跑 #${id} ${hand.heroCards}`}
       />

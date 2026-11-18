@@ -65,8 +65,9 @@ export function toQuery(params: Record<string, unknown>): string {
   return text ? `?${text}` : ''
 }
 
-export async function downloadExport(params: Record<string, unknown>) {
-  const response = await fetch(`${BASE}/export${toQuery(params)}`, { headers: authHeaders() })
+/** 通用下载：路径 + 查询串，文件名取服务端的 Content-Disposition。 */
+export async function downloadFrom(path: string, params: Record<string, unknown>) {
+  const response = await fetch(`${BASE}${path}${toQuery(params)}`, { headers: authHeaders() })
   if (!response.ok) {
     let message = `HTTP ${response.status}`
     try {
@@ -80,7 +81,8 @@ export async function downloadExport(params: Record<string, unknown>) {
   const blob = await response.blob()
   const disposition = response.headers.get('content-disposition') || ''
   const match = disposition.match(/filename="?([^";]+)"?/)
-  const filename = match?.[1] || `replay-export.${params.format === 'markdown' ? 'md' : 'csv'}`
+  const fallbackFormat = params.format === 'markdown' ? 'md' : 'csv'
+  const filename = match?.[1] || `replay-export.${fallbackFormat}`
   const url = URL.createObjectURL(blob)
   const link = document.createElement('a')
   link.href = url
@@ -89,6 +91,18 @@ export async function downloadExport(params: Record<string, unknown>) {
   link.click()
   link.remove()
   URL.revokeObjectURL(url)
+}
+
+export function downloadExport(params: Record<string, unknown>) {
+  return downloadFrom('/export', params)
+}
+
+/** 版本对照翻转表导出（#60）；`only` 跟页面筛选走，不导出看不见的行。 */
+export function downloadScoreRunComparison(
+  runId: number, otherId: number, params: Record<string, unknown> = {},
+) {
+  return downloadFrom(`/score-runs/${runId}/compare/${otherId}/export`,
+    { format: 'csv', ...params })
 }
 
 export function errorMessage(error: unknown): string {

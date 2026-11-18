@@ -4,11 +4,12 @@ import {
 } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
 import { useQuery } from '@tanstack/react-query'
-import { api, errorMessage } from '../api'
+import { api, errorMessage } from '../../api'
 import type {
   RangeABAction, RangeABAdvice, RangeABCase, RangeABResponse,
-} from '../types'
-import { formatAmount, formatDate } from '../lib/format'
+} from '../../types'
+import { formatAmount, formatDate } from '../../lib/format'
+import LegacyBanner from '../../components/LegacyBanner'
 
 const STATUS_COLORS: Record<string, string> = {
   ready: 'blue',
@@ -339,6 +340,8 @@ export default function RangeABPage() {
             : <Tag color="orange">未生成结果</Tag>}
         </Space>
       </div>
+
+      <LegacyBanner scope="范围模型 A/B" />
 
       {!data.resultsAvailable ? (
         <Alert

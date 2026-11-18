@@ -1,23 +1,23 @@
 import { useMemo, useState } from 'react'
 import {
-  Alert, App, Button, Card, Empty, Input, Modal, Segmented, Select, Space, Statistic, Table, Tabs, Tag,
+  Alert, Button, Card, Empty, Modal, Segmented, Space, Statistic, Table, Tabs, Tag,
 } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
-import { ArrowLeftOutlined, PlayCircleOutlined } from '@ant-design/icons'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { ArrowLeftOutlined } from '@ant-design/icons'
+import { useQuery } from '@tanstack/react-query'
 import { useNavigate, useParams } from 'react-router-dom'
-import { api, errorMessage } from '../api'
-import type { Experiment, ExperimentPairs, PairRow, Version } from '../types'
-import { formatAmount } from '../lib/format'
+import { api, errorMessage } from '../../api'
+import type { Experiment, ExperimentPairs, PairRow, Version } from '../../types'
+import { formatAmount } from '../../lib/format'
+import LegacyBanner from '../../components/LegacyBanner'
 
 const STREETS: Record<string, string> = {
   preflop: '翻前', flop: '翻牌', turn: '转牌', river: '河牌',
 }
 
-function Side({ side, version, onReview, onPrompt, preferred }: {
+function Side({ side, version, onPrompt, preferred }: {
   side: PairRow['A']
   version?: Version
-  onReview: (preferred: 'A' | 'B' | 'same' | 'unsure') => void
   onPrompt: () => void
   preferred?: string
 }) {
@@ -28,7 +28,6 @@ function Side({ side, version, onReview, onPrompt, preferred }: {
         <span className="muted mono">{version?.name || 'baseline'}</span>
         <span className="spacer" />
         <Button size="small" onClick={onPrompt}>Prompt</Button>
-        <Button size="small" onClick={() => onReview('A')}>A 更好</Button>
       </div>
       <div className="pair-option">
         <span className={`option-pill kind-${side?.kind || 'none'}`}>
@@ -41,10 +40,9 @@ function Side({ side, version, onReview, onPrompt, preferred }: {
   )
 }
 
-function BSide({ side, version, onReview, onPrompt, preferred }: {
+function BSide({ side, version, onPrompt, preferred }: {
   side: PairRow['B']
   version?: Version
-  onReview: (preferred: 'A' | 'B' | 'same' | 'unsure') => void
   onPrompt: () => void
   preferred?: string
 }) {
@@ -55,7 +53,6 @@ function BSide({ side, version, onReview, onPrompt, preferred }: {
         <span className="muted mono">{version?.name || 'variant'}</span>
         <span className="spacer" />
         <Button size="small" onClick={onPrompt}>Prompt</Button>
-        <Button size="small" onClick={() => onReview('B')}>B 更好</Button>
       </div>
       <div className="pair-option">
         <span className={`option-pill kind-${side?.kind || 'none'}`}>
@@ -72,11 +69,7 @@ export default function ExperimentPairsPage() {
   const { experimentId } = useParams()
   const id = Number(experimentId)
   const navigate = useNavigate()
-  const { message } = App.useApp()
-  const queryClient = useQueryClient()
   const [only, setOnly] = useState('all')
-  const [decision, setDecision] = useState('iterate')
-  const [conclusion, setConclusion] = useState('')
   const [promptRow, setPromptRow] = useState<PairRow | null>(null)
 
   const experiment = useQuery<Experiment>({
@@ -93,27 +86,7 @@ export default function ExperimentPairsPage() {
     queryFn: () => api.get(`/experiments/${id}/pairs${only === 'all' ? '' : `?only=${only}`}`),
     enabled: Number.isFinite(id) && !!experiment.data?.jobId,
   })
-  const review = useMutation({
-    mutationFn: ({ decisionId, preferred }: { decisionId: number; preferred: string }) =>
-      api.post(`/experiments/${id}/pairs/${decisionId}/review`, { preferred }),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['experiment-pairs', id] })
-      message.success('偏好已保存')
-    },
-    onError: (error) => message.error(errorMessage(error)),
-  })
 
-  const outcome = useMutation({
-    mutationFn: () => api.post(`/experiments/${id}/outcome`, {
-      decision,
-      conclusion: conclusion || null,
-    }),
-    onSuccess: () => {
-      message.success('实验结论已保存')
-      queryClient.invalidateQueries({ queryKey: ['experiment', id] })
-    },
-    onError: (error) => message.error(errorMessage(error)),
-  })
   const versionMap = useMemo(() => {
     const map: Record<number, Version> = {}
     for (const version of versions.data?.items || []) map[version.id] = version
@@ -147,8 +120,7 @@ export default function ExperimentPairsPage() {
       render: (_: unknown, row) => (
         <Side side={row.A} version={versionMap[experiment.data?.baselineVersionId || 0]}
           preferred={row.review?.preferred}
-          onPrompt={() => setPromptRow(row)}
-          onReview={(preferred) => review.mutate({ decisionId: row.decisionId, preferred })} />
+          onPrompt={() => setPromptRow(row)} />
       ),
     },
     {
@@ -156,8 +128,7 @@ export default function ExperimentPairsPage() {
       render: (_: unknown, row) => (
         <BSide side={row.B} version={versionMap[experiment.data?.variantVersionId || 0]}
           preferred={row.review?.preferred}
-          onPrompt={() => setPromptRow(row)}
-          onReview={(preferred) => review.mutate({ decisionId: row.decisionId, preferred })} />
+          onPrompt={() => setPromptRow(row)} />
       ),
     },
     {
@@ -168,13 +139,7 @@ export default function ExperimentPairsPage() {
             {row.auto.changed ? <Tag color="orange" className="mini-tag">有差异</Tag> : <Tag color="green" className="mini-tag">一致</Tag>}
             {row.auto.p0 ? (row.auto.p0Pass ? <Tag color="green" className="mini-tag">P0 过</Tag> : <Tag color="red" className="mini-tag">P0 失败</Tag>) : null}
           </Space>
-          <div className="pair-review-actions">
-            <Button size="small" type={row.review?.preferred === 'same' ? 'primary' : 'default'}
-              onClick={() => review.mutate({ decisionId: row.decisionId, preferred: 'same' })}>一样</Button>
-            <Button size="small" type={row.review?.preferred === 'unsure' ? 'primary' : 'default'}
-              onClick={() => review.mutate({ decisionId: row.decisionId, preferred: 'unsure' })}>不确定</Button>
-          </div>
-          {row.review ? <Tag color="blue" className="mini-tag">已复盘 {row.review.preferred}</Tag> : null}
+          {row.review ? <Tag color="blue" className="mini-tag">已复盘 {row.review.preferred}</Tag> : <Tag className="mini-tag">未复盘</Tag>}
           {row.auto.assertions?.length ? (
             <div className="pair-assertions">
               {row.auto.assertions.map((assertion, index) => (
@@ -190,7 +155,7 @@ export default function ExperimentPairsPage() {
   ]
 
   if (!experiment.data?.jobId) {
-    return <Alert type="info" showIcon message="实验还没跑" description="先运行实验，才有成对结果。" />
+    return <Alert type="info" showIcon message="实验还没跑" description="这张实验没有关联任务，所以没有成对结果。" />
   }
   if (pairs.error) return <Alert type="error" showIcon message={errorMessage(pairs.error)} />
   const summary = pairs.data?.summary
@@ -198,18 +163,19 @@ export default function ExperimentPairsPage() {
   return (
     <div className="experiment-pairs-page">
       <div className="detail-back">
-        <Button type="text" icon={<ArrowLeftOutlined />} onClick={() => navigate(`/experiments/${id}`)}>实验详情</Button>
+        <Button type="text" icon={<ArrowLeftOutlined />} onClick={() => navigate(`/legacy/experiments/${id}`)}>实验详情</Button>
         <span className="mono muted">#{id}</span>
         <Tag>{experiment.data?.name}</Tag>
-        <Button size="small" icon={<PlayCircleOutlined />} onClick={() => navigate(`/experiments/${id}`)}>运行/重跑</Button>
       </div>
+
+      <LegacyBanner scope="成对复盘" />
 
       <Card className="hand-hero" bordered={false}>
         <div className="hand-hero-main">
           <div>
             <div className="hand-hero-title">成对复盘</div>
             <div className="hand-hero-sub">
-              <span>看同一决策点的 A/B 建议与理由；A 更好 / B 更好 / 一样 / 不确定</span>
+              <span>看同一决策点的 A/B 建议与理由；当时记录的偏好以「已复盘」标签显示</span>
               <span>agreement 只是诊断，不是正确率</span>
             </div>
           </div>
@@ -237,32 +203,12 @@ export default function ExperimentPairsPage() {
       <Card bordered={false} className="experiment-outcome-card">
         <div className="outcome-row">
           <div>
-            <div className="card-title">实验结论</div>
-            <div className="muted">当前：{experiment.data?.decision || '未记录'} {experiment.data?.conclusion ? `· ${experiment.data.conclusion}` : ''}</div>
+            <div className="card-title">实验结论（已记录，只读）</div>
+            <div className="muted">
+              结论：{experiment.data?.decision || '未记录'}
+              {experiment.data?.conclusion ? ` · ${experiment.data.conclusion}` : ''}
+            </div>
           </div>
-          <Space>
-            <Select
-              value={decision}
-              onChange={setDecision}
-              style={{ width: 130 }}
-              options={[
-                { value: 'adopt', label: '采纳/adopt' },
-                { value: 'reject', label: '拒绝/reject' },
-                { value: 'iterate', label: '继续迭代' },
-                { value: 'inconclusive', label: '数据不足' },
-              ]}
-            />
-            <Input
-              value={conclusion}
-              onChange={(event) => setConclusion(event.target.value)}
-              placeholder="一句话结论，例如：P0 全过，河牌薄价值更合理"
-              style={{ width: 360 }}
-            />
-            <Button type="primary" loading={outcome.isPending}
-              onClick={() => outcome.mutate()}>
-              保存结论
-            </Button>
-          </Space>
         </div>
       </Card>
 
@@ -274,7 +220,7 @@ export default function ExperimentPairsPage() {
           dataSource={pairs.data?.rows || []}
           columns={columns}
           pagination={{ pageSize: 30, showSizeChanger: true }}
-          locale={{ emptyText: <Empty description="没有配对结果。先跑实验。" /> }}
+          locale={{ emptyText: <Empty description="没有配对结果。" /> }}
         />
       </Card>
 

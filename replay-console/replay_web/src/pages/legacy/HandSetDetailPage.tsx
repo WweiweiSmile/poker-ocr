@@ -1,15 +1,14 @@
 import { useMemo } from 'react'
-import {
-  Alert, App, Button, Card, Empty, Space, Statistic, Table, Tag,
-} from 'antd'
+import { Alert, Button, Card, Empty, Statistic, Table, Tag } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
-import { ArrowLeftOutlined, ExperimentOutlined, MinusOutlined } from '@ant-design/icons'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { ArrowLeftOutlined } from '@ant-design/icons'
+import { useQuery } from '@tanstack/react-query'
 import { useNavigate, useParams } from 'react-router-dom'
-import { api, errorMessage } from '../api'
-import type { HandSet, HandSetItem } from '../types'
-import { QualityBadge } from '../components/CardChips'
-import { formatAmount, formatDate } from '../lib/format'
+import { api, errorMessage } from '../../api'
+import type { HandSet, HandSetItem } from '../../types'
+import { QualityBadge } from '../../components/CardChips'
+import LegacyBanner from '../../components/LegacyBanner'
+import { formatAmount, formatDate } from '../../lib/format'
 
 const ROLE: Record<string, string> = {
   golden: '金标准', regression: '回归', exploration: '探索', negative: '对照',
@@ -19,29 +18,11 @@ export default function HandSetDetailPage() {
   const { setId } = useParams()
   const id = Number(setId)
   const navigate = useNavigate()
-  const { message } = App.useApp()
-  const queryClient = useQueryClient()
 
   const set = useQuery<HandSet>({
     queryKey: ['hand-set', id],
     queryFn: () => api.get(`/hand-sets/${id}`),
     enabled: Number.isFinite(id),
-  })
-  const remove = useMutation({
-    mutationFn: (handIds: number[]) => api.delete<HandSet>(`/hand-sets/${id}/items`, { handIds }),
-    onSuccess: () => {
-      message.success('已从手牌集移除')
-      queryClient.invalidateQueries({ queryKey: ['hand-set', id] })
-    },
-    onError: (error) => message.error(errorMessage(error)),
-  })
-  const freeze = useMutation({
-    mutationFn: () => api.post<HandSet>(`/hand-sets/${id}/freeze`),
-    onSuccess: () => {
-      message.success('已冻结当前 revision')
-      queryClient.invalidateQueries({ queryKey: ['hand-set', id] })
-    },
-    onError: (error) => message.error(errorMessage(error)),
   })
 
   const columns: ColumnsType<HandSetItem> = [
@@ -93,12 +74,6 @@ export default function HandSetDetailPage() {
         return n ? <Tag color="blue">{n} 条</Tag> : <span className="muted">—</span>
       },
     },
-    {
-      title: '', key: 'action', width: 70,
-      render: (_: unknown, row) => (
-        <Button size="small" danger icon={<MinusOutlined />} onClick={() => remove.mutate([row.handId])} />
-      ),
-    },
   ]
 
   const coverage = set.data?.coverage
@@ -115,10 +90,12 @@ export default function HandSetDetailPage() {
   return (
     <div className="hand-set-detail">
       <div className="detail-back">
-        <Button type="text" icon={<ArrowLeftOutlined />} onClick={() => navigate('/sets')}>手牌集</Button>
+        <Button type="text" icon={<ArrowLeftOutlined />} onClick={() => navigate('/legacy/sets')}>手牌集</Button>
         <span className="mono muted">#{data.id} · v{data.revision}</span>
         {data.frozenAt ? <Tag color="green">已冻结</Tag> : <Tag>未冻结</Tag>}
       </div>
+
+      <LegacyBanner scope="手牌集" />
 
       <Card className="hand-hero" bordered={false}>
         <div className="hand-hero-main">
@@ -130,13 +107,6 @@ export default function HandSetDetailPage() {
               <span>更新 {formatDate(data.updatedAt, false)}</span>
             </div>
           </div>
-          <Space>
-            <Button onClick={() => freeze.mutate()} loading={freeze.isPending}>冻结 v{data.revision}</Button>
-            <Button type="primary" icon={<ExperimentOutlined />}
-              onClick={() => navigate(`/experiments?handSetId=${data.id}`)}>
-              用这个集合跑 A/B
-            </Button>
-          </Space>
         </div>
       </Card>
 
@@ -154,7 +124,7 @@ export default function HandSetDetailPage() {
           columns={columns}
           dataSource={data.items}
           pagination={false}
-          locale={{ emptyText: <Empty description="还没有手牌。去手牌库勾选后「加入手牌集」。" /> }}
+          locale={{ emptyText: <Empty description="这个手牌集没有条目。" /> }}
         />
       </Card>
     </div>

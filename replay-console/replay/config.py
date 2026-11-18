@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -53,6 +54,19 @@ def _int(value: str | None, default: int, low: int | None = None,
     return out
 
 
+def _judge_timeout(value: str | None) -> float:
+    """REPLAY_JUDGE_TIMEOUT：配错直接炸，不静默退回默认。"""
+    if value is None or not value.strip():
+        return 30.0
+    try:
+        timeout = float(value)
+    except ValueError:
+        raise ValueError(f"REPLAY_JUDGE_TIMEOUT 不是数字：{value!r}") from None
+    if timeout <= 0:
+        raise ValueError("REPLAY_JUDGE_TIMEOUT 必须大于 0")
+    return timeout
+
+
 def _float(value: str | None, default: float | None) -> float | None:
     if value is None or value.strip() == "":
         return default
@@ -60,6 +74,40 @@ def _float(value: str | None, default: float | None) -> float | None:
         return float(value)
     except ValueError:
         return default
+
+
+def _price_table(raw: str | None) -> dict[str, dict[str, float]]:
+    """`REPLAY_PRICE_TABLE` → {model: {"in": 元/百万 token, "out": ...}}。
+
+    配错就直接不启动（fail fast）：成本估算宁可报错，也不要静默显示「未知」
+    让人以为没配过。空值合法，表示没配单价。
+    """
+    if raw is None or not raw.strip():
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"REPLAY_PRICE_TABLE 不是合法 JSON：{exc}") from exc
+    if not isinstance(parsed, dict):
+        raise ValueError("REPLAY_PRICE_TABLE 必须是 {model: {in, out}} 对象")
+    table: dict[str, dict[str, float]] = {}
+    for model, prices in parsed.items():
+        if not isinstance(prices, dict):
+            raise ValueError(
+                f"REPLAY_PRICE_TABLE[{model!r}] 必须是 {{in, out}}")
+        entry: dict[str, float] = {}
+        for key in ("in", "out"):
+            try:
+                value = float(prices.get(key))
+            except (TypeError, ValueError):
+                raise ValueError(
+                    f"REPLAY_PRICE_TABLE[{model!r}].{key} 必须是数字") from None
+            if value < 0:
+                raise ValueError(
+                    f"REPLAY_PRICE_TABLE[{model!r}].{key} 不能为负")
+            entry[key] = value
+        table[str(model)] = entry
+    return table
 
 
 def _load_env_file(path: Path, applied: list[Path]) -> None:
@@ -139,9 +187,18 @@ class Settings:
     rate_limit_per_second: float = 5.0
     max_calls_per_job: int = 2000
     max_queue_depth: int = 3
+    # 成本估算单价（元/百万 token）：REPLAY_PRICE_TABLE，启动时校验
+    price_table: dict[str, dict[str, float]] = field(default_factory=dict)
     heartbeat_seconds: int = 10
     stale_seconds: int = 120
     auto_migrate: bool = True
+
+    # judge（#58）：独立模型 + 温度 0；型号进 judge_version，随 run 冻结。
+    judge_model: str = "deepseek-v4-pro"
+    judge_base_url: str = ""
+    judge_api_key_ref: str = "AI_SERVER_API_KEY"
+    judge_timeout: float = 30.0
+    judge_thinking: str = "disabled"
 
     store_prompts: bool = True
     retention_days: int = 365
@@ -192,9 +249,20 @@ class Settings:
             rate_limit_per_second=_float(os.environ.get("REPLAY_RATE_LIMIT"), 5.0) or 0.0,
             max_calls_per_job=_int(os.environ.get("REPLAY_MAX_CALLS_PER_JOB"), 2000, 1),
             max_queue_depth=_int(os.environ.get("REPLAY_MAX_QUEUE_DEPTH"), 3, 1),
+            price_table=_price_table(os.environ.get("REPLAY_PRICE_TABLE")),
             heartbeat_seconds=_int(os.environ.get("REPLAY_HEARTBEAT_SECONDS"), 10, 2, 120),
             stale_seconds=_int(os.environ.get("REPLAY_STALE_SECONDS"), 120, 10),
             auto_migrate=_truthy(os.environ.get("REPLAY_AUTO_MIGRATE"), True),
+            judge_model=(os.environ.get("REPLAY_JUDGE_MODEL")
+                         or "deepseek-v4-pro").strip(),
+            judge_base_url=(os.environ.get("REPLAY_JUDGE_BASE_URL")
+                            or os.environ.get("AI_SERVER_BASE_URL")
+                            or "").strip(),
+            judge_api_key_ref=(os.environ.get("REPLAY_JUDGE_API_KEY_REF")
+                               or "AI_SERVER_API_KEY").strip(),
+            judge_timeout=_judge_timeout(os.environ.get("REPLAY_JUDGE_TIMEOUT")),
+            judge_thinking=(os.environ.get("REPLAY_JUDGE_THINKING")
+                            or "disabled").strip(),
             store_prompts=_truthy(os.environ.get("REPLAY_STORE_PROMPTS"), True),
             retention_days=_int(os.environ.get("REPLAY_RETENTION_DAYS"), 365, 0),
             default_repeat=_int(os.environ.get("REPLAY_DEFAULT_REPEAT"), 1, 1, 5),
@@ -202,6 +270,13 @@ class Settings:
             log_file=log_file, static_dir=static_dir,
             loaded_env_files=tuple(files),
         )
+        # judge 配置错了必须启动就炸：静默退回默认会让整批评审口径静默变化。
+        if not settings.judge_model:
+            raise ValueError("REPLAY_JUDGE_MODEL 不能为空")
+        if not settings.judge_api_key_ref:
+            raise ValueError("REPLAY_JUDGE_API_KEY_REF 不能为空")
+        if settings.judge_thinking not in ("", "enabled", "disabled"):
+            raise ValueError("REPLAY_JUDGE_THINKING 只能是 enabled / disabled / 空")
         # 便于启动日志说明 DB 配置从哪来（不打印密码）
         settings.callback_env_path = callback_default
         return settings
@@ -226,6 +301,8 @@ class Settings:
             "timeoutSeconds": self.model_timeout,
             "maxCallsPerJob": self.max_calls_per_job,
             "maxQueueDepth": self.max_queue_depth,
+            "judgeModel": self.judge_model,
+            "judgeTimeoutSeconds": self.judge_timeout,
             "storePrompts": self.store_prompts,
             "retentionDays": self.retention_days,
             "defaultRepeat": self.default_repeat,

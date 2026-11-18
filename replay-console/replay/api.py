@@ -18,12 +18,15 @@ from . import range_ab
 from .config import Settings
 from .db import Database
 from .errors import ApiError
+from .run_worker import RunWorker
 from .runner import Runner
 from .schemas import (
+    CaseCreate, CaseHandCases, CaseSample, CaseSeed, CaseSetCasePatch,
+    CaseSetCases, CaseSetCreate, CaseSetPatch,
     DecisionMark, ExperimentCreate, ExperimentOutcome, ExperimentRun,
     HandDelete, HandSetCreate, HandSetItems, HandSetPatch, ImportHands,
     IngestHands, MarkPatch, PairReviewPatch, RunCreate, RunPreview,
-    VersionClone, VersionCreate, VersionMetaPatch,
+    SpecPatch, SpecWrite, VersionClone, VersionCreate, VersionMetaPatch,
 )
 from .service import ReplayService
 
@@ -51,6 +54,11 @@ def setup_logging(settings: Settings) -> None:
     stream.setFormatter(fmt)
     root.addHandler(stream)
     root._replay_configured = True  # type: ignore[attr-defined]
+
+
+def _export_media(fmt: str) -> str:
+    return ("text/csv; charset=utf-8" if fmt == "csv"
+            else "text/markdown; charset=utf-8")
 
 
 def create_app(settings: Settings | None = None,
@@ -84,21 +92,28 @@ def create_app(settings: Settings | None = None,
             except Exception:  # noqa: BLE001
                 log.exception("清理旧 prompt 失败")
         runner = None
+        score_worker = None
         run_worker = settings.worker_enabled if start_worker is None else start_worker
         service = ReplayService(settings, db, runner=None)
         if run_worker:
             runner = Runner(settings, db)
             service.runner = runner
             runner.start()
+            score_worker = RunWorker(settings, db)
+            service.run_worker = score_worker
+            score_worker.start()
         app.state.settings = settings
         app.state.db = db
         app.state.service = service
         app.state.runner = runner
+        app.state.score_worker = score_worker
         log.info("replay console 启动：db=%s/%s worker=%s",
                  settings.db_host, settings.db_name, bool(runner))
         yield
         if runner is not None:
             runner.stop()
+        if score_worker is not None:
+            score_worker.stop()
         try:
             db.close()
         except Exception:  # noqa: BLE001
@@ -237,6 +252,78 @@ def create_app(settings: Settings | None = None,
         return service(request).delete_hands(
             body.model_dump(exclude_unset=True))
 
+    @app.post("/api/cases")
+    def create_case(body: CaseCreate, request: Request):
+        return service(request).create_case(
+            body.model_dump(exclude_unset=True))
+
+    # ─────────────── 案例集（#55） ───────────────
+    # /seed 必须注册在 /{set_id} 之前，否则 "seed" 会被当成路径参数。
+
+    @app.post("/api/case-sets/seed")
+    def seed_case_sets(body: CaseSeed, request: Request):
+        return service(request).seed_case_sets(
+            body.model_dump(exclude_unset=True))
+
+    @app.get("/api/case-sets")
+    def list_case_sets(request: Request):
+        return service(request).list_case_sets(dict(request.query_params))
+
+    @app.post("/api/case-sets")
+    def create_case_set(body: CaseSetCreate, request: Request):
+        return service(request).create_case_set(
+            body.model_dump(exclude_unset=True))
+
+    @app.get("/api/case-sets/{set_id}")
+    def get_case_set(set_id: int, request: Request):
+        return service(request).get_case_set(set_id)
+
+    @app.patch("/api/case-sets/{set_id}")
+    def patch_case_set(set_id: int, body: CaseSetPatch, request: Request):
+        return service(request).patch_case_set(
+            set_id, body.model_dump(exclude_unset=True))
+
+    @app.post("/api/case-sets/{set_id}/freeze")
+    def freeze_case_set(set_id: int, request: Request):
+        return service(request).freeze_case_set(set_id)
+
+    @app.post("/api/case-sets/{set_id}/revisions")
+    def create_case_set_revision(set_id: int, body: CaseSetPatch,
+                                 request: Request):
+        return service(request).create_case_set_revision(
+            set_id, body.model_dump(exclude_unset=True))
+
+    @app.post("/api/case-sets/{set_id}/cases")
+    def add_case_set_cases(set_id: int, body: CaseSetCases, request: Request):
+        return service(request).add_case_set_cases(
+            set_id, body.model_dump(exclude_unset=True))
+
+    @app.patch("/api/case-sets/{set_id}/cases/{case_id}")
+    def patch_case_set_case(set_id: int, case_id: int,
+                            body: CaseSetCasePatch, request: Request):
+        return service(request).patch_case_set_case(
+            set_id, case_id, body.model_dump(exclude_unset=True))
+
+    @app.delete("/api/case-sets/{set_id}/cases/{case_id}")
+    def delete_case_set_case(set_id: int, case_id: int, request: Request):
+        return service(request).delete_case_set_case(set_id, case_id)
+
+    @app.post("/api/case-sets/{set_id}/hand-cases")
+    def build_hand_cases(set_id: int, body: CaseHandCases, request: Request):
+        return service(request).build_hand_cases(
+            set_id, body.model_dump(exclude_unset=True))
+
+    @app.post("/api/case-sets/{set_id}/sample")
+    def sample_case_set_cases(set_id: int, body: CaseSample,
+                              request: Request):
+        return service(request).sample_case_set_cases(
+            set_id, body.model_dump(exclude_unset=True))
+
+    @app.get("/api/case-sets/{set_id}/candidates")
+    def case_candidates(set_id: int, request: Request):
+        return service(request).case_candidates(
+            set_id, dict(request.query_params))
+
     @app.get("/api/imports")
     def list_imports(request: Request):
         return service(request).list_imports(dict(request.query_params))
@@ -284,6 +371,49 @@ def create_app(settings: Settings | None = None,
     @app.post("/api/hand-sets/{set_id}/freeze")
     def freeze_hand_set(set_id: int, request: Request):
         return service(request).freeze_hand_set(set_id)
+
+    # ─────────────── 期望库（spot spec） ───────────────
+    # /meta 必须注册在 /{spec_id} 之前，否则 "meta" 会被当成路径参数。
+
+    @app.get("/api/specs/meta")
+    def spec_meta(request: Request):
+        return service(request).spec_meta()
+
+    @app.get("/api/specs")
+    def list_specs(request: Request):
+        return service(request).list_specs(dict(request.query_params))
+
+    @app.post("/api/specs")
+    def create_spec(body: SpecWrite, request: Request):
+        return service(request).create_spec(
+            body.model_dump(by_alias=True, exclude_unset=True))
+
+    @app.get("/api/specs/{spec_id}")
+    def get_spec(spec_id: int, request: Request):
+        return service(request).get_spec(spec_id)
+
+    @app.post("/api/specs/{spec_id}/revisions")
+    def create_spec_revision(spec_id: int, body: SpecWrite, request: Request):
+        return service(request).create_spec_revision(
+            spec_id, body.model_dump(by_alias=True, exclude_unset=True))
+
+    @app.patch("/api/specs/{spec_id}")
+    def patch_spec(spec_id: int, body: SpecPatch, request: Request):
+        return service(request).patch_spec(
+            spec_id, body.model_dump(exclude_unset=True))
+
+    @app.delete("/api/specs/{spec_id}")
+    def delete_spec(spec_id: int, request: Request):
+        return service(request).delete_spec_revision(spec_id)
+
+    @app.get("/api/specs/{spec_id}/history")
+    def spec_history(spec_id: int, request: Request):
+        return service(request).spec_history(spec_id)
+
+    @app.get("/api/specs/{spec_id}/diff")
+    def spec_diff(spec_id: int, request: Request,
+                  against: int | None = None):
+        return service(request).spec_diff(spec_id, against)
 
     @app.get("/api/experiments/{experiment_id}/pairs")
     def experiment_pairs(experiment_id: int, request: Request):
@@ -376,14 +506,88 @@ def create_app(settings: Settings | None = None,
     def retry_failed(job_id: int, request: Request):
         return service(request).retry_failed(job_id)
 
+    # ─────────────── 评分运行（#57） ───────────────
+    # 与旧 job 链路 /api/runs 分开命名，互不影响。
+
+    @app.get("/api/score-runs/meta")
+    def score_run_meta(request: Request):
+        return service(request).score_run_meta()
+
+    @app.post("/api/score-runs/estimate")
+    def estimate_score_run(body: dict, request: Request):
+        return service(request).estimate_score_run(body)
+
+    @app.get("/api/score-runs")
+    def list_score_runs(request: Request):
+        return service(request).list_score_runs(dict(request.query_params))
+
+    @app.post("/api/score-runs")
+    def create_score_run(body: dict, request: Request):
+        return service(request).create_score_run(body)
+
+    @app.get("/api/score-runs/{run_id}")
+    def get_score_run(run_id: int, request: Request):
+        return service(request).get_score_run(run_id)
+
+    @app.post("/api/score-runs/{run_id}/cancel")
+    def cancel_score_run(run_id: int, request: Request):
+        return service(request).cancel_score_run(run_id)
+
+    @app.get("/api/score-runs/{run_id}/hotspots")
+    def score_run_hotspots(run_id: int, request: Request):
+        return service(request).score_run_hotspots(run_id)
+
+    @app.get("/api/score-runs/{run_id}/items")
+    def score_run_items(run_id: int, request: Request):
+        return service(request).score_run_items(
+            run_id, dict(request.query_params))
+
+    @app.get("/api/score-runs/{run_id}/items/{case_id}/{repeat_index}")
+    def score_run_item(run_id: int, case_id: int, repeat_index: int,
+                       request: Request):
+        return service(request).score_run_item(run_id, case_id, repeat_index)
+
+    @app.post("/api/score-runs/{run_id}/items/{case_id}/override")
+    def save_score_run_override(run_id: int, case_id: int, body: dict,
+                                request: Request):
+        return service(request).save_score_run_override(run_id, case_id, body)
+
+    @app.delete("/api/score-runs/{run_id}/items/{case_id}/override")
+    def delete_score_run_override(run_id: int, case_id: int,
+                                  request: Request, body: dict | None = None):
+        return service(request).delete_score_run_override(
+            run_id, case_id, body or {})
+
+    @app.post(
+        "/api/score-runs/{run_id}/items/{case_id}/{repeat_index}/rejudge")
+    def rejudge_score_run_item(run_id: int, case_id: int, repeat_index: int,
+                               request: Request):
+        return service(request).rejudge_score_run_item(
+            run_id, case_id, repeat_index)
+
+    # ─────────────── 版本对照（#60） ───────────────
+
+    @app.get("/api/score-runs/{run_id}/compare/{other_id}")
+    def compare_score_runs(run_id: int, other_id: int, request: Request):
+        return service(request).compare_score_runs(
+            run_id, other_id, dict(request.query_params))
+
+    @app.get("/api/score-runs/{run_id}/compare/{other_id}/export")
+    def export_score_run_comparison(run_id: int, other_id: int,
+                                    request: Request):
+        fmt, filename, body = service(request).export_score_run_comparison(
+            run_id, other_id, dict(request.query_params))
+        return Response(
+            content=body, media_type=_export_media(fmt),
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
     # ─────────────── export ───────────────
 
     @app.get("/api/export")
     def export(request: Request):
         fmt, filename, body = service(request).export(dict(request.query_params))
-        media = "text/csv; charset=utf-8" if fmt == "csv" else "text/markdown; charset=utf-8"
         return Response(
-            content=body, media_type=media,
+            content=body, media_type=_export_media(fmt),
             headers={"Content-Disposition": f'attachment; filename="{filename}"'})
 
     # ─────────────── SPA ───────────────

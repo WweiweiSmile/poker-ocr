@@ -1,15 +1,21 @@
+import type { ReactNode } from 'react'
 import { App as AntdApp, ConfigProvider, Tag, Tooltip } from 'antd'
 import zhCN from 'antd/locale/zh_CN'
 import {
+  AimOutlined,
   DatabaseOutlined,
   DeploymentUnitOutlined,
-  ExperimentOutlined,
+  FundOutlined,
+  HeatMapOutlined,
+  HistoryOutlined,
+  ReadOutlined,
   SettingOutlined,
-  SwapOutlined,
   ThunderboltOutlined,
 } from '@ant-design/icons'
 import { QueryClient, QueryClientProvider, useQuery } from '@tanstack/react-query'
-import { NavLink, Navigate, Outlet, Route, Routes, useLocation } from 'react-router-dom'
+import {
+  NavLink, Navigate, Outlet, Route, Routes, useLocation,
+} from 'react-router-dom'
 import { BrowserRouter } from 'react-router-dom'
 import dayjs from 'dayjs'
 import 'dayjs/locale/zh-cn'
@@ -19,17 +25,25 @@ import { shortHash } from './lib/format'
 import HandsPage from './pages/HandsPage'
 import HandDetailPage from './pages/HandDetailPage'
 import ReplayPage from './pages/ReplayPage'
-import HandSetsPage from './pages/HandSetsPage'
-import HandSetDetailPage from './pages/HandSetDetailPage'
-import ExperimentPairsPage from './pages/ExperimentPairsPage'
+import HandSetsPage from './pages/legacy/HandSetsPage'
+import HandSetDetailPage from './pages/legacy/HandSetDetailPage'
+import CaseSetsPage from './pages/CaseSetsPage'
+import CaseSetDetailPage from './pages/CaseSetDetailPage'
+import RunsPage from './pages/RunsPage'
+import RunDetailPage from './pages/RunDetailPage'
+import RunComparePage from './pages/RunComparePage'
+import HotspotsPage from './pages/HotspotsPage'
+import SpecsPage from './pages/SpecsPage'
+import ExperimentPairsPage from './pages/legacy/ExperimentPairsPage'
 import JobsPage from './pages/JobsPage'
 import JobDetailPage from './pages/JobDetailPage'
 import JobComparisonPage from './pages/JobComparisonPage'
 import VersionsPage from './pages/VersionsPage'
 import SettingsPage from './pages/SettingsPage'
-import ExperimentsPage from './pages/ExperimentsPage'
-import ExperimentDetailPage from './pages/ExperimentDetailPage'
-import RangeABPage from './pages/RangeABPage'
+import ExperimentsPage from './pages/legacy/ExperimentsPage'
+import ExperimentDetailPage from './pages/legacy/ExperimentDetailPage'
+import RangeABPage from './pages/legacy/RangeABPage'
+import LegacyHomePage from './pages/legacy/LegacyHomePage'
 
 dayjs.locale('zh-cn')
 
@@ -43,15 +57,60 @@ const queryClient = new QueryClient({
   },
 })
 
-const NAV = [
+type NavItem = { to: string; label: string; icon: ReactNode; hint: string }
+
+/** 一级入口：只放新链路的五步，顺序即用户的动线（设计 §9）。 */
+const PRIMARY_NAV: NavItem[] = [
   { to: '/hands', label: '手牌库', icon: <DatabaseOutlined />, hint: '筛选、收藏、逐街对比' },
-  { to: '/experiments', label: 'A/B 实验', icon: <ExperimentOutlined />, hint: '离线冻结数据集、dev/holdout' },
-  { to: '/sets', label: '手牌集', icon: <DatabaseOutlined />, hint: '挑选回归集、冻结 revision' },
-  { to: '/range-ab', label: '范围 A/B', icon: <SwapOutlined />, hint: '旧路径 vs 事件模型' },
+  { to: '/specs', label: '期望库', icon: <ReadOutlined />, hint: '按桶分组的行为规范与 revision' },
+  { to: '/case-sets', label: '案例集', icon: <AimOutlined />, hint: '决策点 × 期望、冻结成版本' },
+  { to: '/runs', label: '运行', icon: <FundOutlined />, hint: '案例集 × 版本，五维打分' },
+  { to: '/hotspots', label: '偏差', icon: <HeatMapOutlined />, hint: '按桶看偏差、下钻、建期望' },
+]
+
+/** 二级：跑一次评测要用的支撑页，不算链路入口。 */
+const TOOL_NAV: NavItem[] = [
   { to: '/jobs', label: '复跑任务', icon: <ThunderboltOutlined />, hint: '进度、取消、重试' },
   { to: '/versions', label: '版本管理', icon: <DeploymentUnitOutlined />, hint: '不可变 AI 配置快照' },
   { to: '/settings', label: '设置与健康', icon: <SettingOutlined />, hint: '连接、队列、上限' },
 ]
+
+/** 旧链路：experiments / 手牌集 / range-ab，全部只读，新链路稳定后删。 */
+const LEGACY_NAV: NavItem[] = [
+  { to: '/legacy', label: '历史页面', icon: <HistoryOutlined />, hint: '旧实验 / 手牌集 / 范围 A/B（只读）' },
+]
+
+const ALL_NAV = [...PRIMARY_NAV, ...TOOL_NAV, ...LEGACY_NAV]
+
+/** NavLink 的默认匹配；高亮和面包屑共用一份，避免两处口径漂移。 */
+const matchesNav = (item: NavItem, pathname: string) =>
+  pathname === item.to || pathname.startsWith(`${item.to}/`)
+
+function NavItems({ items, pathname }: { items: NavItem[]; pathname: string }) {
+  return (
+    <>
+      {items.map((item) => (
+        <NavLink
+          key={item.to}
+          to={item.to}
+          className={`nav-item${matchesNav(item, pathname) ? ' active' : ''}`}
+        >
+          <span className="nav-icon">{item.icon}</span>
+          <span className="nav-copy">
+            <span>{item.label}</span>
+            <span className="nav-hint">{item.hint}</span>
+          </span>
+        </NavLink>
+      ))}
+    </>
+  )
+}
+
+/** 旧路由一律重定向到 /legacy 下的对应页，任何外链/书签都不会 404。 */
+function LegacyRedirect() {
+  const location = useLocation()
+  return <Navigate to={`/legacy${location.pathname}${location.search}`} replace />
+}
 
 function StatusDot({ ok, label, detail }: { ok: boolean; label: string; detail?: string }) {
   return (
@@ -77,7 +136,9 @@ function Shell() {
     refetchInterval: 15_000,
   })
   const h = health.data || meta.data?.health
-  const active = NAV.find((item) => location.pathname.startsWith(item.to)) || NAV[0]
+  const active = ALL_NAV
+    .filter((item) => matchesNav(item, location.pathname))
+    .sort((a, b) => b.to.length - a.to.length)[0] || PRIMARY_NAV[0]
   const engine = meta.data?.current.engine
 
   return (
@@ -94,20 +155,22 @@ function Shell() {
         </div>
 
         <nav className="nav">
-          {NAV.map((item) => (
-            <NavLink
-              key={item.to}
-              to={item.to}
-              className={({ isActive }) => `nav-item${isActive ? ' active' : ''}`}
-            >
-              <span className="nav-icon">{item.icon}</span>
-              <span className="nav-copy">
-                <span>{item.label}</span>
-                <span className="nav-hint">{item.hint}</span>
-              </span>
-            </NavLink>
-          ))}
+          <NavItems items={PRIMARY_NAV} pathname={location.pathname} />
         </nav>
+
+        <div className="nav-group">
+          <div className="nav-group-label">工具</div>
+          <nav className="nav">
+            <NavItems items={TOOL_NAV} pathname={location.pathname} />
+          </nav>
+        </div>
+
+        <div className="nav-group">
+          <div className="nav-group-label">历史</div>
+          <nav className="nav">
+            <NavItems items={LEGACY_NAV} pathname={location.pathname} />
+          </nav>
+        </div>
 
         <div className="sidebar-stats">
           <div>
@@ -196,12 +259,24 @@ export default function App() {
                 <Route path="/hands" element={<HandsPage />} />
                 <Route path="/hands/:handId" element={<HandDetailPage />} />
                 <Route path="/hands/:handId/replay" element={<ReplayPage />} />
-                <Route path="/sets" element={<HandSetsPage />} />
-                <Route path="/sets/:setId" element={<HandSetDetailPage />} />
-                <Route path="/experiments" element={<ExperimentsPage />} />
-                <Route path="/experiments/:experimentId" element={<ExperimentDetailPage />} />
-                <Route path="/experiments/:experimentId/pairs" element={<ExperimentPairsPage />} />
-                <Route path="/range-ab" element={<RangeABPage />} />
+                <Route path="/case-sets" element={<CaseSetsPage />} />
+                <Route path="/case-sets/:setId" element={<CaseSetDetailPage />} />
+                <Route path="/runs" element={<RunsPage />} />
+                <Route path="/runs/:runId" element={<RunDetailPage />} />
+                <Route path="/runs/:runId/compare/:otherId" element={<RunComparePage />} />
+                <Route path="/hotspots" element={<HotspotsPage />} />
+                <Route path="/specs" element={<SpecsPage />} />
+                <Route path="/legacy" element={<LegacyHomePage />} />
+                <Route path="/legacy/experiments" element={<ExperimentsPage />} />
+                <Route path="/legacy/experiments/:experimentId" element={<ExperimentDetailPage />} />
+                <Route path="/legacy/experiments/:experimentId/pairs" element={<ExperimentPairsPage />} />
+                <Route path="/legacy/sets" element={<HandSetsPage />} />
+                <Route path="/legacy/sets/:setId" element={<HandSetDetailPage />} />
+                <Route path="/legacy/range-ab" element={<RangeABPage />} />
+                <Route path="/legacy/*" element={<Navigate to="/legacy" replace />} />
+                <Route path="/experiments/*" element={<LegacyRedirect />} />
+                <Route path="/sets/*" element={<LegacyRedirect />} />
+                <Route path="/range-ab" element={<LegacyRedirect />} />
                 <Route path="/jobs" element={<JobsPage />} />
                 <Route path="/jobs/:jobId" element={<JobDetailPage />} />
                 <Route path="/jobs/:jobId/compare" element={<JobComparisonPage />} />

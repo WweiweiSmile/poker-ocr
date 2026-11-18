@@ -11,19 +11,24 @@ import hashlib
 import io
 import json
 import logging
+import os
 import re
 import threading
 from collections import Counter
+from pathlib import Path
 from typing import Any, Iterable
 
 from poker_ocr.advice import build_situation
 from poker_ocr.advice import AISettings
+from poker_ocr.buckets import BUCKET_ORDER, bucket_label
 
+from . import (case_seed, cases as case_lib, compare, hotspots, judge, library,
+               run_worker, scoring, specs)
 from .config import Settings
 from .db import Database
 from .decisions import (
-    APPROX, EXACT, INVALID, HandAnalysis, analyze_hand, call_amount, cards_of,
-    decision_facts, hand_fingerprint, snapshot_to_dict,
+    APPROX, EXACT, INVALID, UNKNOWN_ACTION, HandAnalysis, analyze_hand,
+    call_amount, cards_of, decision_facts, hand_fingerprint, snapshot_to_dict,
 )
 from .engine import (
     audit, classify, decision_to_public, fmt_option, summarize_version,
@@ -33,12 +38,18 @@ from .importer import (
     SOURCE_LABELS, SOURCE_LIVE, SOURCE_REVIEW, normalize_live_hand,
     parse_hand_text,
 )
+from .canonical import CANONICAL_HAND_ID_BASE
 from .repository import (
     HAND_SOURCE_DB, HAND_SOURCE_LABELS, HAND_SOURCE_LIVE, HAND_SOURCE_REVIEW,
-    DecisionMarkRepository, DecisionRepository, ExperimentRepository,
-    HandRepository, HandSetRepository, ImportBatchRepository, JobRepository,
+    IMPORTED_HAND_ID_BASE, CaseRepository, CanonicalHandRepository,
+    DecisionMarkRepository,
+    DecisionRepository, ExperimentRepository, HandRepository,
+    HandSetRepository, ImportBatchRepository, JobRepository,
     LiveAdviceRepository, MarkRepository, PairReviewRepository,
-    ResultRepository, VersionRepository,
+    ResultRepository, SpotSpecRepository, VersionRepository,
+)
+from .run_repository import (
+    JudgeOverrideRepository, RunItemRepository, RunRepository,
 )
 from .timeline import build_timeline
 from .flags import compute_flags, mask_for, parse_flags
@@ -58,6 +69,8 @@ log = logging.getLogger("replay.service")
 DEFAULT_TAGS = ["典型", "边界", "漏点", "坚果"]
 MARK_STATUSES = ("todo", "confirmed", "disputed")
 RUN_STATUSES = ("queued", "running", "succeeded", "partial", "failed", "canceled")
+# 下钻一次最多取这么多条再排序；超过就显式标 truncated，不静默截断。
+_DRILLDOWN_CAP = 5000
 
 
 def _as_list(value: Any) -> list[str]:
@@ -92,6 +105,46 @@ def _parse_date(value: Any) -> dt.datetime | None:
         return None
 
 
+def _group_filters(query: dict) -> dict:
+    """把 URL 查询串解析成 `library.matches_filters` 需要的形状。"""
+    source_values = {library.LEGACY_SOURCES.get(s.lower())
+                     for s in _as_list(query.get("source"))}
+    source_values.discard(None)
+    flag_names = parse_flags(query.get("flags"))
+    try:
+        min_score = (int(query["minScore"])
+                     if query.get("minScore") not in (None, "") else None)
+    except (TypeError, ValueError):
+        min_score = None
+    try:
+        not_run_days = (int(query["notRunDays"])
+                        if query.get("notRunDays") not in (None, "") else None)
+    except (TypeError, ValueError):
+        not_run_days = None
+    buckets = {}
+    for dimension in library.DIMENSIONS:
+        values = {v for v in _as_list(query.get(dimension)) if v}
+        if values:
+            buckets[dimension] = values
+    return {
+        "favorite": _parse_bool(query.get("favorite")),
+        "sources": source_values,
+        "positions": {p.upper() for p in _as_list(query.get("position"))},
+        "results": {p.lower() for p in _as_list(query.get("result"))},
+        "tags": [t.lower() for t in _as_list(query.get("tag"))],
+        "qualities": {q.lower() for q in _as_list(query.get("quality"))},
+        "hasRun": _parse_bool(query.get("hasRun")),
+        "hasCase": _parse_bool(query.get("hasCase")),
+        "flagMask": mask_for(flag_names),
+        "minScore": min_score,
+        "keyword": str(query.get("keyword") or "").strip().lower(),
+        "dateFrom": _parse_date(query.get("dateFrom")),
+        "dateTo": _parse_date(query.get("dateTo")),
+        "notRunDays": not_run_days,
+        "buckets": buckets,
+    }
+
+
 def _median_or_none(values: list[float]) -> float | None:
     m = median(values)
     return round(m, 1) if m is not None else None
@@ -119,14 +172,26 @@ class ReplayService:
         self.result_repo = ResultRepository(db)
         self.live_advice_repo = LiveAdviceRepository(db)
         self.hand_set_repo = HandSetRepository(db, settings.console_user_id)
+        self.spec_repo = SpotSpecRepository(db)
         self.pair_review_repo = PairReviewRepository(db, settings.console_user_id)
+        self.canonical_repo = CanonicalHandRepository(db)
+        self.case_repo = CaseRepository(db)
+        self.run_repo = RunRepository(db)
+        self.run_item_repo = RunItemRepository(db)
+        self.override_repo = JudgeOverrideRepository(db)
+        self.run_worker = None
 
     # ─────────────────────────── 基础查询 ───────────────────────────
 
     def analyze(self, row: dict) -> HandAnalysis:
+        advices = row.get("advices") if isinstance(row.get("advices"), list) else None
         key = (int(row.get("id") or 0), iso(row.get("updated_at")),
                row.get("hero_cards"), row.get("board"),
-               bool(row.get("streets")), CURRENT_RECONSTRUCT_VERSION)
+               bool(row.get("streets")), CURRENT_RECONSTRUCT_VERSION,
+               # advices 会改决策点（补「英雄动作缺录」的点），必须进 key：
+               # 先按无 advices 的行算过，再拿带 advices 的行重算会命中旧结果。
+               tuple((str(a.get("street") or ""), a.get("action_index"))
+                     for a in (advices or []) if isinstance(a, dict)))
         with self._lock:
             cached = self._analysis_cache.get(key)
         if cached is not None:
@@ -345,33 +410,214 @@ class ReplayService:
     # ─────────────────────────── 手牌库 ───────────────────────────
 
     def list_hands(self, query: dict) -> dict:
-        rows = self.hand_repo.list_rows()
-        analyses = {int(r["id"]): self.analyze(r) for r in rows}
-        last_runs = self._last_run_map([int(r["id"]) for r in rows])
-        filtered = self._filter_rows(rows, analyses, last_runs, query)
-        filtered = self._sort_rows(filtered, analyses, last_runs,
-                                   query.get("sort") or "created_at",
-                                   query.get("order") or "desc")
+        """手牌库列表：以 canonical 为一行，同内容多来源合并展示。
+
+        旧实现把 1058 条手牌的全列（含 streets/villains/table_roster）拖回来，
+        再逐手重建成 1082 个 HandAnalysis；远程 MySQL 上首屏要 9–15 秒。
+        现在只读轻量列 + 决策聚合（约 2.6 秒），来源边由 canonical 表给出。
+        """
+        rows = self.hand_repo.list_light_rows()
+        rows_by_id = {int(r["id"]): r for r in rows}
+        visible_keys = {(library.canonical_source(r), int(r["id"])) for r in rows}
+        groups = library.build_groups(
+            self.canonical_repo.list_all(),
+            self.canonical_repo.all_sources(),
+            visible_keys)
+        stats, buckets = self._decision_index()
+        case_counts = self.case_repo.counts_by_canonical()
+        last_runs = self._last_run_map(
+            [int(s["source_hand_id"]) for g in groups for s in g["visibleSources"]])
+        filters = _group_filters(query)
+
+        items = []
+        for group in groups:
+            item = self._group_item(group, rows_by_id, stats, buckets,
+                                    case_counts, last_runs)
+            if library.matches_filters(item, filters):
+                items.append(item)
+        items.sort(key=lambda g: library.sort_value(
+            g, str(query.get("sort") or "created_at").lower()),
+            reverse=(str(query.get("order") or "desc").lower() != "asc"))
+
         page = max(1, int(query.get("page") or 1))
         page_size = min(200, max(1, int(query.get("pageSize")
                                        or self.settings.default_page_size)))
-        total = len(filtered)
-        page_rows = filtered[(page - 1) * page_size: page * page_size]
-        duplicate_groups = self._duplicate_groups(rows)
-        items = []
-        for row in page_rows:
-            hand_id = int(row["id"])
-            items.append(self._row_item(
-                row, analyses[hand_id], last_runs.get(hand_id),
-                duplicate_groups.get(hand_id)))
         return {
-            "total": total,
+            "total": len(items),
+            "handTotal": sum(int(i.get("sourceCount") or 0) for i in items),
             "page": page,
             "pageSize": page_size,
-            "items": items,
+            "items": items[(page - 1) * page_size: page * page_size],
             "filters": query,
             "tagOptions": self._tag_options(rows),
         }
+
+    def _decision_index(self) -> tuple[dict[int, dict],
+                                       dict[int, dict[str, set[str]]]]:
+        """canonical 决策数 / approx 数 / 七桶取值，一次轻量查询算完。"""
+        grouped: dict[int, list[dict]] = {}
+        for row in self.decision_repo.canonical_decisions():
+            grouped.setdefault(int(row["canonical_id"]), []).append(row)
+        stats: dict[int, dict] = {}
+        buckets: dict[int, dict[str, set[str]]] = {}
+        for cid, rows in grouped.items():
+            stats[cid], buckets[cid] = library.decision_stats(rows)
+        return stats, buckets
+
+    def _advices_for_source(self, hand_id: int, row: dict) -> list[dict]:
+        """线上建议优先读 replay_live_advices（有 prompt/raw 的规范表）；
+        旧记录没有拆表时，再回退 payload_json 里的 advices。"""
+        try:
+            live_rows = self.live_advice_repo.list_for_hand(hand_id)
+        except Exception:  # noqa: BLE001
+            log.exception("读取线上建议失败；回退 payload")
+            live_rows = []
+        advices = [self._advice_public(advice) for advice in live_rows]
+        if not advices and row.get("source") in (HAND_SOURCE_LIVE,
+                                                 HAND_SOURCE_REVIEW):
+            payload = self.import_repo.get_payload(hand_id)
+            value = payload.get("advices") if isinstance(payload, dict) else None
+            if isinstance(value, list):
+                advices = [self._advice_public(a) for a in value
+                           if isinstance(a, dict)]
+        return advices
+
+    def _source_item(self, source: dict, rows_by_id: dict[int, dict],
+                     *, detail: bool = False) -> dict:
+        """列表与详情共用的单来源摘要；详情多带复盘只读字段。"""
+        source_id = int(source["source_hand_id"])
+        row = rows_by_id.get(source_id) or {}
+        name = str(source.get("source") or "")
+        item = {
+            **library.group_source_item(source, source_id),
+            "canonicalSource": name,
+            "sourceLabel": library.SOURCE_LABELS.get(name, name),
+            "title": row.get("title")
+            or self._default_title({**row, "id": source_id}),
+            "result": row.get("result") or "unknown",
+            "resultAmount": row.get("result_amount"),
+            "createdAt": iso(row.get("created_at")),
+        }
+        if detail:
+            item.update({
+                "heroThought": row.get("hero_thought"),
+                "analyzeStatus": row.get("analyze_status"),
+                "reviewScore": int(row.get("review_score") or 0),
+                "mark": self._mark(row),
+                "advices": self._advices_for_source(source_id, row),
+            })
+        else:
+            item["externalId"] = row.get("external_id")
+        return item
+
+    def _group_item(self, group: dict, rows_by_id: dict[int, dict],
+                    stats: dict[int, dict],
+                    buckets: dict[int, dict[str, set[str]]],
+                    case_counts: dict[int, int],
+                    last_runs: dict[int, dict]) -> dict:
+        canonical_id = (int(group["canonicalId"])
+                        if group.get("canonicalId") else None)
+        canonical = group["canonical"]
+        sources = [s for s in group["visibleSources"]
+                   if int(s["source_hand_id"]) in rows_by_id]
+        if not sources:
+            sources = group["visibleSources"]
+        representative = next(
+            (s for s in sources if int(s["source_hand_id"])
+             == int(group["representative"]["source_hand_id"])),
+            sources[0])
+        hand_id = int(representative["source_hand_id"])
+        row = rows_by_id.get(hand_id) or {}
+        stat = (stats.get(canonical_id) if canonical_id else None) or {
+            "count": 0, "approx": 0, "quality": "invalid"}
+        bucket_values = (buckets.get(canonical_id) if canonical_id else None) or {}
+
+        marks = [self._mark(r) for r in
+                 (rows_by_id.get(int(s["source_hand_id"])) or {}
+                  for s in sources)]
+        favorite = any(m["favorite"] for m in marks)
+        mark_tags: list[str] = []
+        for mark in marks:
+            for tag in mark["tags"]:
+                if tag not in mark_tags:
+                    mark_tags.append(tag)
+        source_items = [self._source_item(source, rows_by_id)
+                        for source in sources]
+        run_items = [(last_runs.get(int(s["source_hand_id"])), int(
+            s["source_hand_id"])) for s in sources]
+        latest_run = None
+        for run, _sid in run_items:
+            if run and (latest_run is None or
+                        (run.get("at") or "") > (latest_run.get("at") or "")):
+                latest_run = run
+        flags: dict = {}
+        flag_mask = 0
+        review_score = 0
+        for source in sources:
+            source_row = rows_by_id.get(int(source["source_hand_id"])) or {}
+            flag_mask |= int(source_row.get("flag_mask") or 0)
+            review_score = max(review_score,
+                               int(source_row.get("review_score") or 0))
+            for name, value in (json_load(source_row.get("flags_json"), {})
+                                or {}).items():
+                flags.setdefault(name, value)
+        hand = {
+            "id": hand_id,
+            "canonicalId": canonical_id,
+            "groupSize": len(sources),
+            "sourceCount": len(sources),
+            "sources": source_items,
+            "source": row.get("source") or HAND_SOURCE_DB,
+            "sourceLabel": library.SOURCE_LABELS.get(
+                str(representative.get("source") or ""), ""),
+            "canonicalSource": str(representative.get("source") or ""),
+            "externalId": row.get("external_id"),
+            "importBatchId": row.get("batch_id"),
+            "title": row.get("title") or canonical.get("title")
+            or self._default_title({**row, "id": hand_id}),
+            "heroCards": row.get("hero_cards")
+            or canonical.get("hero_cards") or "",
+            "board": row.get("board") or canonical.get("board") or "",
+            "boardByStreet": split_board(row.get("board")
+                                         or canonical.get("board")),
+            "heroPosition": row.get("hero_position")
+            or canonical.get("hero_position"),
+            "tableSize": int(row.get("table_size") or 0),
+            "heroStackBb": row.get("hero_stack_bb"),
+            "bombPotBb": row.get("bomb_pot_bb") or 0,
+            "bombPot": bool(row.get("bomb_pot_bb")),
+            "result": row.get("result") or "unknown",
+            "resultAmount": row.get("result_amount"),
+            "potType": row.get("pot_type"),
+            "heroTags": json_load(row.get("hero_tags"), []) or [],
+            "favorite": favorite,
+            "markTags": mark_tags,
+            "markStatus": marks[0]["status"] if marks else "todo",
+            "markNote": marks[0]["note"] if marks else "",
+            "decisionCount": int(stat["count"]),
+            "approxCount": int(stat["approx"]),
+            "quality": stat["quality"],
+            "warnings": [],
+            "invalidReason": None,
+            "duplicate": len(sources) > 1,
+            "duplicateIds": [int(s["source_hand_id"]) for s in sources],
+            "fingerprint": canonical.get("content_group") or "",
+            "hasRun": latest_run is not None,
+            "lastRun": latest_run,
+            "lastRunAt": (latest_run or {}).get("at"),
+            "flagMask": flag_mask,
+            "flags": flags,
+            "reviewScore": review_score,
+            "caseCount": int(case_counts.get(canonical_id) or 0)
+            if canonical_id else 0,
+            "buckets": {name: sorted(values)
+                        for name, values in bucket_values.items()},
+            "bucketChips": library.bucket_values(bucket_values),
+            "createdAt": iso(row.get("created_at")),
+            "updatedAt": iso(row.get("updated_at")),
+            "userId": row.get("user_id"),
+        }
+        return hand
 
     def _tag_options(self, rows: list[dict]) -> list[str]:
         tags = set(DEFAULT_TAGS)
@@ -686,9 +932,41 @@ class ReplayService:
             "issues": errors[:50],
         }
 
+    def refresh_enrichment(self, hand_id: int) -> bool:
+        """重算时间线 / 标记 / 复盘分（决策点被回填后必须重算，否则 flags 过期）。
+
+        get_row 刻意不取 payload_json（大字段），但重建靠 payload 里的 advices
+        才能补出「英雄动作缺录」的决策点，所以这里单独取一次。
+        """
+        row = self.hand_repo.get_row(int(hand_id))
+        if not row:
+            return False
+        row = dict(row)
+        if not isinstance(row.get("advices"), list):
+            payload = self.import_repo.get_payload(int(hand_id))
+            advices = payload.get("advices") if isinstance(payload, dict) else None
+            if isinstance(advices, list):
+                row["advices"] = advices
+        analysis = self.analyze(row)
+        # 时间线里的 decisionId 是详情页从帧跳决策行的唯一线索：ingest 会传
+        # 这份映射，重算不传就会把已物化的帧洗成 null（回填过的手牌全部丢链接）。
+        persisted = self.decision_repo.for_hand(int(hand_id),
+                                                analysis.fingerprint)
+        decision_ids = {
+            (street, int(item.get("action_index") or 0)): int(item["id"])
+            for (street, _seq), item in persisted.items()
+            if item.get("id") is not None
+        }
+        return self._apply_enrichment(int(hand_id), row, analysis,
+                                      decision_ids)
+
     def _apply_enrichment(self, hand_id: int, row: dict, analysis: HandAnalysis,
-                          decision_ids: dict | None = None) -> None:
-        """物化时间线 + 深挖标记；失败不阻塞手牌入库。"""
+                          decision_ids: dict | None = None) -> bool:
+        """物化时间线 + 深挖标记；失败不阻塞手牌入库。
+
+        返回是否写成功：ingest 忽略它（失败也不该拦入库），重算路径要拿它
+        区分「已经补好」和「又失败了」，不能把失败算成已重算。
+        """
         try:
             advices = self.live_advice_repo.list_for_hand(hand_id)
             timeline = build_timeline(row, analysis, advices,
@@ -698,8 +976,10 @@ class ReplayService:
                 hand_id, timeline=timeline, flag_mask=flag_mask,
                 flags=flags, review_score=score,
                 record_schema=str(row.get("record_schema") or "hand.v2"))
+            return True
         except Exception:  # noqa: BLE001
             log.exception("手牌 %s 时间线/标记生成失败；手牌已入库", hand_id)
+            return False
 
     @staticmethod
     def _hero_roster(roster: list[dict], hero_position: str | None) -> list[dict]:
@@ -863,35 +1143,128 @@ class ReplayService:
             "bucket": advice.get("bucket"),
         }
 
+    def _canonical_for_hand(self, hand_id: int) -> tuple[dict | None,
+                                                         list[dict]]:
+        """源手牌 id 或 canonical id → (canonical 行, 全部来源边)。"""
+        hand_id = int(hand_id)
+        if hand_id >= CANONICAL_HAND_ID_BASE:
+            canonical = self.canonical_repo.get(hand_id)
+            if canonical is None:
+                return None, []
+            return canonical, self.canonical_repo.sources(hand_id)
+        edges = self.canonical_repo.for_hand(hand_id)
+        want = "live" if hand_id >= IMPORTED_HAND_ID_BASE else "review"
+        edge = next((e for e in edges if str(e.get("source")) == want),
+                    edges[0] if edges else None)
+        if edge is None:
+            return None, []
+        canonical = self.canonical_repo.get(int(edge["canonical_id"]))
+        if canonical is None:
+            return None, []
+        return canonical, self.canonical_repo.sources(int(edge["canonical_id"]))
+
+    def resolve_hand_id(self, hand_id: int) -> int:
+        """canonical id → 可读的源手牌 id（瀑布流/对比等旧路由用）。"""
+        hand_id = int(hand_id)
+        if hand_id < CANONICAL_HAND_ID_BASE:
+            return hand_id
+        _canonical, sources = self._canonical_for_hand(hand_id)
+        for source in sources:
+            source_id = int(source["source_hand_id"])
+            if self.hand_repo.get_row(source_id) is not None:
+                return source_id
+        raise ApiError("HAND_NOT_FOUND",
+                       f"手牌 {hand_id} 没有可见来源", 404)
+
+    def _dedupe_source_decisions(self, rows: list[dict],
+                                 source_order: dict[int, int]) -> dict:
+        """同一决策点被多个来源各写一行时，取来源优先级最高的那一行。"""
+        out: dict[tuple[str, int], dict] = {}
+        for row in rows:
+            hand_id = int(row.get("hand_id") or 0)
+            rank = source_order.get(hand_id)
+            if rank is None:
+                continue
+            key = (str(row.get("street")), int(row.get("seq") or 0))
+            current = out.get(key)
+            if current is None or rank < source_order.get(
+                    int(current.get("hand_id") or 0), 99):
+                out[key] = row
+        return out
+
     def get_hand(self, hand_id: int) -> dict:
-        row = self.hand_repo.get_row(hand_id)
-        if row is None:
-            raise ApiError("HAND_NOT_FOUND", f"手牌 {hand_id} 不存在或已删除", 404)
+        """详情：canonical 维度并列全部来源，决策点时间线以代表来源重建。"""
+        hand_id = int(hand_id)
+        canonical, sources = self._canonical_for_hand(hand_id)
+        source_rows: dict[int, dict] = {}
+        visible: list[dict] = []
+        for source in sources:
+            source_id = int(source["source_hand_id"])
+            source_row = self.hand_repo.get_row(source_id)
+            if source_row is not None:
+                source_rows[source_id] = source_row
+                visible.append(source)
+        if canonical is not None and not visible:
+            raise ApiError("HAND_NOT_FOUND",
+                           f"手牌 {hand_id} 的来源都已删除或隐藏", 404)
+        if canonical is None:
+            row = self.hand_repo.get_row(hand_id)
+            if row is None:
+                raise ApiError("HAND_NOT_FOUND",
+                               f"手牌 {hand_id} 不存在或已删除", 404)
+            source_rows = {hand_id: row}
+            canonical = {"id": None, "content_group": None,
+                         "hero_cards": row.get("hero_cards"),
+                         "board": row.get("board"),
+                         "hero_position": row.get("hero_position"),
+                         "title": row.get("title")}
+            visible = [{"source": library.canonical_source(row),
+                        "source_hand_id": hand_id, "is_primary": 1}]
+        representative = next((s for s in visible if s.get("is_primary")),
+                              visible[0])
+        representative_id = int(representative["source_hand_id"])
+        row = source_rows[representative_id]
         analysis = self.analyze(row)
-        # 线上建议优先读 replay_live_advices（有 prompt/raw 的规范表）；
-        # 旧记录没有拆表时，再回退 payload_json 里的 advices。
-        try:
-            live_rows = self.live_advice_repo.list_for_hand(hand_id)
-        except Exception:  # noqa: BLE001
-            log.exception("读取线上建议失败；回退 payload")
-            live_rows = []
-        advices: list[dict] = [
-            self._advice_public(item) for item in live_rows
-        ]
-        if not advices and row.get("source") in (HAND_SOURCE_LIVE,
-                                                 HAND_SOURCE_REVIEW):
-            payload = self.import_repo.get_payload(hand_id)
-            value = payload.get("advices") if isinstance(payload, dict) else None
-            if isinstance(value, list):
-                advices = [self._advice_public(a) for a in value
-                           if isinstance(a, dict)]
-        all_rows = self.hand_repo.list_rows()
-        analyses = {int(r["id"]): self.analyze(r) for r in all_rows}
-        dup_groups = self._duplicate_groups(all_rows)
-        last_runs = self._last_run_map([hand_id])
-        item = self._row_item(row, analysis, last_runs.get(hand_id),
-                              dup_groups.get(hand_id))
-        persisted = self.decision_repo.for_hand(hand_id, analysis.fingerprint)
+        canonical_id = canonical.get("id")
+
+        source_order = {int(s["source_hand_id"]): index
+                        for index, s in enumerate(visible)}
+        if canonical_id:
+            persisted = self._dedupe_source_decisions(
+                self.decision_repo.for_canonical(int(canonical_id)),
+                source_order)
+        else:
+            persisted = self.decision_repo.for_hand(
+                representative_id, analysis.fingerprint)
+
+        stats, bucket_index = library.decision_stats(persisted.values())
+        stats_map = ({int(canonical_id): stats} if canonical_id else {})
+        case_rows: list[dict] = []
+        bucket_map = ({int(canonical_id): bucket_index} if canonical_id else {})
+        last_runs = self._last_run_map(list(source_order))
+        group = {
+            "canonicalId": canonical_id,
+            "canonical": canonical,
+            "sources": visible,
+            "visibleSources": visible,
+            "representative": representative,
+        }
+        item = self._group_item(group, source_rows, stats_map, bucket_map,
+                                {}, last_runs)
+        if canonical_id:
+            case_rows = (self.case_repo.list_for_canonical(int(canonical_id))
+                         if canonical_id else [])
+            item["caseCount"] = len(case_rows)
+
+        # 多来源并列：每个来源的原始摘要 + 复盘记录（只读展示）。
+        source_details = [self._source_item(source, source_rows, detail=True)
+                          for source in visible]
+        item["sources"] = source_details
+        item["sourceCount"] = len(source_details)
+        item["groupSize"] = len(source_details)
+
+        advices = self._advices_for_source(representative_id, row)
+
         raw_streets = json_load(row.get("streets"), []) or []
         streets = self._streets_public(raw_streets, analysis)
         decision_ids = [int(p["id"]) for p in persisted.values()
@@ -902,23 +1275,23 @@ class ReplayService:
             p = persisted.get((d.street, d.seq))
             mark = marks.get(int(p["id"])) if p and p.get("id") is not None else None
             decisions.append(self._decision_public(d, p, mark))
-        dup_items = []
-        for other in (dup_groups.get(hand_id) or []):
-            if int(other) == hand_id:
-                continue
-            other_row = next((r for r in all_rows if int(r["id"]) == int(other)), None)
-            if other_row:
-                dup_items.append({
-                    "id": int(other),
-                    "title": other_row.get("title") or self._default_title(other_row),
-                    "createdAt": iso(other_row.get("created_at")),
-                })
+        duplicates = [{
+            "id": source["handId"],
+            "title": source["title"],
+            "createdAt": source["createdAt"],
+        } for source in source_details if source["handId"] != item["id"]]
+        cases = [self._case_public(case) for case in
+                 (case_rows if canonical_id else [])]
         return {
             "hand": item,
+            "canonical": (self.canonical_public(canonical, source_details)
+                          if canonical_id else None),
+            "sources": source_details,
+            "cases": cases,
             "streets": streets,
             "decisions": decisions,
             "advices": advices,
-            "duplicates": dup_items,
+            "duplicates": duplicates,
             "mark": self._mark(row),
             "reconstruction": {
                 "quality": analysis.quality,
@@ -933,8 +1306,1501 @@ class ReplayService:
             },
         }
 
+    def canonical_public(self, canonical: dict, sources: list[dict]) -> dict:
+        return {
+            "id": int(canonical["id"]),
+            "contentGroup": canonical.get("content_group"),
+            "primarySource": canonical.get("primary_source"),
+            "heroCards": canonical.get("hero_cards") or "",
+            "board": canonical.get("board") or "",
+            "heroPosition": canonical.get("hero_position"),
+            "startedAt": iso(canonical.get("started_at")),
+            "sourceCount": len(sources),
+        }
+
+    def _case_public(self, case: dict) -> dict:
+        spec = None
+        if case.get("spec_id"):
+            try:
+                spec = self.spec_repo.get(int(case["spec_id"]))
+            except Exception:  # noqa: BLE001 - spec 被删也应能显示案例
+                spec = None
+        return {
+            "id": int(case["id"]),
+            "caseSetId": int(case["case_set_id"]),
+            "caseSetName": case.get("set_name"),
+            "caseSetRevision": case.get("set_revision"),
+            "frozen": bool(case.get("set_frozen_at")),
+            "canonicalId": int(case["canonical_id"]),
+            "decisionKey": case.get("decision_key"),
+            "specId": int(case["spec_id"]) if case.get("spec_id") else None,
+            "specName": (spec or {}).get("name"),
+            "priority": int(case.get("priority") or 0),
+            "p0": int(case.get("priority") or 0) == 0,
+            "status": case.get("status") or "draft",
+            "note": case.get("note") or "",
+            "overrides": json_load(case.get("overrides_json"), {}) or {},
+            "createdAt": iso(case.get("created_at")),
+        }
+
+    CASE_OVERRIDE_KEYS = ("action", "sizing", "freq", "note")
+
+    def _case_overrides(self, payload: dict) -> dict | None:
+        """案例级手工覆盖：只收已知键、限长，坏值直接拒，不静默丢弃。"""
+        raw = payload.get("overrides")
+        if raw is None:
+            return None
+        if not isinstance(raw, dict):
+            raise ApiError("INVALID_CASE_OVERRIDES",
+                           "overrides 必须是对象", 422)
+        unknown = [key for key in raw if key not in self.CASE_OVERRIDE_KEYS]
+        if unknown:
+            allowed = ", ".join(self.CASE_OVERRIDE_KEYS)
+            got = ", ".join(map(str, unknown))
+            raise ApiError(
+                "INVALID_CASE_OVERRIDES",
+                f"overrides 只接受 {allowed}；收到 {got}", 422)
+        if len(json.dumps(raw, ensure_ascii=False)) > 4000:
+            raise ApiError("INVALID_CASE_OVERRIDES",
+                           "overrides 太大（JSON ≤ 4000 字符）", 422)
+        return raw or None
+
+    def _case_target(self, payload: dict) -> tuple[int, str, int | None]:
+        """校验 (canonicalId, decisionKey, specId)，并确认决策点确实存在。"""
+        canonical_id = payload.get("canonicalId")
+        decision_key = str(payload.get("decisionKey") or "").strip()
+        spec_id = payload.get("specId")
+        if not canonical_id:
+            raise ApiError("INVALID_CASE", "建案例需要 canonicalId", 422)
+        if not re.fullmatch(r"(preflop|flop|turn|river):\d+", decision_key):
+            raise ApiError("INVALID_CASE",
+                           "decisionKey 形如 flop:2（街道:seq）", 422)
+        if not spec_id:
+            raise ApiError("SPEC_REQUIRED", "建案例需要选择一个期望（spec）", 422)
+        canonical = self.canonical_repo.get(int(canonical_id))
+        if canonical is None:
+            raise ApiError("HAND_NOT_FOUND",
+                           f"canonical {canonical_id} 不存在", 404)
+        if spec_id:
+            spec = self.spec_repo.get(int(spec_id))
+            if spec is None:
+                raise ApiError("SPEC_NOT_FOUND", f"期望 {spec_id} 不存在", 404)
+        keys = {library.decision_key(row.get("street"), row.get("seq"))
+                for row in self.decision_repo.for_canonical(int(canonical_id))}
+        if decision_key not in keys:
+            # 旧重建只写了加工后的决策点、没落 replay_decisions；用代表来源
+            # 重放一次确认时间线上确有这个点，避免“页面上有、点建案例 404”。
+            for edge in self.canonical_repo.sources(int(canonical_id)):
+                row = self.hand_repo.get_row(int(edge["source_hand_id"]))
+                if row is None:
+                    continue
+                rebuilt = self.analyze(row)
+                if decision_key in {library.decision_key(d.street, d.seq)
+                                    for d in rebuilt.decisions}:
+                    break
+            else:
+                raise ApiError("DECISION_NOT_FOUND",
+                               f"决策点 {decision_key} 不在这手牌上", 404)
+        return (int(canonical_id), decision_key,
+                int(spec_id) if spec_id else None)
+
+    @staticmethod
+    def _priority(payload: dict) -> int:
+        return (int(payload["priority"])
+                if payload.get("priority") is not None else 1)
+
+    def create_case(self, payload: dict) -> dict:
+        """从详情页某个决策点建一条案例（可指定案例集，默认「待整理」）。"""
+        canonical_id, decision_key, spec_id = self._case_target(payload)
+        case, created = self.case_repo.create(
+            canonical_id=canonical_id, decision_key=decision_key,
+            spec_id=int(spec_id),
+            case_set_id=(int(payload["caseSetId"])
+                         if payload.get("caseSetId") else None),
+            priority=self._priority(payload),
+            overrides=self._case_overrides(payload),
+            note=str(payload.get("note") or ""))
+        case = self.case_repo.get_by_id(int(case["id"])) or case
+        return {"created": created, "case": self._case_public(case)}
+
+    # ─────────────────────────── 案例集（#55） ───────────────────────────
+
+    def _case_item_public(self, case: dict) -> dict:
+        out = self._case_public(case)
+        bucket = case_lib.case_bucket(case)
+        out.update({
+            "street": case_lib.street_of(case),
+            "actionIndex": (int(case["action_index"])
+                            if case.get("action_index") is not None else None),
+            "bucket": bucket,
+            "bucketLabel": case_lib.label_of(bucket),
+            "hand": {
+                "heroCards": case.get("hero_cards") or "",
+                "board": case.get("board") or "",
+                "heroPosition": case.get("hero_position"),
+            },
+        })
+        return out
+
+    @staticmethod
+    def _case_set_summary(row: dict) -> dict:
+        count = int(row.get("case_count") or 0)
+        p0 = int(row.get("p0_count") or 0)
+        return {
+            "id": int(row["id"]),
+            "name": row.get("name") or "",
+            "revision": int(row.get("revision") or 1),
+            "purpose": row.get("purpose") or "exploration",
+            "frozen": bool(row.get("frozen_at")),
+            "frozenAt": iso(row.get("frozen_at")),
+            "createdAt": iso(row.get("created_at")),
+            "caseCount": count,
+            "p0Count": p0,
+            "p0Ratio": round(p0 / count, 4) if count else 0.0,
+        }
+
+    @staticmethod
+    def _case_set_name(value: Any) -> str:
+        name = str(value or "").strip()
+        if not name:
+            raise ApiError("INVALID_CASE_SET", "案例集名称不能为空", 422)
+        if len(name) > 100:
+            raise ApiError("INVALID_CASE_SET", "案例集名称最长 100 字符", 422)
+        return name
+
+    @staticmethod
+    def _case_set_purpose(value: Any, default: str = "exploration") -> str:
+        purpose = str(value or default).strip() or default
+        if purpose not in CaseRepository.CASE_SET_PURPOSES:
+            raise ApiError(
+                "INVALID_CASE_SET",
+                f"purpose 只能是 {' / '.join(CaseRepository.CASE_SET_PURPOSES)}",
+                422)
+        return purpose
+
+    def _case_set_detail(self, row: dict) -> dict:
+        items = [self._case_item_public(case)
+                 for case in self.case_repo.items(int(row["id"]))]
+        stats = case_lib.case_stats(items)
+        detail = self._case_set_summary(row)
+        detail.update({
+            "caseCount": stats["total"],
+            "p0Count": stats["p0"],
+            "p0Ratio": stats["p0Ratio"],
+            "items": items,
+            "stats": stats,
+        })
+        return detail
+
+    def list_case_sets(self, query: dict | None = None) -> dict:
+        query = query or {}
+        name = str(query.get("name") or "").strip() or None
+        limit = int(query.get("limit") or 200)
+        rows = self.case_repo.list_sets(limit=min(max(limit, 1), 500),
+                                        name=name)
+        return {"items": [self._case_set_summary(row) for row in rows]}
+
+    def get_case_set(self, set_id: int) -> dict:
+        row = self.case_repo.require_set(set_id)
+        return self._case_set_detail(row)
+
+    def create_case_set(self, payload: dict) -> dict:
+        name = self._case_set_name(payload.get("name"))
+        purpose = self._case_set_purpose(payload.get("purpose"))
+        row = self.case_repo.create_set(name=name, purpose=purpose)
+        return self._case_set_detail(row)
+
+    def patch_case_set(self, set_id: int, payload: dict) -> dict:
+        name = (self._case_set_name(payload["name"])
+                if payload.get("name") is not None else None)
+        purpose = (self._case_set_purpose(payload["purpose"])
+                   if payload.get("purpose") is not None else None)
+        row = self.case_repo.update_set(set_id, name=name, purpose=purpose)
+        return self._case_set_detail(row)
+
+    def freeze_case_set(self, set_id: int) -> dict:
+        row = self.case_repo.freeze_set(set_id)
+        return self._case_set_detail(row)
+
+    def create_case_set_revision(self, set_id: int, payload: dict) -> dict:
+        """冻结（或任意）revision → 复制成下一个 revision，再改新版本。"""
+        row = self.case_repo.copy_set_to_new_revision(set_id)
+        name = (self._case_set_name(payload["name"])
+                if payload.get("name") is not None else None)
+        purpose = (self._case_set_purpose(payload["purpose"])
+                   if payload.get("purpose") is not None else None)
+        if name is not None or purpose is not None:
+            row = self.case_repo.update_set(
+                int(row["id"]), name=name, purpose=purpose)
+        return self._case_set_detail(row)
+
+    def add_case_set_cases(self, set_id: int, payload: dict) -> dict:
+        """批量加案例：逐条校验，坏条目进 skipped，不整批回滚。"""
+        self.case_repo.require_unfrozen(set_id)
+        entries = payload.get("cases") or []
+        if not isinstance(entries, list) or not entries:
+            raise ApiError("INVALID_CASE_SET", "至少选择一条案例", 422)
+        created = existing = 0
+        skipped: list[dict] = []
+        for entry in entries:
+            try:
+                canonical_id, decision_key, spec_id = self._case_target(entry)
+                _, was_created = self.case_repo.create(
+                    canonical_id=canonical_id, decision_key=decision_key,
+                    spec_id=int(spec_id), case_set_id=int(set_id),
+                    priority=self._priority(entry),
+                    overrides=self._case_overrides(entry),
+                    note=str(entry.get("note") or ""))
+            except ApiError as exc:
+                skipped.append({
+                    "canonicalId": entry.get("canonicalId"),
+                    "decisionKey": entry.get("decisionKey"),
+                    "code": exc.code,
+                    "reason": exc.message,
+                })
+                continue
+            if was_created:
+                created += 1
+            else:
+                existing += 1
+        result = self.get_case_set(set_id)
+        result.update({"created": created, "existing": existing,
+                       "skipped": skipped})
+        return result
+
+    def patch_case_set_case(self, set_id: int, case_id: int,
+                            payload: dict) -> dict:
+        spec_id = payload.get("specId")
+        if spec_id is not None:
+            if self.spec_repo.get(int(spec_id)) is None:
+                raise ApiError("SPEC_NOT_FOUND", f"期望 {spec_id} 不存在", 404)
+        status = payload.get("status")
+        if status is not None and status not in ("draft", "active", "retired"):
+            raise ApiError("INVALID_CASE", "status 只能是 draft / active / retired",
+                           422)
+        self.case_repo.update_case(
+            set_id, case_id,
+            spec_id=(int(spec_id) if spec_id is not None else None),
+            priority=(int(payload["priority"])
+                      if payload.get("priority") is not None else None),
+            status=status,
+            note=(str(payload["note"]) if payload.get("note") is not None
+                  else None),
+            overrides=self._case_overrides(payload))
+        return self.get_case_set(set_id)
+
+    def delete_case_set_case(self, set_id: int, case_id: int) -> dict:
+        self.case_repo.delete_case(set_id, case_id)
+        return self.get_case_set(set_id)
+
+    def _active_specs(self) -> list[dict]:
+        specs_out: list[dict] = []
+        for row in self.spec_repo.list_latest():
+            if (row.get("status") or "") != "active":
+                continue
+            specs_out.append({
+                "id": int(row["id"]),
+                "name": row.get("name"),
+                "bucket": json_load(row.get("bucket_json"), {}) or {},
+            })
+        return specs_out
+
+    # ───────────────────────── 评分运行（#57） ─────────────────────────
+
+    def _price_table(self) -> dict:
+        """价目表：`Settings.price_table`（启动时已校验 REPLAY_PRICE_TABLE）。"""
+        return dict(getattr(self.settings, "price_table", None) or {})
+
+    @staticmethod
+    def _run_id(payload: dict, key: str, label: str) -> int:
+        try:
+            return int(payload.get(key))
+        except (TypeError, ValueError):
+            raise ApiError("INVALID_RUN", f"需要 {key}（{label}）", 422) from None
+
+    @staticmethod
+    def _query_int(value: Any, default: int | None, *, low: int | None = None,
+                   high: int | None = None) -> int | None:
+        """查询参数转 int：坏值按缺省处理（fail open），不把 500 抛给页面。"""
+        try:
+            out = int(value)
+        except (TypeError, ValueError):
+            return default
+        if low is not None:
+            out = max(low, out)
+        if high is not None:
+            out = min(high, out)
+        return out
+
+    def _require_ready_version(self, version_id: int) -> dict:
+        row = self.version_repo.get(version_id)
+        if row is None:
+            raise ApiError("VERSION_NOT_FOUND", f"版本 {version_id} 不存在", 404)
+        blockers = run_blockers(row)
+        if blockers:
+            raise ApiError(
+                "VERSION_NOT_RUNNABLE",
+                "版本不可运行：" + "、".join(
+                    str(b.get("message") or b.get("code"))
+                    for b in blockers),
+                409, detail=blockers)
+        return row
+
+    def _judge_public(self, cfg: dict | None = None, *,
+                      model_under_test: str | None = None) -> dict:
+        cfg = cfg or judge.judge_config(self.settings)
+        blockers = judge.judge_blockers(cfg, model_under_test=model_under_test)
+        return {
+            "model": cfg.get("model") or "",
+            "version": cfg.get("version") or "",
+            "promptVersion": cfg.get("promptVersion") or "",
+            "temperature": cfg.get("temperature"),
+            "timeout": cfg.get("timeout"),
+            "blockers": blockers,
+            "ready": not blockers,
+        }
+
+    def score_run_meta(self) -> dict:
+        """创建页需要的字典：可运行的案例集、版本、判定口径与单价。"""
+        sets_out: list[dict] = []
+        for row in self.case_repo.list_sets(limit=200):
+            summary = self._case_set_summary(row)
+            if summary["frozen"]:
+                summary["plan"] = run_worker.plan_counts(
+                    summary["caseCount"], summary["p0Count"])
+            else:
+                summary["plan"] = None
+            sets_out.append(summary)
+        judge_cfg = judge.judge_config(self.settings)
+        versions_out: list[dict] = []
+        for row in self.version_repo.list(include_archived=True):
+            blockers = run_blockers(row)
+            judge_blockers = judge.judge_blockers(
+                judge_cfg, model_under_test=row.get("model"))
+            versions_out.append({
+                "id": int(row["id"]),
+                "name": row.get("name"),
+                "model": row.get("model"),
+                "archived": bool(row.get("archived")),
+                "adviceVersion": row.get("advice_version"),
+                "reconstructVersion": row.get("reconstruct_version"),
+                "blockers": blockers,
+                "runnable": not blockers,
+                # 判定模型不能与被测模型同一个（设计 §13-2）。
+                "judgeBlockers": judge_blockers,
+                "judgeRunnable": not blockers and not judge_blockers,
+            })
+        return {
+            "caseSets": sets_out,
+            "versions": versions_out,
+            "judge": self._judge_public(judge_cfg),
+            "judgeVersion": judge_cfg["version"],
+            "reconstructVersion": CURRENT_RECONSTRUCT_VERSION,
+            "p0ExtraRepeats": run_worker.P0_EXTRA_REPEATS,
+            "freqMinN": scoring.FREQ_MIN_N,
+            "maxCallsPerRun": self.settings.max_calls_per_job,
+            "priceModels": sorted(self._price_table().keys()),
+        }
+
+    def estimate_score_run(self, payload: dict) -> dict:
+        """创建前估算：案例数、P0 数、调用次数、token 与成本。"""
+        set_id = self._run_id(payload, "caseSetId", "案例集")
+        version_id = self._run_id(payload, "versionId", "版本")
+        set_row = self.case_repo.require_set(set_id)
+        cases = self.case_repo.items(set_id)
+        plan = run_worker.plan_calls(cases) if cases else run_worker.plan_counts(
+            int(set_row.get("case_count") or 0),
+            int(set_row.get("p0_count") or 0))
+        version = self._require_ready_version(version_id)
+        history = self.run_repo.avg_tokens(version_id)
+        tokens = history or run_worker.DEFAULT_TOKENS
+        price = run_worker.price_for(version.get("model"), self._price_table())
+        est = run_worker.estimate_cost(plan["calls"], tokens, price)
+        _case_specs, unmatched = self._case_spec_ids(cases)
+        judge_cfg = judge.judge_config(self.settings)
+        judge_public = self._judge_public(judge_cfg,
+                                          model_under_test=version.get("model"))
+        return {
+            "caseSet": self._case_set_summary(set_row),
+            "version": {"id": version_id, "name": version.get("name"),
+                        "model": version.get("model")},
+            **plan, **est,
+            "tokens": {
+                "in": round(float(tokens.get("tokensIn") or 0), 0),
+                "out": round(float(tokens.get("tokensOut") or 0), 0),
+            },
+            "tokensSource": "history" if history else "default",
+            "price": price,
+            "priceMissing": price is None,
+            "frozen": bool(set_row.get("frozen_at")),
+            "runnable": (bool(set_row.get("frozen_at")) and bool(cases)
+                         and not unmatched),
+            "casesWithoutSpec": unmatched,
+            "maxCalls": self.settings.max_calls_per_job,
+            "overLimit": plan["calls"] > self.settings.max_calls_per_job,
+            # judge 每个单元也要调一次（判定与被测调用一一对应）。
+            "judge": {**judge_public, "calls": plan["calls"]},
+            "judgeReady": judge_public["ready"],
+        }
+
+    def _case_spec_ids(
+            self, cases: list[dict]) -> tuple[dict[str, int], list[int]]:
+        """案例 → spec id：案例写死的优先，否则按桶匹配 active spec。
+
+        返回 (case_id → spec_id, 匹配不到 spec 的 case_id 列表)。
+        """
+        active = self._active_specs()
+        case_specs: dict[str, int] = {}
+        missing: list[int] = []
+        for case in cases:
+            spec_id = case.get("spec_id")
+            if not spec_id:
+                spec = case_lib.best_spec(case_lib.case_bucket(case), active)
+                spec_id = int(spec["id"]) if spec else None
+            if not spec_id:
+                missing.append(int(case["id"]))
+                continue
+            case_specs[str(int(case["id"]))] = int(spec_id)
+        return case_specs, missing
+
+    def create_score_run(self, payload: dict) -> dict:
+        """冻结「案例集 revision × spec revisions × 版本 × 判定 × 重建」建 run。"""
+        set_id = self._run_id(payload, "caseSetId", "案例集")
+        version_id = self._run_id(payload, "versionId", "版本")
+        set_row = self.case_repo.require_set(set_id)
+        if not set_row.get("frozen_at"):
+            raise ApiError(
+                "CASE_SET_NOT_FROZEN",
+                f"案例集 {set_row.get('name')} v{set_row.get('revision')} "
+                "还没冻结；评分运行只跑冻结版本（先冻结）", 409)
+        cases = self.case_repo.items(set_id)
+        if not cases:
+            raise ApiError("CASE_SET_EMPTY", "案例集没有案例", 422)
+        version = self._require_ready_version(version_id)
+        judge_cfg = judge.judge_config(self.settings)
+        judge_blockers = judge.judge_blockers(
+            judge_cfg, model_under_test=version.get("model"))
+        if judge_blockers:
+            raise ApiError(
+                "JUDGE_NOT_READY",
+                "判定模型不可用：" + "、".join(
+                    str(b.get("message") or b.get("code"))
+                    for b in judge_blockers),
+                409, detail=judge_blockers)
+
+        case_specs, missing = self._case_spec_ids(cases)
+        if missing:
+            raise ApiError(
+                "CASE_NO_SPEC",
+                f"{len(missing)} 个案例匹配不到 active spec；先补 spec 再建运行",
+                422, detail={"caseIds": missing})
+        spec_ids = sorted(set(case_specs.values()))
+
+        plan = run_worker.plan_calls(cases)
+        # 超上限不是硬拒：创建页已经显示调用数与成本，用户明确确认（confirmLarge）
+        # 才继续；和 advice 任务的 TOO_MANY_CALLS 同一套语义。
+        if (plan["calls"] > self.settings.max_calls_per_job
+                and not bool(payload.get("confirmLarge"))):
+            raise ApiError(
+                "RUN_TOO_LARGE",
+                f"预计调用 {plan['calls']} 次，超过单次上限 "
+                f"{self.settings.max_calls_per_job}；确认后再提交",
+                409, detail={**plan, "maxCalls": self.settings.max_calls_per_job})
+
+        specs_meta: list[dict] = []
+        for spec_id in spec_ids:
+            row = self.spec_repo.get(spec_id)
+            if row is None:
+                raise ApiError("SPEC_NOT_FOUND",
+                               f"spec {spec_id} 不存在", 409)
+            specs_meta.append({
+                "id": int(row["id"]),
+                "name": row.get("name"),
+                "revision": int(row.get("revision") or 1),
+                "bucket": json_load(row.get("bucket_json"), {}) or {},
+                # 频次目标也冻进快照：报表的「实际 vs 目标带」必须能复现，
+                # 不能因为后来删了 revision 就悄悄换成均分口径。
+                "freq": (json_load(row.get("spec_json"), {}) or {}).get("freq"),
+            })
+
+        history = self.run_repo.avg_tokens(version_id)
+        price = run_worker.price_for(version.get("model"), self._price_table())
+        snapshot = {
+            "caseSet": {
+                "id": set_id,
+                "name": set_row.get("name"),
+                "revision": int(set_row.get("revision") or 1),
+                "frozenAt": iso(set_row.get("frozen_at")),
+            },
+            "version": {
+                "id": version_id,
+                "name": version.get("name"),
+                "model": version.get("model"),
+                "configHash": version.get("config_hash"),
+                "adviceVersion": version.get("advice_version"),
+                "reconstructVersion": version.get("reconstruct_version"),
+                "contextMode": version.get("context_mode"),
+                "tableStatsMode": version.get("table_stats_mode"),
+            },
+            "specIds": spec_ids,
+            "specs": specs_meta,
+            "caseSpecs": case_specs,
+            "judge": judge_cfg,
+            "judgeVersion": judge_cfg["version"],
+            "reconstructVersion": CURRENT_RECONSTRUCT_VERSION,
+            "plan": plan,
+            "tokens": history or run_worker.DEFAULT_TOKENS,
+            "tokensSource": "history" if history else "default",
+            "price": price,
+            "createdAt": iso(now_cn()),
+        }
+        run_id = self.run_repo.create(
+            case_set_id=set_id,
+            case_set_revision=int(set_row.get("revision") or 1),
+            spec_ids=spec_ids,
+            version_id=version_id,
+            judge_version=judge_cfg["version"],
+            reconstruct_version=CURRENT_RECONSTRUCT_VERSION,
+            total_cases=len(cases),
+            config_snapshot=snapshot,
+        )
+        if self.run_worker is not None:
+            try:
+                self.run_worker.wake()
+            except Exception:  # noqa: BLE001
+                log.exception("唤醒评分 worker 失败")
+        return self._run_public(self.run_repo.get(run_id) or {})
+
+    def list_score_runs(self, query: dict | None = None) -> dict:
+        query = query or {}
+        rows = self.run_repo.list(
+            limit=self._query_int(query.get("limit"), 50, low=1, high=200),
+            case_set_id=self._query_int(query.get("caseSetId"), None, low=1),
+            status=(str(query.get("status") or "") or None),
+        )
+        return {"items": [self._run_public(row) for row in rows]}
+
+    def get_score_run(self, run_id: int) -> dict:
+        return self._run_public(self.run_repo.require(run_id))
+
+    def score_run_items(self, run_id: int, query: dict | None = None) -> dict:
+        query = query or {}
+        run = self.run_repo.require(run_id)
+        limit = self._query_int(query.get("limit"), 200, low=1, high=1000)
+        offset = self._query_int(query.get("offset"), 0, low=0)
+        only_fail = str(query.get("only") or "") == "hardfail"
+        spec_id = self._query_int(query.get("specId"), None, low=1)
+        repeat_index = self._query_int(query.get("repeat"), None, low=0, high=9)
+        sort = str(query.get("sort") or "priority")
+        if sort not in ("priority", "score"):
+            raise ApiError("INVALID_SORT", "sort 只能是 priority / score", 422)
+        reconstruct_version = str(run.get("reconstruct_version")
+                                  or CURRENT_RECONSTRUCT_VERSION)
+        total = None
+        if sort == "score":
+            # 「最差优先」必须按**改判后的有效分**排，所以先在内存里全取本桶
+            # 条目再排；否则改判过的条目会按原始分卡在前面，跟报表口径打架。
+            rows = self.run_item_repo.list(
+                run_id, reconstruct_version, only_hardfail=only_fail,
+                spec_id=spec_id, repeat_index=repeat_index,
+                limit=_DRILLDOWN_CAP, offset=0)
+            overrides = self.override_repo.list(run_id)
+            rows.sort(key=lambda row: self._drilldown_key(row, overrides))
+            total = len(rows)
+            rows = rows[offset:offset + limit]
+        else:
+            rows = self.run_item_repo.list(
+                run_id, reconstruct_version, only_hardfail=only_fail,
+                spec_id=spec_id, repeat_index=repeat_index,
+                limit=limit, offset=offset)
+        return {
+            "items": [self.run_item_repo.public_item(row) for row in rows],
+            "counts": self.run_item_repo.counts(run_id),
+            "limit": limit,
+            "offset": offset,
+            "sorted": sort,
+            "total": total,
+            "truncated": total is not None and total >= _DRILLDOWN_CAP,
+        }
+
+    @staticmethod
+    def _drilldown_key(row: dict, overrides: dict[int, dict]) -> tuple:
+        """下钻排序键：硬失败优先，未出分垫底、再按有效分升序。"""
+        raw = row.get("score")
+        score, _scores, hard_fail = run_worker.apply_override(
+            json_load(row.get("scores_json"), {}) or {},
+            row.get("hard_fail") or None,
+            (float(raw) if raw is not None else None),
+            overrides.get(int(row["case_id"])))
+        return (hard_fail is None, score is None,
+                (score if score is not None else 0.0), int(row["case_id"]))
+
+    def score_run_item(self, run_id: int, case_id: int,
+                       repeat_index: int = 0) -> dict:
+        run = self.run_repo.require(run_id)
+        row = self.run_item_repo.get(
+            run_id, case_id, repeat_index,
+            str(run.get("reconstruct_version") or CURRENT_RECONSTRUCT_VERSION))
+        if row is None:
+            raise ApiError("RUN_ITEM_NOT_FOUND",
+                           f"运行 {run_id} 没有案例 {case_id} 的第 "
+                           f"{repeat_index} 次结果", 404)
+        item = self.run_item_repo.public_item(row)
+        facts = json_load(row.get("facts_json"), {}) or {}
+        item.update({
+            "facts": facts,
+            "options": facts.get("options") or [],
+            "prompt": json_load(row.get("prompt_json"), {}) or {},
+            "judge": json_load(row.get("judge_json"), {}) or {},
+        })
+        override = self.override_repo.get(run_id, case_id)
+        score, scores, hard_fail = run_worker.apply_override(
+            json_load(row.get("scores_json"), {}) or {},
+            row.get("hard_fail") or None,
+            (float(row["score"]) if row.get("score") is not None else None),
+            override)
+        # 机器判定原值仍在 score/scores/hardFail；人工改判只体现在
+        # effective 与聚合分上，不覆盖 run_items（设计 §7.2 / 验收第 5 条）。
+        item["effective"] = {
+            "score": score,
+            "scores": scores,
+            "hardFail": hard_fail,
+            "overridden": bool(override),
+        }
+        item["override"] = override
+        item["overrideHistory"] = self.override_repo.log(run_id, case_id)
+        return item
+
+    def score_run_hotspots(self, run_id: int) -> dict:
+        """偏差热点（#59）：把一次运行的逐条结果按 spec 桶聚合成报表。
+
+        口径全部复用现成常量：首次建议（repeat 0）、人工改判后的有效分、
+        `scoring.freq_score` 的频率判定、`scoring.FREQ_MIN_N` 的样本门槛。
+        不另立阈值，也不在这里做告警/卡点。
+        """
+        run = self.run_repo.require(run_id)
+        config = json_load(run.get("config_snapshot"), {}) or {}
+        rows = self._all_run_items(run)
+        overrides = self.override_repo.list(int(run["id"]))
+        spec_meta: dict[int, dict] = {}
+        for snapshot in config.get("specs") or []:
+            try:
+                spec_id = int(snapshot["id"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            # 频次以创建 run 时冻结的快照为准（老 run 没存 freq 才按 id 回读
+            # revision 行：revision 只增不改，读回即是当时那一版）。
+            spec_row = (self.spec_repo.get(spec_id)
+                        if self.spec_repo is not None else None)
+            normalized = specs.spec_from_row(spec_row) if spec_row else {}
+            bucket = snapshot.get("bucket") or normalized.get("bucket") or {}
+            freq = (snapshot.get("freq") if "freq" in snapshot
+                    else normalized.get("freq"))
+            spec_meta[spec_id] = {
+                "id": spec_id,
+                "name": snapshot.get("name") or (spec_row or {}).get("name") or "",
+                "bucket": bucket,
+                "bucketLabel": bucket_label(bucket),
+                "freq": freq,
+            }
+
+        items: list[dict] = []
+        for row in rows:
+            if int(row["repeat_index"]) != 0:
+                continue
+            score, scores, hard_fail = run_worker.apply_override(
+                json_load(row.get("scores_json"), {}) or {},
+                row.get("hard_fail") or None,
+                (float(row["score"]) if row.get("score") is not None else None),
+                overrides.get(int(row["case_id"])))
+            kind = row.get("option_kind") or None
+            items.append({
+                "specId": int(row.get("spec_id") or 0),
+                "score": score,
+                "scores": scores,
+                "hardFail": hard_fail,
+                "kind": kind,
+                "comparable": bool(kind) and row.get("source") != "error",
+            })
+
+        metrics = json_load(run.get("metrics_json"), {}) or {}
+        global_mean = (metrics.get("score") or {}).get("mean")
+        if global_mean is None:
+            # 老 run 没写 metrics 时用同一批条目现算，保证 delta 有基准
+            global_mean = scoring.mean_ci(
+                [float(item["score"]) for item in items
+                 if item["score"] is not None])["mean"]
+        report = hotspots.hotspot_rows(
+            items, spec_meta, global_mean=global_mean)
+        return {
+            "run": self._run_public(run),
+            "summary": hotspots.summarize(items, report),
+            "rows": report,
+        }
+
+    def _all_run_items(self, run: dict) -> list[dict]:
+        """分页取回一次运行的全部条目：报表必须覆盖全量，不能静默截断。"""
+        run_id = int(run["id"])
+        reconstruct_version = str(
+            run.get("reconstruct_version") or CURRENT_RECONSTRUCT_VERSION)
+        rows: list[dict] = []
+        page = 2000
+        offset = 0
+        while True:
+            batch = self.run_item_repo.list(
+                run_id, reconstruct_version, limit=page, offset=offset)
+            rows.extend(batch)
+            if len(batch) < page:
+                return rows
+            offset += page
+
+    # ─────────────── 版本对照（#60） ───────────────
+
+    def compare_score_runs(self, run_id: int, other_id: int,
+                           query: dict | None = None) -> dict:
+        """两次运行按共同决策点做翻转表（设计 §9 第 6 行 / §11 第 4 期）。
+
+        口径全在 `replay/compare.py`（纯函数）：配对键、方向、跨版本告警。
+        这里只负责取数、分页与把口径差异摆到响应最外层。
+        """
+        query = query or {}
+        only = self._compare_only(query)   # 参数错先报，不依赖两次运行是否存在
+        base, rows = self._compare_build(run_id, other_id)
+        filtered = self._compare_filter(rows, only)
+        total = len(filtered)
+        limit = self._query_int(query.get("limit"), 200, low=1, high=1000)
+        offset = self._query_int(query.get("offset"), 0, low=0)
+        base.update({
+            "rows": filtered[offset:offset + limit],
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "truncated": offset + limit < total,
+        })
+        return base
+
+    def export_score_run_comparison(self, run_id: int, other_id: int,
+                                    query: dict | None = None
+                                    ) -> tuple[str, str, str]:
+        """翻转表导出 CSV（验收第 4 条：案例 id、桶、两次分数、翻转方向）。
+
+        导出不受页面分页限制：`limit` 只是展示口径。CSV 里同时带上案例集与
+        spec revision、以及告警代码，避免文件离开页面后「跨版本」这件事被
+        静默丢掉。
+        """
+        query = query or {}
+        fmt = str(query.get("format") or "csv").lower()
+        if fmt not in ("csv",):
+            raise ApiError("INVALID_FORMAT", "版本对照目前只支持 csv", 422)
+        only = self._compare_only(query)
+        base, rows = self._compare_build(run_id, other_id)
+        filtered = self._compare_filter(rows, only)
+        left_set = base["left"].get("caseSet") or {}
+        right_set = base["right"].get("caseSet") or {}
+        warning_codes = "|".join(w["code"] for w in base["warnings"])
+        buf = io.StringIO()
+        fieldnames = [
+            "case_id_left", "case_id_right", "canonical_id", "decision_key",
+            "street", "action_index", "p0", "bucket_label", "bucket_json",
+            "score_left", "score_right", "delta", "direction",
+            "direction_label", "hard_fail_left", "hard_fail_right",
+            "advice_left", "advice_right", "source_left", "source_right",
+            "overridden_left", "overridden_right", "case_set_left",
+            "case_set_right", "spec_revision_left", "spec_revision_right",
+            "warning_codes",
+        ]
+        writer = csv.DictWriter(buf, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in filtered:
+            left, right = row["left"], row["right"]
+            writer.writerow({
+                "case_id_left": left["caseId"],
+                "case_id_right": right["caseId"],
+                "canonical_id": ("" if row["canonicalId"] is None
+                                 else row["canonicalId"]),
+                "decision_key": row["decisionKey"] or "",
+                "street": row["street"] or "",
+                "action_index": ("" if row["actionIndex"] is None
+                                 else row["actionIndex"]),
+                "p0": "yes" if row["p0"] else "no",
+                "bucket_label": row["bucketLabel"],
+                "bucket_json": json.dumps(row["bucket"] or {},
+                                          ensure_ascii=False),
+                "score_left": self._compare_number(left["score"]),
+                "score_right": self._compare_number(right["score"]),
+                "delta": self._compare_number(row["delta"]),
+                "direction": row["direction"],
+                "direction_label": compare.DIRECTION_LABELS[row["direction"]],
+                "hard_fail_left": left["hardFail"] or "",
+                "hard_fail_right": right["hardFail"] or "",
+                "advice_left": self._compare_advice(left),
+                "advice_right": self._compare_advice(right),
+                "source_left": left["source"] or "",
+                "source_right": right["source"] or "",
+                "overridden_left": "yes" if left["overridden"] else "no",
+                "overridden_right": "yes" if right["overridden"] else "no",
+                "case_set_left": f"#{left_set.get('id')} rev"
+                                 f"{left_set.get('revision')}",
+                "case_set_right": f"#{right_set.get('id')} rev"
+                                  f"{right_set.get('revision')}",
+                "spec_revision_left": ("" if left["specRevision"] is None
+                                       else left["specRevision"]),
+                "spec_revision_right": ("" if right["specRevision"] is None
+                                        else right["specRevision"]),
+                "warning_codes": warning_codes,
+            })
+        filename = f"replay-compare-{int(run_id)}-vs-{int(other_id)}.csv"
+        return ("csv", filename, "\ufeff" + buf.getvalue())
+
+    def _compare_build(self, run_id: int, other_id: int) -> tuple[dict, list]:
+        """配对 + 汇总 + 口径差异；行不在这里过滤/分页（导出要全量）。"""
+        if int(run_id) == int(other_id):
+            raise ApiError("COMPARE_SAME_RUN", "同一个运行不能和自己对照", 422)
+        left_run = self.run_repo.require(run_id)
+        right_run = self.run_repo.require(other_id)
+        left_entries = self._comparison_entries(left_run)
+        right_entries = self._comparison_entries(right_run)
+        pairs, cases = compare.pair(left_entries.values(),
+                                    right_entries.values())
+        rows = [compare.compare_row(left, right) for left, right in pairs]
+        rows.sort(key=self._compare_sort_key)
+        summary = compare.summarize(rows)
+        left = self._run_public(left_run)
+        right = self._run_public(right_run)
+        versions = compare.version_diff(left, right)
+        return ({
+            "left": left,
+            "right": right,
+            "cases": cases,
+            "summary": summary,
+            "directions": summary["directions"],
+            "versions": versions,
+            "warnings": compare.warnings(versions, left, right),
+        }, rows)
+
+    def _comparison_entries(self, run: dict) -> dict[tuple, dict]:
+        """一次运行 → 「决策点身份 → 条目」，只看首次建议与改判后的有效分。"""
+        run_id = int(run["id"])
+        config = json_load(run.get("config_snapshot"), {}) or {}
+        spec_meta: dict[int, dict] = {}
+        for snapshot in config.get("specs") or []:
+            try:
+                spec_meta[int(snapshot["id"])] = snapshot
+            except (KeyError, TypeError, ValueError):
+                continue
+        overrides = self.override_repo.list(run_id)
+        entries: dict[tuple, dict] = {}
+        for row in self._all_run_items(run):
+            if int(row["repeat_index"]) != 0:
+                continue
+            item = self.run_item_repo.public_item(row)
+            override = overrides.get(int(row["case_id"]))
+            score, scores, hard_fail = run_worker.apply_override(
+                json_load(row.get("scores_json"), {}) or {},
+                row.get("hard_fail") or None,
+                (float(row["score"]) if row.get("score") is not None else None),
+                override)
+            spec = spec_meta.get(int(item["specId"] or 0)) or {}
+            item.update({
+                "runId": run_id,
+                "score": score,
+                "scores": scores,
+                "hardFail": hard_fail,
+                "overridden": bool(override),
+                "specName": spec.get("name") or "",
+                "specRevision": spec.get("revision"),
+            })
+            entries[compare.comparison_key(item)] = item
+        return entries
+
+    @staticmethod
+    def _compare_only(query: dict) -> str:
+        """页面筛选：`only` 只认四个方向，写错就报错，不静默忽略。"""
+        only = str(query.get("only") or "").strip()
+        if only and only not in compare.DIRECTIONS:
+            raise ApiError(
+                "INVALID_DIRECTION",
+                "only 只能是 " + " / ".join(compare.DIRECTIONS), 422)
+        return only
+
+    @staticmethod
+    def _compare_filter(rows: list[dict], only: str) -> list[dict]:
+        if not only:
+            return list(rows)
+        return [row for row in rows if row["direction"] == only]
+
+    @staticmethod
+    def _compare_sort_key(row: dict) -> tuple:
+        """改坏在前（跌得最多最先），再改好、不变，最后不可比。"""
+        direction = row["direction"]
+        delta = row.get("delta")
+        if direction == "worse":
+            spread = delta if delta is not None else 0.0
+        elif direction == "improved":
+            spread = -(delta or 0.0)
+        else:
+            spread = 0.0
+        return (compare.direction_rank(direction), spread,
+                int(row["left"]["caseId"] or 0))
+
+    @staticmethod
+    def _compare_number(value: float | None) -> str:
+        return "" if value is None else str(float(value))
+
+    @staticmethod
+    def _compare_advice(side: dict) -> str:
+        """与页面的 `adviceText` / `fmt_option` 同口径：fold/check 不带金额。"""
+        advice = side.get("advice") or {}
+        text = fmt_option(advice.get("kind") or advice.get("optionId"),
+                          advice.get("amount"))
+        return "" if text == "—" else text
+
+    def case_candidates(self, set_id: int, query: dict | None = None) -> dict:
+        """从存档按桶找「可补样」的决策点：看得见手牌、标出已在集内。"""
+        query = query or {}
+        set_row = self.case_repo.require_set(set_id)
+        bucket: dict[str, list[str]] = {}
+        for dimension in BUCKET_ORDER:
+            raw = query.get(dimension)
+            if raw is None:
+                continue
+            # 查询串里同维多值用逗号；缺省维度 = 通配（与其他桶口径一致）
+            values = [v.strip() for v in str(raw).split(",")]
+            values = [v for v in values if v]
+            if values:
+                bucket[dimension] = values
+        limit = self._query_int(query.get("limit"), 50, low=1, high=200)
+        offset = self._query_int(query.get("offset"), 0, low=0)
+        rows = self.case_repo.candidates_for_bucket(
+            set_id, bucket, limit=limit, offset=offset)
+        active = self._active_specs()
+        items = []
+        for row in rows:
+            observed = case_lib.bucket_of_row(row)
+            spec = case_lib.best_spec(observed, active)
+            items.append({
+                "canonicalId": int(row["canonical_id"]),
+                "decisionKey": library.decision_key(
+                    row.get("street"), int(row.get("seq") or 0)),
+                "street": row.get("street"),
+                "seq": int(row.get("seq") or 0),
+                "actionIndex": (int(row["action_index"])
+                                if row.get("action_index") is not None
+                                else None),
+                "bucket": observed,
+                "bucketLabel": case_lib.label_of(observed),
+                "hand": {
+                    "heroCards": row.get("hero_cards") or "",
+                    "board": row.get("board") or "",
+                    "heroPosition": row.get("hero_position"),
+                },
+                "specId": int(spec["id"]) if spec else None,
+                "specName": (spec or {}).get("name") or "",
+                "inSet": row.get("case_id") is not None,
+            })
+        return {
+            "caseSet": {
+                "id": int(set_row["id"]),
+                "name": set_row.get("name"),
+                "revision": int(set_row.get("revision") or 1),
+                "frozen": bool(set_row.get("frozen_at")),
+            },
+            "bucket": bucket,
+            "items": items,
+            "limit": limit,
+            "offset": offset,
+        }
+
+    def _run_metric_rows(self, run: dict) -> tuple[list[dict], dict[int, str]]:
+        config = json_load(run.get("config_snapshot"), {}) or {}
+        rows = self.run_item_repo.list(
+            int(run["id"]),
+            str(run.get("reconstruct_version") or CURRENT_RECONSTRUCT_VERSION),
+            limit=10000)
+        spec_buckets = {}
+        for spec in config.get("specs") or []:
+            try:
+                spec_buckets[int(spec["id"])] = bucket_label(
+                    spec.get("bucket") or {})
+            except (KeyError, TypeError, ValueError):
+                continue
+        return rows, spec_buckets
+
+    @staticmethod
+    def _override_actor(payload: dict | None, settings: Settings) -> str:
+        actor = str((payload or {}).get("actor") or "").strip()
+        if not actor:
+            actor = f"console:{settings.console_user_id or 'unknown'}"
+        return actor[:64]
+
+    @staticmethod
+    def _check_finished(run: dict) -> None:
+        status = str(run.get("status") or "")
+        if status in ("queued", "running"):
+            raise ApiError(
+                "RUN_NOT_FINISHED",
+                f"运行 #{run.get('id')} 还没结束（{status}），先等它跑完再改判",
+                409)
+
+    def _require_item_row(self, run: dict, case_id: int,
+                          repeat_index: int = 0) -> dict:
+        row = self.run_item_repo.get(
+            int(run["id"]), int(case_id), int(repeat_index),
+            str(run.get("reconstruct_version") or CURRENT_RECONSTRUCT_VERSION))
+        if row is None:
+            raise ApiError(
+                "RUN_ITEM_NOT_FOUND",
+                f"运行 {run['id']} 没有案例 {case_id} 的第 {repeat_index} 次结果",
+                404)
+        return row
+
+    def _validate_override_scores(self, raw: Any) -> dict:
+        if raw is None:
+            return {}
+        if not isinstance(raw, dict):
+            raise ApiError("INVALID_OVERRIDE", "scores 必须是对象", 422)
+        scores: dict[str, float | None] = {}
+        for dim, value in raw.items():
+            if dim not in scoring.DIMENSIONS:
+                raise ApiError(
+                    "INVALID_OVERRIDE",
+                    f"未知维度 {dim}；只认 {', '.join(scoring.DIMENSIONS)}",
+                    422)
+            if value is None:
+                scores[dim] = None
+                continue
+            try:
+                num = float(value)
+            except (TypeError, ValueError):
+                raise ApiError(
+                    "INVALID_OVERRIDE", f"维度 {dim} 的分数必须是 0–1 的数",
+                    422)
+            if not 0.0 <= num <= 1.0:
+                raise ApiError(
+                    "INVALID_OVERRIDE",
+                    f"维度 {dim} 的分数 {num} 超出 0–1", 422)
+            scores[dim] = round(num, 4)
+        return scores
+
+    @staticmethod
+    def _validate_override_hard_fail(raw: Any) -> str | None:
+        if raw is None or raw == "":
+            return None
+        code = str(raw)
+        if code not in scoring.HARD_FAIL_CODES:
+            raise ApiError(
+                "INVALID_OVERRIDE",
+                f"未知硬失败码 {code}；只认 {', '.join(scoring.HARD_FAIL_CODES)}",
+                422)
+        return code
+
+    def save_score_run_override(self, run_id: int, case_id: int,
+                                payload: dict | None = None) -> dict:
+        """人工改判：只写 replay_judge_overrides + 日志，不动 run_items。"""
+        payload = payload or {}
+        run = self.run_repo.require(run_id)
+        self._check_finished(run)
+        row = self._require_item_row(run, case_id)
+        changed = self._validate_override_scores(payload.get("scores"))
+        machine_scores = json_load(row.get("scores_json"), {}) or {}
+        merged = {dim: machine_scores.get(dim) for dim in scoring.DIMENSIONS
+                  if dim in machine_scores}
+        merged.update(changed)
+        if "hardFail" in payload:
+            hard_fail = self._validate_override_hard_fail(
+                payload.get("hardFail"))
+        else:
+            hard_fail = row.get("hard_fail") or None
+        before = {
+            "score": (float(row["score"])
+                      if row.get("score") is not None else None),
+            "scores": machine_scores,
+            "hardFail": row.get("hard_fail") or None,
+        }
+        self.override_repo.save(
+            run_id=int(run_id), case_id=int(case_id),
+            actor=self._override_actor(payload, self.settings),
+            note=str(payload.get("note") or ""),
+            override={"scores": merged, "hardFail": hard_fail},
+            before=before)
+        self._recompute_run_metrics(int(run_id))
+        return self.score_run_item(int(run_id), int(case_id), 0)
+
+    def delete_score_run_override(self, run_id: int, case_id: int,
+                                  payload: dict | None = None) -> dict:
+        payload = payload or {}
+        run = self.run_repo.require(run_id)
+        self._check_finished(run)
+        self._require_item_row(run, case_id)
+        before = self.override_repo.get(int(run_id), int(case_id))
+        if before is not None:
+            self.override_repo.clear(
+                run_id=int(run_id), case_id=int(case_id),
+                actor=self._override_actor(payload, self.settings),
+                note=str(payload.get("note") or ""), before=before)
+            self._recompute_run_metrics(int(run_id))
+        return self.score_run_item(int(run_id), int(case_id), 0)
+
+    def rejudge_score_run_item(self, run_id: int, case_id: int,
+                               repeat_index: int = 0) -> dict:
+        """重跑一次判定（temp 0）并与存下来的判定逐条比对；不写库。"""
+        run = self.run_repo.require(run_id)
+        row = self._require_item_row(run, case_id, repeat_index)
+        config = json_load(run.get("config_snapshot"), {}) or {}
+        version = self.version_repo.get(
+            int(run.get("version_id") or 0)) or {}
+        cfg = judge.judge_config(self.settings)
+        frozen = config.get("judge")
+        if isinstance(frozen, dict):
+            cfg = {**cfg, **{k: v for k, v in frozen.items()
+                             if v is not None}}
+        blockers = judge.judge_blockers(
+            cfg, model_under_test=version.get("model"))
+        if blockers:
+            raise ApiError(
+                "JUDGE_NOT_READY",
+                "判定模型不可用：" + "、".join(
+                    str(b.get("message") or b.get("code"))
+                    for b in blockers),
+                409, detail=blockers)
+        case_specs = config.get("caseSpecs") or {}
+        spec_id = case_specs.get(str(case_id)) or case_specs.get(case_id)
+        spec_row = self.spec_repo.get(int(spec_id)) if spec_id else None
+        if spec_row is None:
+            raise ApiError(
+                "SPEC_NOT_FOUND",
+                f"案例 {case_id} 冻结的 spec 已不存在，无法重判", 409)
+        spec = specs.spec_from_row(spec_row)
+        facts = json_load(row.get("facts_json"), {}) or {}
+        option_ids = [str(opt.get("id")) for opt in facts.get("options") or []
+                      if isinstance(opt, dict) and opt.get("id") is not None]
+        advice = {
+            "option_id": row.get("option_id"),
+            "kind": row.get("kind"),
+            "amount": (float(row["amount"])
+                       if row.get("amount") is not None else None),
+            "reason": row.get("reason") or "",
+            "source": row.get("source") or "",
+        }
+        try:
+            ai_settings = judge.build_settings(cfg)
+        except judge.JudgeUnavailable as exc:
+            raise ApiError("JUDGE_NOT_READY", str(exc), 409)
+        before = json_load(row.get("judge_json"), {}) or {}
+        after = judge.evaluate(
+            cfg, settings=ai_settings, spec=spec, advice=advice,
+            facts=facts, option_ids=option_ids, timeout=cfg.get("timeout"))
+        verdict = judge.compare_verdict(before, after)
+        result = judge.score_verdict(
+            after, spec=spec, advice=advice, option_ids=option_ids)
+        return {
+            "runId": int(run_id),
+            "caseId": int(case_id),
+            "repeatIndex": int(repeat_index),
+            **verdict,
+            "before": before,
+            "after": after,
+            "judgeVersion": after.get("judgeVersion"),
+            "inputDigest": after.get("inputDigest"),
+            "score": result["score"],
+            "scores": result["scores"],
+            "hardFail": result["hardFail"],
+        }
+
+    def _recompute_run_metrics(self, run_id: int) -> dict:
+        """改判后重算聚合分（run 级），item.score 保持机器原值。"""
+        run = self.run_repo.require(run_id)
+        metrics = json_load(run.get("metrics_json"), {}) or {}
+        rows, spec_buckets = self._run_metric_rows(run)
+        overrides = self.override_repo.list(int(run_id))
+        p0_total = int((metrics.get("p0") or {}).get("total") or 0) or None
+        bucket_total = int((metrics.get("coverage") or {}).get("bucketTotal")
+                           or 0)
+        agg, _items, errors = run_worker.aggregate_rows(
+            rows, spec_buckets=spec_buckets, bucket_total=bucket_total,
+            p0_total=p0_total, overrides=overrides)
+        merged = {**metrics, **agg, "errors": errors, "units": len(rows),
+                  "overrideCount": len(overrides)}
+        self.run_repo.update_metrics(
+            int(run_id),
+            score=agg["score"]["mean"],
+            p0_pass_rate=agg["p0"]["rate"],
+            coverage_rate=agg["coverage"]["rate"],
+            scored_cases=agg["scored"],
+            metrics=merged)
+        return merged
+
+    def cancel_score_run(self, run_id: int) -> dict:
+        row = self.run_repo.request_cancel(run_id)
+        if self.run_worker is not None:
+            try:
+                self.run_worker.wake()
+            except Exception:  # noqa: BLE001
+                log.exception("唤醒评分 worker 失败")
+        return self._run_public(row)
+
+    @staticmethod
+    def _run_public(row: dict) -> dict:
+        config = json_load(row.get("config_snapshot"), {}) or {}
+        metrics = json_load(row.get("metrics_json"), {}) or {}
+        return {
+            "id": int(row.get("id") or 0),
+            "status": row.get("status") or "queued",
+            "caseSet": {
+                "id": int(row.get("case_set_id") or 0),
+                "name": row.get("set_name"),
+                "revision": int(row.get("case_set_revision") or 1),
+                "frozen": bool(row.get("set_frozen_at")),
+            },
+            "version": {
+                "id": int(row.get("version_id") or 0),
+                "name": row.get("version_name"),
+                "model": row.get("version_model"),
+            },
+            "judgeVersion": row.get("judge_version"),
+            "reconstructVersion": row.get("reconstruct_version"),
+            "specIds": json_load(row.get("spec_ids_json"), []) or [],
+            "totalCases": int(row.get("total_cases") or 0),
+            "doneCases": int(row.get("done_cases") or 0),
+            "scoredCases": int(row.get("scored_cases") or 0),
+            "score": (float(row["score"])
+                      if row.get("score") is not None else None),
+            "p0PassRate": (float(row["p0_pass_rate"])
+                           if row.get("p0_pass_rate") is not None else None),
+            "coverageRate": (float(row["coverage_rate"])
+                             if row.get("coverage_rate") is not None else None),
+            "metrics": metrics,
+            "config": config,
+            "cancelRequested": bool(row.get("cancel_requested")),
+            "error": row.get("error_msg") or "",
+            "createdAt": iso(row.get("created_at")),
+            "startedAt": iso(row.get("started_at")),
+            "finishedAt": iso(row.get("finished_at")),
+        }
+
+    def build_hand_cases(self, set_id: int, payload: dict) -> dict:
+        """整手全建：每个决策点自动挑最具体的 active spec，写死 spec_id。"""
+        self.case_repo.require_unfrozen(set_id)
+        canonical_id = payload.get("canonicalId")
+        if not canonical_id:
+            raise ApiError("INVALID_CASE", "整手全建需要 canonicalId", 422)
+        if self.canonical_repo.get(int(canonical_id)) is None:
+            raise ApiError("HAND_NOT_FOUND",
+                           f"canonical {canonical_id} 不存在", 404)
+        decisions = self.decision_repo.for_canonical(int(canonical_id))
+        if not decisions:
+            raise ApiError("DECISION_NOT_FOUND",
+                           "这手牌还没有决策点；先跑回填再整手全建", 404)
+        rows = [{**row, "canonical_id": int(canonical_id)}
+                for row in decisions]
+        created, no_spec = self._auto_cases(
+            set_id, rows, priority=self._priority(payload), note="整手全建")
+        result = self.get_case_set(set_id)
+        result.update({"created": created,
+                       "existing": len(rows) - len(no_spec) - created,
+                       "noSpec": no_spec})
+        return result
+
+    def _auto_cases(self, set_id: int, rows: Iterable[dict], *, priority: int,
+                    note: str, limit: int | None = None,
+                    skip: set[tuple] | None = None) -> tuple[int, list[str]]:
+        """给一批决策点自动配最具体的 active spec，返回 (新建数, 没 spec 的键)。"""
+        active = self._active_specs()
+        skip = set(skip or ())
+        created = 0
+        no_spec: list[str] = []
+        for row in rows:
+            if limit is not None and created >= limit:
+                break
+            canonical_id = int(row["canonical_id"])
+            street = row.get("street")
+            seq = int(row.get("seq") or 0)
+            if (canonical_id, street, seq) in skip:
+                continue
+            key = library.decision_key(street, seq)
+            spec = case_lib.best_spec(case_lib.bucket_of_row(row), active)
+            if spec is None:
+                no_spec.append(key)
+                continue
+            _, was_created = self.case_repo.create(
+                canonical_id=canonical_id, decision_key=key,
+                spec_id=int(spec["id"]), case_set_id=int(set_id),
+                priority=priority, note=note)
+            if was_created:
+                created += 1
+                skip.add((canonical_id, street, seq))
+        return created, no_spec
+
+    def sample_case_set_cases(self, set_id: int, payload: dict) -> dict:
+        """按桶补样：从存档里按时间倒序抽符合条件的决策点建 draft 案例。"""
+        self.case_repo.require_unfrozen(set_id)
+        bucket = specs.validate_bucket(payload.get("bucket") or {})
+        count = int(payload.get("count") or 10)
+        if not 1 <= count <= 100:
+            raise ApiError("INVALID_CASE_SET", "count 只能是 1–100", 422)
+        priority = self._priority(payload)
+        taken = {
+            (int(item["canonical_id"]),
+             case_lib.street_of(item),
+             int(str(item["decision_key"]).split(":", 1)[1]))
+            for item in self.case_repo.items(set_id)
+        }
+        rows = self.case_repo.decisions_for_bucket(
+            bucket, limit=max(count * 4, count), exclude=sorted(taken))
+        created, no_spec = self._auto_cases(
+            set_id, rows, priority=priority, note="按桶补样", limit=count,
+            skip=taken)
+        result = self.get_case_set(set_id)
+        result.update({"created": created, "noSpec": no_spec})
+        return result
+
+    def _seed_target(self, case: dict) -> tuple[int, str]:
+        """ab_set 的 hand uid → (canonical_id, decision_key)。"""
+        hand = self.hand_repo.imports.find_any_by_uid(case["handUid"])
+        if hand is None:
+            raise ApiError(
+                "SEED_HAND_MISSING",
+                f"手牌 {case['handUid']} 不在导入库（先跑导入）", 404)
+        edge = self.canonical_repo.source_of(hand["source"], int(hand["id"]))
+        if edge is None or not edge.get("canonical_id"):
+            raise ApiError(
+                "SEED_CANONICAL_MISSING",
+                f"手牌 {case['handUid']} 还没回填 canonical（先跑回填）", 409)
+        canonical_id = int(edge["canonical_id"])
+        rows = self.decision_repo.for_canonical(canonical_id)
+        match = next(
+            (row for row in rows
+             if row.get("street") == case["street"]
+             and int(row.get("action_index") or -1) == case["actionIndex"]),
+            None)
+        if match is None:
+            raise ApiError(
+                "SEED_DECISION_MISSING",
+                f"决策点 {case['street']}#{case['actionIndex']} 不在 canonical "
+                f"{canonical_id} 上", 404)
+        return canonical_id, library.decision_key(match.get("street"),
+                                                  match.get("seq"))
+
+    def seed_case_sets(self, payload: dict) -> dict:
+        """把 ab_set.json 导成 seed 案例集；同名 + 同 revision 不重复建。"""
+        path = payload.get("path")
+        if path:
+            candidate = Path(str(path)).expanduser().resolve()
+            if not candidate.is_relative_to(case_seed.REPO_ROOT.resolve()):
+                raise ApiError(
+                    "INVALID_SEED_PATH",
+                    f"seed 文件必须在仓库内：{case_seed.REPO_ROOT}", 422)
+            path = str(candidate)
+        plan = case_seed.plan_seed(case_seed.load_ab_set(path))
+        set_name = str(payload.get("setName") or plan["setName"]).strip()
+        dry_run = bool(payload.get("dryRun"))
+        report: dict[str, Any] = {
+            "dryRun": dry_run,
+            "source": str(path or case_seed.AB_SET_PATH),
+            "setName": set_name,
+            "set": None,
+            "specs": {"created": [], "reused": [], "wouldCreate": [],
+                      "diverged": []},
+            "cases": {"created": [], "existing": [], "skipped": [],
+                      "wouldCreate": []},
+        }
+
+        set_row = self.case_repo.set_by_name_revision(set_name, 1)
+        if set_row is None:
+            if dry_run:
+                report["set"] = {"name": set_name, "revision": 1,
+                                 "wouldCreate": True}
+            else:
+                set_row = self.case_repo.create_set(name=set_name,
+                                                    purpose="golden")
+                report["set"] = self._case_set_summary(set_row)
+        else:
+            report["set"] = self._case_set_summary(set_row)
+
+        resolved: dict[str, dict] = {}
+        for planned in plan["specs"]:
+            name = planned["name"]
+            latest = self.spec_repo.latest(name)
+            if (latest is not None
+                    and specs.spec_from_row(latest) == planned["content"]):
+                resolved[name] = latest
+                report["specs"]["reused"].append(name)
+                continue
+            if dry_run:
+                report["specs"]["wouldCreate"].append(name)
+                continue
+            if latest is None:
+                spec_id = self.spec_repo.create(
+                    name=name, revision=1, status="active",
+                    content=planned["content"], note=planned["note"],
+                    supersedes=None)
+                self.spec_repo.activate(spec_id, name)
+            else:
+                # 同名已有别的版本：只追加一条 draft，不 activate ——
+                # 生效与否是人的决定，seed 不能把人工写的 active 顶掉。
+                spec_id = self.spec_repo.create(
+                    name=name, revision=int(latest["revision"]) + 1,
+                    status="draft", content=planned["content"],
+                    note=planned["note"], supersedes=int(latest["id"]))
+                report["specs"]["diverged"].append(name)
+            resolved[name] = self.spec_repo.get(spec_id) or {}
+            report["specs"]["created"].append(name)
+
+        frozen = bool((set_row or {}).get("frozen_at"))
+        for case in plan["cases"]:
+            seed_id = case["seedId"]
+            if frozen and not dry_run:
+                report["cases"]["skipped"].append({
+                    "seedId": seed_id,
+                    "reason": f"案例集 {set_name} v1 已冻结；请建新版本",
+                })
+                continue
+            try:
+                canonical_id, decision_key = self._seed_target(case)
+            except ApiError as exc:
+                report["cases"]["skipped"].append({
+                    "seedId": seed_id,
+                    "code": exc.code,
+                    "reason": exc.message,
+                })
+                continue
+            spec_row = resolved.get(case["specName"])
+            if dry_run:
+                report["cases"]["wouldCreate"].append({
+                    "seedId": seed_id, "canonicalId": canonical_id,
+                    "decisionKey": decision_key,
+                    "specName": case["specName"],
+                })
+                continue
+            if spec_row is None:
+                report["cases"]["skipped"].append({
+                    "seedId": seed_id,
+                    "reason": f"spec {case['specName']} 未落库",
+                })
+                continue
+            try:
+                _, was_created = self.case_repo.create(
+                    canonical_id=canonical_id, decision_key=decision_key,
+                    spec_id=int(spec_row["id"]), case_set_id=int(set_row["id"]),
+                    priority=case["priority"], note=case["note"])
+            except ApiError as exc:
+                report["cases"]["skipped"].append({
+                    "seedId": seed_id, "code": exc.code,
+                    "reason": exc.message,
+                })
+                continue
+            bucket = ("created" if was_created else "existing")
+            report["cases"][bucket].append({
+                "seedId": seed_id, "canonicalId": canonical_id,
+                "decisionKey": decision_key, "specName": case["specName"],
+            })
+
+        report["cases"]["skippedPlan"] = plan["skipped"]
+        return report
+
     def hand_replay(self, hand_id: int) -> dict:
         """瀑布流/牌桌共用的帧序列。优先读 ingest 时物化的 timeline。"""
+        hand_id = self.resolve_hand_id(hand_id)
         row = self.hand_repo.get_row(hand_id)
         if row is None:
             raise ApiError("HAND_NOT_FOUND", f"手牌 {hand_id} 不存在或已删除", 404)
@@ -1103,6 +2969,12 @@ class ReplayService:
                          mark: dict | None = None) -> dict:
         return {
             "id": persisted.get("id") if persisted else None,
+            "canonicalId": (persisted.get("canonical_id") if persisted else None),
+            "decisionKey": library.decision_key(d.street, d.seq),
+            "buckets": ({dimension: persisted.get(dimension)
+                         for dimension in library.DIMENSIONS
+                         if persisted.get(dimension) not in (None, "")}
+                        if persisted else {}),
             "street": d.street,
             "seq": d.seq,
             "actionIndex": d.action_index,
@@ -1778,6 +3650,156 @@ class ReplayService:
             raise ApiError("HAND_SET_NOT_FOUND", f"手牌集 {set_id} 不存在", 404)
         return self.get_hand_set(set_id)
 
+    # ─────────────────────────── 期望库（spot spec） ───────────────────────────
+
+    def spec_meta(self) -> dict:
+        return specs.meta()
+
+    def _spec_row(self, spec_id: int) -> dict:
+        row = self.spec_repo.get(spec_id)
+        if row is None:
+            raise ApiError("SPEC_NOT_FOUND", f"期望 {spec_id} 不存在", 404)
+        return row
+
+    @staticmethod
+    def _spec_content(payload: dict) -> dict:
+        """API 的 camelCase → §4.1 的 snake_case，再交给纯校验。"""
+        return specs.validate_spec({
+            "schema": payload.get("schema"),
+            "bucket": payload.get("bucket"),
+            "allowed_actions": payload.get("allowedActions"),
+            "forbidden_actions": payload.get("forbiddenActions"),
+            "sizing": payload.get("sizing"),
+            "freq": payload.get("freq"),
+            "required_points": payload.get("requiredPoints"),
+            "forbidden_points": payload.get("forbiddenPoints"),
+            "rationale": payload.get("rationale"),
+        })
+
+    @staticmethod
+    def _public_spec_row(row: dict) -> dict:
+        return specs.public_spec(
+            row,
+            revision_count=row.get("revision_count"),
+            active_revision_id=row.get("active_revision_id"))
+
+    def get_spec(self, spec_id: int) -> dict:
+        return self._public_spec_row(self._spec_row(spec_id))
+
+    def list_specs(self, query: dict | None = None) -> dict:
+        query = query or {}
+        status = str(query.get("status") or "").strip()
+        if status and status not in specs.SPEC_STATUSES:
+            raise ApiError("INVALID_SPEC_STATUS",
+                           "status 只能是 active / draft", 422)
+        keyword = str(query.get("q") or "").strip().lower()
+        items = [self._public_spec_row(row)
+                 for row in self.spec_repo.list_latest()]
+        if status == "active":
+            items = [item for item in items if item["status"] == "active"]
+        elif status == "draft":
+            items = [item for item in items if item["status"] == "draft"]
+        if keyword:
+            items = [item for item in items
+                     if keyword in item["name"].lower()
+                     or keyword in item["bucketLabel"].lower()]
+        # 按桶分组展示：同一桶的标签排在一起，桶内按名字。
+        items.sort(key=lambda item: (item["bucketLabel"], item["name"]))
+        return {"items": items, "total": len(items)}
+
+    def spec_history(self, spec_id: int) -> dict:
+        row = self._spec_row(spec_id)
+        rows = self.spec_repo.by_name(row["name"])
+        active_id = next((int(item["id"]) for item in rows
+                          if item["status"] == "active"), None)
+        items = [specs.public_spec(item, revision_count=len(rows),
+                                   active_revision_id=active_id)
+                 for item in rows]
+        return {"name": row["name"], "items": items}
+
+    def spec_diff(self, spec_id: int,
+                  against_id: int | None = None) -> dict:
+        row = self._spec_row(spec_id)
+        other_id = (int(against_id) if against_id is not None
+                    else row.get("supersedes"))
+        if other_id is None:
+            return {"from": None, "to": self._public_spec_row(row),
+                    "changes": []}
+        other = self._spec_row(other_id)
+        if other["name"] != row["name"]:
+            raise ApiError("INVALID_SPEC_DIFF",
+                           "只能比较同名期望的两个 revision", 422)
+        return {
+            "from": self._public_spec_row(other),
+            "to": self._public_spec_row(row),
+            "changes": specs.diff_specs(specs.spec_from_row(other),
+                                        specs.spec_from_row(row)),
+        }
+
+    def create_spec(self, payload: dict) -> dict:
+        name = specs.validate_name(payload.get("name"))
+        status = specs.validate_status(payload.get("status") or "draft")
+        note = specs.validate_note(payload.get("note"))
+        content = self._spec_content(payload)
+        if self.spec_repo.latest(name) is not None:
+            raise ApiError(
+                "SPEC_NAME_TAKEN",
+                f"期望 {name!r} 已存在；编辑请从最新 revision 派生", 409)
+        spec_id = self.spec_repo.create(
+            name=name, revision=1, status=status, content=content,
+            note=note, supersedes=None)
+        if status == "active":
+            self.spec_repo.activate(spec_id, name)
+        return self.get_spec(spec_id)
+
+    def create_spec_revision(self, spec_id: int, payload: dict) -> dict:
+        base = self._spec_row(spec_id)
+        latest = self.spec_repo.latest(base["name"])
+        if latest is None or int(latest["id"]) != int(base["id"]):
+            version = f"v{latest['revision']}" if latest else "?"
+            raise ApiError(
+                "SPEC_NOT_LATEST",
+                f"只能从最新 revision（{version}）派生；旧 revision 只读", 409)
+        name = payload.get("name")
+        if name is not None and specs.validate_name(name) != base["name"]:
+            raise ApiError("SPEC_NAME_IMMUTABLE",
+                           "revision 不能改名；改名请新建期望", 422)
+        status = specs.validate_status(payload.get("status") or "draft")
+        note = specs.validate_note(payload.get("note"))
+        content = self._spec_content(payload)
+        new_id = self.spec_repo.create(
+            name=base["name"], revision=int(latest["revision"]) + 1,
+            status=status, content=content, note=note,
+            supersedes=int(base["id"]))
+        if status == "active":
+            self.spec_repo.activate(new_id, base["name"])
+        return self.get_spec(new_id)
+
+    def patch_spec(self, spec_id: int, payload: dict) -> dict:
+        row = self._spec_row(spec_id)
+        if set(payload) - {"status"} or "status" not in payload:
+            raise ApiError(
+                "INVALID_SPEC",
+                "PATCH 只支持修改 status；改内容请新建 revision", 422)
+        status = specs.validate_status(payload["status"])
+        if status == "active":
+            self.spec_repo.activate(spec_id, row["name"])
+        else:
+            self.spec_repo.set_status(spec_id, "draft")
+        return self.get_spec(spec_id)
+
+    def delete_spec_revision(self, spec_id: int) -> dict:
+        row = self._spec_row(spec_id)
+        latest = self.spec_repo.latest(row["name"])
+        if latest is None or int(latest["id"]) != int(row["id"]):
+            raise ApiError("SPEC_NOT_LATEST",
+                           "只能删除最新 revision；旧 revision 只读", 409)
+        if row["status"] == "active":
+            raise ApiError("SPEC_ACTIVE",
+                           "生效中的期望不能删除；先停用再删", 409)
+        deleted = self.spec_repo.delete(spec_id)
+        return {"name": row["name"], "deletedRevisions": int(deleted or 0)}
+
     # ─────────────────────────── 离线 A/B 实验 ───────────────────────────
 
     def create_experiment(self, payload: dict) -> dict:
@@ -1968,9 +3990,14 @@ class ReplayService:
             for tag in tags:
                 version["violations"][str(tag)] += 1
         for version in versions.values():
-            total = version["n"] or 1
-            version["agreement"] = round(
-                version["bucket"].get("一致", 0) / total, 4)
+            # 实际动作缺录的决策点记「未知动作」：没有可比的动作，不进分母
+            unknown = version["bucket"].get(UNKNOWN_ACTION, 0)
+            scored = max(version["n"] - unknown, 0)
+            version["unknown"] = unknown
+            version["scored"] = scored
+            version["agreement"] = (round(
+                version["bucket"].get("一致", 0) / scored, 4)
+                if scored else None)
             version["bucket"] = dict(version["bucket"])
             version["source"] = dict(version["source"])
             version["violations"] = dict(version["violations"])
@@ -2500,6 +4527,7 @@ class ReplayService:
         return True
 
     def hand_comparison(self, hand_id: int, query: dict) -> dict:
+        hand_id = self.resolve_hand_id(hand_id)
         row = self.hand_repo.get_row(hand_id)
         if row is None:
             raise ApiError("HAND_NOT_FOUND", f"手牌 {hand_id} 不存在或已删除", 404)
@@ -2686,10 +4714,12 @@ class ReplayService:
     # ─────────────────────────── meta / health ───────────────────────────
 
     def meta(self) -> dict:
-        rows = self.hand_repo.list_rows()
+        # 只读轻量列：meta 在每次页面加载时都要，不能为了 source 计数把
+        # 1058 条 streets 全拖回来（远程库上那是 9 秒）。
+        rows = self.hand_repo.list_light_rows()
         total = len(rows)
         favorite = sum(1 for r in rows if r.get("mark_favorite"))
-        source_counts = Counter((r.get("source") or HAND_SOURCE_DB) for r in rows)
+        source_counts = Counter(library.canonical_source(r) for r in rows)
         versions = self.version_repo.list(False)
         last_job = self.job_repo.list(page=1, page_size=1)[1]
         defaults = {"versionIds": [], "repeat": self.settings.default_repeat}
@@ -2716,12 +4746,11 @@ class ReplayService:
             },
             "tags": self._tag_options(rows),
             "handSources": [
-                {"value": source,
-                 "label": HAND_SOURCE_LABELS.get(source, source),
+                {"value": source, "label": library.SOURCE_LABELS[source],
                  "count": source_counts.get(source, 0)}
-                for source in (HAND_SOURCE_DB, HAND_SOURCE_REVIEW,
-                               HAND_SOURCE_LIVE)
+                for source in ("review", "live", "synthetic")
             ],
+            "buckets": library.meta_vocab(),
             "markStatuses": list(MARK_STATUSES),
             "runStatuses": list(RUN_STATUSES),
             "limits": {

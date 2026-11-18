@@ -21,7 +21,9 @@ from poker_ocr.opponent_profile import (
     OpponentRead, PooledStats, TENDENCY_PCT_FIELDS,
 )
 
-from .decisions import DecisionPoint, call_amount, decision_facts
+from .decisions import (
+    UNKNOWN_ACTION, DecisionPoint, call_amount, decision_facts,
+)
 from .util import cards_of
 
 log = logging.getLogger("replay.engine")
@@ -41,7 +43,14 @@ def audit(sit, kind: str | None, amount: float | None) -> set[str]:
 def classify(new_kind: str | None, new_amt: float | None,
              act_kind: str | None, act_amt: float | None,
              pot: float, street: str) -> str:
-    """一致 / 尺度差 / 动作不同。"""
+    """一致 / 尺度差 / 动作不同；实际动作缺录时返回「未知动作」。
+
+    英雄动作缺录（线上 timeline 漏采、advice 回填的决策点）时没有实际行动可比：
+    按 fail open 退化成「未知动作」，而不是判成「动作不同」——后者会把缺数据
+    静默算成模型出错，压低一致率。一致率的分母也会剔除这一类。
+    """
+    if not act_kind:
+        return UNKNOWN_ACTION
     nk = "raise" if new_kind == "allin" else new_kind
     ak = "raise" if act_kind == "allin" else act_kind
     if nk == ak:

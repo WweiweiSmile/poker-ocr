@@ -52,7 +52,8 @@ runs/                   # 工作台运行产物（日志/manifest/预览；本�
 replay-console/         # 独立子项目：手牌库 + A/B 复盘控制台（Python 后端 + React 前端）
 tests/                  # 52 个测试套件 + golden/ 期望 JSON，run_all.py 分层执行
 tools/                  # 离线 CLI（回放 / 画像重建 / 报表 / SFT 数据集 /
-                        # hand_recognition_audit.py 手牌识别倒查）
+                        # hand_recognition_audit.py 手牌识别倒查 /
+                        # import_case_seed.py 案例集 seed / backfill_advice_decisions.py）
 docs/                   # 56 篇设计文档与复盘（业务语义的真正来源）
 data/                   # 运行期数据：hand_outbox/、opponents/、sft/
 logs/                   # live.states.jsonl、复盘产物、incidents/
@@ -208,6 +209,7 @@ poker_ocr.workbench :8030
 | `hand_strength.py` | 纯判定层：`size` / `equity_tier` / `kind` / `summary_en`（**只服务离线审计**，live 传 `include_strength=False` 不渲染） |
 | `fold_equity.py` | 逐座位条件弃牌率与各尺寸盈亏平衡（数字来自 `tables/fold_equity.json`） |
 | `strategy_tables.py` | 策略表加载器：profile → 变体，缺变体回落 v0 并标记 `fell_back` |
+| `rules/` | 规则台账骨架（票 #64）：`load_ledger()` → `facts_snapshot()` → `match_rules()` → `export_rules --check` 静态校验；规则只存「前提 + 引用」，数字住 `tables/` |
 | `pot_math.py` / `allin.py` / `preflop_ranges.py` / `ranges.py` / `field_ranges.py` | 底池赔率、全下判定、翻前范围与先验 |
 | `opponent_profile.py` | 对手画像：按机会计数统计 → 确定性分类；`n<8` 一律 unknown；人工 pin 优先 |
 | `table_dynamics.py` | 桌况/桌风描述 |
@@ -403,10 +405,22 @@ nv extract_table.py run --img images/... --out /tmp/rois.json
 # 复盘控制台（后端 :8010，托管 replay_web/dist 构建产物）
 cd replay-console && ./start.sh
 #   前端开发态：cd replay-console/replay_web && pnpm dev
+#   评分运行（#56/#57）：页面 /runs 选「冻结案例集 × 可运行版本」，先看预估调用数/成本再跑
+curl -s -X POST localhost:8010/api/score-runs/estimate \
+  -H 'Content-Type: application/json' -d '{"caseSetId":4,"versionId":13}'
+#   成本单价（元/百万 token，可选）：REPLAY_PRICE_TABLE='{"deepseek-flash":{"in":1,"out":2}}'
 
 # 手牌导出 / outbox 同步
 nv tools/export_live_hands.py
 nv tools/sync_hand_outbox.py
+
+# 案例集 seed（工具 ab_set.json → replay_case_sets/replay_cases，幂等）
+nv tools/import_case_seed.py --no-migrate          # 加 --dry-run 只预演
+# 把「英雄动作缺录」的线上 advice 回填成决策点（#55；不编造动作，只补缺口）
+nv tools/backfill_advice_decisions.py --dry-run    # 去掉 --dry-run 才写库
+#   --hand-id 1000000000320 只看一手；--no-profiles 不读画像库
+#   --refresh-stale 重算 enrichment 过期的旧批次：flags 还写 INVALID 但决策点已有，
+#                 或时间线 decision 帧的 decisionId 还是 null（一手坏数据不影响其余）
 
 # 策略表（默认 hand-tuned；切换必须用真环境变量，写 .env 不生效）
 nv -m poker_ocr.strategy_tables --profile sourced   # 生效 profile + 每张表来源/是否回落

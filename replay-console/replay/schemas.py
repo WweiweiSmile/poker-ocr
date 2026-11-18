@@ -90,6 +90,37 @@ class HandSetItems(APIModel):
     expect: dict[str, Any] | None = None
 
 
+class SpecWrite(APIModel):
+    """创建 / 派生期望（§4.1）。
+
+    `extra="forbid"` 是刻意的：非法维度键、`min_n` 之类门槛字段必须 422，
+    不能静默丢弃。嵌套的 bucket/sizing/freq 由 `replay.specs` 做词表校验。
+    """
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    schema_version: str | None = Field(default=None, alias="schema")
+    name: str | None = Field(default=None, max_length=120)
+    status: Literal["draft", "active"] = "draft"
+    note: str | None = Field(default=None, max_length=2000)
+    bucket: Any = None
+    allowedActions: list[str] | None = None
+    forbiddenActions: list[str] | None = None
+    sizing: Any = None
+    freq: Any = None
+    requiredPoints: list[dict[str, Any]] | None = None
+    forbiddenPoints: list[dict[str, Any]] | None = None
+    rationale: str | None = Field(default=None, max_length=4000)
+
+
+class SpecPatch(APIModel):
+    """期望只允许改状态；改内容必须走新 revision。"""
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    status: Literal["draft", "active"]
+
+
 class PairReviewPatch(APIModel):
     preferred: Literal["A", "B", "same", "unsure"]
     tags: list[str] | None = None
@@ -114,6 +145,70 @@ class DecisionMark(APIModel):
 
 class HandDelete(APIModel):
     handIds: list[int] = Field(min_length=1, max_length=1000)
+
+
+class CaseCreate(APIModel):
+    """从详情页某决策点建一条实例案例（第 1 期最小可用）。"""
+
+    canonicalId: int
+    decisionKey: str = Field(min_length=3, max_length=48)
+    specId: int
+    caseSetId: int | None = None
+    priority: int = Field(1, ge=0, le=9)
+    overrides: dict[str, Any] | None = None
+    note: str | None = Field(default=None, max_length=255)
+
+
+class CaseSetCreate(APIModel):
+    """案例集第 1 版；同名新版本走 /revisions，不重复建第 1 版。"""
+
+    name: str = Field(min_length=1, max_length=100)
+    purpose: Literal["golden", "regression", "exploration", "coverage"] = "exploration"
+
+
+class CaseSetPatch(APIModel):
+    name: str | None = Field(default=None, min_length=1, max_length=100)
+    purpose: Literal["golden", "regression", "exploration", "coverage"] | None = None
+
+
+class CaseSetCase(APIModel):
+    canonicalId: int
+    decisionKey: str = Field(min_length=3, max_length=48)
+    specId: int
+    priority: int = Field(1, ge=0, le=9)
+    overrides: dict[str, Any] | None = None
+    note: str | None = Field(default=None, max_length=255)
+
+
+class CaseSetCases(APIModel):
+    cases: list[CaseSetCase] = Field(min_length=1, max_length=500)
+
+
+class CaseSetCasePatch(APIModel):
+    specId: int | None = None
+    priority: int | None = Field(default=None, ge=0, le=9)
+    status: Literal["draft", "active", "retired"] | None = None
+    note: str | None = Field(default=None, max_length=255)
+    overrides: dict[str, Any] | None = None
+
+
+class CaseHandCases(APIModel):
+    """整手全建：每个决策点自动挑最具体的 active spec。"""
+
+    canonicalId: int
+    priority: int = Field(1, ge=0, le=9)
+
+
+class CaseSample(APIModel):
+    bucket: dict[str, Any] = Field(default_factory=dict)
+    count: int = Field(10, ge=1, le=100)
+    priority: int = Field(1, ge=0, le=9)
+
+
+class CaseSeed(APIModel):
+    path: str | None = None
+    setName: str | None = Field(default=None, max_length=100)
+    dryRun: bool = False
 
 
 class VersionCreate(APIModel):

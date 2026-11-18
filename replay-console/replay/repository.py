@@ -6,8 +6,21 @@ import datetime as dt
 import logging
 from typing import Any, Iterable
 
+from poker_ocr.buckets import BUCKET_ORDER
 from pymysql.err import IntegrityError
 
+from .canonical import (
+    MATCH_WINDOW,
+    MERGE_CHAIN_LIMIT,
+    as_datetime,
+    content_group_key,
+    normalize_board,
+    normalize_hero_cards,
+    pick_candidate,
+    primary_row,
+    rank_key,
+    validate_source,
+)
 from .db import Database
 from .decisions import HandAnalysis
 from .errors import ApiError
@@ -32,19 +45,6 @@ HAND_SOURCE_LABELS = {
 def is_imported_hand_id(hand_id: int) -> bool:
     return int(hand_id) >= IMPORTED_HAND_ID_BASE
 
-
-def _mysql_datetime(value: Any) -> dt.datetime | None:
-    """把 ISO 字符串转成 MySQL DATETIME；无时区/坏值都安全返回 None。"""
-    if value is None or value == "":
-        return None
-    if isinstance(value, dt.datetime):
-        return value.replace(tzinfo=None)
-    text = str(value).strip()
-    try:
-        parsed = dt.datetime.fromisoformat(text.replace("Z", "+00:00"))
-        return parsed.replace(tzinfo=None)
-    except ValueError:
-        return None
 
 
 class HandRepository:
@@ -84,6 +84,50 @@ class HandRepository:
             row["external_id"] = None
             row["batch_id"] = None
         return rows
+
+    def list_light_review_rows(self, *, limit: int = 10000) -> list[dict]:
+        """列表用：不取 `streets` / `villains` 这些大 JSON 列。
+
+        `list_hands` 只需要展示字段；决策数/质量从 `replay_decisions` 聚合。
+        取 `h.*` 会把每条手牌的 streets（几百字节到几 KB）拖过远程连接，
+        1058 行累计就是 8–16 秒的首屏。详情仍走 `get_row` 取全量。
+        """
+        where, params = self._where()
+        sql = f"""
+            SELECT h.id, h.user_id, h.game_id, h.title, h.hero_position,
+                   h.hero_cards, h.hero_stack_bb, h.stakes, h.board,
+                   h.villain_count, h.pot_type, h.result, h.result_amount,
+                   h.hero_tags, h.analyze_status, h.created_at, h.updated_at,
+                   h.table_size, h.small_blind_bb, h.big_blind_bb,
+                   h.ante_bb, h.bomb_pot_bb,
+                   m.favorite AS mark_favorite,
+                   m.tags AS mark_tags,
+                   m.status AS mark_status,
+                   m.note AS mark_note
+              FROM review_hands h
+              LEFT JOIN replay_marks m
+                ON m.user_id = %s AND m.hand_id = h.id
+              LEFT JOIN replay_hand_deletions d
+                ON d.user_id = %s AND d.hand_id = h.id
+             WHERE h.deleted_at IS NULL AND d.hand_id IS NULL{where}
+             ORDER BY h.created_at DESC, h.id DESC
+             LIMIT %s
+        """
+        rows = self.db.query(sql, (self.console_user_id,
+                                   self.console_user_id) + params + (limit,))
+        for row in rows:
+            row["source"] = HAND_SOURCE_DB
+            row["external_id"] = None
+            row["batch_id"] = None
+        return rows
+
+    def list_light_rows(self, *, limit: int = 10000) -> list[dict]:
+        """列表用的全部可见手牌（review + 导入），不含大 JSON 列。"""
+        rows = self.list_light_review_rows(limit=limit)
+        rows += self.imports.list_light_rows(limit=limit)
+        rows.sort(key=lambda r: (r.get("created_at") or dt.datetime.min,
+                                 int(r["id"])), reverse=True)
+        return rows[:limit]
 
     def list_rows(self, *, limit: int = 10000) -> list[dict]:
         rows = self.list_review_rows(limit=limit)
@@ -290,6 +334,32 @@ class ImportedHandRepository:
         """
         return self.db.query(sql, (self.user_id, self.user_id, limit))
 
+    # 列表专用：去掉 streets / villains / table_roster 三个大 JSON 列。
+    # 详情和重建需要它们，列表只需要展示字段；决策数/质量来自 replay_decisions。
+    LIGHT_COLUMNS = """
+        h.id, h.batch_id, h.source, h.external_id, h.fingerprint, h.title,
+        h.hero_cards, h.board, h.hero_position, h.table_size,
+        h.hero_stack_bb, h.bomb_pot_bb, h.result, h.result_amount,
+        h.pot_type, h.hero_tags, h.flag_mask, h.flags_json, h.review_score,
+        h.created_at, h.updated_at, h.user_id
+    """
+
+    def list_light_rows(self, *, limit: int = 10000) -> list[dict]:
+        sql = f"""
+            SELECT {self.LIGHT_COLUMNS},
+                   m.favorite AS mark_favorite,
+                   m.tags AS mark_tags,
+                   m.status AS mark_status,
+                   m.note AS mark_note
+              FROM replay_imported_hands h
+              LEFT JOIN replay_marks m
+                ON m.user_id = %s AND m.hand_id = h.id
+             WHERE h.user_id = %s AND h.deleted_at IS NULL
+             ORDER BY h.created_at DESC, h.id DESC
+             LIMIT %s
+        """
+        return self.db.query(sql, (self.user_id, self.user_id, limit))
+
     def get_row(self, hand_id: int) -> dict | None:
         sql = self._select() + """
              WHERE h.id = %s AND h.user_id = %s AND h.deleted_at IS NULL
@@ -372,6 +442,18 @@ class ImportedHandRepository:
                 WHERE user_id=%s AND source=%s AND external_uid=%s
                 LIMIT 1""",
             (self.user_id, source, uid[:128]))
+
+    def find_any_by_uid(self, external_uid: str | None) -> dict | None:
+        """只按 uid 找（seed 导入拿 ab_set 的 20261101-xxx 反查手牌）。"""
+        uid = (external_uid or "").strip()
+        if not uid:
+            return None
+        return self.db.one(
+            """SELECT id, source, fingerprint, external_uid
+                 FROM replay_imported_hands
+                WHERE user_id=%s AND external_uid=%s
+                ORDER BY id DESC LIMIT 1""",
+            (self.user_id, uid[:128]))
 
     def upsert(self, row: dict, *, batch_id: int | None = None) -> tuple[int, bool]:
         """幂等写入：优先按 (user, source, external_uid)，旧记录回退 fingerprint。
@@ -572,7 +654,7 @@ class ImportedHandRepository:
                  json_dumps(advice.get("model_params") or {}),
                  1 if advice.get("prompt_missing") else 0,
                  (str(advice.get("prompt_missing_reason") or "")[:64] or None),
-                 _mysql_datetime(advice.get("captured_at")),
+                 as_datetime(advice.get("captured_at")),
                  int(advice.get("attempt") or 1),
                  json_dumps(advice.get("context") or {}),
                  advice.get("duration_ms"),
@@ -900,6 +982,51 @@ class DecisionRepository:
         return self.db.one("SELECT * FROM replay_decisions WHERE id=%s",
                            (decision_id,))
 
+    def canonical_decisions(self) -> list[dict]:
+        """列表用：每个 canonical 本版本的「去重决策点」及七桶取值。
+
+        同一决策点可能被复盘、实时两条链路各写一行；按 (canonical, street,
+        seq) 去重，质量取较差的那一行。1375 行轻量列，比逐手重建快得多。
+        """
+        from .versioning import CURRENT_RECONSTRUCT_VERSION
+        return self.db.query(
+            """SELECT canonical_id, street, seq,
+                      MAX(quality='approx') AS is_approx,
+                      MAX(position_bucket) AS position_bucket,
+                      MAX(hand_tier) AS hand_tier,
+                      MAX(board_texture) AS board_texture,
+                      MAX(pot_type) AS pot_type,
+                      MAX(facing) AS facing,
+                      MAX(opponent_profile) AS opponent_profile
+                 FROM replay_decisions
+                WHERE reconstruct_version=%s AND canonical_id IS NOT NULL
+                GROUP BY canonical_id, street, seq""",
+            (CURRENT_RECONSTRUCT_VERSION,))
+
+    def for_canonical(self, canonical_id: int) -> list[dict]:
+        """本版本隶属于某个 canonical 的全部决策行（去重由调用方做）。"""
+        from .versioning import CURRENT_RECONSTRUCT_VERSION
+        return self.db.query(
+            """SELECT d.* FROM replay_decisions d
+                WHERE d.canonical_id=%s AND d.reconstruct_version=%s
+                ORDER BY d.action_index, d.seq""",
+            (int(canonical_id), CURRENT_RECONSTRUCT_VERSION))
+
+    def for_source_hands(self, hand_ids: list[int]) -> list[dict]:
+        from .versioning import CURRENT_RECONSTRUCT_VERSION
+        if not hand_ids:
+            return []
+        placeholders = ",".join(["%s"] * len(hand_ids))
+        return self.db.query(
+            f"""SELECT hand_id, street, seq, action_index, quality,
+                       position_bucket, hand_tier, board_texture, pot_type,
+                       facing, opponent_profile, canonical_id
+                  FROM replay_decisions
+                 WHERE hand_id IN ({placeholders})
+                   AND reconstruct_version=%s
+                 ORDER BY hand_id, action_index, seq""",
+            (*hand_ids, CURRENT_RECONSTRUCT_VERSION))
+
 
 def current_reconstruct_version() -> str:
     # 延迟导入，避免 repository ↔ versioning 循环
@@ -945,6 +1072,20 @@ class LiveAdviceRepository:
                 "options": options if isinstance(options, list) else None,
             }
         return out
+
+    def link_decision(self, hand_id: int, street: str, action_index: int,
+                      decision_id: int) -> int:
+        """把线上建议行挂到决策点；只补空挂，绝不覆盖已有 decision_id。
+
+        street 列宽 10、取值只有 preflop/flop/turn/river，截断对这四个值无影响，
+        只为不因脏值让 UPDATE 抛错（脏值本来就匹配不到行）。
+        """
+        return int(self.db.execute(
+            """UPDATE replay_live_advices SET decision_id=%s
+                WHERE hand_id=%s AND street=%s AND action_index=%s
+                  AND decision_id IS NULL""",
+            (int(decision_id), int(hand_id), str(street)[:10],
+             int(action_index))) or 0)
 
     def context_for_hand(self, hand_id: int) -> dict[tuple[str, int], dict]:
         """(street, action_index) → context_json。没有线上快照的手牌返回空。"""
@@ -1594,3 +1735,752 @@ class ResultRepository:
                WHERE created_at < DATE_SUB(NOW(3), INTERVAL %s DAY)
                  AND (prompt_system IS NOT NULL OR prompt_user IS NOT NULL
                       OR raw_response IS NOT NULL)""", (days,))
+
+
+# ─────────────────────────── 期望库（spot spec） ───────────────────────────
+
+_SPEC_CHAIN = """
+       (SELECT COUNT(*) FROM replay_spot_specs x
+         WHERE x.name = s.name) AS revision_count,
+       (SELECT x.id FROM replay_spot_specs x
+         WHERE x.name = s.name AND x.status = 'active'
+         ORDER BY x.revision DESC LIMIT 1) AS active_revision_id"""
+
+
+class SpotSpecRepository:
+    """`replay_spot_specs` 的读写：revision 只增不改，旧行只读。"""
+
+    def __init__(self, db: Database):
+        self.db = db
+
+    def create(self, *, name: str, revision: int, status: str,
+               content: dict, note: str | None,
+               supersedes: int | None) -> int:
+        bucket = content["bucket"]
+        spec = {key: value for key, value in content.items()
+                if key != "bucket"}
+        try:
+            return self.db.execute(
+                """INSERT INTO replay_spot_specs
+                     (name, revision, status, bucket_json, spec_json, note,
+                      supersedes)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+                (name, revision, status, json_dumps(bucket),
+                 json_dumps(spec), note or None, supersedes))
+        except IntegrityError as exc:
+            raise ApiError(
+                "SPEC_REVISION_CONFLICT",
+                f"期望 {name} 的 revision {revision} 已存在（并发保存？请重试）",
+                409) from exc
+
+    def get(self, spec_id: int) -> dict | None:
+        return self.db.one(
+            f"SELECT s.*,{_SPEC_CHAIN} FROM replay_spot_specs s "
+            "WHERE s.id=%s", (spec_id,))
+
+    def latest(self, name: str) -> dict | None:
+        return self.db.one(
+            f"SELECT s.*,{_SPEC_CHAIN} FROM replay_spot_specs s "
+            "WHERE s.name=%s ORDER BY s.revision DESC LIMIT 1", (name,))
+
+    def by_name(self, name: str) -> list[dict]:
+        return self.db.query(
+            f"SELECT s.*,{_SPEC_CHAIN} FROM replay_spot_specs s "
+            "WHERE s.name=%s ORDER BY s.revision DESC", (name,))
+
+    def list_latest(self) -> list[dict]:
+        return self.db.query(
+            f"""SELECT s.*,{_SPEC_CHAIN}
+                  FROM replay_spot_specs s
+                  JOIN (SELECT name, MAX(revision) AS revision
+                          FROM replay_spot_specs GROUP BY name) m
+                    ON m.name = s.name AND m.revision = s.revision
+                 ORDER BY s.name""")
+
+    def activate(self, spec_id: int, name: str) -> int:
+        """把该 revision 置 active，同名的旧 active 退回 draft（单条 SQL）。"""
+        return self.db.execute(
+            """UPDATE replay_spot_specs
+                  SET status = CASE WHEN id = %s THEN 'active' ELSE 'draft' END
+                WHERE name = %s AND (id = %s OR status = 'active')""",
+            (spec_id, name, spec_id))
+
+    def set_status(self, spec_id: int, status: str) -> int:
+        return self.db.execute(
+            "UPDATE replay_spot_specs SET status=%s WHERE id=%s",
+            (status, spec_id))
+
+    def delete(self, spec_id: int) -> int:
+        return self.db.execute(
+            "DELETE FROM replay_spot_specs WHERE id=%s", (spec_id,))
+
+
+
+# ──────────────────────────── canonical 手牌 ────────────────────────────
+
+_CANDIDATE_SQL = """
+    SELECT id, started_at, content_group
+      FROM replay_canonical_hands
+     WHERE hero_cards = %s AND board = %s AND is_synthetic = %s
+       AND merged_into IS NULL
+       AND started_at BETWEEN %s AND %s
+"""
+
+_SOURCE_JOIN_SQL = """
+    SELECT hs.canonical_id, hs.source, hs.source_hand_id, hs.fingerprint,
+           hs.is_primary, hs.linked_by,
+           ch.content_group, ch.primary_source, ch.merged_into
+      FROM replay_hand_sources hs
+      JOIN replay_canonical_hands ch ON ch.id = hs.canonical_id
+     WHERE hs.source = %s AND hs.source_hand_id = %s
+"""
+
+_PRIMARY_ROWS_SQL = """
+    SELECT source, source_hand_id, is_primary
+      FROM replay_hand_sources
+     WHERE canonical_id = %s
+"""
+
+_INSERT_CANONICAL_SQL = """
+    INSERT INTO replay_canonical_hands
+           (content_group, primary_source, title, hero_cards, board,
+            hero_position, started_at, is_synthetic)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+"""
+
+_INSERT_SOURCE_SQL = """
+    INSERT INTO replay_hand_sources
+           (canonical_id, source, source_hand_id, fingerprint, is_primary,
+            linked_by)
+    VALUES (%s, %s, %s, %s, %s, %s)
+    ON DUPLICATE KEY UPDATE fingerprint = VALUES(fingerprint)
+"""
+
+
+def _bucket_where(bucket: dict | None) -> tuple[list[str], list[Any]]:
+    """七维桶的 SQL 条件：维间 AND、维内 IN；空维度 = 通配。"""
+    where: list[str] = []
+    params: list[Any] = []
+    for dimension in BUCKET_ORDER:
+        values = [v for v in ((bucket or {}).get(dimension) or [])
+                  if v not in (None, "")]
+        if values:
+            marks = ", ".join(["%s"] * len(values))
+            where.append(f"d.{dimension} IN ({marks})")
+            params += list(values)
+    return where, params
+
+
+class CaseRepository:
+    """`replay_case_sets` / `replay_cases` 的读写。
+
+    案例是「某个 canonical 手牌 + 某个决策点 + 写死的 spec_id」；案例集按
+    (name, revision) 分版本，`frozen_at` 一置该版本就只读，要改只能从它升
+    一个新 revision（`copy_set_to_new_revision`）。
+    """
+
+    DEFAULT_SET_NAME = "待整理"
+    # DDL 里的 DEFAULT 'golden' 只是占位：create_set 强制显式传 purpose，
+    # 不依赖库侧默认，避免「代码默认 exploration / 库默认 golden」两套口径。
+    CASE_SET_PURPOSES = ("golden", "regression", "exploration", "coverage")
+
+    _SET_SELECT = """SELECT s.*,
+              (SELECT COUNT(*) FROM replay_cases c
+                WHERE c.case_set_id = s.id) AS case_count,
+              (SELECT COUNT(*) FROM replay_cases c
+                WHERE c.case_set_id = s.id AND c.priority = 0) AS p0_count
+         FROM replay_case_sets s"""
+
+    def _frozen_error(self, row: dict) -> ApiError:
+        return ApiError(
+            "CASE_SET_FROZEN",
+            f"案例集 {row.get('name')} v{row.get('revision')} 已冻结，"
+            "不能再改；请从它建新版本（POST /api/case-sets/{id}/revisions）",
+            409)
+
+    def list_sets(self, *, limit: int = 200,
+                  name: str | None = None) -> list[dict]:
+        sql = self._SET_SELECT
+        params: list[Any] = []
+        if name:
+            sql += " WHERE s.name = %s"
+            params.append(name)
+        sql += " ORDER BY s.name, s.revision DESC LIMIT %s"
+        params.append(int(limit))
+        return self.db.query(sql, tuple(params))
+
+    def get_set(self, set_id: int) -> dict | None:
+        return self.db.one(self._SET_SELECT + " WHERE s.id = %s",
+                           (int(set_id),))
+
+    def require_set(self, set_id: int) -> dict:
+        row = self.get_set(set_id)
+        if row is None:
+            raise ApiError("CASE_SET_NOT_FOUND", f"案例集 {set_id} 不存在", 404)
+        return row
+
+    def require_unfrozen(self, set_id: int) -> dict:
+        row = self.require_set(set_id)
+        if row.get("frozen_at"):
+            raise self._frozen_error(row)
+        return row
+
+    def set_by_name_revision(self, name: str,
+                             revision: int = 1) -> dict | None:
+        return self.db.one(
+            self._SET_SELECT + " WHERE s.name = %s AND s.revision = %s",
+            (name, int(revision)))
+
+    def next_revision(self, name: str) -> int:
+        return int(self.db.scalar(
+            "SELECT COALESCE(MAX(revision), 0) + 1 FROM replay_case_sets"
+            " WHERE name = %s", (name,)) or 1)
+
+    def create_set(self, *, name: str, purpose: str) -> dict:
+        """建第 1 版案例集；同名已存在时报错（新版本走 revisions）。"""
+        clean = (name or "").strip()
+        if not clean:
+            raise ApiError("INVALID_CASE_SET", "案例集 name 不能为空", 422)
+        if len(clean) > 100:
+            raise ApiError("INVALID_CASE_SET",
+                           "案例集 name 最多 100 个字符", 422)
+        try:
+            new_id = int(self.db.execute(
+                """INSERT INTO replay_case_sets (revision, name, purpose)
+                   VALUES (1, %s, %s)""",
+                (clean, (purpose or "exploration")[:16])))
+        except IntegrityError as exc:
+            raise ApiError(
+                "CASE_SET_EXISTS",
+                f"案例集 {clean} 已存在；要改内容请从它建新版本", 409) from exc
+        row = self.get_set(new_id)
+        return row or {}
+
+    def update_set(self, set_id: int, *, name: str | None = None,
+                   purpose: str | None = None) -> dict:
+        self.require_unfrozen(set_id)
+        sets: list[str] = []
+        params: list[Any] = []
+        if name is not None:
+            clean = (name or "").strip()
+            if not clean or len(clean) > 100:
+                raise ApiError("INVALID_CASE_SET",
+                               "案例集 name 需为 1–100 个字符", 422)
+            sets.append("name=%s")
+            params.append(clean)
+        if purpose is not None:
+            sets.append("purpose=%s")
+            params.append((purpose or "exploration")[:16])
+        if sets:
+            params.append(int(set_id))
+            try:
+                self.db.execute(
+                    f"UPDATE replay_case_sets SET {', '.join(sets)} WHERE id=%s",
+                    tuple(params))
+            except IntegrityError as exc:
+                raise ApiError(
+                    "CASE_SET_EXISTS",
+                    f"案例集 {name} 已存在；要改内容请从它建新版本",
+                    409) from exc
+        return self.get_set(set_id) or {}
+
+    def freeze_set(self, set_id: int) -> dict:
+        row = self.require_set(set_id)
+        if row.get("frozen_at"):
+            raise self._frozen_error(row)
+        self.db.execute(
+            "UPDATE replay_case_sets SET frozen_at=%s WHERE id=%s",
+            (now_cn(), int(set_id)))
+        return self.get_set(set_id) or {}
+
+    def copy_set_to_new_revision(self, set_id: int) -> dict:
+        """把任一 revision（含已冻结）整体复制成下一个 revision（未冻结）。"""
+        row = self.require_set(set_id)
+        revision = self.next_revision(row["name"])
+        new_id = int(self.db.execute(
+            """INSERT INTO replay_case_sets (revision, name, purpose)
+               VALUES (%s, %s, %s)""",
+            (revision, row["name"], row.get("purpose") or "exploration")))
+        self.db.execute(
+            """INSERT INTO replay_cases
+                   (case_set_id, canonical_id, decision_key, spec_id, priority,
+                    overrides_json, status, note)
+               SELECT %s, canonical_id, decision_key, spec_id, priority,
+                      overrides_json, status, note
+                 FROM replay_cases WHERE case_set_id = %s""",
+            (new_id, int(set_id)))
+        return self.get_set(new_id) or {}
+
+    def __init__(self, db: Database):
+        self.db = db
+
+    def list_for_canonical(self, canonical_id: int) -> list[dict]:
+        return self.db.query(
+            """SELECT c.*, s.name AS set_name, s.revision AS set_revision,
+                      s.frozen_at AS set_frozen_at
+                 FROM replay_cases c
+                 JOIN replay_case_sets s ON s.id = c.case_set_id
+                WHERE c.canonical_id = %s
+                ORDER BY c.created_at DESC, c.id DESC""",
+            (int(canonical_id),))
+
+    def counts_by_canonical(self) -> dict[int, int]:
+        rows = self.db.query(
+            """SELECT canonical_id, COUNT(*) AS n FROM replay_cases
+                GROUP BY canonical_id""")
+        return {int(r["canonical_id"]): int(r["n"]) for r in rows}
+
+    def get(self, case_set_id: int, canonical_id: int,
+            decision_key: str) -> dict | None:
+        return self.db.one(
+            """SELECT * FROM replay_cases
+                WHERE case_set_id=%s AND canonical_id=%s AND decision_key=%s""",
+            (int(case_set_id), int(canonical_id), decision_key))
+
+    def case_set(self, case_set_id: int) -> dict | None:
+        return self.db.one("SELECT * FROM replay_case_sets WHERE id=%s",
+                           (int(case_set_id),))
+
+    def get_by_id(self, case_id: int) -> dict | None:
+        return self.db.one(
+            """SELECT c.*, s.name AS set_name, s.revision AS set_revision,
+                      s.frozen_at AS set_frozen_at
+                 FROM replay_cases c
+                 JOIN replay_case_sets s ON s.id = c.case_set_id
+                WHERE c.id = %s""",
+            (int(case_id),))
+
+    def items(self, case_set_id: int) -> list[dict]:
+        """案例集详情用：案例 + 手牌摘要 + 决策点的桶维度。"""
+        from .versioning import CURRENT_RECONSTRUCT_VERSION
+
+        return self.db.query(
+            """SELECT c.*, s.name AS set_name, s.revision AS set_revision,
+                      s.frozen_at AS set_frozen_at,
+                      ch.hero_cards, ch.board, ch.hero_position,
+                      d.position_bucket, d.hand_tier, d.board_texture,
+                      d.pot_type, d.facing, d.opponent_profile,
+                      d.action_index
+                 FROM replay_cases c
+                 JOIN replay_case_sets s ON s.id = c.case_set_id
+                 LEFT JOIN replay_canonical_hands ch ON ch.id = c.canonical_id
+                 LEFT JOIN replay_decisions d
+                        ON d.canonical_id = c.canonical_id
+                       AND d.street = SUBSTRING_INDEX(c.decision_key, ':', 1)
+                       AND d.seq = CAST(SUBSTRING_INDEX(c.decision_key, ':', -1)
+                                        AS UNSIGNED)
+                       AND d.reconstruct_version = %s
+                WHERE c.case_set_id = %s
+                ORDER BY c.priority ASC, c.id ASC""",
+            (CURRENT_RECONSTRUCT_VERSION, int(case_set_id)))
+
+    def case_with_set(self, case_id: int) -> dict | None:
+        return self.db.one(
+            """SELECT c.*, s.name AS set_name, s.revision AS set_revision,
+                      s.frozen_at AS set_frozen_at
+                 FROM replay_cases c
+                 JOIN replay_case_sets s ON s.id = c.case_set_id
+                WHERE c.id = %s""",
+            (int(case_id),))
+
+    def _case_for_write(self, case_set_id: int, case_id: int) -> dict:
+        row = self.case_with_set(case_id)
+        if row is None or int(row["case_set_id"]) != int(case_set_id):
+            raise ApiError("CASE_NOT_FOUND", f"案例 {case_id} 不存在", 404)
+        if row.get("set_frozen_at"):
+            raise self._frozen_error({
+                "name": row.get("set_name"),
+                "revision": row.get("set_revision"),
+            })
+        return row
+
+    def update_case(self, case_set_id: int, case_id: int, *,
+                    spec_id: int | None = None, priority: int | None = None,
+                    status: str | None = None, note: str | None = None,
+                    overrides: dict | None = None) -> dict:
+        self._case_for_write(case_set_id, case_id)
+        sets: list[str] = []
+        params: list[Any] = []
+        if spec_id is not None:
+            sets.append("spec_id=%s")
+            params.append(int(spec_id))
+        if priority is not None:
+            sets.append("priority=%s")
+            params.append(int(priority))
+        if status is not None:
+            sets.append("status=%s")
+            params.append(status)
+        if note is not None:
+            sets.append("note=%s")
+            params.append((note or "").strip()[:255] or None)
+        if overrides is not None:
+            sets.append("overrides_json=%s")
+            params.append(json_dumps(overrides) if overrides else None)
+        if sets:
+            params.append(int(case_id))
+            self.db.execute(
+                f"UPDATE replay_cases SET {', '.join(sets)} WHERE id=%s",
+                tuple(params))
+        return self.get_by_id(case_id) or {}
+
+    def delete_case(self, case_set_id: int, case_id: int) -> None:
+        self._case_for_write(case_set_id, case_id)
+        self.db.execute("DELETE FROM replay_cases WHERE id=%s", (int(case_id),))
+
+    def decisions_for_bucket(self, bucket: dict, *, limit: int = 50,
+                             exclude: list[tuple[int, str, int]] | None = None
+                             ) -> list[dict]:
+        """按桶维度抽最近决策点（样例池：只取已回填 canonical 的）。"""
+        from .versioning import CURRENT_RECONSTRUCT_VERSION
+
+        where, params = _bucket_where(bucket)
+        where = ["d.canonical_id IS NOT NULL",
+                 "d.reconstruct_version = %s"] + where
+        params = [CURRENT_RECONSTRUCT_VERSION] + params
+        if exclude:
+            marks = ", ".join(["(%s,%s,%s)"] * len(exclude))
+            where.append(f"NOT ((d.canonical_id, d.street, d.seq) IN ({marks}))")
+            for canonical_id, street, seq in exclude:
+                params += [int(canonical_id), street, int(seq)]
+        params.append(int(limit))
+        return self.db.query(
+            f"""SELECT d.canonical_id, d.street, d.seq, d.action_index,
+                       d.position_bucket, d.hand_tier, d.board_texture,
+                       d.pot_type, d.facing, d.opponent_profile
+                  FROM replay_decisions d
+                 WHERE {' AND '.join(where)}
+                 ORDER BY d.id DESC
+                 LIMIT %s""",
+            tuple(params))
+
+    def candidates_for_bucket(self, case_set_id: int, bucket: dict, *,
+                              limit: int = 50, offset: int = 0) -> list[dict]:
+        """存档里按桶找可补样的决策点，并标出它是否已在该案例集里。
+
+        与 `decisions_for_bucket` 的区别：带上手牌展示信息（hero/board），以及
+        案例集成员标记（`case_id`）——补样页要「能选」，所以得看得见手牌。
+        """
+        from .versioning import CURRENT_RECONSTRUCT_VERSION
+
+        bucket_where, bucket_params = _bucket_where(bucket)
+        where = ["d.canonical_id IS NOT NULL",
+                 "d.reconstruct_version = %s"] + bucket_where
+        params: list[Any] = [int(case_set_id), CURRENT_RECONSTRUCT_VERSION]
+        params += bucket_params
+        params += [int(limit), int(offset)]
+        return self.db.query(
+            f"""SELECT d.canonical_id, d.street, d.seq, d.action_index,
+                       d.position_bucket, d.hand_tier, d.board_texture,
+                       d.pot_type, d.facing, d.opponent_profile,
+                       ch.hero_cards, ch.board, ch.hero_position,
+                       c.id AS case_id
+                  FROM replay_decisions d
+                  JOIN replay_canonical_hands ch ON ch.id = d.canonical_id
+                  LEFT JOIN replay_cases c
+                         ON c.case_set_id = %s
+                        AND c.canonical_id = d.canonical_id
+                        AND c.decision_key = CONCAT(d.street, ':', d.seq)
+                 WHERE {' AND '.join(where)}
+                 ORDER BY d.id DESC
+                 LIMIT %s OFFSET %s""",
+            tuple(params))
+
+    def ensure_open_set(self) -> dict:
+        """拿一张未冻结的「待整理」集；没有就建第 1 版。"""
+        row = self.db.one(
+            """SELECT * FROM replay_case_sets
+                WHERE name=%s AND frozen_at IS NULL
+                ORDER BY revision DESC LIMIT 1""",
+            (self.DEFAULT_SET_NAME,))
+        if row is not None:
+            return row
+        revision = int(self.db.scalar(
+            "SELECT COALESCE(MAX(revision), 0) + 1 FROM replay_case_sets"
+            " WHERE name=%s", (self.DEFAULT_SET_NAME,)) or 1)
+        self.db.execute(
+            """INSERT INTO replay_case_sets (revision, name, purpose)
+               VALUES (%s, %s, 'exploration')""",
+            (revision, self.DEFAULT_SET_NAME))
+        return self.db.one(
+            "SELECT * FROM replay_case_sets WHERE name=%s AND revision=%s",
+            (self.DEFAULT_SET_NAME, revision))
+
+    def create(self, *, canonical_id: int, decision_key: str, spec_id: int,
+               case_set_id: int | None = None, priority: int = 1,
+               overrides: dict | None = None,
+               note: str | None = None) -> tuple[dict, bool]:
+        """建一条案例；同 (集, canonical, 决策点) 已存在就返回原行。"""
+        case_set = (self.case_set(case_set_id) if case_set_id
+                    else self.ensure_open_set())
+        if case_set is None:
+            raise ApiError("CASE_SET_NOT_FOUND",
+                           f"案例集 {case_set_id} 不存在", 404)
+        if case_set.get("frozen_at"):
+            raise self._frozen_error(case_set)
+        existing = self.get(case_set["id"], canonical_id, decision_key)
+        if existing is not None:
+            return existing, False
+        try:
+            self.db.execute(
+                """INSERT INTO replay_cases
+                   (case_set_id, canonical_id, decision_key, spec_id, priority,
+                    overrides_json, status, note)
+                   VALUES (%s,%s,%s,%s,%s,%s,'draft',%s)""",
+                (case_set["id"], int(canonical_id), decision_key,
+                 int(spec_id), int(priority),
+                 json_dumps(overrides) if overrides else None,
+                 (note or "").strip()[:255] or None))
+        except IntegrityError:
+            # 并发重复：唯一键兜底，读回已有的那条
+            existing = self.get(case_set["id"], canonical_id, decision_key)
+            if existing is not None:
+                return existing, False
+            raise
+        created = self.get(case_set["id"], canonical_id, decision_key)
+        return created or {}, True
+
+
+class CanonicalHandRepository:
+    """`replay_canonical_hands` / `replay_hand_sources` 的读写。
+
+    一条源记录 = 某个来源里的一手牌（复盘 review_hands.id、导入 id、构造 id）。
+    upsert 按 (source, source_hand_id) 幂等；同内容（底牌 + 公共牌 + 30 分钟内）
+    的源记录挂到同一个 canonical id 上，并列保存、互不覆盖（设计 §3.4）。
+
+    primary：新建时就是这条源；之后新来的源记录只有在默认优先级更高时才顶替
+    （review > live > synthetic），否则保留当前 primary —— 人工切换不会被
+    一次回填或一条低优先级来源悄悄改回去。重新跑回填更不会：已存在的源记录
+    直接跳过，只校正 fingerprint；若它指向的行被人工软合并过，源记录整体改挂
+    到保留行（`_resolve_merged`），旧行不删。
+
+    已知边界（都不影响读路径，留给第 2 期）：写入是逐条自动提交、不开显式事务，
+    中途失败会留下一条没有源记录的 canonical 空行（下次同内容 upsert 会接上它，
+    不产生错误数据）；「同内容超过 3 条 / 时间跨越」进待确认页的规则（§3.4 规则 4）
+    随合并/拆分 UI 一起做。
+    """
+
+    def __init__(self, db: Database):
+        self.db = db
+
+    # ── 读 ──
+
+    def get(self, canonical_id: int) -> dict | None:
+        return self.db.one(
+            "SELECT * FROM replay_canonical_hands WHERE id=%s",
+            (int(canonical_id),))
+
+    def source_of(self, source: str, source_hand_id: int) -> dict | None:
+        return self.db.one(_SOURCE_JOIN_SQL,
+                           (validate_source(source), int(source_hand_id)))
+
+    def sources(self, canonical_id: int) -> list[dict]:
+        """一个 canonical 下的全部源记录；primary 排第一，其次按来源、id。"""
+        return self.db.query(
+            """SELECT * FROM replay_hand_sources
+                WHERE canonical_id = %s
+                ORDER BY is_primary DESC, source, source_hand_id""",
+            (int(canonical_id),))
+
+    def list_all(self) -> list[dict]:
+        """列表首屏用：全部未被软合并的 canonical（不含大字段，宽表很小）。"""
+        return self.db.query(
+            """SELECT id, content_group, primary_source, title, hero_cards,
+                      board, hero_position, started_at, is_synthetic
+                 FROM replay_canonical_hands
+                WHERE merged_into IS NULL""")
+
+    def all_sources(self) -> list[dict]:
+        """列表首屏用：全部来源边（1191 行，轻量列）。"""
+        return self.db.query(
+            """SELECT canonical_id, source, source_hand_id, is_primary,
+                      fingerprint
+                 FROM replay_hand_sources
+                ORDER BY canonical_id, is_primary DESC, source, source_hand_id""")
+
+    def for_hand(self, hand_id: int) -> list[dict]:
+        """反查某条源记录属于哪个 canonical（详情页入口用）。"""
+        return self.db.query(
+            """SELECT canonical_id, source, source_hand_id, is_primary
+                 FROM replay_hand_sources WHERE source_hand_id = %s""",
+            (int(hand_id),))
+
+    # ── 写 ──
+
+    def upsert_source(self, *, source: str, source_hand_id: int,
+                      hero_cards: str | None = "", board: str | None = "",
+                      fingerprint: str | None = None, started_at=None,
+                      title: str | None = None, hero_position: str | None = None,
+                      is_synthetic: bool = False,
+                      linked_by: str = "auto") -> dict:
+        """把一条源记录接到 canonical 上；返回 {canonical_id, created, ...}。"""
+        src = validate_source(source)
+        hand_id = _positive_id(source_hand_id)
+
+        existing = self.source_of(src, hand_id)
+        if existing is not None:
+            canonical_id = self._resolve_merged(int(existing["canonical_id"]))
+            if canonical_id != int(existing["canonical_id"]):
+                # 人工软合并过：源记录整体改挂到保留行，旧行不删（§3.4 规则 5）
+                self.db.execute(
+                    "UPDATE replay_hand_sources SET canonical_id=%s"
+                    " WHERE source=%s AND source_hand_id=%s",
+                    (canonical_id, existing["source"], hand_id))
+                existing = self.source_of(src, hand_id) or existing
+            self._fix_fingerprint(existing, fingerprint)
+            return {"canonical_id": canonical_id,
+                    "created": False,
+                    "content_group": existing.get("content_group"),
+                    "primary_source": existing.get("primary_source")}
+
+        hero = normalize_hero_cards(hero_cards)
+        board_text = normalize_board(board)
+        started = as_datetime(started_at)
+        # 构造手牌自成一列：source=synthetic 就算调用方忘了传 is_synthetic，
+        # 也不会和真实手牌并到同一行（否则构造样本会污染真实统计）
+        synthetic = 1 if (is_synthetic or src == "synthetic") else 0
+        group = content_group_key(hero, board_text, started)
+
+        target = self._match(hero, board_text, started, synthetic)
+        if target is None:
+            canonical_id = self._create_canonical(
+                content_group=group, primary_source=src,
+                title=(title or "").strip() or None,
+                hero_cards=hero, board=board_text,
+                hero_position=(hero_position or "").strip() or None,
+                started_at=started, is_synthetic=synthetic)
+            self._insert_source(canonical_id, src, hand_id, fingerprint,
+                                linked_by, primary=1)
+            return {"canonical_id": canonical_id, "created": True,
+                    "content_group": group, "primary_source": src}
+
+        canonical_id = int(target["id"])
+        if group and not target.get("content_group"):
+            # 老行可能没算过组键（早期回填缺时间）；补上，别的列不动
+            self.db.execute(
+                """UPDATE replay_canonical_hands SET content_group=%s
+                    WHERE id=%s AND content_group IS NULL""",
+                (group, canonical_id))
+        else:
+            group = target.get("content_group") or group
+        self._insert_source(canonical_id, src, hand_id, fingerprint,
+                            linked_by, primary=0)
+        primary = self._refresh_primary(
+            canonical_id, {"source": src, "source_hand_id": hand_id})
+        return {"canonical_id": canonical_id, "created": False,
+                "content_group": group, "primary_source": primary or src}
+
+    def set_primary(self, canonical_id: int, source: str,
+                    source_hand_id: int | None = None) -> dict:
+        """人工指定 primary；不给 hand_id 时取该来源 id 最小的一条。"""
+        src = validate_source(source)
+        canonical_id = int(canonical_id)
+        if source_hand_id is None:
+            row = self.db.one(
+                """SELECT source_hand_id FROM replay_hand_sources
+                    WHERE canonical_id=%s AND source=%s
+                    ORDER BY source_hand_id LIMIT 1""",
+                (canonical_id, src))
+            if row is None:
+                raise ApiError("SOURCE_NOT_FOUND",
+                               f"canonical {canonical_id} 没有 {src} 来源记录", 404)
+            hand_id = int(row["source_hand_id"])
+        else:
+            hand_id = _positive_id(source_hand_id)
+            found = self.db.one(
+                """SELECT 1 AS ok FROM replay_hand_sources
+                    WHERE canonical_id=%s AND source=%s AND source_hand_id=%s""",
+                (canonical_id, src, hand_id))
+            if found is None:
+                raise ApiError(
+                    "SOURCE_NOT_FOUND",
+                    f"canonical {canonical_id} 没有 {src}:{hand_id} 这条来源记录", 404)
+        self._write_primary(canonical_id, src, hand_id)
+        return {"canonical_id": canonical_id, "primary_source": src}
+
+    # ── 内部 ──
+
+    def _resolve_merged(self, canonical_id: int) -> int:
+        """沿 `merged_into` 走到人工合并后保留的那一行（链最多走 8 层）。
+
+        软合并只改指针、不删行；源记录跟着指针走，历史和审计都还在（§3.4 规则 5）。
+        """
+        current = int(canonical_id)
+        for _ in range(MERGE_CHAIN_LIMIT):
+            row = self.db.one(
+                "SELECT merged_into FROM replay_canonical_hands WHERE id=%s",
+                (current,))
+            if row is None or row.get("merged_into") in (None, 0):
+                return current
+            current = int(row["merged_into"])
+        return current
+
+    def _match(self, hero: str, board: str, started, synthetic: int):
+        if started is None:
+            return None
+        rows = self.db.query(
+            _CANDIDATE_SQL,
+            (hero, board, synthetic, started - MATCH_WINDOW,
+             started + MATCH_WINDOW))
+        return pick_candidate(rows, started)
+
+    def _create_canonical(self, *, content_group, primary_source, title,
+                          hero_cards, board, hero_position, started_at,
+                          is_synthetic) -> int:
+        return int(self.db.execute(
+            _INSERT_CANONICAL_SQL,
+            (content_group, primary_source, title, hero_cards,
+             board, hero_position, started_at, is_synthetic)))
+
+    def _insert_source(self, canonical_id: int, source: str, hand_id: int,
+                       fingerprint: str | None, linked_by: str,
+                       primary: int) -> None:
+        self.db.execute(_INSERT_SOURCE_SQL,
+                        (canonical_id, source, hand_id, fingerprint, primary,
+                         linked_by))
+
+    def _fix_fingerprint(self, existing: dict, fingerprint: str | None) -> None:
+        if not fingerprint or fingerprint == existing.get("fingerprint"):
+            return
+        self.db.execute(
+            """UPDATE replay_hand_sources SET fingerprint=%s
+                WHERE source=%s AND source_hand_id=%s""",
+            (fingerprint, existing["source"], int(existing["source_hand_id"])))
+
+    def _refresh_primary(self, canonical_id: int, added: dict) -> str | None:
+        rows = self.db.query(_PRIMARY_ROWS_SQL, (canonical_id,))
+        if not rows:
+            return None
+        current = next((r for r in rows if int(r.get("is_primary") or 0) == 1), None)
+        if current is None:
+            chosen = primary_row(rows)
+        elif rank_key(added) < rank_key(current):
+            chosen = added
+        else:
+            return str(current["source"])
+        if chosen is None:
+            return None
+        self._write_primary(canonical_id, str(chosen["source"]),
+                           int(chosen["source_hand_id"]))
+        return str(chosen["source"])
+
+    def _write_primary(self, canonical_id: int, source: str, hand_id: int) -> None:
+        self.db.execute(
+            """UPDATE replay_hand_sources
+                  SET is_primary = CASE WHEN source=%s AND source_hand_id=%s
+                                        THEN 1 ELSE 0 END
+                WHERE canonical_id=%s""",
+            (source, hand_id, canonical_id))
+        self.db.execute(
+            "UPDATE replay_canonical_hands SET primary_source=%s WHERE id=%s",
+            (source, canonical_id))
+
+
+def _positive_id(value) -> int:
+    try:
+        ident = int(value)
+    except (TypeError, ValueError):
+        ident = 0
+    if ident <= 0:
+        raise ApiError("BAD_SOURCE_ID", f"源记录 id 必须是正整数：{value!r}", 422)
+    return ident
+

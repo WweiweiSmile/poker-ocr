@@ -941,6 +941,12 @@ def test_http_routes_and_token() -> None:
     check(page.status_code == 200 and "window.__WB_TOKEN__" in page.text,
           "首页应可访问并注入 token")
     check("test-token-123" in page.text, "token 应注入页面")
+    link = next((line for line in page.text.splitlines() if 'id="open-console"' in line), "")
+    check(bool(link), "工作台顶部应有「打开复盘控制台」入口")
+    check('href="http://127.0.0.1:8010"' in link,
+          f"入口应指向 replay-console 的 127.0.0.1:8010：{link}")
+    check('target="_blank"' in link and 'rel="noreferrer"' in link,
+          f"入口应新窗口打开（noopener/noreferrer）：{link}")
 
     body = {"from_profile": str(PROFILE),
             "source": {"kind": "window", "spec": "window:title:WePoker-H5"}}

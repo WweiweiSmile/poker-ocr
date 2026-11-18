@@ -57,7 +57,7 @@ def _previous_stored_advice(rows, decision):
     )
 
 
-def _decision_from_row(row: dict) -> DecisionPoint:
+def decision_from_row(row: dict) -> DecisionPoint:
     snap = snapshot_from_json(row.get("snapshot_json") or "{}")
     warnings = json_load(row.get("warnings"), []) or []
     return DecisionPoint(
@@ -240,7 +240,7 @@ class Runner:
             stored_prompts = self.live_advice_repo.baseline_prompts_for_hand(hand_id)
             stored_advices = self.live_advice_repo.list_for_hand(hand_id)
             for db_row in decision_rows:
-                decision = _decision_from_row(db_row)
+                decision = decision_from_row(db_row)
                 key = (decision.street, decision.action_index)
                 decision.context = contexts.get(key, {})
                 decision.previous_advice = _previous_stored_advice(
