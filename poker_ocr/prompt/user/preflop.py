@@ -288,7 +288,7 @@ def _facing_raise_zh(sit: Situation) -> list[str]:
         else:
             lines.append(f"对加注的牌力（程序建议）：{key} 在 {label}{width_text}内"
                          f" → 可以跟注，不 4-bet（{profile_desc}；"
-                         "4-bet 默认只用 KK/AA）")
+                         "4-bet 默认是 QQ+/AK）")
     elif key in range_mod.expand_tokens(("QQ+", "AKs", "AKo")):
         lines.append(f"对加注的牌力（程序建议）：{key} 在 {label}{width_text}内"
                      " → 可以 3-bet 或跟注")

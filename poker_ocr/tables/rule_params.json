@@ -113,6 +113,27 @@
         "needs": "书页值；待本池实测校准",
         "value": 1.0
       }
+    },
+    "bb_complete_raise_bb": {
+      "v0": {
+        "source": "book:p22",
+        "verified": false,
+        "note": "SB 只补齐时 BB 加注到 3BB。",
+        "needs": "书页值；待本池实测校准",
+        "value": 3.0
+      }
+    },
+    "fourbet_multiplier": {
+      "v0": {
+        "source": "book:p25",
+        "verified": false,
+        "note": "4-bet 到对手加注的 2.2–2.5 倍。",
+        "needs": "书页值；待本池实测校准",
+        "items": [
+          2.2,
+          2.5
+        ]
+      }
     }
   }
 }
