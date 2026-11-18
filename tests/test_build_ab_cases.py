@@ -23,6 +23,8 @@ for path in (str(ROOT), str(CONSOLE)):
 from replay import case_seed, specs  # noqa: E402
 from tools.build_ab_cases import (  # noqa: E402
     build_anchor_cases,
+    dedupe_joined_rows,
+    is_eligible,
     merge_ab_set,
     plan_anchor_cases,
     select_anchors,
@@ -40,9 +42,10 @@ def row(**overrides):
     """一条形状与 replay_live_advices dump 相同的建议行。"""
     base = {
         "id": 1,
+        "canonical_id": 2_000_000_000_001,
         "street": "river",
-        "action_index": 0,
-        "decision_key": "river:pot:1",
+        "action_index": 1,
+        "decision_key": "river:2",
         "option_kind": "call",
         "actual_action": "call",
         "prompt_version": OLD,
@@ -80,8 +83,8 @@ def test_select_skips_existing_decisions():
 
 def test_version_priority_newest_first():
     rows = [
-        row(id=1, action_index=0, prompt_version=OLD),
-        row(id=2, action_index=1, prompt_version=NEW),
+        row(id=1, action_index=1, prompt_version=OLD),
+        row(id=2, action_index=2, prompt_version=NEW),
     ]
     got = select_anchors(rows, [], per_street=1, surplus=0)
     assert [item["id"] for item in got] == [2], "新版本必须排前面"
@@ -89,8 +92,8 @@ def test_version_priority_newest_first():
 
 def test_version_revision_breaks_same_day_tie():
     rows = [
-        row(id=1, action_index=0, prompt_version="lean-zh-2026-11-01.1"),
-        row(id=2, action_index=1, prompt_version="lean-zh-2026-11-01.2"),
+        row(id=1, action_index=1, prompt_version="lean-zh-2026-11-01.1"),
+        row(id=2, action_index=2, prompt_version="lean-zh-2026-11-01.2"),
     ]
     got = select_anchors(rows, [], per_street=1, surplus=0)
     assert [item["id"] for item in got] == [2]
@@ -98,15 +101,15 @@ def test_version_revision_breaks_same_day_tie():
 
 def test_round_robin_balances_option_kinds():
     rows = [
-        row(id=1, external_uid=hand(1), action_index=0,
+        row(id=1, external_uid=hand(1), action_index=1,
             option_kind="fold", prompt_version=NEW),
-        row(id=2, external_uid=hand(2), action_index=0,
+        row(id=2, external_uid=hand(2), action_index=1,
             option_kind="fold", prompt_version=OLD),
-        row(id=3, external_uid=hand(3), action_index=0,
+        row(id=3, external_uid=hand(3), action_index=1,
             option_kind="fold", prompt_version=OLD),
-        row(id=4, external_uid=hand(4), action_index=0,
+        row(id=4, external_uid=hand(4), action_index=1,
             option_kind="bet", prompt_version=OLD),
-        row(id=5, external_uid=hand(5), action_index=0,
+        row(id=5, external_uid=hand(5), action_index=1,
             option_kind="call", prompt_version=OLD),
     ]
     got = select_anchors(rows, [], per_street=4, surplus=0)
@@ -115,7 +118,8 @@ def test_round_robin_balances_option_kinds():
 
 
 def test_per_hand_capped_at_two():
-    rows = [row(id=i, external_uid=hand(7), action_index=i) for i in range(3)]
+    rows = [row(id=i + 1, external_uid=hand(7), action_index=i + 1)
+            for i in range(3)]
     rows.append(row(id=9, external_uid=hand(8), action_index=9))
     got = select_anchors(rows, [], per_street=3, surplus=0)
     assert len(got) == 3
@@ -150,7 +154,8 @@ def test_note_is_fixed_traceability_format():
         external_uid=hand(3))
     case = build_anchor_cases([diverged])[0]
     assert case["note"] == (
-        f"锚点：advice_row=7 hand={hand(3)} street=river action_index=3 "
+        f"锚点：advice_row=7 hand={hand(3)} canonical=2000000000001 "
+        f"street=river action_index=3 "
         f"version={NEW} 建议=bet｜真实动作=check "
         f"decision=river:pot:2｜分歧"
     ), case["note"]
@@ -167,11 +172,54 @@ def test_note_omits_empty_decision_key():
             row(id=11, decision_key=empty, actual_action="call")])[0]["note"]
         assert " decision=" not in note, note
         assert note.endswith("建议=call｜真实动作=call"), note
-        assert "street=river" in note and "action_index=0" in note, note
+        assert "street=river" in note and "action_index=1" in note, note
 
     note = build_anchor_cases([
         row(id=12, decision_key="river:pot:3")])[0]["note"]
     assert note.endswith("真实动作=call decision=river:pot:3"), note
+
+
+def test_rows_without_canonical_are_ineligible():
+    assert not is_eligible(row(canonical_id=None)), "缺 canonical 不能做锚点"
+    assert not is_eligible(row(canonical_id=0)), "canonical=0 视为缺"
+    try:
+        select_anchors([row(canonical_id=None)], [], per_street=1,
+                       surplus=0, streets=("river",))
+    except ValueError as exc:
+        assert str(exc).startswith("锚点不足："), str(exc)
+    else:
+        raise AssertionError("没有 canonical 必须凑不够而 raise")
+
+
+def test_action_index_zero_is_skipped():
+    # seed 的 _seed_target 把 0 当缺失（`or -1`），这类点落库必挂，先跳过。
+    assert not is_eligible(row(action_index=0))
+    try:
+        select_anchors([row(action_index=0)], [], per_street=1,
+                       surplus=0, streets=("river",))
+    except ValueError as exc:
+        assert "river 需新增 1 条、只凑到 0 条（缺 1）" in str(exc), str(exc)
+    else:
+        raise AssertionError("action_index=0 必须被跳过")
+
+
+def test_dedupe_joined_rows_keeps_first_per_canonical_decision():
+    rows = [
+        row(id=1, canonical_id=2_000_000_000_009, external_uid=hand(1)),
+        row(id=2, canonical_id=2_000_000_000_009, external_uid=hand(2)),
+        row(id=3, canonical_id=2_000_000_000_009, street="flop"),
+        row(id=4, canonical_id=2_000_000_000_010, external_uid=hand(3)),
+    ]
+    got = dedupe_joined_rows(rows)
+    assert [item["id"] for item in got] == [1, 3, 4],         "同一 canonical 决策点只留第一条，不同街/别的 canonical 保留"
+
+
+def test_note_derives_decision_key_from_seq():
+    note = build_anchor_cases([
+        row(id=21, street="turn", action_index=2, decision_key="",
+            seq=4)])[0]["note"]
+    assert " decision=turn:4" in note, note
+    assert note.endswith("建议=call｜真实动作=call decision=turn:4"), note
 
 
 def test_case_fields_match_ab_set_schema():
@@ -226,7 +274,8 @@ def test_output_passes_plan_seed_validation():
 
 
 def test_selection_is_deterministic():
-    rows = [row(id=i, external_uid=hand(i), action_index=i) for i in range(6)]
+    rows = [row(id=i + 1, external_uid=hand(i + 1), action_index=i + 1)
+            for i in range(6)]
     first = select_anchors(rows, [], per_street=3, surplus=0)
     second = select_anchors(rows, [], per_street=3, surplus=0)
     assert first == second
