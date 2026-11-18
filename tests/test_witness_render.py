@@ -95,11 +95,16 @@ def test_nine_seats_budget() -> None:
         rows += rows_for(f"p{i}", "weak_ace_top_pair", 3, seat=f"s{i}", ts0=i * 10)
         rows += rows_for(f"p{i}", "two_pair_plus", 2, seat=f"s{i}", ts0=i * 10 + 5)
     got = R.render_witness_lines(rows, seats=seats, max_chars=600)
-    check(len(got) == 9, f"600 下 9 个座位都出：{len(got)}")
-    check(all(len(lines) == 2 for lines in got.values()), "每座位 2 条")
+    # #69：池级证据整段只出一次，放在保留键 POOL_KEY 下（不再借给每个座位）。
+    pool = got.get(R.POOL_KEY, ())
+    personal = {k: v for k, v in got.items() if k != R.POOL_KEY}
+    check(len(personal) == 9, f"600 下 9 个座位都出：{len(personal)}")
+    check(all(len(lines) == 2 for lines in personal.values()), "每座位 2 条")
     total = sum(len(line) + 1 for lines in got.values() for line in lines)
     check(total <= 600, f"总预算 ≤600：{total}")
-    check(list(got) == list(seats), "座位按入参顺序（近→远）")
+    check(list(personal) == list(seats), "座位按入参顺序（近→远）")
+    check(len(pool) <= 2, f"池级证据最多 2 条：{len(pool)}")
+    check(list(got)[-1] == R.POOL_KEY if pool else True, "池级证据排在最后")
     check(all(line.startswith(PREFIX) for lines in got.values() for line in lines),
           "每行都带前缀")
 
@@ -158,15 +163,18 @@ def test_pool_layer() -> None:
 
     twenty = nineteen + rows_for("someone", "weak_ace_top_pair", 1, seat="s9", ts0=19)
     got = R.render_witness_lines(twenty, seats=seats)
-    check(len(got.get("s1", ())) == 1, f"池级 n=20 出比例线：{got}")
-    check("100%" in got["s1"][0] and "20 次" in got["s1"][0], f"比例与次数：{got}")
+    pool = got.get(R.POOL_KEY, ())
+    check(len(pool) == 1, f"池级 n=20 出比例线：{got}")
+    check("100%" in pool[0] and "20 次" in pool[0], f"比例与次数：{got}")
+    check("s1" not in got, f"池级句不挂到没有个人证据的座位：{got}")
 
     mixed = twenty + []
     for i in range(20):
         mixed += rows_for("someone", "two_pair_plus", 1, seat="s9", ts0=100 + i)
     got = R.render_witness_lines(mixed, seats=seats)
-    check(len(got.get("s1", ())) == 2, f"池级最多 2 条：{got}")
-    check(all("50%" in line for line in got["s1"]), f"各 50%：{got}")
+    pool = got.get(R.POOL_KEY, ())
+    check(len(pool) == 2, f"池级最多 2 条：{got}")
+    check(all("50%" in line for line in pool), f"各 50%：{got}")
 
 
 def test_invalid_rows_skipped() -> None:
@@ -201,7 +209,7 @@ def test_forbidden_words_absent() -> None:
     for i in range(30):
         pool_rows += rows_for("someone", "air_high_card", 1, seat="s9", ts0=i)
     pool = R.render_witness_lines(pool_rows, seats=seats)
-    lines = [line for lines in (personal, pool) for line in lines.get("s1", ())]
+    lines = list(personal.get("s1", ())) + list(pool.get(R.POOL_KEY, ()))
     check(len(lines) >= 2, "禁词断言需要至少两行样本文本")
     for word in R.forbidden_words():
         check(all(word not in line for line in lines), f"禁词「{word}」不得出现在证据行")

@@ -1,0 +1,355 @@
+{
+  "schema": 1,
+  "rules": [
+    {
+      "id": "pf.rfi.first_in",
+      "version": 1,
+      "slot": "intent",
+      "street": "preflop",
+      "node": "第一个入池",
+      "preconditions": [
+        {
+          "fact": "street",
+          "eq": "preflop"
+        },
+        {
+          "fact": "limpers_before",
+          "eq": 0
+        },
+        {
+          "fact": "raises_before",
+          "eq": 0
+        },
+        {
+          "fact": "hand_in_open_range",
+          "eq": true
+        },
+        {
+          "fact": "ante_bb",
+          "lte": 0
+        },
+        {
+          "fact": "hero_position",
+          "not_in": [
+            "SB",
+            "BB"
+          ]
+        }
+      ],
+      "why": "第一个入池只加注，减少对手并让翻后好判断",
+      "action": "raise",
+      "size": {
+        "table": "rule_params",
+        "name": "open_size_bb",
+        "unit": "bb",
+        "key": "position_group"
+      },
+      "source": {
+        "book": "德州扑克小绿皮书",
+        "page": 18,
+        "status": "verbatim"
+      },
+      "confidence": "book",
+      "verified": false
+    },
+    {
+      "id": "pf.rfi.overlimp",
+      "version": 1,
+      "slot": "intent",
+      "street": "preflop",
+      "node": "大前注桌的溜入例外",
+      "preconditions": [
+        {
+          "fact": "street",
+          "eq": "preflop"
+        },
+        {
+          "fact": "ante_bb",
+          "gte": 5
+        },
+        {
+          "fact": "limpers_before",
+          "gte": 2
+        },
+        {
+          "fact": "hand_in_open_range",
+          "eq": false
+        },
+        {
+          "fact": "hero_position",
+          "in": [
+            "CO",
+            "BTN",
+            "SB",
+            "BB"
+          ]
+        },
+        {
+          "fact": "raises_before",
+          "eq": 0
+        }
+      ],
+      "why": "9 人前注 6BB 死钱，1BB 跟注只占 14% 破价",
+      "action": "call",
+      "source": {
+        "book": "德州扑克小绿皮书",
+        "page": 19,
+        "status": "rebuilt"
+      },
+      "confidence": "book",
+      "verified": false
+    },
+    {
+      "id": "pf.iso.limp",
+      "version": 1,
+      "slot": "intent",
+      "street": "preflop",
+      "node": "隔离 1–2 个溜入者",
+      "preconditions": [
+        {
+          "fact": "street",
+          "eq": "preflop"
+        },
+        {
+          "fact": "limpers_before",
+          "in": [
+            1,
+            2
+          ]
+        },
+        {
+          "fact": "raises_before",
+          "eq": 0
+        },
+        {
+          "fact": "in_position",
+          "eq": true
+        },
+        {
+          "fact": "hand_in_open_range",
+          "eq": true
+        },
+        {
+          "fact": "hero_position",
+          "not_in": [
+            "SB",
+            "BB"
+          ]
+        }
+      ],
+      "why": "有位置惩罚溜入者，翻后可 c-bet 也可过牌",
+      "action": "raise",
+      "size": {
+        "table": "rule_params",
+        "name": "iso_size_per_limper",
+        "unit": "bb",
+        "per": "limpers_before"
+      },
+      "source": {
+        "book": "德州扑克小绿皮书",
+        "page": 23,
+        "status": "verbatim"
+      },
+      "confidence": "book",
+      "verified": false
+    },
+    {
+      "id": "pf.sb.complete.no_ante",
+      "version": 1,
+      "slot": "intent",
+      "street": "preflop",
+      "node": "SB 无前注",
+      "preconditions": [
+        {
+          "fact": "street",
+          "eq": "preflop"
+        },
+        {
+          "fact": "hero_position",
+          "eq": "SB"
+        },
+        {
+          "fact": "limpers_before",
+          "eq": 0
+        },
+        {
+          "fact": "raises_before",
+          "eq": 0
+        },
+        {
+          "fact": "ante_bb",
+          "eq": 0
+        },
+        {
+          "fact": "opp_pfr",
+          "lte": 15
+        }
+      ],
+      "why": "位置差，平跟（25%）只为便宜看翻牌且要 BB 不爱加注",
+      "action": "raise",
+      "source": {
+        "book": "德州扑克小绿皮书",
+        "page": 21,
+        "status": "verbatim"
+      },
+      "confidence": "book",
+      "verified": false
+    },
+    {
+      "id": "pf.sb.ante",
+      "version": 1,
+      "slot": "intent",
+      "street": "preflop",
+      "node": "SB 有前注",
+      "preconditions": [
+        {
+          "fact": "street",
+          "eq": "preflop"
+        },
+        {
+          "fact": "hero_position",
+          "eq": "SB"
+        },
+        {
+          "fact": "raises_before",
+          "eq": 0
+        },
+        {
+          "fact": "ante_bb",
+          "between": [
+            0.01,
+            4.99
+          ]
+        }
+      ],
+      "why": "前注让偷盲变便宜，几乎都打；75% 加注、15% 弱牌平跟、5% 强牌平跟",
+      "action": "raise",
+      "source": {
+        "book": "德州扑克小绿皮书",
+        "page": 22,
+        "status": "rebuilt"
+      },
+      "confidence": "book",
+      "verified": false
+    },
+    {
+      "id": "pf.bb.vs_complete",
+      "version": 1,
+      "slot": "intent",
+      "street": "preflop",
+      "node": "SB 只补齐",
+      "preconditions": [
+        {
+          "fact": "street",
+          "eq": "preflop"
+        },
+        {
+          "fact": "hero_position",
+          "eq": "BB"
+        },
+        {
+          "fact": "limpers_before",
+          "eq": 1
+        },
+        {
+          "fact": "raises_before",
+          "eq": 0
+        },
+        {
+          "fact": "ante_bb",
+          "eq": 0
+        }
+      ],
+      "why": "SB 位置差且未示强，加注多半直接拿下",
+      "action": "raise",
+      "size": {
+        "table": "rule_params",
+        "name": "bb_complete_raise_bb",
+        "unit": "bb"
+      },
+      "source": {
+        "book": "德州扑克小绿皮书",
+        "page": 22,
+        "status": "verbatim"
+      },
+      "confidence": "book",
+      "verified": false
+    },
+    {
+      "id": "pf.threebet.size",
+      "version": 1,
+      "slot": "size",
+      "street": "preflop",
+      "node": "3-bet 尺寸",
+      "preconditions": [
+        {
+          "fact": "street",
+          "eq": "preflop"
+        },
+        {
+          "fact": "raises_before",
+          "eq": 1
+        },
+        {
+          "fact": "hand_in_3bet_range",
+          "eq": true
+        }
+      ],
+      "why": "有位置跟注设陷阱，无位置加注尽早结束",
+      "size": {
+        "table": "rule_params",
+        "name": "threebet_multiplier",
+        "unit": "raise",
+        "key": "in_position"
+      },
+      "source": {
+        "book": "德州扑克小绿皮书",
+        "page": 25,
+        "status": "verbatim"
+      },
+      "confidence": "book",
+      "verified": false
+    },
+    {
+      "id": "pf.fourbet.premium",
+      "version": 1,
+      "slot": "intent",
+      "street": "preflop",
+      "node": "4-bet",
+      "preconditions": [
+        {
+          "fact": "street",
+          "eq": "preflop"
+        },
+        {
+          "fact": "raises_before",
+          "gte": 2
+        },
+        {
+          "fact": "hand_label",
+          "in": [
+            "AA",
+            "KK",
+            "QQ",
+            "AKs",
+            "AKo"
+          ]
+        }
+      ],
+      "why": "QQ/KK 翻牌被 A 盖的概率高，翻前把钱放进去",
+      "action": "raise",
+      "size": {
+        "table": "rule_params",
+        "name": "fourbet_multiplier",
+        "unit": "raise"
+      },
+      "source": {
+        "book": "德州扑克小绿皮书",
+        "page": 25,
+        "status": "verbatim"
+      },
+      "confidence": "book",
+      "verified": false
+    }
+  ]
+}

@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Callable, Iterable, Mapping, Sequence
 
 from .positions import POSITIONS_BY_TABLE_SIZE
+from .witness.render import POOL_KEY
 
 # 分类器版本：规则/阈值改动时递增，画像文件里会记录，重建时能看出差异。
 CLASSIFIER_VERSION = "rules-2026-10-30e"
@@ -2831,8 +2832,12 @@ def render_reads_zh(reads: Iterable[OpponentRead],
         if not seat or seat not in positions:
             continue
         rows.append((positions[seat], read))
+    pool = _pool_witness_lines(witness_by_seat)
     if not rows:
-        return []
+        # 池级证据与具体座位无关，没有座位画像时它也能单独成段。
+        if not pool:
+            return []
+        return ([header] if header else []) + pool
     if not preserve_input_order:
         rows.sort(key=lambda item: _reads_sort_key(item[0]))
     lines = [header] if header else []
@@ -2876,7 +2881,20 @@ def render_reads_zh(reads: Iterable[OpponentRead],
                 evidence = exploit.split("——")[0].split("；")[0].strip()
                 if evidence:
                     lines.append(f"  可剥削证据：{evidence}")
+    if pool:
+        # 池级证据整段只出一次，空行隔开、不缩进——它不是任何一个座位的属性，
+        # 挂到座位下会让同一对句子按座位数重复（#38 验收口径）。
+        lines.append("")
+        lines.extend(pool)
     return lines
+
+
+def _pool_witness_lines(
+    witness_by_seat: "Mapping[str, Iterable[str]] | None",
+) -> list[str]:
+    if not witness_by_seat:
+        return []
+    return [text for text in witness_by_seat.get(POOL_KEY) or () if text]
 
 
 def _mark(read: OpponentRead, names: tuple[str, ...], text: str) -> str:

@@ -6,13 +6,28 @@
 
 from __future__ import annotations
 
+from ...coach import _has_run, rank_char
 from ...ground_truth import GroundTruth, card_text
 from ..shared.labels import _SUIT_ZH
 
 
 def _board_structure_zh(gt: GroundTruth) -> str:
+    """牌面结构（一行）：花色 / 顺子 / 公对 / 同花张数 / 连接 / 单张成顺。
+
+    前三段是既有口径（成花面/花听面/彩虹面、顺子可能、公对面），文案语义不动；
+    后面三段是票 70 新补的、给「按牌面选尺寸」用的轴：
+
+      · 同花：<花色> <n> 张 —— 只在 ≥3 张（三张同花面）时出，花听已有「花听面」；
+      · 连接：<n> 连       —— 公共牌最长连续点数串（3 连=顺面），A 可作 1；
+      · 单张成顺（<点数>）/ 多张成顺（<n> 个点）—— 河牌没下一张牌，不渲染。
+
+    缺数据就少一段（不编、不猜），每段自成一项，调用方拼进「牌面结构：」一行。
+    """
     b = gt.board_info
-    on_river = len(gt.board) >= 5
+    board = gt.board
+    if len(board) < 3:
+        return ""
+    on_river = len(board) >= 5
     if b.flush_made_possible:
         flush = "成花面（同花已可能）"
     elif b.flush_draw_possible and not on_river:
@@ -22,8 +37,70 @@ def _board_structure_zh(gt: GroundTruth) -> str:
     else:
         flush = "彩虹面（无同花可能）"
     straight = "顺子可能" if b.straight_possible else "顺子不可能"
-    paired = "公对面：是" if b.paired else "公对面：否"
-    return "｜".join((flush, straight, paired))
+    if not b.paired:
+        paired = "公对面：否"
+    elif b.quads:
+        paired = "公对面：是（四条）"
+    elif b.trips:
+        paired = "公对面：是（三条）"
+    else:
+        paired = "公对面：是"
+    parts = [flush, straight, paired]
+
+    suit_run = _suit_run(board)
+    if suit_run is not None and suit_run[1] >= 3:
+        suit, count = suit_run
+        parts.append(f"同花：{_SUIT_ZH.get(suit, suit)} {count} 张")
+
+    ranks = {rank for rank, _suit in board}
+    run = _longest_run(ranks)
+    if run >= 5:
+        parts.append("连接：牌面成顺")
+    elif run >= 3:
+        parts.append(f"连接：{run} 连")
+
+    if not on_river:
+        makers = _straight_makers(ranks)
+        if len(makers) == 1:
+            parts.append(f"单张成顺（{rank_char(makers[0])}）")
+        elif len(makers) >= 2:
+            parts.append(f"多张成顺（{len(makers)} 个点）")
+    return "｜".join(parts)
+
+
+def _suit_run(board) -> tuple[str, int] | None:
+    """牌面最多的花色与张数；空牌面返回 None。"""
+    counts: dict[str, int] = {}
+    for _rank, suit in board:
+        counts[suit] = counts.get(suit, 0) + 1
+    if not counts:
+        return None
+    return max(counts.items(), key=lambda item: (item[1], item[0]))
+
+
+def _longest_run(ranks: set[int]) -> int:
+    """最长连续点数串（A 可作 1）：3=三连、5=牌面自己已经成顺。"""
+    ext = set(ranks)
+    if 12 in ranks:                                   # A（coach 里 A=12）当 1 用
+        ext.add(-1)
+    best = 0
+    for low in range(-1, 13):
+        length = 0
+        while (low + length) in ext:
+            length += 1
+        best = max(best, length)
+    return best
+
+
+def _straight_makers(ranks: set[int]) -> list[int]:
+    """再发一张什么点数会让**公共牌自己**成顺（A 可作 1 或最高张）。"""
+    out: list[int] = []
+    for cand in range(13):
+        if cand in ranks:
+            continue
+        if _has_run(ranks | {cand}, 5):
+            out.append(cand)
+    return out
 
 
 def _street_change_zh(gt: GroundTruth) -> str:
