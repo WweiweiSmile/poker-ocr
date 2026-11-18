@@ -41,11 +41,12 @@ from poker_ocr.hand_track import (  # noqa: E402
 from poker_ocr.parse import Blinds  # noqa: E402
 from poker_ocr.prompt.user.rules import render_rules_zh  # noqa: E402
 
-# 接入规则段之前（lean-zh-2026-11-16.3）整段 prompt 的 sha256：
+# lean-zh-2026-11-18.1 下整段 prompt 的 sha256：
 #   sha256(system + "\n---\n" + user)，fixture 见下面 _flop_sit()。
-# 空台账时这个值必须一直成立——它就是「一个字节都不变」的证据。
+# 空台账时这个值必须一直成立——它就是「规则段一个字都不加」的证据；
+# 提示词版本 bump（#69 删散装句）后基线随之更新，规则段本身仍须贡献 0 字节。
 EMPTY_LEDGER_PROMPT_HASH = (
-    "86b1de13fc2d40317be4c6a93678b7d7386b42063749760e3652ded8b8780adc"
+    "8b6cda7d2323aaa5329fcabf3cb8711ee62af6c654c8412b2b69b17ea893645a"
 )
 
 # 「牌力段之后、render_options_zh 之前」的锚点：这两行必须把规则段夹在中间。

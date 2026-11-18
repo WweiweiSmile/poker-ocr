@@ -43,6 +43,8 @@ PHRASING_PATH = Path(__file__).resolve().parent.parent / "tables" / "witness_phr
 
 POOL_MIN_COUNT = 20  # §10.2：池级比例线 n≥20 才出
 SEATS_MAX_LINES = 2
+# 池级证据的保留键：它不是座位，整段只出一次，调用方独立成段、不缩进。
+POOL_KEY = "__pool__"
 ENV_FLAG = "WITNESS_PROMPT"
 
 DEFAULT_PHRASING: dict[str, Any] = {
@@ -314,6 +316,9 @@ def render_witness_lines(
 ) -> dict[str, tuple[str, ...]]:
     """witness.rows → {seat: (行, 行)}；0 条返回 {}（§14.5 不写占位）。
 
+    个人摊牌证据按座位分组；没有个人证据的座位**不再**借用池级句——池级证据
+    描述全桌，整段只出一次，放在保留键 `POOL_KEY` 下（调用方独立成段、不缩进）。
+
     seats 是「由近到远」的有序 seat→player（调用方按 hero 下注后行动顺序给）。
     rows 可以是行列表，也可以是 {"version": ..., "rows": [...]} 的 profiles.witness。
     """
@@ -339,18 +344,16 @@ def render_witness_lines(
     hero = str(hero_seat) if hero_seat is not None else None
     out: dict[str, tuple[str, ...]] = {}
     used = 0
+    exhausted = False
     for seat, player in items:
         if hero is not None and seat == hero:
             continue
         try:
             lines = _personal_lines(admitted, player, table, SEATS_MAX_LINES)
-            if not lines:
-                lines = _pool_lines(counts, totals, table, SEATS_MAX_LINES)
         except Exception:  # noqa: BLE001 - 单座位异常只丢这一座位
             log.warning("witness 渲染失败，跳过座位 %s", seat, exc_info=True)
             continue
         emitted: list[str] = []
-        exhausted = False
         for line in lines:
             cost = len(line) + 1
             if used + cost > max_chars:
@@ -362,4 +365,22 @@ def render_witness_lines(
             out[seat] = tuple(emitted)
         if exhausted:
             break
+    # 池级证据描述的是这张桌子整体，与具体座位无关：全局只出一次，放在
+    # POOL_KEY 这个保留键下，由调用方独立成段；挂到每个座位上会把同一对
+    # 句子按座位数重复（#38 验收里 42% 的证据行是这么来的）。
+    if not exhausted:
+        try:
+            pool = _pool_lines(counts, totals, table, SEATS_MAX_LINES)
+        except Exception:  # noqa: BLE001 - 池级失败只丢池级
+            log.warning("witness 池级证据渲染失败", exc_info=True)
+            pool = ()
+        emitted = []
+        for line in pool:
+            cost = len(line) + 1
+            if used + cost > max_chars:
+                break
+            emitted.append(line)
+            used += cost
+        if emitted:
+            out[POOL_KEY] = tuple(emitted)
     return out

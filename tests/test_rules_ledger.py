@@ -596,7 +596,7 @@ def test_new_predicates_fail_open_without_data() -> None:
 
 
 def test_rule_params_table_entries() -> None:
-    """rule_params 十个条目都能被 table() 取到，值与来源符合书页（票 68）。"""
+    """rule_params 十二个条目都能被 table() 取到，值与来源符合书页（票 68/69）。"""
     from poker_ocr.strategy_tables import table as strategy_table
 
     expected = {
@@ -613,6 +613,9 @@ def test_rule_params_table_entries() -> None:
         "block_bet": ("value", 0.25, "book:p33"),
         "river_value_band": ("items", (0.66, 1.0), "book:p52"),
         "iso_size_per_limper": ("value", 1.0, "book:p23"),
+        # 票 69：规则 6/8 要引用、规则里又不许写数字，所以补这两条。
+        "bb_complete_raise_bb": ("value", 3.0, "book:p22"),
+        "fourbet_multiplier": ("items", (2.2, 2.5), "book:p25"),
     }
     for name, (kind, want, source) in expected.items():
         entry = strategy_table("rule_params", name)

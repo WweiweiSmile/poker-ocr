@@ -72,7 +72,7 @@ def facts_snapshot(sit: Any) -> dict[str, Any]:
     _put(out, "effective_stack_bb", _num(_guard(_effective_stack, snap)))
 
     _put(out, "hero_hand_tier", getattr(sit, "hand_tier", None))
-    _put(out, "hand_label", getattr(sit, "hand_label", None))
+    _put(out, "hand_label", _hand_label(sit, snap))
     # 牌力没读出来时 `has_draw`/`outs` 都是 0 而不是「没有听牌」，同样不出面。
     if getattr(sit, "hand_tier", None) is not None:
         _put(out, "has_draw", bool(getattr(sit, "has_draw", False)))
@@ -166,11 +166,31 @@ def _ante_bb(snap) -> float | None:
     口径证据：`poker_ocr/parse.py:189-191` 把 `Blinds.sb/bb/ante` 的字段
     单位写成 BB，`parse_blinds` 在 `:219-221` 用 `ante_chips / bb_chips`
     把横幅里的筹码数折成 BB；`poker_ocr/prompt/system/__init__.py:52-53`
-    也按「前注 {ante}BB」渲染。所以这里只做「>0 才出面」的门控，绝不乘除。
+    也按「前注 {ante}BB」渲染。所以这里只做门控，绝不乘除。
+
+    `0` 是**明确读到「没有前注」**，要出面——规则要靠 `ante_bb<=0` 把无前注
+    桌与有前注桌切开（pf.rfi.first_in / pf.sb.complete.no_ante）；`None` 才是
+    「读不到」，那时不出面（fail open）。
     """
     ante = getattr(getattr(snap, "blinds", None), "ante", None)
     number = _num(ante)
-    return number if number and number > 0 else None
+    return number if number is not None and number >= 0 else None
+
+
+def _hand_label(sit: Any, snap) -> str | None:
+    """翻前用 169 键（`AA`/`AKs`/`42s`），翻后沿用牌型标签。
+
+    翻前 `Situation._read` 直接返回 None，所以 `sit.hand_label` 翻前恒缺；
+    规则要写「QQ+/AK」这类翻前口径只能从底牌现算——`hand_key` 与范围表
+    同一份契约，绝不另造一套命名。
+    """
+    if snap.street == PREFLOP:
+        cards = tuple(getattr(snap, "hero_cards", ()) or ())
+        if len(cards) != 2:
+            return None
+        key = _guard(hand_key, cards)
+        return key if isinstance(key, str) and key else None
+    return getattr(sit, "hand_label", None)
 
 
 def _previous_line(sit: Any) -> str | None:

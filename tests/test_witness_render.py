@@ -158,15 +158,18 @@ def test_pool_layer() -> None:
 
     twenty = nineteen + rows_for("someone", "weak_ace_top_pair", 1, seat="s9", ts0=19)
     got = R.render_witness_lines(twenty, seats=seats)
-    check(len(got.get("s1", ())) == 1, f"池级 n=20 出比例线：{got}")
-    check("100%" in got["s1"][0] and "20 次" in got["s1"][0], f"比例与次数：{got}")
+    pool = got.get(R.POOL_KEY, ())
+    check(len(pool) == 1, f"池级 n=20 出比例线：{got}")
+    check("100%" in pool[0] and "20 次" in pool[0], f"比例与次数：{got}")
+    check("s1" not in got, f"池级句不挂到没有个人证据的座位：{got}")
 
     mixed = twenty + []
     for i in range(20):
         mixed += rows_for("someone", "two_pair_plus", 1, seat="s9", ts0=100 + i)
     got = R.render_witness_lines(mixed, seats=seats)
-    check(len(got.get("s1", ())) == 2, f"池级最多 2 条：{got}")
-    check(all("50%" in line for line in got["s1"]), f"各 50%：{got}")
+    pool = got.get(R.POOL_KEY, ())
+    check(len(pool) == 2, f"池级最多 2 条：{got}")
+    check(all("50%" in line for line in pool), f"各 50%：{got}")
 
 
 def test_invalid_rows_skipped() -> None:
@@ -201,7 +204,7 @@ def test_forbidden_words_absent() -> None:
     for i in range(30):
         pool_rows += rows_for("someone", "air_high_card", 1, seat="s9", ts0=i)
     pool = R.render_witness_lines(pool_rows, seats=seats)
-    lines = [line for lines in (personal, pool) for line in lines.get("s1", ())]
+    lines = list(personal.get("s1", ())) + list(pool.get(R.POOL_KEY, ()))
     check(len(lines) >= 2, "禁词断言需要至少两行样本文本")
     for word in R.forbidden_words():
         check(all(word not in line for line in lines), f"禁词「{word}」不得出现在证据行")

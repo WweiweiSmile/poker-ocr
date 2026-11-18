@@ -116,5 +116,14 @@ from __future__ import annotations
 # 「对手见 A 易弃」的额外修正：该口径是 .table_dy 现场观察（当前文件为空），
 # 表况统计也没有牌面高度维度，先靠本手条件弃牌率。依据
 # docs/两高张-miss-cbet-研究-2026-11-16.md §A 与 coach 改动（同一提交）。
-PROMPT_VERSION = "lean-zh-2026-11-16.3"
+# 2026-11-18.1：规则台账落地（#63 系列，#69）——首批翻前 8 条规则进
+# poker_ocr/rules/ledger/preflop.json，由渲染器输出「规则:」/「尺寸:」两行，
+# 尺寸只引用 rule_params（规则里不写数字）；同批删掉被规则取代的散装句：
+# aggression 的 PFR 目标频率 / 隔离接近 100% / SB 不补齐，preflop 的
+# 「4-bet 默认只用 KK/AA」改为 QQ+/AK。翻前事实补 hand_label（翻前用 169 键
+# 现算）与 ante_bb=0（明确无前注要出面，规则靠它切开有无前注）。依据
+# docs/规则台账-设计-2026-11-18.md §2/§3/§4/§6/§10 与
+# docs/规则台账-首批20条.md §0.2/§1/§4/§5。这是 spec #63 的定版版本号，
+# 后续 #70/#71 只更新 golden hash，不再改 PROMPT_VERSION。
+PROMPT_VERSION = "lean-zh-2026-11-18.1"
 PROMPT_LANGUAGE = "zh"

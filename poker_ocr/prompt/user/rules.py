@@ -8,9 +8,15 @@
     动作中文：check→过牌 call→跟注 fold→弃牌 raise→加注 bet→下注 allin→全下。
   · size 行：`尺寸: <node> → <尺寸文字> [书 p<page>]`
     尺寸文字由 `rule.size = {"table": …, "name": …}` 经 `strategy_tables.table()`
-    解析出 `value` 得到（规则里不存数字）：
-    0.25→1/4 池、0.33/0.34→1/3 池、0.4→2/5 池、0.5→半池、0.66/0.67→2/3 池、
-    0.75→3/4 池、1.0→1 倍池；其他 `<x> 倍池`（`%g`，如 0.6→「0.6 倍池」）。
+    解析（规则里不存数字）。`unit` 决定量纲（`pot` 默认 / `bb` / `raise`）：
+    value 标量按 §6 的池比例表（0.25→1/4 池、0.33/0.34→1/3 池、0.4→2/5 池、
+    0.5→半池、0.66/0.67→2/3 池、0.75→3/4 池、1.0→1 倍池，其他 `<x> 倍池`）；
+    bb 用 `<x>BB`；raise 用 `对手加注的 <x> 倍`。
+  · `rows` + `key`：`position_group` 按 hero_position 分早/中/晚/小盲，
+    `in_position` 按 in_position 取 `in_position`/`out_of_position` 行；
+    facts 缺该谓词或表里没有这一行 → 不出尺寸行（**绝不**拿第一行当答案）。
+  · `items`：长度为 2 的数字区间渲染 `<低>–<高>`；非数字（如 `premium`）不出行。
+    `per: limpers_before` 渲染成「每多一个溜入者 +<x>BB / +<x> 倍池」。
   · 只命中 intent 不命中 size：只出 intent 行，不渲染半截尺寸（尺寸交回现役
     `aggression.py` 的默认值）。
   · 零命中返回 `[]`：不产生空行、不产生标题（组装函数见空列表就不加分隔符）。
@@ -21,9 +27,8 @@
 
   · `load_ledger()` 抛 `RuleError`、`facts_snapshot()`/`match_rules()` 任何
     异常 → 返回 `[]`，绝不上抛。
-  · 尺寸表解析失败、`value` 缺失/非数字/非有限/≤0 → 该行不渲染（intent 行照出）。
-  · **rows 型尺寸表（如 `size_ladder`）现在一律 fail open 不渲染**：按 facts
-    选行是 #70 的分支逻辑，本票只做标量 `value`；不要把 rows 的第一行当成 answer。
+  · 尺寸表解析失败、`value` 缺失/非数字/非有限/≤0、rows 选不中行、items 不是
+    两段正数 → 该行不渲染（intent 行照出），绝不猜一个默认行。
   · 未知 `action`（校验器已拦，防御性）→ intent 行不渲染。
 
 **刻意的取舍**（改之前先看理由）：
@@ -91,8 +96,12 @@ def render_rules_zh(sit) -> list[str]:
             lines.append(line)
 
     size = _pick(hits, "size")
-    if size is not None:
-        text = _size_text(size.size)
+    if size is None and intent is not None:
+        # intent 规则可以自带默认尺寸（如 pf.rfi.first_in 的 open_size_bb）：
+        # 没有更具体的 size 槽命中时退回它，仍然只出一行尺寸。
+        size = intent
+    if size is not None and size.size:
+        text = _size_text(size.size, facts)
         if text is not None:
             lines.append(_size_line(size, text))
 
@@ -141,8 +150,27 @@ def _page_suffix(source: Any) -> str:
 
 # ─────────────────────────── 尺寸文字 ───────────────────────────
 
-def _size_text(size: Any) -> str | None:
-    """解析 `{"table": …, "name": …}` 的标量 value；读不出就 None。"""
+# 位置 → 开池尺寸分组（与 `rule_params.open_size_bb` 的 rows 键同一份契约）。
+POSITION_GROUP = {
+    "UTG": "early", "UTG+1": "early", "UTG+2": "early",
+    "LJ": "middle", "HJ": "middle",
+    "CO": "late", "BTN": "late",
+    "SB": "sb",
+}
+POSITION_GROUP_ZH = {
+    "early": "早位", "middle": "中位", "late": "晚位", "sb": "小盲",
+}
+IN_POSITION_ROW = {True: "in_position", False: "out_of_position"}
+IN_POSITION_ZH = {True: "有位置", False: "无位置"}
+
+
+def _size_text(size: Any, facts: Any = None) -> str | None:
+    """把一个 size 引用 + 事实渲染成尺寸文字；读不出就 None（fail open）。
+
+    纯函数：只读 `size` 与 `facts`，不碰 `Situation`、不写任何规则 id 特判。
+    三种载体：`value` 标量、`rows` + `key` 选行、`items` 两段区间；
+    外加 `per: limpers_before` 的「每个溜入者递增」说明。
+    """
     if not isinstance(size, dict):
         return None
     kind, name = size.get("table"), size.get("name")
@@ -152,14 +180,96 @@ def _size_text(size: Any) -> str | None:
         entry = table(kind, name)
     except Exception:  # noqa: BLE001 - 表缺失/坏 JSON 都算「没这行」
         return None
+    if entry is None:
+        return None
 
-    value = entry.value
+    facts = facts if isinstance(facts, dict) else {}
+    unit = size.get("unit", "pot")
+    if unit not in ("pot", "bb", "raise"):
+        return None
+
+    # per：数值是「每多一个 X」的增量，不是一次下注的总尺寸。
+    per = size.get("per")
+    if per is not None:
+        if per != "limpers_before":
+            return None
+        value = _positive(entry.value)
+        if value is None:
+            return None
+        if unit == "bb":
+            return f"每多一个溜入者 +{value:g}BB"
+        if unit == "pot":
+            return f"每多一个溜入者 +{value:g} 倍池"
+        return None
+
+    key = size.get("key")
+    if key is not None:
+        row, suffix = _size_row(key, facts)
+        if row is None:
+            return None
+        value = _positive((entry.rows or {}).get(row))
+        if value is None:
+            return None
+        text = _unit_text(value, unit)
+        return f"{text}（{suffix}）" if text and suffix else text
+
+    value = _positive(entry.value)
+    if value is not None:
+        return _unit_text(value, unit)
+    return _size_band(entry.items, unit)
+
+
+def _size_row(key: str, facts: dict) -> tuple[str | None, str]:
+    """按 facts 选出 rows 的行键与中文后缀；选不出就 (None, "")。"""
+    if key == "position_group":
+        group = POSITION_GROUP.get(facts.get("hero_position"))
+        if group is None:
+            return None, ""
+        return group, POSITION_GROUP_ZH[group]
+    if key == "in_position":
+        flag = facts.get("in_position")
+        if not isinstance(flag, bool):
+            return None, ""
+        return IN_POSITION_ROW[flag], IN_POSITION_ZH[flag]
+    return None, ""
+
+
+def _unit_text(value: float, unit: str) -> str:
+    """标量 → 中文尺寸；池比例走 §6 的档位表。"""
+    if unit == "bb":
+        return f"{value:g}BB"
+    if unit == "raise":
+        return f"对手加注的 {value:g} 倍"
+    return SIZE_LABELS.get(value, f"{value:g} 倍池")
+
+
+def _size_band(items: Any, unit: str) -> str | None:
+    """`items` 两段数字 → 区间文字；不是两段正数就不出行（如 premium）。"""
+    if not isinstance(items, (list, tuple)) or len(items) != 2:
+        return None
+    values = [_positive(item) for item in items]
+    if any(item is None for item in values):
+        return None
+    low, high = values
+    lo, hi = _band_num(low), _band_num(high)
+    if unit == "raise":
+        return f"对手加注的 {lo}–{hi} 倍"
+    if unit == "bb":
+        return f"{lo}–{hi}BB"
+    return f"{lo}–{hi} 倍池"
+
+
+def _band_num(value: float) -> str:
+    """区间端点：0.66→0.66、1.0→1.0（区间里保留一位小数，读起来像倍数）。"""
+    text = f"{value:g}"
+    return text if "." in text else f"{value:.1f}"
+
+
+def _positive(value: Any) -> float | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    ratio = float(value)
-    if not math.isfinite(ratio) or ratio <= 0:
-        return None
-    return SIZE_LABELS.get(ratio, f"{ratio:g} 倍池")
+    number = float(value)
+    return number if math.isfinite(number) and number > 0 else None
 
 
 # ─────────────────────────── 预算 ───────────────────────────
