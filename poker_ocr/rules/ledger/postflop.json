@@ -1,0 +1,383 @@
+{
+  "schema": 1,
+  "rules": [
+    {
+      "id": "po.cbet.hu",
+      "version": 1,
+      "slot": "intent",
+      "street": "flop",
+      "node": "单挑翻牌你先行动、对手只跟注",
+      "preconditions": [
+        {
+          "fact": "street",
+          "in": [
+            "flop"
+          ]
+        },
+        {
+          "fact": "players_in_hand",
+          "eq": 2
+        },
+        {
+          "fact": "pot_type",
+          "eq": "single-raised pot"
+        },
+        {
+          "fact": "previous_line",
+          "eq": "raise"
+        },
+        {
+          "fact": "to_call_bb",
+          "eq": 0
+        },
+        {
+          "fact": "has_draw",
+          "eq": false
+        }
+      ],
+      "why": "对手只有约 35% 中翻牌，半池即可收下",
+      "action": "bet",
+      "size": {
+        "table": "rule_params",
+        "name": "cbet_size_hu",
+        "unit": "pot"
+      },
+      "coexist_with": [
+        "po.size.texture"
+      ],
+      "source": {
+        "book": "德州扑克小绿皮书",
+        "page": 30,
+        "status": "verbatim"
+      },
+      "confidence": "book",
+      "verified": false
+    },
+    {
+      "id": "po.cbet.multiway",
+      "version": 1,
+      "slot": "intent",
+      "street": "flop",
+      "node": "多人池你先行动，只为减少对手",
+      "preconditions": [
+        {
+          "fact": "street",
+          "in": [
+            "flop"
+          ]
+        },
+        {
+          "fact": "players_in_hand",
+          "gte": 3
+        },
+        {
+          "fact": "hero_is_first_to_act",
+          "eq": true
+        },
+        {
+          "fact": "to_call_bb",
+          "eq": 0
+        },
+        {
+          "fact": "has_draw",
+          "eq": false
+        }
+      ],
+      "why": "人越多越不诈唬，下注目的是打走人",
+      "action": "bet",
+      "source": {
+        "book": "德州扑克小绿皮书",
+        "page": 32,
+        "status": "verbatim"
+      },
+      "confidence": "book",
+      "verified": false
+    },
+    {
+      "id": "po.size.texture",
+      "version": 1,
+      "slot": "size",
+      "street": "flop",
+      "node": "牌越强下越小，牌越弱下越大",
+      "preconditions": [
+        {
+          "fact": "street",
+          "in": [
+            "flop",
+            "turn"
+          ]
+        },
+        {
+          "fact": "hand_class",
+          "in": [
+            "strong",
+            "medium",
+            "weak"
+          ]
+        },
+        {
+          "fact": "has_draw",
+          "eq": false
+        }
+      ],
+      "why": "牌越强下小引跟注，牌越弱下大求弃牌",
+      "size": {
+        "table": "rule_params",
+        "name": "size_ladder",
+        "unit": "pot",
+        "key": "hand_class"
+      },
+      "coexist_with": [
+        "po.cbet.hu"
+      ],
+      "source": {
+        "book": "德州扑克小绿皮书",
+        "page": 35,
+        "status": "verbatim"
+      },
+      "confidence": "book",
+      "verified": false
+    },
+    {
+      "id": "po.draw.semi",
+      "version": 1,
+      "slot": "intent",
+      "street": "flop",
+      "node": "强听翻牌半诈唬：两种赢法",
+      "preconditions": [
+        {
+          "fact": "street",
+          "in": [
+            "flop",
+            "turn"
+          ]
+        },
+        {
+          "fact": "has_draw",
+          "eq": true
+        },
+        {
+          "fact": "outs",
+          "gte": 8
+        },
+        {
+          "fact": "previous_line",
+          "eq": "raise"
+        }
+      ],
+      "why": "先下注有两种赢法：对手弃牌或我抽中",
+      "action": "bet",
+      "size": {
+        "table": "rule_params",
+        "name": "cbet_size_hu",
+        "unit": "pot"
+      },
+      "source": {
+        "book": "德州扑克小绿皮书",
+        "page": 34,
+        "status": "verbatim"
+      },
+      "confidence": "book",
+      "verified": false
+    },
+    {
+      "id": "po.draw.block",
+      "version": 1,
+      "slot": "intent",
+      "street": "flop",
+      "node": "无位置中等听牌：小注封锁",
+      "preconditions": [
+        {
+          "fact": "street",
+          "in": [
+            "flop",
+            "turn"
+          ]
+        },
+        {
+          "fact": "has_draw",
+          "eq": true
+        },
+        {
+          "fact": "outs",
+          "between": [
+            4,
+            7
+          ]
+        },
+        {
+          "fact": "in_position",
+          "eq": false
+        },
+        {
+          "fact": "opp_aggression",
+          "eq": "high"
+        }
+      ],
+      "why": "小注锁住对手加注，换 5:1 看转牌",
+      "action": "bet",
+      "size": {
+        "table": "rule_params",
+        "name": "block_bet",
+        "unit": "pot"
+      },
+      "source": {
+        "book": "德州扑克小绿皮书",
+        "page": 33,
+        "status": "rebuilt"
+      },
+      "confidence": "book",
+      "verified": false
+    },
+    {
+      "id": "po.turn.enhance",
+      "version": 1,
+      "slot": "intent",
+      "street": "turn",
+      "node": "转牌牌力上升：加速度做大局",
+      "preconditions": [
+        {
+          "fact": "street",
+          "in": [
+            "turn"
+          ]
+        },
+        {
+          "fact": "hand_tier_rose",
+          "eq": true
+        },
+        {
+          "fact": "has_draw",
+          "eq": false
+        }
+      ],
+      "why": "转牌变强就加速度，别让河牌吓退对手",
+      "action": "raise",
+      "source": {
+        "book": "德州扑克小绿皮书",
+        "page": 47,
+        "status": "verbatim"
+      },
+      "confidence": "book",
+      "verified": false
+    },
+    {
+      "id": "po.turn.scary",
+      "version": 1,
+      "slot": "intent",
+      "street": "turn",
+      "node": "转牌成花成顺又你先行动：让出开火权",
+      "preconditions": [
+        {
+          "fact": "street",
+          "in": [
+            "turn"
+          ]
+        },
+        {
+          "fact": "turn_scare",
+          "in": [
+            "成花",
+            "成顺"
+          ]
+        },
+        {
+          "fact": "hero_is_first_to_act",
+          "eq": true
+        },
+        {
+          "fact": "hand_tier_rose",
+          "eq": false
+        },
+        {
+          "fact": "has_draw",
+          "eq": false
+        }
+      ],
+      "why": "20% 的免费河牌不值得被加注",
+      "action": "check",
+      "source": {
+        "book": "德州扑克小绿皮书",
+        "page": 48,
+        "status": "verbatim"
+      },
+      "confidence": "book",
+      "verified": false
+    },
+    {
+      "id": "po.river.value",
+      "version": 1,
+      "slot": "intent",
+      "street": "river",
+      "node": "河牌坚果：下注拿价值",
+      "preconditions": [
+        {
+          "fact": "street",
+          "in": [
+            "river"
+          ]
+        },
+        {
+          "fact": "hero_is_nuts",
+          "eq": true
+        },
+        {
+          "fact": "hand_class",
+          "not_in": [
+            "weak"
+          ]
+        }
+      ],
+      "why": "价值下注别被读出，尺寸围绕对手愿付价浮动",
+      "action": "bet",
+      "size": {
+        "table": "rule_params",
+        "name": "river_value_band",
+        "unit": "pot"
+      },
+      "source": {
+        "book": "德州扑克小绿皮书",
+        "page": 52,
+        "status": "verbatim"
+      },
+      "confidence": "book",
+      "verified": false
+    },
+    {
+      "id": "po.river.mid.check",
+      "version": 1,
+      "slot": "intent",
+      "street": "river",
+      "node": "河牌中等牌无位置：过牌控池",
+      "preconditions": [
+        {
+          "fact": "street",
+          "in": [
+            "river"
+          ]
+        },
+        {
+          "fact": "hand_class",
+          "eq": "medium"
+        },
+        {
+          "fact": "in_position",
+          "eq": false
+        },
+        {
+          "fact": "hero_is_nuts",
+          "eq": false
+        }
+      ],
+      "why": "中等牌下注只被更强的跟，还丢诈唬机会",
+      "action": "check",
+      "source": {
+        "book": "德州扑克小绿皮书",
+        "page": 53,
+        "status": "verbatim"
+      },
+      "confidence": "book",
+      "verified": false
+    }
+  ]
+}

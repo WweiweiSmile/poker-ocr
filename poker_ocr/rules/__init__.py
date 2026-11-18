@@ -95,6 +95,19 @@ PREDICATE_DOMAINS: dict[str, tuple | None] = {
     "hand_in_open_range": (True, False),
     "hand_in_3bet_range": (True, False),
     "hero_is_first_to_act": (True, False),
+    # ── 翻后 9 条（票 70）────────────────────────────────────────────
+    # hero_is_nuts 只信 ground_truth 的「没有任何对手持牌能打败我」——
+    # 「不是坚果」不是「我的牌不够好」，所以它不能由牌力档反推。
+    "hero_is_nuts": (True, False),
+    # hand_class 是**派生档**：由 hero_hand_tier 按事实层写死的映射折叠成
+    # 强/中/弱三档（书 p35 的尺寸阶梯只有这三行）。台账引用它，不自己拼牌型。
+    "hand_class": ("strong", "medium", "weak"),
+    # hand_tier_rose：本街牌力档比上一条街高（转牌/河牌才算，见 facts）。
+    "hand_tier_rose": (True, False),
+    # 转牌有多吓人：同花成牌 / 顺子成牌 / 高张 / 空白（coach.turn_scare 口径）。
+    "turn_scare": ("blank", "高张", "成花", "成顺"),
+    # 唯一在局对手的攻击度（AF 分档）；多人池或多个画像不一致时不写。
+    "opp_aggression": ("low", "medium", "high"),
 }
 
 PREDICATES = frozenset(_NUMERIC_PREDICATES) | frozenset(PREDICATE_DOMAINS)

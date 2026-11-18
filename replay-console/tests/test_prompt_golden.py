@@ -7,6 +7,11 @@
      改的是 EXPECTED_THREE_BET_PROMPT_HASH——那个 fixture 才会渲染
      `_THREE_BET`；改动只落在空气 c-bet 段（AIR_RULES）时，改的是
      EXPECTED_AIR_PROMPT_HASH——顶对 fixture 走 MADE_RULES，看不见它）
+
+#70（2026-11-18）删掉了与规则台账重复的翻后经验段（手牌类型段的半诈唬
+频率/价值分档/空气 c-bet、攻击口径的尺寸阶梯），尺寸与频率改由
+ledger/postflop.json 渲染；提示词版本**不 bump**（仍 lean-zh-2026-11-18.1），
+只按实测回填三个 hash。
 """
 
 from __future__ import annotations
@@ -22,9 +27,9 @@ from poker_ocr.parse import Blinds
 from replay.versioning import CURRENT_ADVICE_VERSION
 
 EXPECTED_ADVICE_VERSION = "advice-2026-11-18.1"
-EXPECTED_PROMPT_HASH = "8fe7afc84f266b5cf4ca3e5237838b52238a3a7232f996a9a5a40c8e26d86ffb"
-EXPECTED_THREE_BET_PROMPT_HASH = "ea6d04f87fdd5719f2ba42b0e22105d06ab73fcf364c77a16d17330fcf23fdcf"
-EXPECTED_AIR_PROMPT_HASH = "bb9fba9779dd6bdab074760a42b4cd18dc503bba639a9652cc1ceceae6094f4d"
+EXPECTED_PROMPT_HASH = "5109e53dd406c2a414ca19d37e6354baa475858a0e79c656ca5a024010df4ab0"
+EXPECTED_THREE_BET_PROMPT_HASH = "76fdddaf26d9b93ec0445bbcabb34ef167621c3d901892ef2bd5be7ba06547e7"
+EXPECTED_AIR_PROMPT_HASH = "69f9c5bf7079e9743a9b70a98f2f58d01af07b6caf40a609a258ea250dfec417"
 
 # 快照没有可用画像，所以「对手画像」段只有标题 + 缺口说明；
 # witness 数据落地前这一段必须逐字节不变（spec §15.1）。
@@ -167,11 +172,20 @@ def _air_snapshot() -> HandSnapshot:
 
 
 def test_air_prompt_golden_pins_unified_air_rule():
-    """#43：两高张、单高张、0-out 纯空气共用同一套 c-bet 口径。"""
+    """#43 的空气 c-bet 口径现在住在规则台账里（#70）。
+
+    以前 AIR_RULES 自己写「默认 1/3 池、升 1/2 要四条」；#70 把它并进
+    postflop.json 的 po.cbet.hu / po.cbet.multiway（动作）与 po.size.texture
+    （尺寸），system 段不再写第二套数字。
+    """
     sit = build_situation(_air_snapshot(), table_dynamics="")
     system, user = build_messages(sit)
-    assert "空气 c-bet" in system
-    assert "单高张、0-out 纯空气同一套" in system
+    air_section = system.split("## 牌型：空气", 1)[1].split("\n## ", 1)[0]
+    assert "空气 c-bet" not in air_section, (
+        "空气 c-bet 的条件与尺寸已搬到规则台账（po.cbet.* / po.size.texture），"
+        "system 段不能再写一套")
+    assert "1/3" not in air_section, (
+        "空气段的尺寸已交回规则层（默认半池，1/3 只在对手弃牌率显著低于 55% 时偏离）")
     assert "单高张不套用" not in system, "「单高张不套用」是 #43 收掉的分叉，不能回来"
     digest = hashlib.sha256((system + "\n---\n" + user).encode()).hexdigest()
     assert digest == EXPECTED_AIR_PROMPT_HASH, (

@@ -13,12 +13,16 @@
     0.5→半池、0.66/0.67→2/3 池、0.75→3/4 池、1.0→1 倍池，其他 `<x> 倍池`）；
     bb 用 `<x>BB`；raise 用 `对手加注的 <x> 倍`。
   · `rows` + `key`：`position_group` 按 hero_position 分早/中/晚/小盲，
-    `in_position` 按 in_position 取 `in_position`/`out_of_position` 行；
+    `in_position` 按 in_position 取 `in_position`/`out_of_position` 行，
+    `hand_class` 按 facts 的 strong/medium/weak 取 size_ladder 的三行；
     facts 缺该谓词或表里没有这一行 → 不出尺寸行（**绝不**拿第一行当答案）。
   · `items`：长度为 2 的数字区间渲染 `<低>–<高>`；非数字（如 `premium`）不出行。
     `per: limpers_before` 渲染成「每多一个溜入者 +<x>BB / +<x> 倍池」。
   · 只命中 intent 不命中 size：只出 intent 行，不渲染半截尺寸（尺寸交回现役
-    `aggression.py` 的默认值）。
+    `aggression.py` 的默认值）；intent 自带的默认尺寸（如 po.cbet.hu 的
+    cbet_size_hu）此时顶上，仍然只出一行尺寸。
+  · intent 的动作是过牌/跟注/弃牌时不出尺寸行：规则 15（转牌吓人牌）命中
+    「过牌控池」的同时牌面尺寸规则也会命中，P 一个 1/3 池会自相矛盾。
   · 零命中返回 `[]`：不产生空行、不产生标题（组装函数见空列表就不加分隔符）。
   · 总行数 ≤2，整段 ≤800 字（按各行字符数累计，不含段内分隔换行）；
     超了从尾部丢行（intent 比 size 先保）。
@@ -100,7 +104,7 @@ def render_rules_zh(sit) -> list[str]:
         # intent 规则可以自带默认尺寸（如 pf.rfi.first_in 的 open_size_bb）：
         # 没有更具体的 size 槽命中时退回它，仍然只出一行尺寸。
         size = intent
-    if size is not None and size.size:
+    if size is not None and size.size and _sizing_ok(intent):
         text = _size_text(size.size, facts)
         if text is not None:
             lines.append(_size_line(size, text))
@@ -109,6 +113,17 @@ def render_rules_zh(sit) -> list[str]:
 
 
 # ─────────────────────────── 选行 ───────────────────────────
+
+def _sizing_ok(intent) -> bool:
+    """动作不是下注/加注时不给尺寸行（否则「过牌」配「1/3 池」自相矛盾）。
+
+    没有 intent 命中（只命中尺寸槽）时不冲突，照出；这条只挡「同一点上
+    动作行与尺寸行打架」的情况。
+    """
+    if intent is None:
+        return True
+    return intent.action in ("bet", "raise", "allin")
+
 
 def _pick(hits: tuple, slot: str):
     """同槽位取前提最多的一条；平手留 id 更小的（输入已按 id 升序）。"""
@@ -162,6 +177,8 @@ POSITION_GROUP_ZH = {
 }
 IN_POSITION_ROW = {True: "in_position", False: "out_of_position"}
 IN_POSITION_ZH = {True: "有位置", False: "无位置"}
+# 牌力档 → size_ladder 的行键（行键本身来自 facts.hand_class，不在这里再映射一遍）
+HAND_CLASS_ZH = {"strong": "强牌", "medium": "中等牌", "weak": "弱牌"}
 
 
 def _size_text(size: Any, facts: Any = None) -> str | None:
@@ -231,6 +248,11 @@ def _size_row(key: str, facts: dict) -> tuple[str | None, str]:
         if not isinstance(flag, bool):
             return None, ""
         return IN_POSITION_ROW[flag], IN_POSITION_ZH[flag]
+    if key == "hand_class":
+        cls = facts.get("hand_class")
+        if not isinstance(cls, str):
+            return None, ""
+        return cls, HAND_CLASS_ZH.get(cls, "")
     return None, ""
 
 
