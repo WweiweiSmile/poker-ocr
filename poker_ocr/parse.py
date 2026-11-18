@@ -47,6 +47,21 @@ _AMOUNT_TRAILING_ZERO_RE = re.compile(
 _AMOUNT_CORE_RE = re.compile(r"^[^0-9]{0,3}(\d+(?:\.\d+)?)\s*(BB|B)")
 _AMOUNT_TAIL_NOISE_MAX = 2
 
+# 牌桌金额的显示口径：BB（含被读成单 B 的）最多 1 位小数。OCR 会把
+# `9.5BB` 的第二个 B 读成 8 → `9.58B`，再把 pill 右侧的棋子图标读成 0
+# → `9.58B0`；这种读数带单位、量级也像真的，底池/本街总额的量级闸拦不住
+# （#48，9.58 被静默记进牌局）。所以按渲染不变量拒绝：超过 1 位小数就不是
+# 牌桌能显示出来的金额。
+#
+# 不能改成「BB 后面跟数字就拒」：`1BB0` / `0.5BB0` 是 2026-11-12 为
+# `1BB8` / `55BBO` 刻意保留的图标尾噪容错，退回去会让整条街丢帧。
+_MAX_AMOUNT_DECIMALS = 1
+_TOO_PRECISE_ERROR = "小数位超过 1 位（牌桌金额最多 1 位小数），不采信"
+
+
+def _decimal_places(num: str) -> int:
+    return len(num.partition(".")[2])
+
 
 @dataclass
 class Amount:
@@ -58,6 +73,9 @@ class Amount:
     # 清洗掉的尾巴（单位后面的筹码图标/误读字符）。有值说明这个数是从
     # `55BB0` 这类带噪声的文本里洗出来的，统计时能单独数一遍。
     tail_noise: str | None = None
+    # 带单位但小数位超过显示口径（#48）。下游据此降级成 bet_unknown，
+    # 而不是当成「没读到下注」去丢整帧。
+    too_precise: bool = False
 
     @property
     def ok(self) -> bool:
@@ -71,6 +89,8 @@ class Amount:
             d["zero_no_unit"] = True
         if self.tail_noise:
             d["tail_noise"] = self.tail_noise
+        if self.too_precise:
+            d["too_precise"] = True
         if self.error:
             d["error"] = self.error
         return d
@@ -108,7 +128,8 @@ def parse_amount(text: str | None) -> Amount:
 
     与 `fields.parse_chip` 的区别：那个是**筹码专用**、要求严格的 BB 后缀；
     这里要有意放宽（单 B、前导图标、尾巴噪声），因为下注 pill 实测就是会这样错。
-    放宽的边界靠「必须有单位」守住。
+    放宽的边界靠两条守住：**必须有单位**；**带单位时小数位最多 1 位**（牌桌的
+    显示口径，`9.58B0` 这种是 `9.5BB` 读坏，见 #48）。
     """
     t = (text or "").strip()
     if not t:
@@ -124,13 +145,20 @@ def parse_amount(text: str | None) -> Amount:
         core = _AMOUNT_CORE_RE.match(t)
         tail = t[core.end():] if core else ""
         if core and len(tail) <= _AMOUNT_TAIL_NOISE_MAX:
-            return Amount(t, float(core.group(1)), core.group(2).upper(),
+            num, unit = core.group(1), core.group(2)
+            if _decimal_places(num) > _MAX_AMOUNT_DECIMALS:
+                return Amount(t, None, unit.upper(), too_precise=True,
+                              error=_TOO_PRECISE_ERROR)
+            return Amount(t, float(num), unit.upper(),
                           tail_noise=tail or None)
         return Amount(t, None, None, error="不是金额形状")
     num, unit = m.group(1), m.group(2)
     if unit is None:
         return Amount(t, None, None,
                       error="没有 BB 单位，值可能是误读（如 BB→88），不采信")
+    if _decimal_places(num) > _MAX_AMOUNT_DECIMALS:
+        return Amount(t, None, unit.upper(), too_precise=True,
+                      error=_TOO_PRECISE_ERROR)
     value = float(num)
     # `01BB` / `00.5BB` 的开头 0 是左边的筹码图标；float 天然处理掉。
     return Amount(t, value, unit.upper())
