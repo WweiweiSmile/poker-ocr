@@ -125,5 +125,9 @@ from __future__ import annotations
 # docs/规则台账-设计-2026-11-18.md §2/§3/§4/§6/§10 与
 # docs/规则台账-首批20条.md §0.2/§1/§4/§5。这是 spec #63 的定版版本号，
 # 后续 #70/#71 只更新 golden hash，不再改 PROMPT_VERSION。
+# 2026-11-18.1（#71，仍不改版本号）：补 3 条画像修正规则 ex.station/ex.loose/
+# ex.tight_passive（ledger/exploit.json）；渲染器在基础行之后追加至多一行
+# 「修正:」，未知画像按设计 Q26 走松系；aggression 里与 ex.station 重复的
+# 跟注站尺寸/诈唬句改为指向修正行。只更新 golden hash。
 PROMPT_VERSION = "lean-zh-2026-11-18.1"
 PROMPT_LANGUAGE = "zh"
