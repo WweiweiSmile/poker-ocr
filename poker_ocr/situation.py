@@ -16,8 +16,8 @@ from typing import TYPE_CHECKING, Iterable, Mapping
 
 from .coach import (
     BOARD_PLAY, MID_BOTTOM, OVERPAIR, STRONG_DRAW, STRONG_MADE, TPTK,
-    TP_WEAK, WEAK_DRAW, board_texture, opponent_strength, parse_cards,
-    read_hand,
+    TP_WEAK, WEAK_DRAW, at_least_one_behind, board_texture, opponent_strength,
+    parse_cards, read_hand,
 )
 from .ground_truth import GroundTruth, compute_ground_truth
 from .hand_track import PREFLOP, HandSnapshot, preflop_aggressive
@@ -453,7 +453,7 @@ def build_situation(snap: HandSnapshot,
         # 兜底：gt 计算失败时仍复用 read_hand 已经枚举过的单人比例
         p = read.beat_pct
         beat_pct = round(p * 100, 1)
-        beat_at_least = round((1.0 - (1.0 - p) ** max(n_opp, 1)) * 100, 1)
+        beat_at_least = round(at_least_one_behind(p, n_opp) * 100, 1)
     # 桌子的松紧优先用**算出来的**全场统计；没有统计（第一晚、新桌）才退回
     # `.table_dy` 的关键词。`.table_dy` 现在只写现场观察，关键词多数时候匹配
     # 不到，所以这里的先后顺序很关键。

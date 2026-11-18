@@ -63,7 +63,9 @@ function FactStrip({ decision }: { decision: ComparisonDecision }) {
     items.push({ label: '胜率', value: `${facts.equityPct}%`, color: 'blue' })
   }
   if (facts.beatAtLeastPct !== null && facts.beatAtLeastPct !== undefined) {
-    items.push({ label: '至少一家领先', value: `${facts.beatAtLeastPct}%` })
+    // 随机牌独立近似（coach.at_least_one_behind），不是手牌范围的联合重抽；
+    // 与 handStrength.behindAny 量纲/算法都不同，展示时必须标出来。
+    items.push({ label: '至少一家领先', value: `${facts.beatAtLeastPct}%（近似）` })
   }
   if (facts.textureEn) items.push({ label: '牌面', value: String(facts.textureEn) })
   if (facts.heroIsNuts !== null && facts.heroIsNuts !== undefined) {
