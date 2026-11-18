@@ -812,6 +812,15 @@ def decision_facts(sit) -> dict:
 
     旧版会把 `value_directive` 写进 `directive` 字段；中文 lean 上线后该字段
     不再生成（旧记录里的值保持只读）。
+
+    两个「至少一家领先」的数字各自带 basis，读的人不必猜算法：
+
+      · `beatAtLeastPct` 是**随机牌独立近似**（`coach.at_least_one_behind`），
+        单位百分数，只有兜底分支才会进提示词；
+      · `handStrength.behindAny` 是**联合拒绝重抽**（对手范围、0..1 比例），
+        与提示词主路同一个函数。
+    量纲不同（百分数 vs 比例），不能相加/替换，见
+    `docs/equity-与牌力分解口径-v1.md` §8。
     """
     gt = getattr(sit, "ground_truth", None)
     hs = getattr(sit, "hand_strength", None)
@@ -825,6 +834,7 @@ def decision_facts(sit) -> dict:
         "equityPct": sit.equity_pct,
         "beatPct": sit.beat_pct,
         "beatAtLeastPct": sit.beat_at_least_pct,
+        "beatAtLeastBasis": "random_hands_independent_approx",
         "heroIsNuts": getattr(gt, "hero_is_nuts", None) if gt else None,
         "bestFive": ([_card(c) for c in gt.made.best_five]
                      if gt is not None and getattr(gt, "made", None) else None),
@@ -833,6 +843,7 @@ def decision_facts(sit) -> dict:
         "handStrength": ({
             "kind": hs.kind, "size": hs.size,
             "behindAny": round(hs.behind_any, 4),
+            "behindAnyBasis": "joint_resample_over_ranges",
             "equity": round(hs.equity, 4), "n": hs.n,
         } if hs is not None else None),
         "options": [o.to_dict() for o in sit.options],

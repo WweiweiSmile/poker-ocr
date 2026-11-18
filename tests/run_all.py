@@ -113,7 +113,9 @@ SUITES = ["test_positions.py", "test_env.py", "test_profile_8p.py", "test_coach.
           # 票 #72（规则台账 A/B 对跑：新旧提示词分档对比）新增套件
           "test_ab_compare.py",
           # 票 #75（「至少一家领先」双口径偏差量化）新增套件
-          "test_behind_any_caliber.py"]
+          "test_behind_any_caliber.py",
+          # 票 #76（「至少一家领先」单一实现 + 近似口径显式标注）新增套件
+          "test_behind_any_single_source.py"]
 
 
 def main() -> int:
