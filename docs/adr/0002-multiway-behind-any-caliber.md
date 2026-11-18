@@ -7,7 +7,7 @@ date: 2026-11-19
 
 > 关联：父规格 #74；量化 #75（`docs/至少一家领先-双口径偏差-2026-11-19.md`）；
 > 单一实现与 basis #76（`docs/equity-与牌力分解口径-v1.md` §8）；
-> 冷跟按人数分桶 #77（待接入）。本文只定口径，不重复 #75 的量化表。
+> 冷跟按人数分桶 #77（草案）/ #78（已落地）。本文只定口径，不重复 #75 的量化表。
 
 ## Context
 
@@ -54,8 +54,10 @@ date: 2026-11-19
   目前没有任何评分代码读这两个数；`hand_strength._BEHIND_DEMOTE = 0.35`
   （`poker_ocr/hand_strength.py:45`）读的是 `behind_any`，不是独立近似。
 - **提示词模板不为数字来源而改**：票 #76 只加了 basis 与 UI 标注，提示词文本
-  未变、`PROMPT_VERSION` / `CURRENT_ADVICE_VERSION` 未 bump，基线位移 0.00pp。
-  口径 provenance 由 facts 字段表达，不由模板文案表达。
+  未变、`PROMPT_VERSION` / `CURRENT_ADVICE_VERSION` 未 bump，#76 那次闭式收敛
+  的基线位移为 0.00pp。口径 provenance 由 facts 字段表达，不由模板文案表达。
+  后续 #78 的冷跟分桶按提示词铁律另行 bump（`lean-zh-2026-11-19.1`，评审修复
+  后 `lean-zh-2026-11-19.2`），与 #76 的「不 bump」不是同一件事。
 
 ## Considered Options
 
@@ -94,7 +96,7 @@ date: 2026-11-19
 | 差值或主路数值跨过下游判定线：`hand_strength._BEHIND_DEMOTE = 0.35`，或新增任何读 `beatAtLeastPct` 的数值消费者/阈值 | 先定该消费者该读哪个口径；跨线前不得上线 |
 | 6–9 人池决策点占比上升，或现场常驻 ≥6 人池 | 扩样本重跑票 #75（当前 11 点、均值 −2.01pp、最坏 −5.50pp，4× 复核最大 \|差\| 5.18pp），单独校准大池 |
 | 范围模型换版：`ranges.RANGE_VERSION` 变更、先验表/事件模型/profile（v0→v1）变更、新增数据源 | 重跑票 #75 并重设基线；主路数值会随范围变化，旧结论不再可比 |
-| 票 #77 的冷跟按人数分桶落地（预期 `docs/冷跟先验-按人数分桶-草案.md`） | 先验分布变了，重跑票 #75，重看主路/兜底覆盖率与差值 |
+| 票 #77 的冷跟按人数分桶（#78 已落地：`poker_ocr/tables/cold_call_buckets.json` + `poker_ocr/cold_call_tiers.py`，2/3/4 人池三档） | 已完成接入；先验分布已变，按本条重跑票 #75，重看主路/兜底覆盖率与差值 |
 | 提示词或评分新增「至少一家」的数值用法（阈值、排序、EV 输入） | 先重开本 ADR，明确口径与 basis；不得直接拿现有字段当判定输入 |
 
 ## Consequences

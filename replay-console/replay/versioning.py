@@ -80,6 +80,8 @@ from poker_ocr.table_dynamics import (  # noqa: E402
 # 2026-11-19.1：冷跟先验按入池人数分档（#78）——翻后对手范围逐家行标出
 #               用的是 2/3/4 人池档与该档宽度，人数读不出标「未定」；翻前
 #               面对加注的宽度串同样带档位。2 人池数值逐位不变。
+# 2026-11-19.2：冷跟「未定」措辞纠偏（#78 评审修复）——「按 2 人池档」
+#               改为「沿用未分档先验」，避免把「人数未定」读成「确认 2 人池」。
 # 版本号由 PROMPT_VERSION 派生：只 bump 提示词包，advice 版本自动跟随。
 CURRENT_ADVICE_VERSION = "advice-" + PROMPT_VERSION.removeprefix("lean-zh-")
 # 改动 decisions.py 的重建语义时 bump。
