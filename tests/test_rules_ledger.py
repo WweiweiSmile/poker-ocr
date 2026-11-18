@@ -529,6 +529,188 @@ def test_export_rules_check_bad_ledger() -> None:
           f"错误输出要带规则 id：{res.stdout}{res.stderr}")
 
 
+# ─────────────── 5. rule_params 表与新谓词（票 68） ───────────────
+
+def test_new_predicates_deterministic() -> None:
+    """五个新谓词在现有 fixture 上的确定取值（票 68 / 设计 §5）。"""
+    # hand_in_open_range / hand_in_3bet_range：AA 在 CO 必开、42s 必不开。
+    strong = r.facts_snapshot(build_situation(
+        replace(preflop_snap(), hero_cards=("As", "Ad"))))
+    eq(strong.get("hand_in_open_range"), True,
+       "hand_in_open_range（AA CO 在 RFI 表里）")
+    eq(strong.get("hand_in_3bet_range"), True,
+       "hand_in_3bet_range（AA 在 3-bet 宽度表里）")
+
+    weak = r.facts_snapshot(build_situation(preflop_snap()))
+    eq(weak.get("hand_in_open_range"), False,
+       "hand_in_open_range（42s CO 不在 RFI 表里）")
+    eq(weak.get("hand_in_3bet_range"), False,
+       "hand_in_3bet_range（42s 不在 3-bet 宽度表里）")
+
+    # board_paired：干燥面 False，公对面 True。
+    dry = r.facts_snapshot(build_situation(flop_snap()))
+    eq(dry.get("board_paired"), False, "board_paired（K72 干燥面）")
+    paired = r.facts_snapshot(build_situation(
+        replace(flop_snap(), board=("Ks", "Kd", "2c"))))
+    eq(paired.get("board_paired"), True, "board_paired（KK2 公对面）")
+
+    # hero_is_first_to_act：翻后按行动线给 bool，翻前 fail open 缺键。
+    eq(dry.get("hero_is_first_to_act"), False,
+       "hero_is_first_to_act（BTN 最后行动）")
+    first = r.facts_snapshot(build_situation(
+        replace(flop_snap(), hero_position="SB")))
+    eq(first.get("hero_is_first_to_act"), True,
+       "hero_is_first_to_act（SB 第一个行动）")
+    check("hero_is_first_to_act" not in weak,
+          "翻前不写 hero_is_first_to_act")
+
+    # ante_bb：Blinds.ante 已经是 BB/人，事实层不再换算。
+    # 口径证据：parse.py:191（字段注释）与 parse.py:219-221（筹码 / bb 筹码）。
+    from poker_ocr.parse import parse_blinds
+    parsed = parse_blinds("1/2(1)")
+    check(parsed is not None and parsed.ante == 0.5,
+          f"parse_blinds 把括号里的 1 个筹码折成 0.5BB：{parsed!r}")
+    ante = r.facts_snapshot(build_situation(
+        replace(preflop_snap(),
+                blinds=Blinds(sb=0.5, bb=1.0, ante=0.5, raw="1/2(1)"))))
+    eq(ante.get("ante_bb"), 0.5,
+       "ante_bb（1/2(1) 的 1 个筹码 = 0.5BB，直接取 Blinds.ante）")
+    big = r.facts_snapshot(build_situation(
+        replace(preflop_snap(),
+                blinds=Blinds(sb=0.5, bb=1.0, ante=5.0, raw="1/2(5)"))))
+    eq(big.get("ante_bb"), 5.0, "ante_bb（5 个筹码 = 5BB，不乘 bb）")
+
+
+def test_new_predicates_fail_open_without_data() -> None:
+    """五个新谓词缺数据时一律不出现，且不抛异常（设计 §4.2 fail open）。"""
+    snap = replace(preflop_snap(), hero_cards=(), blinds=None)
+    try:
+        facts = r.facts_snapshot(build_situation(snap, include_strength=False))
+    except Exception as exc:  # noqa: BLE001 - 就是要断言这里不抛
+        FAILS.append(f"新谓词缺数据时应 fail open，却抛了 "
+                     f"{type(exc).__name__}: {exc}")
+        return
+    for key in ("hand_in_open_range", "hand_in_3bet_range", "ante_bb",
+                "board_paired", "hero_is_first_to_act"):
+        check(key not in facts, f"缺数据时不该写 {key}：{facts.get(key)!r}")
+
+
+def test_rule_params_table_entries() -> None:
+    """rule_params 十个条目都能被 table() 取到，值与来源符合书页（票 68）。"""
+    from poker_ocr.strategy_tables import table as strategy_table
+
+    expected = {
+        "open_size_bb": ("rows", {"early": 2.75, "middle": 3.25,
+                                  "late": 3.75, "sb": 3.0}, "book:p19"),
+        "threebet_multiplier": ("rows", {"in_position": 3.0,
+                                         "out_of_position": 4.0}, "book:p26"),
+        "fourbet_min_tier": ("items", ("premium",), "book:p25"),
+        "cbet_freq_hu": ("value", 0.65, "book:p30"),
+        "cbet_size_hu": ("value", 0.5, "book:p30"),
+        "cbet_size_paired": ("value", 0.4, "book:p28"),
+        "size_ladder": ("rows", {"strong": 0.33, "medium": 0.66,
+                                 "weak": 1.0}, "book:p35"),
+        "block_bet": ("value", 0.25, "book:p33"),
+        "river_value_band": ("items", (0.66, 1.0), "book:p52"),
+        "iso_size_per_limper": ("value", 1.0, "book:p23"),
+    }
+    for name, (kind, want, source) in expected.items():
+        entry = strategy_table("rule_params", name)
+        eq(entry.source, source, f"{name}.source")
+        eq(entry.verified, False, f"{name}.verified")
+        check(bool(entry.note), f"{name}.note 不能为空")
+        check(bool(entry.needs), f"{name}.needs 不能为空")
+        if kind == "rows":
+            eq(dict(entry.rows), want, f"{name}.rows")
+        elif kind == "items":
+            eq(tuple(entry.items), want, f"{name}.items")
+        else:
+            eq(entry.value, want, f"{name}.value")
+
+
+def test_rule_params_size_ref_success_and_failure() -> None:
+    """size 引用成功 / 引用不存在的条目失败，错误要带规则 id 与路径。"""
+    good = rule(id="pf.good.size", slot="size", action=None,
+                size={"table": "rule_params", "name": "cbet_size_hu"})
+    check_ok(good, label="size 引用 rule_params.cbet_size_hu")
+
+    bad = rule(id="pf.bad.size", slot="size", action=None,
+               size={"table": "rule_params", "name": "cbet_size_hux"})
+    text = check_bad(bad, label="size 引用 rule_params 里不存在的条目",
+                     must=("pf.bad.size", "rule_params.cbet_size_hux"))
+    check("解析失败" in text or "找不到" in text,
+          f"错误应说明引用解析不了：{text}")
+
+
+def test_rule_params_literal_size_rejected() -> None:
+    """规则 JSON 写死字面数字（size: 0.5）必须校验失败。"""
+    bad = rule(id="pf.literal.size", slot="size", action=None, size=0.5)
+    check_bad(bad, label="size 写死字面数字 0.5",
+              must=("pf.literal.size", "size"))
+
+
+def test_export_rules_check_accepts_rule_params_ref() -> None:
+    """export_rules --check 能解析 rule_params 引用（票 68 验收）。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        directory = Path(tmp)
+        write_ledger(directory, rule(
+            id="pf.good.size", slot="size", action=None,
+            size={"table": "rule_params", "name": "cbet_size_hu"}))
+        res = subprocess.run(
+            [sys.executable, str(ROOT / "tools" / "export_rules.py"),
+             "--check", "--dir", str(directory)],
+            capture_output=True, text=True, cwd=str(ROOT), timeout=120,
+        )
+    eq(res.returncode, 0,
+       f"--check 应接受 rule_params 引用：{res.stdout}{res.stderr}")
+
+
+def test_export_rules_check_rejects_missing_rule_param() -> None:
+    """--check 对 rule_params 里不存在的条目要报错并带规则 id / 路径。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        directory = Path(tmp)
+        write_ledger(directory, rule(
+            id="pf.bad.missing", slot="size", action=None,
+            size={"table": "rule_params", "name": "cbet_size_hux"}))
+        res = subprocess.run(
+            [sys.executable, str(ROOT / "tools" / "export_rules.py"),
+             "--check", "--dir", str(directory)],
+            capture_output=True, text=True, cwd=str(ROOT), timeout=120,
+        )
+    text = res.stdout + res.stderr
+    eq(res.returncode, 1, f"rule_params 缺条目应退出 1：{text}")
+    check("pf.bad.missing" in text and "rule_params.cbet_size_hux" in text,
+          f"错误要含规则 id 与引用路径：{text}")
+
+
+def test_export_rules_check_rejects_non_rule_params_size_kind() -> None:
+    """size 引用的 kind 白名单只允许 rule_params（票 68 边界）。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        directory = Path(tmp)
+        write_ledger(directory, rule(
+            id="pf.bad.kind", slot="size", action=None,
+            size={"table": "fold_equity", "name": "price_ref"}))
+        res = subprocess.run(
+            [sys.executable, str(ROOT / "tools" / "export_rules.py"),
+             "--check", "--dir", str(directory)],
+            capture_output=True, text=True, cwd=str(ROOT), timeout=120,
+        )
+    text = res.stdout + res.stderr
+    eq(res.returncode, 1, f"size 引用非 rule_params 表应退出 1：{text}")
+    check("pf.bad.kind" in text and "fold_equity.price_ref" in text,
+          f"错误要含规则 id 与引用路径：{text}")
+
+
+def test_script_style_harness_has_no_failures() -> None:
+    """pytest 桥：脚本式用例把失败记在 FAILS，这里让 pytest 也红。
+
+    本文件历史上是「脚本 + main() 汇总」的写法（`nv tests/test_rules_ledger.py`）；
+    pytest 只收集函数、看不到 FAILS，所以补这一条让两种跑法结论一致。
+    故意不放进 main() 的 tests 列表，避免脚本模式自己断言自己。
+    """
+    assert not FAILS, "脚本式断言失败：\n" + "\n".join(FAILS)
+
+
 # ─────────────────────── 入口 ───────────────────────
 
 def main() -> int:
@@ -561,6 +743,14 @@ def main() -> int:
         test_pot_odds_matches_pot_math,
         test_export_rules_check_empty_ok,
         test_export_rules_check_bad_ledger,
+        test_new_predicates_deterministic,
+        test_new_predicates_fail_open_without_data,
+        test_rule_params_table_entries,
+        test_rule_params_size_ref_success_and_failure,
+        test_rule_params_literal_size_rejected,
+        test_export_rules_check_accepts_rule_params_ref,
+        test_export_rules_check_rejects_missing_rule_param,
+        test_export_rules_check_rejects_non_rule_params_size_kind,
     ]
     for t in tests:
         before = len(FAILS)

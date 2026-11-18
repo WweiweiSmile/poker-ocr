@@ -161,6 +161,13 @@ def _board_paired(sit: Any) -> bool | None:
 
 
 def _ante_bb(snap) -> float | None:
+    """前注（BB/人）；`Blinds.ante` 已经是 BB，这里不再换算。
+
+    口径证据：`poker_ocr/parse.py:189-191` 把 `Blinds.sb/bb/ante` 的字段
+    单位写成 BB，`parse_blinds` 在 `:219-221` 用 `ante_chips / bb_chips`
+    把横幅里的筹码数折成 BB；`poker_ocr/prompt/system/__init__.py:52-53`
+    也按「前注 {ante}BB」渲染。所以这里只做「>0 才出面」的门控，绝不乘除。
+    """
     ante = getattr(getattr(snap, "blinds", None), "ante", None)
     number = _num(ante)
     return number if number and number > 0 else None
