@@ -29,6 +29,7 @@ const DIMENSIONS: { key: keyof ScoreRunScoreMap; label: string }[] = [
 
 function statusTag(status?: string) {
   if (status === 'hit' || status === 'supported') return <Tag color="green">{status}</Tag>
+  if (status === 'contradicted') return <Tag color="orange">{status}</Tag>
   if (status === 'miss' || status === 'missing') return <Tag color="red">{status}</Tag>
   return <Tag>{status || '—'}</Tag>
 }
@@ -61,6 +62,7 @@ export function JudgeCard({ judge }: { judge?: ScoreRunJudge }) {
         <Space size={4} wrap>
           <Tag color={judge.mode === 'llm' ? 'blue' : 'default'}>{judge.mode || '—'}</Tag>
           <Tag color={judge.status === 'ok' ? 'green' : 'orange'}>{judge.status || '—'}</Tag>
+          {judge.status !== 'error' && judge.inputPrompt === false ? <Tag color="orange">无模型输入</Tag> : null}
           {judge.judgeVersion ? <Tag>{judge.judgeVersion}</Tag> : null}
         </Space>
       )}
@@ -69,7 +71,19 @@ export function JudgeCard({ judge }: { judge?: ScoreRunJudge }) {
         <Descriptions.Item label="模型">{judge.model || '—'}</Descriptions.Item>
         <Descriptions.Item label="温度">{judge.temperature ?? '—'}</Descriptions.Item>
         <Descriptions.Item label="prompt">{judge.promptVersion || '—'}</Descriptions.Item>
+        <Descriptions.Item label="事实源">
+          {judge.status === 'error'
+            ? '未判定'
+            : judge.inputPrompt === true
+              ? '模型输入 prompt'
+              : judge.inputPrompt === false
+                ? '未留存模型输入'
+                : '旧判定（未记录输入）'}
+        </Descriptions.Item>
         <Descriptions.Item label="输入指纹">{judge.inputDigest || '—'}</Descriptions.Item>
+        {judge.degraded ? (
+          <Descriptions.Item label="降级">{judge.degraded}</Descriptions.Item>
+        ) : null}
       </Descriptions>
       {judge.error ? (
         <Alert
@@ -85,7 +99,7 @@ export function JudgeCard({ judge }: { judge?: ScoreRunJudge }) {
           description={(
             <Space direction="vertical" size={2} style={{ width: '100%' }}>
               {evidence.quotes?.length ? <Text>引用原句：{evidence.quotes.join(' / ')}</Text> : null}
-              {evidence.missingFacts?.length ? <Text>facts 缺失：{evidence.missingFacts.join('；')}</Text> : null}
+              {evidence.missingFacts?.length ? <Text>输入里缺失：{evidence.missingFacts.join('；')}</Text> : null}
               {evidence.forbiddenPoints?.length ? <Text>命中禁令：{evidence.forbiddenPoints.join('；')}</Text> : null}
               {evidence.forbiddenActions?.length ? <Text>禁用动作：{evidence.forbiddenActions.join(' / ')}</Text> : null}
               {evidence.error ? <Text type="danger">{evidence.error}</Text> : null}
@@ -120,7 +134,15 @@ export function JudgeCard({ judge }: { judge?: ScoreRunJudge }) {
             { title: '对应事实', dataIndex: 'fact', width: 220, ellipsis: true, render: (value?: string) => value || '—' },
           ]}
         />
-      ) : <Text type="secondary">没有引用事实</Text>}
+      ) : (
+        <Text type="secondary">
+          {judge.status === 'error'
+            ? '未判定'
+            : judge.inputPrompt === false
+              ? '未留存模型输入，未核对引用事实'
+              : '没有引用事实'}
+        </Text>
+      )}
       <Space size={8} wrap style={{ marginTop: 8 }}>
         <Tag color={judge.hallucinated ? 'red' : 'default'}>幻觉 {judge.hallucinated ? '是' : '否'}</Tag>
         {judge.missingPoints?.length ? <Tag color="orange">漏判 {judge.missingPoints.length}</Tag> : null}
@@ -178,6 +200,13 @@ export function OverrideCard({ runId, item }: { runId: number; item: ScoreRunIte
     onSuccess: () => { message.success('已撤回改判'); refresh() },
     onError: (error) => message.error(errorMessage(error)),
   })
+  const versionChanged = Boolean(rejudge?.judgeVersionChanged)
+  const rejudgeMessage = !rejudge ? '' : versionChanged
+    ? '判定口径已升级（' + String((rejudge.before as { judgeVersion?: string } | undefined)?.judgeVersion || '旧版')
+      + ' → ' + String(rejudge.judgeVersion || '当前') + '），差异包含提示词变化的影响'
+    : rejudge.consistent
+      ? '重判结果与原始判定一致（temp 0 可复现）'
+      : '重判结果与原始判定不一致，见差异'
   const runRejudge = useMutation({
     mutationFn: () => api.post('/score-runs/' + runId + '/items/' + item.caseId + '/' + item.repeatIndex + '/rejudge', {}),
     onSuccess: (data) => { setRejudge(data as Record<string, unknown>); message.success('重判完成（未写库）') },
@@ -237,9 +266,9 @@ export function OverrideCard({ runId, item }: { runId: number; item: ScoreRunIte
       {rejudge ? (
         <Alert
           style={{ marginTop: 8 }}
-          type={rejudge.consistent ? 'success' : 'warning'}
+          type={rejudge.consistent && !versionChanged ? 'success' : 'warning'}
           showIcon
-          message={rejudge.consistent ? '重判结果与原始判定一致（temp 0 可复现）' : '重判结果与原始判定不一致，见差异'}
+          message={rejudgeMessage}
           description={(
             <Text style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
               {JSON.stringify(rejudge.diffs ?? {}, null, 2)}

@@ -218,7 +218,7 @@ canonical 手牌：一手牌可以在复盘（`review`）、实时（`live`）�
 | 事实 `s_fact` | 15 | `1 - 错误事实项/引用事实项`；没引用事实记 1（fail open） |
 | 稳定 `s_stable` | 5 | 同案例 3 次建议动作的一致率；没抽样时整维不进分母 |
 
-`score = Σ W·s / Σ W`；命中硬失败封顶 40。硬失败六码：`HF_OPTION`（option 不在该决策点选项里）、`HF_FALLBACK`（不是模型给的建议）、`HF_FORBIDDEN_ACTION`、`HF_FORBIDDEN_POINT`、`HF_HALLUCINATION`（把 facts 里没有的具体事实当依据）、`HF_ERROR`（调用异常）。事实说错只扣 `s_fact`，不算硬失败。
+`score = Σ W·s / Σ W`；命中硬失败封顶 40。硬失败六码：`HF_OPTION`（option 不在该决策点选项里）、`HF_FALLBACK`（不是模型给的建议）、`HF_FORBIDDEN_ACTION`、`HF_FORBIDDEN_POINT`、`HF_HALLUCINATION`（把模型输入里没有的具体事实当依据）、`HF_ERROR`（调用异常）。事实说错只扣 `s_fact`，不算硬失败。
 
 聚合：总分取「重复 0 次」的案例均值，P0 通过率 = (P0 且无硬失败 且 `s_action=1`) / **本次 run 的 P0 案例总数**（没跑到/没出分的 P0 也算分母，否则通过率虚高），覆盖率 = 达到 `FREQ_MIN_N=15` 样本的桶数 / 有 active spec 的桶数（按 spec 的桶标签去重，空桶不计；分母是本次 run 开始时全部 active spec 的桶，不是恰好被冻结到的那些）。比例类给 Wilson 95% 区间，均值给正态近似；页面同时显示 n 与区间。
 
@@ -226,7 +226,17 @@ canonical 手牌：一手牌可以在复盘（`review`）、实时（`live`）�
 
 **版本对照（#60）**：`GET /api/score-runs/{id}/compare/{other}` 把两次 run 按**共同决策点**配对，只比两边都跑过的案例，交集外的案例数与各自案例数显式写进 `cases`，不进表也不进均分。配对键是 `(canonical_id, decision_key)` 而不是 `case_id`：案例集升 revision 是整集复制、每行生成新 `case_id`，按 `case_id` 配对会把「两个版本」算成「零个共同案例」。方向判定先看硬失败再看有效分（`38 → 40` 的涨分其实是多了一条 `HF_OPTION`，纯比分数会判成改好）；某侧 `source=error` 或缺分记 `incomparable`，不冒充「不变」；分数差 `|Δ| ≤ 0.005` 才算不变。跨案例集 revision、spec revision/集合、judge、reconstruct 任一不同都进 `versions` 与 `warnings`（代码 `CASE_SET_CHANGED` / `SPEC_CHANGED` / `JUDGE_CHANGED` / `RECONSTRUCT_CHANGED` / `RUN_NOT_FINISHED`），页面顶部强制显示「只比共同案例、分差里混着口径变化」；被测版本不同不算口径变化。页面 `/runs/:id/compare/:other` 给出交集计数、两侧共同案例均分与 CI、改坏/改好/不变/不可比四方向筛选、逐条「两侧实际建议 + 两次判定」抽屉，导出 CSV 带案例 id、桶、两次分数、差值、方向、两侧案例集/spec revision 与告警代码。纯逻辑在 `replay/compare.py`。
 
-**LLM judge（#58）**：run 路径先用判定模型逐条判 `required_points` / `forbidden_points`（温度 0，`judge_version = llm-j1:<模型>` 冻结进 `config_snapshot.judge`），再走同一套五维合成；`s_reason` 用要点加权和，`s_fact` 用引用/缺失事实，`HF_HALLUCINATION` / `HF_FORBIDDEN_POINT` 在 run 路径真正生效。每条硬失败把 evidence 落进 `judge_json`：引用的原句 `quotes`、facts 里缺失的项 `missingFacts`、命中的禁令 `forbiddenPoints` / `forbiddenActions`，页面据此展示「为什么判它错」。judge 自己失败（超时、回复不是合法 JSON）时 fail open：退回 #57 的退化口径（`reasonMode: action-support`，不伪造硬失败，`judge_json.status=error` 且带 error 文本）。判定模型要求与被测模型不同、走最强档：`REPLAY_JUDGE_MODEL`（默认 `deepseek-v4-pro`）、`REPLAY_JUDGE_BASE_URL`（缺省回落 `AI_SERVER_BASE_URL`）、`REPLAY_JUDGE_API_KEY_REF`（默认 `AI_SERVER_API_KEY`）、`REPLAY_JUDGE_TIMEOUT`（默认 30 秒）、`REPLAY_JUDGE_THINKING`；不合规时创建页显示原因、`create_score_run` 直接 409 `JUDGE_NOT_READY`。人工改判写 `replay_judge_overrides`（唯一键 run+case，带 `actor` / `note` / `updated_at`），原始 `replay_run_items.score` 与 `judge_json` 一个字不动，聚合时优先取改判分；每次改判/撤回都追加一行 `replay_judge_override_log`（before/after）。抽屉里可看逐条判定与 evidence、保存/撤回改判，并可「重判（不写库）」比对一致性。语义口径见 `replay/judge.py` 顶部。
+**LLM judge（#58 / #73）**：run 路径先用判定模型逐条判 `required_points` / `forbidden_points`（温度 0，`judge_version = llm-j2:<模型>` 冻结进 `config_snapshot.judge`），再走同一套五维合成；`s_reason` 用要点加权和，`s_fact` 用引用/错误事实。核对引用事实的事实源是**模型当时实际看到的 prompt 原文**（`prompt_json.user`，judge 输入里单列【模型当时看到的输入】并声明权威）；结构化 `facts` 只用于 options / id 与结构参考，冲突以 prompt 为准。`citedFacts` 三态：`supported`（原文一致，或能由原文数字直接算出且算对）、`contradicted`（原文有该事实但数值/对象实质不符，只计 `wrongFacts` 扣 `s_fact`，不产生硬失败）、`missing`（原文完全没有，被当依据时 `HF_HALLUCINATION` 生效）。prompt 未留存时（`store_prompts=false` / 旧行 `prompt_json` 为 NULL）fail open：不产生幻觉判定，`judge_json` 写 `inputPrompt=false` / `degraded=prompt_missing`，只判要点。每条硬失败把 evidence 落进 `judge_json`：引用的原句 `quotes`、输入里缺失的事实项 `missingFacts`、命中的禁令 `forbiddenPoints` / `forbiddenActions`，页面据此展示「为什么判它错」。judge 自己失败（超时、回复不是合法 JSON）时 fail open：退回 #57 的退化口径（`reasonMode: action-support`，不伪造硬失败，`judge_json.status=error` 且带 error 文本）。判定模型要求与被测模型不同、走最强档：`REPLAY_JUDGE_MODEL`（默认 `deepseek-v4-pro`）、`REPLAY_JUDGE_BASE_URL`（缺省回落 `AI_SERVER_BASE_URL`）、`REPLAY_JUDGE_API_KEY_REF`（默认 `AI_SERVER_API_KEY`）、`REPLAY_JUDGE_TIMEOUT`（默认 30 秒）、`REPLAY_JUDGE_THINKING`；不合规时创建页显示原因、`create_score_run` 直接 409 `JUDGE_NOT_READY`。人工改判写 `replay_judge_overrides`（唯一键 run+case，带 `actor` / `note` / `updated_at`），原始 `replay_run_items.score` 与 `judge_json` 一个字不动，聚合时优先取改判分；每次改判/撤回都追加一行 `replay_judge_override_log`（before/after）。抽屉里可看逐条判定与 evidence、保存/撤回改判，并可「重判（不写库）」比对一致性；重判的提示词只能来自当前代码，所以旧 run 快照里的 j1 标签不沿用（响应带 `judgeVersionChanged`，页面据此说明差异含口径升级影响，不是同输入复现）。语义口径见 `replay/judge.py` 顶部。
+
+**#73 手动 ab 收口（维护者执行）**：j2 与旧 run 不同口径，比较前先把旧 run 全量重判到 j2，或直接用 j2 新建 run。批量重判只读、不写库，逐条调用的就是页面「重判」按钮那条路径：
+
+```bash
+cd replay-console
+../nv -m replay.rejudge_report --run-id 8                      # 预演：planned / withPrompt
+../nv -m replay.rejudge_report --run-id 8 --execute --json /tmp/run8-j2.json
+```
+
+输出里 `beforeHf` / `afterHf` 是同一批 `compared` 条目的 `HF_HALLUCINATION` 数，`hfRateBefore` / `hfRateAfter` 是比率；`compared` 只收 judge 真的返回判定（`afterStatus=ok`）且 `inputPrompt != false` 的条目。`factBeforeMean` / `factAfterMean` 只算 before/after 都有值的 `compared` 记录。`promptMissing`（`prompt_json` 为 NULL）与 `judgeFailed`（judge 调用失败 / 不可用，`degraded=judge_error`）各自单列、都不进任何对比——这两类会 fail open 把 `s_fact` 记 1，混进去会虚高。`fixed` / `new` 与 `samples`（带 `kind`）给出 HF 消失/新增的案例。`withPrompt` 明显低于 `planned` 时先查 store_prompts 与旧行 `prompt_json`。结论（HF 率、s_fact 变化、fixed/new 样例）写回 #73 后再关；agent 不代跑模型、不代出对比结论。
 
 采样与中断：每个案例跑 1 次，`priority=0` 的案例额外再跑 2 次（固定样本，不随机抽）；调用次数 = 案例数 + P0 数 × 2。取消是协作式的：已完成的案例照常计分，**没开跑就取消的单元不算「已完成」**（进度不会跳到 N/N），run 标 `partial` 并在 `error_msg` 里写「完成 X/Y 个案例；已按要求中断」；服务重启时 `running` 的 run 会被标成 `partial`，不冒充成功。案例缺决策点、或冻结的 spec 已被删时，不静默跳过也不换 spec：落一条 `source=error` 的 run_item（`HF_ERROR`，errorMsg 写明原因），run 因有 error 标 `partial`。
 

@@ -1401,8 +1401,10 @@ export interface ScoreRunJudge {
   missingPoints?: string[]
   forbiddenHits?: string[]
   citedFacts?: ScoreRunJudgeCitedFact[]
-  wrongFacts?: string[]
+  wrongFacts?: ScoreRunJudgeCitedFact[]
   hallucinated?: boolean
+  inputPrompt?: boolean
+  degraded?: string
   optionIds?: string[]
   error?: string
   evidence?: ScoreRunJudgeEvidence

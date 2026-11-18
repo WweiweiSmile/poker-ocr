@@ -2454,6 +2454,11 @@ class ReplayService:
         if isinstance(frozen, dict):
             cfg = {**cfg, **{k: v for k, v in frozen.items()
                              if v is not None}}
+        # #73：promptVersion / version 描述的是「这次判定实际用的是哪版口径」。
+        # 旧 run 的快照里是旧版本（j1），但复判的提示词只能来自当前代码；
+        # 沿用旧标签会把 j2 判定标成 j1，前后结论也不可比。
+        cfg["promptVersion"] = judge.JUDGE_PROMPT_VERSION
+        cfg["version"] = judge.judge_version(cfg.get("model"))
         blockers = judge.judge_blockers(
             cfg, model_under_test=version.get("model"))
         if blockers:
@@ -2472,6 +2477,10 @@ class ReplayService:
                 f"案例 {case_id} 冻结的 spec 已不存在，无法重判", 409)
         spec = specs.spec_from_row(spec_row)
         facts = json_load(row.get("facts_json"), {}) or {}
+        # #73：复判必须用模型当时实际看到的 prompt 原文核对引用事实；
+        # 旧行 / store_prompts=false 时 prompt_json 为 NULL，judge 侧 fail open。
+        # prompt_json.system 是建议模型的 system 段，不是事实源，不传给 judge。
+        prompt_row = json_load(row.get("prompt_json"), {}) or {}
         option_ids = [str(opt.get("id")) for opt in facts.get("options") or []
                       if isinstance(opt, dict) and opt.get("id") is not None]
         advice = {
@@ -2489,7 +2498,10 @@ class ReplayService:
         before = json_load(row.get("judge_json"), {}) or {}
         after = judge.evaluate(
             cfg, settings=ai_settings, spec=spec, advice=advice,
-            facts=facts, option_ids=option_ids, timeout=cfg.get("timeout"))
+            facts=facts, option_ids=option_ids,
+            model_prompt=prompt_row.get("user"),
+            model_prompt_sha=prompt_row.get("sha"),
+            timeout=cfg.get("timeout"))
         verdict = judge.compare_verdict(before, after)
         result = judge.score_verdict(
             after, spec=spec, advice=advice, option_ids=option_ids)
@@ -2501,6 +2513,9 @@ class ReplayService:
             "before": before,
             "after": after,
             "judgeVersion": after.get("judgeVersion"),
+            "judgeVersionChanged": bool(
+                before.get("judgeVersion")
+                and before.get("judgeVersion") != after.get("judgeVersion")),
             "inputDigest": after.get("inputDigest"),
             "score": result["score"],
             "scores": result["scores"],

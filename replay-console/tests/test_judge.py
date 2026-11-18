@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -45,7 +46,7 @@ def _cfg(model="judge-pro"):
 
 def test_judge_version_embeds_model_and_fits_column():
     version = judge.judge_version("deepseek-v4-pro")
-    assert version == "llm-j1:deepseek-v4-pro"
+    assert version == "llm-j2:deepseek-v4-pro"
     assert len(version) <= 32
     assert len(judge.judge_version("x" * 80)) <= 32
 
@@ -79,6 +80,7 @@ def test_build_messages_lists_every_point_and_forbids_made_up_quotes():
     # 命中必须摘 reason 原文；facts 里没有的引用必须标 missing。
     assert "reason" in system and "quote" in system
     assert "supported" in system and "missing" in system
+    assert "contradicted" in system
     assert "hallucinated" in system
     assert ADVICE["reason"] in user
 
@@ -264,6 +266,7 @@ def test_evaluate_fails_open_without_faking_hard_fail(monkeypatch):
                          facts=FACTS, option_ids=["o1"])
     assert out["mode"] == judge.MODE_RULES
     assert out["status"] == judge.STATUS_ERROR
+    assert out["degraded"] == "judge_error"
     assert "upstream down" in out["error"]
     result = judge.score_verdict(out, spec=SPEC, advice=ADVICE,
                                  option_ids=["o1"])
@@ -304,7 +307,7 @@ def test_judge_version_stays_unique_for_long_models():
     b = judge.judge_version("provider-b/super-long-model-name-2026-11")
     assert len(a) <= 32 and len(b) <= 32
     assert a != b
-    assert a.startswith("llm-j1:")
+    assert a.startswith("llm-j2:")
 
 
 def test_clip_facts_keeps_valid_json_and_names_dropped_keys():
@@ -325,7 +328,7 @@ def test_clip_facts_keeps_valid_json_and_names_dropped_keys():
 def test_build_messages_never_cuts_facts_json_in_half():
     facts = dict(FACTS, board="AhKd7c2s9h" * 900)
     _system, user = judge.build_messages(SPEC, ADVICE, facts, ["o1", "o2"])
-    payload = user.split("【facts】", 1)[1].strip()
+    payload = user.split("【facts】", 1)[1].strip().splitlines()[-1]
     parsed = json.loads(payload)
     assert parsed["truncatedKeys"]
     assert parsed["options"][0]["id"] == "o1"
@@ -370,3 +373,211 @@ def test_judge_ai_settings_are_temperature_zero(monkeypatch):
     assert settings.temperature == 0.0
     assert settings.model == "judge-pro"
     assert settings.base_url == "https://j.example/v1"
+
+# ─────────────── #73：judge 输入对齐模型实际看到的 prompt ───────────────
+
+# 真实记录：run 8 / case 22（BTN 河牌明三条跟注）/ repeat 0，2026-11-18 取自
+# call_game_dev 的 replay_run_items（prompt_json / facts_json / reason / judge_json）。
+FIXTURE = Path(__file__).parent / "fixtures" / "run8_case22.json"
+
+
+def _fixture():
+    return json.loads(FIXTURE.read_text(encoding="utf-8"))
+
+
+def test_build_messages_includes_model_prompt_as_authority():
+    prompt = ("## 当前局面\n赔率门槛：63BB / 可争夺底池 261BB = 24.1%\n"
+              "## 行动线\n河牌：midR 下注 63BB")
+    system, user = judge.build_messages(SPEC, ADVICE, FACTS, ["o1", "o2"],
+                                        model_prompt=prompt)
+    assert "【模型当时看到的输入" in user
+    assert prompt in user
+    assert "权威事实源" in user
+    assert "以它为准" in user and "以 prompt 原文为准" in system
+    assert user.index("【模型当时看到的输入") < user.index("【facts】")
+
+
+def test_build_messages_omits_prompt_section_when_absent():
+    system, user = judge.build_messages(SPEC, ADVICE, FACTS, ["o1", "o2"])
+    assert "【模型当时看到的输入" not in user
+    assert "没有留存模型输入" in system
+
+
+def test_build_messages_clips_long_prompt_with_visible_marker():
+    prompt = "x" * (judge.PROMPT_CHAR_LIMIT + 500)
+    _system, user = judge.build_messages(SPEC, ADVICE, FACTS, ["o1"],
+                                         model_prompt=prompt)
+    section = user.split("【模型当时看到的输入（权威事实源）】", 1)[1]
+    section = section.split("【facts】", 1)[0]
+    assert len(section) < judge.PROMPT_CHAR_LIMIT + 200
+    assert "已截断" in section and "不要据此判 missing" in section
+
+
+def test_parse_verdict_contradicted_is_wrong_fact_not_hallucination():
+    advice = {**ADVICE, "reason": "对手范围权益 80%，跟注。"}
+    raw = {"citedFacts": [
+        {"quote": "权益 80%", "status": "contradicted", "fact": "equity"}],
+        "hallucinated": True}
+    out = judge.parse_verdict(raw, spec=SPEC, advice=advice)
+    assert out["citedFacts"][0]["status"] == "contradicted"
+    assert out["wrongFacts"] == [
+        {"quote": "权益 80%", "status": "contradicted", "fact": "equity"}]
+    assert out["hallucinated"] is False
+
+
+def test_parse_verdict_missing_plus_contradicted_keeps_hallucination():
+    advice = {**ADVICE, "reason": "对手范围权益 80%，门槛 24% 也不够，跟注。"}
+    raw = {"citedFacts": [
+        {"quote": "权益 80%", "status": "contradicted", "fact": "equity"},
+        {"quote": "门槛 24%", "status": "missing", "fact": "odds"}],
+        "hallucinated": True}
+    out = judge.parse_verdict(raw, spec=SPEC, advice=advice)
+    assert out["hallucinated"] is True
+    assert [f["status"] for f in out["wrongFacts"]] == [
+        "missing", "contradicted"]
+
+
+def test_score_verdict_contradicted_lowers_fact_score_without_hard_fail():
+    advice = {**ADVICE, "reason": "对手范围权益 80%，跟注。"}
+    verdict = judge.parse_verdict({"citedFacts": [
+        {"quote": "权益 80%", "status": "contradicted", "fact": "equity"}]},
+        spec=SPEC, advice=advice)
+    verdict["mode"] = judge.MODE_LLM
+    result = judge.score_verdict(verdict, spec=SPEC, advice=advice,
+                                 option_ids=["o1", "o2"], pot=6.0)
+    assert result["hardFail"] is None
+    assert result["scores"]["fact"] == 0.0
+
+
+def test_evaluate_without_prompt_clears_hallucination_fail_open(monkeypatch):
+    reply = {
+        "requiredPoints": [{"key": "position", "status": "hit",
+                            "quote": "我在按钮位"}],
+        "citedFacts": [{"quote": "对手持续下注范围偏宽", "status": "missing",
+                        "fact": "opponent_range"}],
+        "hallucinated": True,
+    }
+    _stub_model(monkeypatch, reply)
+    out = judge.evaluate(_cfg(), settings=object(), spec=SPEC, advice=ADVICE,
+                         facts=FACTS, option_ids=["o1", "o2"])
+    assert out["inputPrompt"] is False
+    assert out["degraded"] == "prompt_missing"
+    assert out["citedFacts"] == [] and out["wrongFacts"] == []
+    assert out["hallucinated"] is False
+    assert out["matchedPoints"] == ["position"]
+    assert judge.score_verdict(out, spec=SPEC, advice=ADVICE,
+                               option_ids=["o1", "o2"])["hardFail"] is None
+
+
+def test_evaluate_passes_prompt_to_model_and_digest(monkeypatch):
+    reply = {"requiredPoints": [], "forbiddenPoints": [], "citedFacts": [],
+             "hallucinated": False}
+    calls = _stub_model(monkeypatch, reply)
+    prompt = "## 当前局面\n赔率门槛：63BB / 可争夺底池 261BB = 24.1%"
+    out = judge.evaluate(_cfg(), settings=object(), spec=SPEC, advice=ADVICE,
+                         facts=FACTS, option_ids=["o1", "o2"],
+                         model_prompt=prompt, model_prompt_sha="sha-1")
+    assert out["inputPrompt"] is True and out["degraded"] == ""
+    assert prompt in calls[0][1]
+    without = judge.evaluate(_cfg(), settings=object(), spec=SPEC,
+                             advice=ADVICE, facts=FACTS,
+                             option_ids=["o1", "o2"])
+    assert out["inputDigest"] != without["inputDigest"]
+
+
+def test_evaluate_prompt_present_call_failure_keeps_prompt_flag(monkeypatch):
+    import poker_ocr.advice as advice_mod
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("judge down")
+
+    monkeypatch.setattr(advice_mod, "complete_json", boom)
+    out = judge.evaluate(_cfg(), settings=object(), spec=SPEC, advice=ADVICE,
+                         facts=FACTS, option_ids=["o1"],
+                         model_prompt="## 当前局面\n底池 198BB")
+    assert out["status"] == judge.STATUS_ERROR
+    assert out["inputPrompt"] is True
+    assert out["degraded"] == "judge_error"
+
+
+def test_input_digest_changes_when_prompt_changes():
+    a = judge.input_digest(SPEC, ADVICE, FACTS, ["o1"], model_prompt="A")
+    b = judge.input_digest(SPEC, ADVICE, FACTS, ["o1"], model_prompt="B")
+    assert a != b and len(a) == 16
+
+
+def test_fixture_run8_case22_prompt_reaches_judge_and_absence_fails_open(
+        monkeypatch):
+    data = _fixture()
+    prompt = data["prompt_json"]["user"]
+    facts = data["facts_json"]
+    advice = {"option_id": "call", "kind": "call", "amount": 63,
+              "reason": data["reason"], "source": "model"}
+    spec = {"required_points": [], "forbidden_points": [],
+            "forbidden_actions": ["fold"]}
+    reply = {"requiredPoints": [], "forbiddenPoints": [], "citedFacts": [
+        {"quote": "24%门槛", "status": "missing", "fact": "odds"}],
+        "hallucinated": True}
+    calls = _stub_model(monkeypatch, reply)
+
+    with_prompt = judge.evaluate(_cfg(), settings=object(), spec=spec,
+                                 advice=advice, facts=facts,
+                                 model_prompt=prompt,
+                                 model_prompt_sha=data["prompt_json"]["sha"])
+    assert "63BB / 可争夺底池 261BB = 24.1%" in calls[0][1]
+    assert "## 行动线" in calls[0][1]
+    assert with_prompt["inputPrompt"] is True
+
+    without_prompt = judge.evaluate(_cfg(), settings=object(), spec=spec,
+                                    advice=advice, facts=facts)
+    assert without_prompt["hallucinated"] is False
+    assert without_prompt["citedFacts"] == []
+    assert judge.score_verdict(without_prompt, spec=spec, advice=advice,
+                               option_ids=["call", "fold"])["hardFail"] is None
+
+
+def test_run_worker_passes_stored_prompt_to_judge(monkeypatch):
+    from replay import run_worker
+
+    captured = []
+
+    def fake_evaluate(cfg, **kwargs):
+        captured.append(kwargs)
+        return judge.fallback_verdict(cfg)
+
+    class _Items:
+        def __init__(self):
+            self.written = []
+
+        def upsert(self, **kwargs):
+            self.written.append(kwargs)
+
+    worker = SimpleNamespace(
+        settings=SimpleNamespace(model_timeout=1.0, transient_retries=0,
+                                 store_prompts=True),
+        limiter=None, items=_Items())
+    data = _fixture()
+    prompt_user = data["prompt_json"]["user"]
+    payload = {
+        "facts_json": json.dumps(FACTS), "option_id": "o1",
+        "option_kind": "call", "option_amount": None,
+        "reason_full": ADVICE["reason"], "source": "model",
+        "prompt_user": prompt_user,
+        "prompt_sha256": data["prompt_json"]["sha"],
+    }
+    unit = {"case": {"id": 3}, "decision": SimpleNamespace(pot=6.0),
+            "spec": SPEC, "specId": 11, "repeat": 0}
+
+    monkeypatch.setattr(run_worker, "execute_unit",
+                        lambda **kwargs: SimpleNamespace(payload=payload))
+    monkeypatch.setattr(run_worker.judge, "evaluate", fake_evaluate)
+    ok = run_worker.RunWorker._run_unit(worker, {"id": 1}, unit, object(),
+                                        {"model": "deepseek-flash"}, [11],
+                                        {"model": "judge-pro"}, object())
+    assert ok is True
+    assert captured[0]["model_prompt"] == prompt_user
+    assert "63BB / 可争夺底池 261BB = 24.1%" in captured[0]["model_prompt"]
+    assert "## 行动线" in captured[0]["model_prompt"]
+    assert captured[0]["model_prompt_sha"] == data["prompt_json"]["sha"]
+    stored = json.loads(worker.items.written[0]["item"]["promptJson"])
+    assert stored["user"] == prompt_user

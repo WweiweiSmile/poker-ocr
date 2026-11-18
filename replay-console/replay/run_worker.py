@@ -502,9 +502,13 @@ class RunWorker:
         }
         # #58：先让 judge 逐条判要点/幻觉（温度 0、证据留档），再走同一套
         # scoring 合成——失败时 judge 自己退化成 #57 的规则口径，不伪造 HF。
+        # #73：核对事实以模型当时实际看到的 prompt 原文为准（store_prompts=false
+        # 时 payload 无这两个字段，judge 侧 fail open，不产生幻觉判定）。
         verdict = judge.evaluate(
             judge_cfg or {}, settings=judge_settings, spec=spec,
             advice=advice, facts=facts, option_ids=option_ids,
+            model_prompt=payload.get("prompt_user"),
+            model_prompt_sha=payload.get("prompt_sha256"),
             timeout=(judge_cfg or {}).get("timeout"))
         result = judge.score_verdict(
             verdict, spec=spec, advice=advice, option_ids=option_ids,

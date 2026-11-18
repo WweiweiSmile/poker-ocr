@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -599,3 +600,80 @@ def test_rejudge_compares_same_input_without_writing(monkeypatch):
     # 重判只读：原始行与聚合分都不动。
     assert rows[0]["score"] == 90.0
     assert service.run_repo.rows[run_id]["score"] is None
+
+
+def test_rejudge_uses_stored_prompt_and_fails_open_without_it(monkeypatch):
+    service, run_id, rows = _finished_service(monkeypatch)
+    service.spec_repo.rows[11]["spec_json"] = json.dumps({
+        "required_points": [{"key": "position", "text": "按钮位", "weight": 1}],
+        "forbidden_points": []})
+    import poker_ocr.advice as advice_mod
+    users = []
+
+    def fake(settings, system, user, timeout=None):
+        users.append(user)
+        return {
+            "requiredPoints": [{"key": "position", "status": "hit",
+                                "quote": "我在按钮位"}],
+            "forbiddenPoints": [],
+            "citedFacts": [{"quote": "我在按钮位", "status": "missing",
+                            "fact": "position"}],
+            "hallucinated": True,
+        }
+
+    monkeypatch.setattr(advice_mod, "complete_json", fake)
+    # 旧行没有 prompt_json：fail open，不产生幻觉，也不产出 HF。
+    without = service.rejudge_score_run_item(run_id, 1, 0)
+    assert "【模型当时看到的输入" not in users[0]
+    assert without["after"]["inputPrompt"] is False
+    assert without["after"]["degraded"] == "prompt_missing"
+    assert without["after"]["hallucinated"] is False
+    assert without["after"]["citedFacts"] == []
+    assert without["hardFail"] is None
+
+    # 有 prompt 时原文进 judge 输入，并进 inputDigest（真 fixture：run 8 / case 22）。
+    fixture = json.loads(
+        (Path(__file__).parent / "fixtures" / "run8_case22.json").read_text(
+            encoding="utf-8"))
+    rows[0]["prompt_json"] = json.dumps(fixture["prompt_json"])
+    with_prompt = service.rejudge_score_run_item(run_id, 1, 0)
+    assert "63BB / 可争夺底池 261BB = 24.1%" in users[1]
+    assert "## 行动线" in users[1]
+    assert with_prompt["after"]["inputPrompt"] is True
+    assert with_prompt["after"]["degraded"] == ""
+    assert with_prompt["after"]["hallucinated"] is True
+    assert with_prompt["inputDigest"] != without["inputDigest"]
+    # 重判不写库。
+    assert rows[0]["score"] == 90.0
+
+
+def test_rejudge_uses_current_prompt_version_not_stale_snapshot(monkeypatch):
+    """旧 run 冻结的是 j1；复判用的是当前 j2 提示词，标签必须跟着实际口径。"""
+    service, run_id, rows = _finished_service(monkeypatch)
+    service.spec_repo.rows[11]["spec_json"] = json.dumps({
+        "required_points": [{"key": "position", "text": "按钮位", "weight": 1}],
+        "forbidden_points": []})
+    run = service.run_repo.rows[run_id]
+    snapshot = json.loads(run["config_snapshot"])
+    snapshot["judge"]["promptVersion"] = "j1"
+    snapshot["judge"]["version"] = "llm-j1:judge-pro"
+    run["config_snapshot"] = json.dumps(snapshot)
+    before = json.loads(rows[0]["judge_json"])
+    before["promptVersion"] = "j1"
+    before["judgeVersion"] = "llm-j1:judge-pro"
+    before["requiredPoints"] = [{"key": "position", "text": "按钮位",
+                                 "weight": 1, "status": "hit",
+                                 "quote": "我在按钮位", "quoteFound": True}]
+    rows[0]["judge_json"] = json.dumps(before)
+    import poker_ocr.advice as advice_mod
+    monkeypatch.setattr(advice_mod, "complete_json", lambda *a, **k: {
+        "requiredPoints": [{"key": "position", "status": "hit",
+                            "quote": "我在按钮位"}],
+        "forbiddenPoints": [], "citedFacts": [], "hallucinated": False})
+    out = service.rejudge_score_run_item(run_id, 1, 0)
+    assert out["after"]["promptVersion"] == judge.JUDGE_PROMPT_VERSION
+    assert out["judgeVersion"] == judge.judge_version("judge-pro")
+    assert out["judgeVersionChanged"] is True
+    assert out["consistent"] is True   # 状态一致，但口径已升级，由 flag 标注
+    # 快照本身不被改写。
+    assert json.loads(run["config_snapshot"])["judge"]["promptVersion"] == "j1"

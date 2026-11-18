@@ -4,11 +4,13 @@
 
 - judge 用与被测模型**不同**的独立模型（默认 deepseek-v4-pro，被测通常是
   deepseek-flash），温度 0；实际型号写进 judge_version（随 run 冻结）；
-- required_points / forbidden_points 逐条判命中 / 漏判；引用 facts 里不存在的
-  事实算幻觉。judge 只产出「判定」，动作/选项/回落/调用失败仍由 scoring 的
-  规则判——判官不重算分；
+- required_points / forbidden_points 逐条判命中 / 漏判；引用事实一律以模型
+  当时实际看到的 prompt 原文为准，结构化 facts 只作 options / id 与结构参考，
+  冲突以 prompt 为准；prompt 里完全没有的事实才算 missing（幻觉），prompt 有
+  但数值/对象不符算 contradicted（扣 s_fact，不算幻觉）。judge 只产出「判定」，
+  动作/选项/回落/调用失败仍由 scoring 的规则判——判官不重算分；
 - 六个硬失败码每条都必须在 judge_json.evidence 里给出「引用的原句 /
-  facts 里缺失的项 / 命中的禁令」，人工推翻走 replay_judge_overrides，不覆盖
+  缺失的事实项 / 命中的禁令」，人工推翻走 replay_judge_overrides，不覆盖
   run_items 的原始分；
 - judge 调用失败按项 fail open：退化到 #57 的规则口径（mode=rules），只记
   status/error，绝不伪造硬失败码。
@@ -27,7 +29,7 @@ from . import scoring
 from .util import json_dumps, sha256_text
 
 #: judge 提示词版本；改提示词必须 bump（judge_version 会变，旧 run 保留旧值）。
-JUDGE_PROMPT_VERSION = "j1"
+JUDGE_PROMPT_VERSION = "j2"
 #: 判定必须可复现：温度固定 0（不能被配置改掉）。
 JUDGE_TEMPERATURE = 0.0
 #: 判定输出 schema 版本。
@@ -38,6 +40,8 @@ DEFAULT_JUDGE_MODEL = "deepseek-v4-pro"
 JUDGE_MAX_TOKENS = 1200
 #: 塞给 judge 的 facts 上限（字符）；超出截断并在 prompt 里注明。
 FACTS_CHAR_LIMIT = 6000
+#: 塞给 judge 的模型输入 prompt 上限（字符）；正常一条 2–4K，留足余量。
+PROMPT_CHAR_LIMIT = 12000
 #: 理由原文上限（字符）；正常 reason 在 300 以内。
 REASON_CHAR_LIMIT = 2000
 
@@ -54,7 +58,7 @@ _HINTS = {
     scoring.HF_FALLBACK: "建议来自回退（不是模型输出）",
     scoring.HF_FORBIDDEN_ACTION: "动作命中了禁令",
     scoring.HF_FORBIDDEN_POINT: "理由依赖了被禁止的要点",
-    scoring.HF_HALLUCINATION: "理由引用了 facts 里不存在的事实并当作依据",
+    scoring.HF_HALLUCINATION: "理由引用了模型输入里不存在的事实并当作依据",
     scoring.HF_ERROR: "这次调用失败",
 }
 
@@ -236,16 +240,43 @@ def _clip_facts(facts: Mapping[str, Any]) -> dict:
     return data
 
 
+def _clip_prompt(text: Any, limit: int = PROMPT_CHAR_LIMIT) -> str:
+    """模型输入原文单独限长；截断必须留标记，否则 judge 会把没看到的内容判 missing。
+
+    优先在最后一个换行处切，避免把「63BB」这类数字从中间切断后读成另一个值。
+    """
+    prompt = str(text or "")
+    if len(prompt) <= limit:
+        return prompt
+    mark = (f"\n…（prompt 原文超 {limit} 字，已截断；"
+            "标记之后未展示的内容不要据此判 missing）")
+    budget = max(0, limit - len(mark))
+    head = prompt[:budget]
+    cut = head.rfind("\n")
+    if cut > budget // 2:
+        head = head[:cut]
+    return head + mark
+
+
 def build_messages(spec: Mapping[str, Any] | None,
                    advice: Mapping[str, Any],
                    facts: Mapping[str, Any],
-                   option_ids: Iterable[Any] = ()) -> tuple[str, str]:
-    """组装 judge 的 system/user。提示词改动必须 bump JUDGE_PROMPT_VERSION。"""
+                   option_ids: Iterable[Any] = (),
+                   model_prompt: str | None = None) -> tuple[str, str]:
+    """组装 judge 的 system/user。提示词改动必须 bump JUDGE_PROMPT_VERSION。
+
+    model_prompt 是模型当时实际看到的 prompt 原文（prompt_json.user），是核对
+    引用事实的权威来源；facts 只用于 options / id 与结构参考。
+    """
     system = (
         "你是德州扑克复盘里的判定模型（judge），只做核对，不重新解题。\n"
         "输入：spot spec 的 required_points（必须说到的要点，带权重）与 "
         "forbidden_points（禁止依赖的要点）、被测模型给出的 advice（选项、动作、"
-        "金额、理由原文）、当时的 facts（模型当时看到的事实 JSON）、当时的 optionIds。\n"
+        "金额、理由原文）、模型当时实际看到的 prompt 原文"
+        "（【模型当时看到的输入】，权威事实源）、当时的 optionIds、以及结构化 "
+        "facts（只用于核对 options / id 与结构参考）。\n"
+        "事实源优先级：【模型当时看到的输入】是权威；结构化 facts 与它冲突时"
+        "一律以 prompt 原文为准。\n"
         "只按下面四条判，不允许补充外部知识：\n"
         "1. requiredPoints 逐条判理由有没有真的说出这个要点。hit 必须从理由原文"
         "里摘出连续一段 quote；理由没写就是 miss——不要替它补，也不要因为结论对"
@@ -253,16 +284,22 @@ def build_messages(spec: Mapping[str, Any] | None,
         "2. forbiddenPoints 逐条判理由有没有依赖这条禁令。依赖了给 hit 并摘 "
         "quote，否则 clean。\n"
         "3. citedFacts 把理由里当作依据的数字/牌型/范围/人数/赔率等逐条列出："
-        "quote 是理由原文；facts 里能找到一致的是 supported，找不到或相反的是 "
-        "missing，并在 fact 里写清缺什么。\n"
+        "quote 是理由原文；用【模型当时看到的输入】原文判三态——supported 表示"
+        "原文有一致事实（原文没逐字给出、但能由原文数字直接算出且算对，也算 "
+        "supported）；contradicted 表示原文有这条事实但数值/对象/方向实质不符；"
+        "missing 表示原文完全没有这条事实。prompt 与结构化 facts 冲突时按 prompt "
+        "判；结构化 facts 只用来核对 options / id。\n"
         "4. hallucinated 只有当存在 missing 的引用事实、且它确实被拿来支撑建议"
-        "时才是 true；没有 missing 时必须 false。\n"
+        "时才是 true；只有 contradicted、没有 missing 时必须 false。\n"
+        "如果输入里没有【模型当时看到的输入】一节，说明该条没有留存模型输入："
+        "citedFacts 必须为空、hallucinated 必须 false，只判 requiredPoints / "
+        "forbiddenPoints。\n"
         "quote 必须一字不改地摘自 advice.reason（含标点），不要改写、翻译、拼接。\n"
         "只输出一个 JSON 对象，不要 markdown、不要解释，字段固定：\n"
         '{"requiredPoints":[{"key":"...","status":"hit|miss","quote":"..."}],'
         '"forbiddenPoints":[{"key":"...","status":"hit|clean","quote":"..."}],'
-        '"citedFacts":[{"quote":"...","status":"supported|missing","fact":"..."}],'
-        '"hallucinated":false}\n'
+        '"citedFacts":[{"quote":"...","status":"supported|contradicted|missing",'
+        '"fact":"..."}],"hallucinated":false}\n'
         "requiredPoints / forbiddenPoints 必须覆盖每个 key，各一条，不许漏。"
     )
     required = _points(spec, "required_points")
@@ -296,15 +333,36 @@ def build_messages(spec: Mapping[str, Any] | None,
     lines.append(f"amount: {advice.get('amount')}")
     lines.append(f'reason: """{reason}"""')
     lines.append("")
+    prompt_text = str(model_prompt or "")
+    if prompt_text.strip():
+        lines.append("【模型当时看到的输入（权威事实源）】")
+        lines.append("以下是被测模型当时实际看到的 prompt 原文；引用事实一律以它"
+                     "为准，与下方结构化 facts 冲突时也以它为准。")
+        lines.append('"""')
+        lines.append(_clip_prompt(prompt_text))
+        lines.append('"""')
+        lines.append("")
     lines.append("【facts】")
+    lines.append("（结构化参考，仅用于核对 options / id 与结构；与上方 prompt "
+                 "冲突时以 prompt 为准）")
     lines.append(json_dumps(_clip_facts(facts)))
     return system, "\n".join(lines)
 
 
 def input_digest(spec: Mapping[str, Any] | None, advice: Mapping[str, Any],
                  facts: Mapping[str, Any],
-                 option_ids: Iterable[Any] = ()) -> str:
-    """同输入 → 同 digest；两次判定对不上时用它证明输入没变。"""
+                 option_ids: Iterable[Any] = (),
+                 model_prompt: str | None = None,
+                 model_prompt_sha: str | None = None) -> str:
+    """同输入 → 同 digest；两次判定对不上时用它证明输入没变。
+
+    prompt 是判定输入的一部分，必须进 digest。哈希的是 judge 实际看到的
+    （_clip_prompt 之后）原文；只有原文缺失时才退回留存 sha。
+    """
+    if str(model_prompt or "").strip():
+        prompt_tag = sha256_text(_clip_prompt(model_prompt))
+    else:
+        prompt_tag = str(model_prompt_sha or "").strip()
     payload = {
         "requiredPoints": _points(spec, "required_points"),
         "forbiddenPoints": _points(spec, "forbidden_points"),
@@ -316,6 +374,7 @@ def input_digest(spec: Mapping[str, Any] | None, advice: Mapping[str, Any],
             "reason": str(advice.get("reason") or "")[:REASON_CHAR_LIMIT],
         },
         "facts": facts or {},
+        "prompt": prompt_tag,
     }
     try:
         text = json.dumps(payload, ensure_ascii=False, sort_keys=True,
@@ -329,10 +388,12 @@ def parse_verdict(raw: Mapping[str, Any] | None, *, spec: Mapping[str, Any] | No
                   advice: Mapping[str, Any]) -> dict:
     """模型回复 → 规范化判定（纯函数）。
 
-    三条硬约束，防止「判官编证据」：
+    四条硬约束，防止「判官编证据」：
     - quote 必须能在 reason 里找到，否则强制 miss / clean，不认；
     - required_points 里没被提到的 key 一律 miss；
-    - hallucinated=true 但没有 missing 的引用事实时强制 false。
+    - citedFacts 只认 supported / contradicted / missing，其余按 supported；
+    - hallucinated=true 但没有 missing 的引用事实时强制 false（contradicted
+      只计 wrongFacts 扣 s_fact，不升级成幻觉）。
     """
     data: Mapping[str, Any] = raw if isinstance(raw, Mapping) else {}
     reason_norm = _norm_text(advice.get("reason") or "")
@@ -394,14 +455,16 @@ def parse_verdict(raw: Mapping[str, Any] | None, *, spec: Mapping[str, Any] | No
         quote = clean_quote(entry.get("quote"))
         if not quote:
             continue
-        status = ("missing" if str(entry.get("status") or "").strip().lower()
-                  == "missing" else "supported")
+        status = str(entry.get("status") or "").strip().lower()
+        if status not in ("supported", "contradicted", "missing"):
+            status = "supported"
         cited.append({
             "quote": quote,
             "status": status,
             "fact": str(entry.get("fact") or "").strip()[:200],
         })
     missing = [item for item in cited if item["status"] == "missing"]
+    contradicted = [item for item in cited if item["status"] == "contradicted"]
     hallucinated = bool(data.get("hallucinated")) and bool(missing)
     return {
         "schema": JUDGE_SCHEMA,
@@ -413,7 +476,7 @@ def parse_verdict(raw: Mapping[str, Any] | None, *, spec: Mapping[str, Any] | No
                           if p["status"] == "miss"],
         "forbiddenHits": forbidden_hits,
         "citedFacts": cited,
-        "wrongFacts": missing,
+        "wrongFacts": missing + contradicted,
         "hallucinated": hallucinated,
     }
 
@@ -431,6 +494,8 @@ def error_judge_json(message: str, *, source: str = "error") -> dict:
         "temperature": JUDGE_TEMPERATURE,
         "inputDigest": "",
         "optionIds": [],
+        "inputPrompt": False,
+        "degraded": "judge_error",
         "error": text,
         "evidence": {
             "code": scoring.HF_ERROR,
@@ -450,7 +515,7 @@ def evidence(code: str | None, verdict: Mapping[str, Any] | None, *,
              option_ids: Iterable[Any] = (),
              spec: Mapping[str, Any] | None = None,
              error: str = "") -> dict:
-    """硬失败的 evidence（设计 §7.2）：引用的原句 / facts 缺失的项 / 命中的禁令。"""
+    """硬失败的 evidence（设计 §7.2）：引用的原句 / 缺失的事实项 / 命中的禁令。"""
     if not code:
         return {}
     data = verdict or {}
@@ -514,6 +579,8 @@ def fallback_verdict(cfg: Mapping[str, Any] | None, *,
         "citedFacts": [],
         "wrongFacts": [],
         "hallucinated": False,
+        "inputPrompt": False,
+        "degraded": "",
         "error": error[:500],
     }
 
@@ -521,28 +588,50 @@ def fallback_verdict(cfg: Mapping[str, Any] | None, *,
 def evaluate(cfg: Mapping[str, Any], *, settings: Any,
              spec: Mapping[str, Any] | None, advice: Mapping[str, Any],
              facts: Mapping[str, Any], option_ids: Iterable[Any] = (),
+             model_prompt: str | None = None,
+             model_prompt_sha: str | None = None,
              timeout: float | None = None) -> dict:
-    """调一次 judge 并返回可落库的 judge_json；失败 fail open。"""
+    """调一次 judge 并返回可落库的 judge_json；失败 fail open。
+
+    model_prompt 是模型当时实际看到的 prompt 原文（prompt_json.user）。没有留存
+    prompt 时（store_prompts=false / 旧行 prompt_json 为 NULL）不产生幻觉判定，
+    只判 required / forbidden 要点，并写 inputPrompt=false / degraded。
+    """
     from poker_ocr.advice import AIError, complete_json
 
     version = str(cfg.get("version") or judge_version(cfg.get("model")))
     option_list = [str(o) for o in option_ids]
-    digest = input_digest(spec, advice, facts, option_list)
+    has_prompt = bool(str(model_prompt or "").strip())
+    prompt_meta = {
+        "inputPrompt": has_prompt,
+        "degraded": "" if has_prompt else "prompt_missing",
+    }
+    digest = input_digest(spec, advice, facts, option_list,
+                          model_prompt=model_prompt,
+                          model_prompt_sha=model_prompt_sha)
     if settings is None:
         return {**fallback_verdict(cfg, status=STATUS_UNAVAILABLE,
                                    error="judge 凭据不可用"),
-                "inputDigest": digest}
-    system, user = build_messages(spec, advice, facts, option_list)
+                **prompt_meta, "inputDigest": digest,
+                "degraded": "judge_error"}
+    system, user = build_messages(spec, advice, facts, option_list,
+                                  model_prompt=model_prompt)
     try:
         raw = complete_json(settings, system, user,
                             timeout=_positive_float(timeout, 30.0))
     except AIError as exc:
         return {**fallback_verdict(cfg, error=f"{type(exc).__name__}: {exc}"),
-                "inputDigest": digest}
+                **prompt_meta, "inputDigest": digest,
+                "degraded": "judge_error"}
     except Exception as exc:  # noqa: BLE001  judge 永不阻塞评分
         return {**fallback_verdict(cfg, error=f"{type(exc).__name__}: {exc}"),
-                "inputDigest": digest}
+                **prompt_meta, "inputDigest": digest,
+                "degraded": "judge_error"}
     verdict = parse_verdict(raw, spec=spec, advice=advice)
+    if not has_prompt:
+        # 没有权威事实源就无法证明幻觉；fail open，不产生 HF_HALLUCINATION。
+        verdict = {**verdict, "citedFacts": [], "wrongFacts": [],
+                   "hallucinated": False}
     meta = raw.get("_meta") if isinstance(raw, Mapping) else None
     return {
         **verdict,
@@ -555,6 +644,7 @@ def evaluate(cfg: Mapping[str, Any], *, settings: Any,
         "inputDigest": digest,
         "optionIds": option_list,
         "error": "",
+        **prompt_meta,
         **({"usage": meta} if isinstance(meta, Mapping) else {}),
     }
 
