@@ -95,11 +95,16 @@ def test_nine_seats_budget() -> None:
         rows += rows_for(f"p{i}", "weak_ace_top_pair", 3, seat=f"s{i}", ts0=i * 10)
         rows += rows_for(f"p{i}", "two_pair_plus", 2, seat=f"s{i}", ts0=i * 10 + 5)
     got = R.render_witness_lines(rows, seats=seats, max_chars=600)
-    check(len(got) == 9, f"600 下 9 个座位都出：{len(got)}")
-    check(all(len(lines) == 2 for lines in got.values()), "每座位 2 条")
+    # #69：池级证据整段只出一次，放在保留键 POOL_KEY 下（不再借给每个座位）。
+    pool = got.get(R.POOL_KEY, ())
+    personal = {k: v for k, v in got.items() if k != R.POOL_KEY}
+    check(len(personal) == 9, f"600 下 9 个座位都出：{len(personal)}")
+    check(all(len(lines) == 2 for lines in personal.values()), "每座位 2 条")
     total = sum(len(line) + 1 for lines in got.values() for line in lines)
     check(total <= 600, f"总预算 ≤600：{total}")
-    check(list(got) == list(seats), "座位按入参顺序（近→远）")
+    check(list(personal) == list(seats), "座位按入参顺序（近→远）")
+    check(len(pool) <= 2, f"池级证据最多 2 条：{len(pool)}")
+    check(list(got)[-1] == R.POOL_KEY if pool else True, "池级证据排在最后")
     check(all(line.startswith(PREFIX) for lines in got.values() for line in lines),
           "每行都带前缀")
 
