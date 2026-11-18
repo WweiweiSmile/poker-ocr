@@ -115,7 +115,9 @@ SUITES = ["test_positions.py", "test_env.py", "test_profile_8p.py", "test_coach.
           # 票 #75（「至少一家领先」双口径偏差量化）新增套件
           "test_behind_any_caliber.py",
           # 票 #76（「至少一家领先」单一实现 + 近似口径显式标注）新增套件
-          "test_behind_any_single_source.py"]
+          "test_behind_any_single_source.py",
+          # 票 #78（冷跟先验按入池人数分桶）新增套件
+          "test_cold_call_buckets.py"]
 
 
 def main() -> int:

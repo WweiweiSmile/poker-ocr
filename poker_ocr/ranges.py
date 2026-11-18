@@ -17,11 +17,13 @@
 from __future__ import annotations
 
 import itertools
+import re
 from dataclasses import dataclass, field
 from functools import lru_cache
 from types import MappingProxyType
 from typing import Iterable, Mapping
 
+from . import cold_call_tiers
 from .preflop_ranges import RFI, expand
 
 RANK_CHARS = "23456789TJQKA"
@@ -257,6 +259,9 @@ def uniform_range(id: str = "UNIFORM", *, note: str = "") -> Range:
 #   · 同花加 K7s+/Q7s+/J7s+/T7s+ 与一/二隔张（97s/86s/75s/64s/53s）；
 #   · 非同花加 K9o+/Q9o+/J9o+/T9o/98o/87o（含 DEEP 池常见的 87o）。
 
+# 人数后缀（_n3/_n4）出现在 id 里但位置不对时，不退回 2 人池冒充。
+_STRAY_TIER = re.compile(r"_N[234]", re.IGNORECASE)
+
 _RULE_TOKENS: dict[str, tuple[str, ...]] = {
     # 对子必须逐个写：`expand` 不支持 "22-JJ" 这种区间（会静默展开成空集）。
     "COLD_CALL_IP": (
@@ -378,10 +383,30 @@ def get(range_id: str | None) -> Range | None:
                             note="static BB defense (same table for all openers)")
 
     if upper.startswith("COLD_CALL_"):
-        # COLD_CALL_<IP|OOP>_vs_<bucket>
-        head = upper.split("_VS_", 1)[0]
-        ip_oop = head.replace("COLD_CALL_", "", 1).strip("_")
-        base = "COLD_CALL_IP" if ip_oop == "IP" else "COLD_CALL_OOP"
+        # COLD_CALL_<IP|OOP>[_vs_<bucket>][_n<3|4>]（票 #78）
+        parsed = cold_call_tiers.parse_range_id(upper)
+        if parsed is not None:
+            ip_oop, _opener, tier = parsed
+        elif _STRAY_TIER.search(upper):
+            # 人数后缀放错位置（例如 COLD_CALL_IP_n3_vs_EP）：不猜是哪一档。
+            return None
+        else:
+            # 历史/异常形状：沿用 #78 之前的解析（位置后缀丢弃，2 人池档）。
+            head = upper.split("_VS_", 1)[0]
+            side = head.replace("COLD_CALL_", "", 1).strip("_")
+            ip_oop = "IP" if side == "IP" else "OOP"
+            tier = cold_call_tiers.TIER_MIN
+        base = f"COLD_CALL_{ip_oop}"
+        if tier > cold_call_tiers.TIER_MIN:
+            # 3/4 人池档的 token 只住在 tables/cold_call_buckets.json；
+            # 表里缺这一档时返回 None（宁可「范围未知」，不拿 2 人池冒充）。
+            tokens = cold_call_tiers.tokens_for(ip_oop, tier)
+            if not tokens:
+                return None
+            return _from_tokens(
+                rid, tokens,
+                source=f"table:cold_call_buckets_{ip_oop.lower()}_n{tier}",
+                note="cold-call prior by players already in the pot")
         return _range_from_rule(rid, base)
 
     if upper.startswith("LIMP_"):
@@ -405,6 +430,7 @@ def reset_cache() -> None:
     get.cache_clear()
     combos_of_key.cache_clear()
     _BB_DEF_CACHE = None
+    cold_call_tiers.reset_cache()
 
 
 __all__ = [

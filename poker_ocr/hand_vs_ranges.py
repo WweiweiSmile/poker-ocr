@@ -31,7 +31,8 @@ from collections import Counter
 from dataclasses import dataclass, field, replace
 from typing import Any, Iterable, Sequence
 
-from . import board_range, field_ranges, range_flow, range_trace, ranges
+from . import (board_range, cold_call_tiers, field_ranges, range_flow,
+               range_trace, ranges)
 from .coach import (
     CATEGORY_NAMES_EN, FLUSH, FULL_HOUSE, ONE_PAIR, QUADS, STRAIGHT,
     STRAIGHT_FLUSH, TRIPS, TWO_PAIR, evaluate, parse_cards,
@@ -79,6 +80,12 @@ class OpponentEdge:
     # 权重算条件弃牌率；compare=False 是为了不改变 dataclass 的相等语义
     # （Range 里带 dict，参与比较会又慢又容易误判）。
     rng: "ranges.Range | None" = field(default=None, compare=False, repr=False)
+    # 冷跟先验用哪一档（票 #78）：tier=2/3/4，或 tier=None（人数未定）。
+    # 非冷跟座位为 None。宽度是**翻前先验**的宽度，与收窄后的 width_pct 不同。
+    cold_call: "cold_call_tiers.ColdCall | None" = field(
+        default=None, compare=False, repr=False)
+    cold_call_prior_width: float | None = field(
+        default=None, compare=False, repr=False)
 
     @property
     def label(self) -> str:
@@ -609,6 +616,8 @@ def _seat_trace(spec: Any, prior: ranges.Range, built: ranges.Range,
                 bucket: str, trail: dict | None,
                 archetype: str) -> dict:
     """一家对手的 trace 块。trail 为 None ⇒ 走的是 board_range 旧口径。"""
+    cold = cold_call_tiers.fact_payload(
+        getattr(spec, "cold_call", None), prior.width_pct)
     if trail:
         return {
             "seat": spec.seat_id,
@@ -617,6 +626,7 @@ def _seat_trace(spec: Any, prior: ranges.Range, built: ranges.Range,
             "path": "event_model",
             "mode": spec.mode,
             "bucket": bucket,
+            **({"cold_call": cold} if cold else {}),
             "prior": trail.get("prior") or range_flow.prior_payload(prior),
             "steps": trail.get("steps") or [],
             "final": trail.get("final"),
@@ -630,6 +640,7 @@ def _seat_trace(spec: Any, prior: ranges.Range, built: ranges.Range,
         "path": "board_range",
         "mode": spec.mode,
         "bucket": bucket,
+        **({"cold_call": cold} if cold else {}),
         "prior": range_flow.prior_payload(prior),
         # 旧口径没有逐步留痕：一条街一次过滤，没有「第 k 个事件」可言。
         "steps": [],
@@ -704,6 +715,9 @@ def _lookup(sit: Any) -> HandVsRanges | None:
     entries = []
     warnings = list(field.warnings)
     used_specs = []
+    # 冷跟档位（票 #78）：座位 → (档位, 该档先验宽度)。compute 不知道翻前
+    # 角色，所以在这里挂到 edge 上，事实块才能标「用的是哪一档」。
+    cold_meta: dict[str, tuple[cold_call_tiers.ColdCall, float]] = {}
     traced: list[tuple[dict, ranges.Range | None]] = []
     widest: dict = {}
     widest_events = -1
@@ -740,6 +754,8 @@ def _lookup(sit: Any) -> HandVsRanges | None:
         entries.append((spec.seat_id, spec.position, built, spec.mode,
                         bucket, spec.events))
         used_specs.append(spec)
+        if spec.cold_call is not None:
+            cold_meta[spec.seat_id] = (spec.cold_call, float(prior.width_pct))
         if tracing:
             traced.append((_seat_trace(spec, prior, built, bucket, trail,
                                        archetype), built))
@@ -771,6 +787,14 @@ def _lookup(sit: Any) -> HandVsRanges | None:
         seed_key=snap.hand_id,
         random_opponents=random_opponents,
     )
+    if result is not None and cold_meta:
+        # 档位只影响事实文案（数值已经体现在 prior 上），所以挂在这里而不是
+        # 进 MC 缓存键：同一档位的 range id 相同，数值必然相同。
+        result = replace(result, opponents=tuple(
+            replace(edge, cold_call=cold_meta[edge.seat_id][0],
+                    cold_call_prior_width=cold_meta[edge.seat_id][1])
+            if edge.seat_id in cold_meta else edge
+            for edge in result.opponents))
     if tracing and result is not None and not result.cache_hit:
         _emit_ok(snap, result, traced, widest, warnings,
                  len(active) - len(entries))

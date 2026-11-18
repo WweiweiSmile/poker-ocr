@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from ... import cold_call_tiers
 from ...hand_track import (
     PREFLOP, ActionRecord, HandSnapshot, preflop_aggressive,
 )
@@ -168,11 +169,17 @@ def _facing_raise_zh(sit: Situation) -> list[str]:
     if behind:
         tight_reasons.append(f"{len(behind)} 人还没响应加注")
     multiway = bool(callers or limpers or behind)
+    # 冷跟先验按「冷跟那一刻的入池人数」分档（票 #78）：开池者 + 已经进池的
+    # 人 + 你。hero 还没行动，所以「你」算 1 家；`behind` 不算 —— 那是
+    # 「可能会跟」的估计，算进去就是猜。人数口径与 field_ranges / hand_vs_ranges
+    # 共用 `cold_call_tiers`（同一个 tier_from_n_way，不许各写一份）。
+    cold_tier = cold_call_tiers.tier_for_n_way(2 + limpers + callers)
 
     # ── 选「继续/跟注」的参照范围；4-bet/5-bet 看最后一手加注者的画像 ──
     strong = range_mod.expand_tokens(_STRONG_VS_RAISE_TOKENS)
     profile, profile_desc = _fourbet_tendency(_raiser_read(sit, last))
     tightened = False
+    cold_label = ""          # 只在参照范围是冷跟先验时写档位
     five_keys: set[str] = set()
     five_range = ""
     if n_raises >= 3:
@@ -213,21 +220,30 @@ def _facing_raise_zh(sit: Situation) -> list[str]:
         else:
             base_label = (f"{hero_pos} 有位置冷跟范围" if hero_ip
                           else f"{hero_pos} 无位置冷跟范围")
-        base = range_mod.get(
-            f"BB_DEF_VS_{bucket(raise_pos)}" if hero_pos == BB
-            else f"COLD_CALL_{'IP' if hero_ip else 'OOP'}_vs_{bucket(raise_pos)}")
+        if hero_pos == BB:
+            base_id = f"BB_DEF_VS_{bucket(raise_pos)}"
+        else:
+            # 3/4 人池档换的是同一张表里的 token 子集，位置轴仍同宽（票 #77 §4.3）。
+            base_id = cold_call_tiers.with_tier(
+                f"COLD_CALL_{'IP' if hero_ip else 'OOP'}_vs_{bucket(raise_pos)}",
+                cold_tier.tier)
+        base = range_mod.get(base_id)
         base_in = _in_keys_range(key, base)
         width = base.width_pct if base is not None else None
         label = base_label
+        if hero_pos != BB:
+            cold_label = cold_call_tiers.tier_label_zh(cold_tier)
         if key in strong:
             in_range = True
         elif hero_pos == BB and multiway:
             # BB 的「宽防守」只在收尾的单挑池里成立；有溜入者/跟注者、
-            # 还有人没响应时必须收紧到无位置冷跟范围。
-            tight = range_mod.get(f"COLD_CALL_OOP_vs_{bucket(raise_pos)}")
+            # 还有人没响应时必须收紧到无位置冷跟范围，并按入池人数取档。
+            tight = range_mod.get(cold_call_tiers.with_tier(
+                f"COLD_CALL_OOP_vs_{bucket(raise_pos)}", cold_tier.tier))
             in_range = _in_keys_range(key, tight)
             tightened = True
             label = "多人池紧防守范围"
+            cold_label = cold_call_tiers.tier_label_zh(cold_tier)
             width = tight.width_pct if tight is not None else None
         else:
             in_range = base_in
@@ -256,7 +272,8 @@ def _facing_raise_zh(sit: Situation) -> list[str]:
                      "只能按牌力和价格自行判断")
         return lines
     shape = _hand_shape_zh(key)
-    width_text = f"（{width:.0f}%）" if width else ""
+    width_text = (f"（{cold_label + ' ' if cold_label else ''}{width:.0f}%）"
+                  if width else "")
     if in_range is False and tightened:
         lines.append(f"对加注的牌力（程序建议）：{key} 在单加注收尾的宽防守里；当前有 "
                      f"{'、'.join(tight_reasons)}，按{label}{width_text}不在内"
