@@ -46,7 +46,7 @@ from poker_ocr.prompt.user.rules import render_rules_zh  # noqa: E402
 # 空台账时这个值必须一直成立——它就是「规则段一个字都不加」的证据；
 # 提示词版本 bump（#69 删散装句）后基线随之更新，规则段本身仍须贡献 0 字节。
 EMPTY_LEDGER_PROMPT_HASH = (
-    "38fe0cb1a320c163fc78047648df94a1919fd8855edea3c6ea4fa74ff6fcf920"
+    "236f9e3a8edfcfa3ae3683922fe84a1d1fa1eca935609aa0ae8520b5a3962684"
 )
 
 # 「牌力段之后、render_options_zh 之前」的锚点：这两行必须把规则段夹在中间。
