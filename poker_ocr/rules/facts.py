@@ -10,7 +10,7 @@
 3. **不抛异常**：这是 OCR 主链路的旁路，任何读不出的牌面/范围都退化成
    「没这条事实」，绝不让规则层把主循环搞挂。
 
-谓词目录（29 项）见 `rules.PREDICATES`；本模块的产物必须落在里面，
+谓词目录（34 项，含翻后 5 项派生谓词）见 `rules.PREDICATES`；本模块的产物必须落在里面，
 `tests/test_rules_ledger.py` 会断言这一点。新增谓词要两边一起改。
 """
 
@@ -20,7 +20,10 @@ import math
 from typing import Any
 
 from .. import ranges as _ranges
-from ..coach import parse_cards
+from ..coach import (
+    AIR, BOARD_PLAY, MID_BOTTOM, OVERPAIR, STRONG_DRAW, STRONG_MADE, TPTK,
+    TP_WEAK, WEAK_DRAW, parse_cards, read_hand, turn_scare,
+)
 from ..hand_track import PREFLOP, preflop_aggressive
 from ..pot_math import (
     _effective_stack, _playable_depth, count_limpers, hero_first_to_act,
@@ -80,6 +83,17 @@ def facts_snapshot(sit: Any) -> dict[str, Any]:
     _put(out, "equity_pct", _num(getattr(sit, "equity_pct", None)))
     _put(out, "board_texture", getattr(sit, "texture", None))
     _put(out, "board_paired", _board_paired(sit))
+
+    # ── 翻后派生事实（票 70）──────────────────────────────────────────
+    # 都是**折叠**出来的，不是新口径：hand_class 由 hero_hand_tier 折叠，
+    # hand_tier_rose 用同一条 read_hand 读上一条街的牌面，turn_scare 直接用
+    # coach 的判定。任何一步读不出来就不写这个键（fail open）。
+    _put(out, "hand_class", _hand_class(getattr(sit, "hand_tier", None)))
+    _put(out, "hero_is_nuts", _hero_is_nuts(sit))
+    if snap.street in ("turn", "river"):
+        _put(out, "hand_tier_rose", _hand_tier_rose(sit, snap))
+    if snap.street == "turn":
+        _put(out, "turn_scare", _turn_scare(snap))
 
     _put(out, "ante_bb", _ante_bb(snap))
     _put(out, "previous_line", _previous_line(sit))
@@ -160,6 +174,104 @@ def _board_paired(sit: Any) -> bool | None:
     return len(set(ranks)) < len(ranks)
 
 
+# ── 翻后派生（票 70）─────────────────────────────────────────────
+
+# 牌力档 → 尺寸档：书 p35 的 size_ladder 只有 strong/medium/weak 三行，
+# 台账不能自己拼牌型，所以在这里折叠一次，三处共用同一份映射。
+#   strong = 能拿价值、要被跟的牌（两对+、超对、顶对强踢）
+#   medium = 只有一个对子、能摊牌但经不起大池（顶对弱踢、中/底对）
+#   weak   = 没有摊牌价值或靠抽牌（听牌、空气、打牌面）
+# 九个档位全部有归属；漏一个就是映射缺口 → 不出键，规则不命中（fail open）。
+HAND_CLASS_BY_TIER: dict[str, str] = {
+    STRONG_MADE: "strong", OVERPAIR: "strong", TPTK: "strong",
+    TP_WEAK: "medium", MID_BOTTOM: "medium",
+    STRONG_DRAW: "weak", WEAK_DRAW: "weak", AIR: "weak", BOARD_PLAY: "weak",
+}
+
+# 牌力档的高低序列（只用于判断「转/河比上一条街强了还是弱了」）。
+# 成牌部分与 `poker_ocr/situation.py` 的 _MADE_TIERS 顺序一致（两对+ 最高、
+# 打牌面是最低的成牌），听牌插在成牌下面、空气垫底——这是**档位**顺序，
+# 不是权益排序，所以不拿它算胜率。
+TIER_ORDER: tuple[str, ...] = (
+    AIR, WEAK_DRAW, STRONG_DRAW, BOARD_PLAY, MID_BOTTOM,
+    TP_WEAK, TPTK, OVERPAIR, STRONG_MADE,
+)
+
+# AF 分档阈值：AF 是「下注/加注次数 ÷ 跟注次数」，牌圈惯例 1 以下偏被动、
+# 2 以上偏凶。这不是书上的数字（书没有 AF 口径），所以留在事实层当常量，
+# 不进 rule_params（那张表只放能标书页的尺寸/频率）。
+AF_HIGH = 2.0
+AF_LOW = 1.0
+
+
+def _hand_class(tier: Any) -> str | None:
+    """牌力档 → 强/中/弱；不在映射表里就不出声。"""
+    if not isinstance(tier, str):
+        return None
+    return HAND_CLASS_BY_TIER.get(tier)
+
+
+def _hero_is_nuts(sit: Any) -> bool | None:
+    """坚果事实：只信 ground_truth 的「没有对手持牌能打败我」。"""
+    gt = getattr(sit, "ground_truth", None)
+    if gt is None:
+        return None
+    flag = _guard(lambda: gt.hero_is_nuts)
+    return None if flag is None else bool(flag)
+
+
+def _tier_rank(tier: Any) -> int | None:
+    if not isinstance(tier, str) or tier not in TIER_ORDER:
+        return None
+    return TIER_ORDER.index(tier)
+
+
+def _hand_tier_rose(sit: Any, snap) -> bool | None:
+    """本街牌力档是否**高于**上一条街（转/河才有意义）。
+
+    用同一条 `coach.read_hand` 读「hero 底牌 + 上一条街的牌面」，与
+    `sit.hand_tier` 同一口径；只要有一边读不出来就不出声（fail open）。
+    严格大于才算「上升」：持平不算，掉了也不算。
+    """
+    board = tuple(getattr(snap, "board", ()) or ())
+    hero = tuple(getattr(snap, "hero_cards", ()) or ())
+    if len(board) < 4 or len(hero) != 2:
+        return None
+    current = _tier_rank(getattr(sit, "hand_tier", None))
+    previous = _tier_rank(_guard(_read_tier, hero, board[:-1]))
+    if current is None or previous is None:
+        return None
+    return current > previous
+
+
+def _read_tier(hero, board) -> str | None:
+    """`read_hand(底牌, 牌面).tier`；牌串读不出来时返回 None。"""
+    hole = parse_cards("".join(hero))
+    cards = parse_cards("".join(board))
+    tier = read_hand(hole, cards).tier
+    return tier if isinstance(tier, str) and tier else None
+
+
+def _turn_scare(snap) -> str | None:
+    """转牌有多吓人（coach.turn_scare 的口径，转牌才写）。"""
+    board = tuple(getattr(snap, "board", ()) or ())
+    if len(board) < 4:
+        return None
+    return _guard(lambda: turn_scare(parse_cards("".join(board))))
+
+
+def _af_class(af: Any) -> str | None:
+    """AF → 攻击度档；0/缺失 = 没算出来（opponent_profile 用 0.0 表示没样本）。"""
+    number = _num(af)
+    if number is None or number <= 0:
+        return None
+    if number >= AF_HIGH:
+        return "high"
+    if number <= AF_LOW:
+        return "low"
+    return "medium"
+
+
 def _ante_bb(snap) -> float | None:
     """前注（BB/人）；`Blinds.ante` 已经是 BB，这里不再换算。
 
@@ -228,6 +340,7 @@ def _put_opponent(out: dict, sit: Any, snap) -> None:
     _put(out, "opp_vpip", _num(getattr(read, "vpip", None)))
     _put(out, "opp_pfr", _num(getattr(read, "pfr", None)))
     _put(out, "opp_fold_to_cbet", _num(getattr(read, "fold_to_cbet_pct", None)))
+    _put(out, "opp_aggression", _af_class(getattr(read, "af", None)))
 
 
 def _in_open_range(sit: Any, snap) -> bool | None:

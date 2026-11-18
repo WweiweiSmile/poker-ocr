@@ -46,7 +46,7 @@ from poker_ocr.prompt.user.rules import render_rules_zh  # noqa: E402
 # 空台账时这个值必须一直成立——它就是「规则段一个字都不加」的证据；
 # 提示词版本 bump（#69 删散装句）后基线随之更新，规则段本身仍须贡献 0 字节。
 EMPTY_LEDGER_PROMPT_HASH = (
-    "8b6cda7d2323aaa5329fcabf3cb8711ee62af6c654c8412b2b69b17ea893645a"
+    "38fe0cb1a320c163fc78047648df94a1919fd8855edea3c6ea4fa74ff6fcf920"
 )
 
 # 「牌力段之后、render_options_zh 之前」的锚点：这两行必须把规则段夹在中间。
@@ -249,7 +249,11 @@ def test_intent_only_renders_one_line(monkeypatch, tmp_path):
 
 
 def test_rows_size_table_fails_open(monkeypatch, tmp_path):
-    """rows 型尺寸要按 facts 选行（#70 才做）；现在必须整行不渲染。"""
+    """rows 型尺寸**没有 key** 时必须整行不渲染（绝不拿第一行当答案）。
+
+    #70 起 `key` 已支持 hand_class（见 tests/test_rules_postflop.py），
+    但没有 key 就选不出行 → fail open，这条契约不变。
+    """
     _use_rule_params(monkeypatch, tmp_path / "tables")
     _write_rule_params(tmp_path / "tables", "size_ladder", {
         "rows": {"strong": 0.33, "medium": 0.66, "weak": 1.0},
