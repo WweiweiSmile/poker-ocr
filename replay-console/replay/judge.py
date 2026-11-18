@@ -2,8 +2,9 @@
 
 设计依据（docs/手牌库-AB案例-一体化设计-2026-11-17.md §7.2 / §7.4 / §13）：
 
-- judge 用与被测模型**不同**的独立模型（默认 deepseek-v4-pro，被测通常是
-  deepseek-flash），温度 0；实际型号写进 judge_version（随 run 冻结）；
+- judge 默认与被测版本同档（deepseek-flash），温度 0；#74 起允许 judge 与被测
+  模型相同（省成本，同模型自评的偏差由人工改判兜底），实际型号写进
+  judge_version（随 run 冻结）；
 - required_points / forbidden_points 逐条判命中 / 漏判；引用事实一律以模型
   当时实际看到的 prompt 原文为准，结构化 facts 只作 options / id 与结构参考，
   冲突以 prompt 为准；prompt 里完全没有的事实才算 missing（幻觉），prompt 有
@@ -34,8 +35,8 @@ JUDGE_PROMPT_VERSION = "j2"
 JUDGE_TEMPERATURE = 0.0
 #: 判定输出 schema 版本。
 JUDGE_SCHEMA = "judge.v1"
-#: 默认判定模型：比 flash 强一档，且与被测默认版本不同模型。
-DEFAULT_JUDGE_MODEL = "deepseek-v4-pro"
+#: 默认判定模型：与被测版本同档；#74 起允许同模型自评（不再硬拦 JUDGE_SAME_MODEL）。
+DEFAULT_JUDGE_MODEL = "deepseek-flash"
 #: judge 回复上限：逐条要点 + 引用原句，1200 足够，也防跑飞。
 JUDGE_MAX_TOKENS = 1200
 #: 塞给 judge 的 facts 上限（字符）；超出截断并在 prompt 里注明。
@@ -90,7 +91,7 @@ def judge_version(model: str | None) -> str:
 
 
 def judge_config(settings: Any) -> dict:
-    """从 Settings 解析 judge 配置（同模型检查在 judge_blockers 里做）。"""
+    """从 Settings 解析 judge 配置。"""
     model = str(getattr(settings, "judge_model", "") or
                 DEFAULT_JUDGE_MODEL).strip()
     base_url = str(getattr(settings, "judge_base_url", "") or "").strip()
@@ -117,6 +118,8 @@ def judge_blockers(cfg: Mapping[str, Any], *,
     """judge 不可用/不合规的原因；空列表 = 可以建 run。
 
     这些不是「静默默认」：创建页会显示，create_score_run 直接 409。
+    `model_under_test` 仍保留在签名里（调用方传，便于将来加提示），但 #74 起
+    不再因「判官与被测同模型」拦截——同模型自评的偏差由人工改判兜底。
     """
     out: list[dict] = []
     model = str(cfg.get("model") or "").strip()
@@ -131,13 +134,6 @@ def judge_blockers(cfg: Mapping[str, Any], *,
     if not (os.environ.get(ref) or "").strip():
         out.append({"code": "JUDGE_KEY_MISSING",
                     "message": f"判定模型凭据 {ref} 未设置"})
-    if model and model_under_test and (
-            model.lower() == str(model_under_test).strip().lower()):
-        out.append({
-            "code": "JUDGE_SAME_MODEL",
-            "message": (f"判定模型与被测模型都是 {model}；"
-                        "换一个更强且不同的模型（REPLAY_JUDGE_MODEL）"),
-        })
     return out
 
 

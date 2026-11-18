@@ -509,13 +509,14 @@ def test_meta_exposes_judge_model_and_blockers(monkeypatch):
     assert all(v["judgeRunnable"] for v in out["versions"])
 
 
-def test_create_rejects_when_judge_model_equals_model_under_test(monkeypatch):
+def test_create_allows_judge_model_equal_to_model_under_test(monkeypatch):
+    """#74：判官与被测同模型不再拦截（自评偏差靠人工改判兜底）。"""
     service = _service([_case(1)], version=_version_row(model="judge-pro"),
                        monkeypatch=monkeypatch)
-    with pytest.raises(ApiError) as err:
-        service.create_score_run({"caseSetId": 4, "versionId": 7})
-    assert err.value.code == "JUDGE_NOT_READY"
-    assert err.value.detail[0]["code"] == "JUDGE_SAME_MODEL"
+    out = service.create_score_run({"caseSetId": 4, "versionId": 7})
+    _run_id, kwargs = service.run_repo.created[0]
+    assert out["status"] == "queued"
+    assert kwargs["judge_version"] == judge.judge_version("judge-pro")
 
 
 def test_override_changes_run_score_but_not_item_score(monkeypatch):

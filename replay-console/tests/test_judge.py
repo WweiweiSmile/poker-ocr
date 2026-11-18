@@ -58,15 +58,16 @@ def test_judge_config_pins_temperature_zero_and_prompt_version():
     assert cfg["version"] == judge.judge_version("judge-pro")
 
 
-def test_judge_blockers_flag_same_model_and_missing_key(monkeypatch):
+def test_judge_blockers_allow_same_model_but_flag_missing_key(monkeypatch):
+    # #74：判官与被测同模型不再拦截，只保留缺 key 这类真实不可用。
     monkeypatch.delenv("TEST_JUDGE_KEY", raising=False)
     codes = {b["code"] for b in judge.judge_blockers(
         _cfg(), model_under_test="judge-pro")}
-    assert "JUDGE_SAME_MODEL" in codes
+    assert "JUDGE_SAME_MODEL" not in codes
     assert "JUDGE_KEY_MISSING" in codes
     monkeypatch.setenv("TEST_JUDGE_KEY", "sk-judge")
     codes = {b["code"] for b in judge.judge_blockers(
-        _cfg(), model_under_test="deepseek-flash")}
+        _cfg(), model_under_test="judge-pro")}
     assert codes == set()
 
 

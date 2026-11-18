@@ -193,8 +193,8 @@ class Settings:
     stale_seconds: int = 120
     auto_migrate: bool = True
 
-    # judge（#58）：独立模型 + 温度 0；型号进 judge_version，随 run 冻结。
-    judge_model: str = "deepseek-v4-pro"
+    # judge（#58）：温度 0；#74 起默认与被测版本同档、允许同模型自评。
+    judge_model: str = "deepseek-flash"
     judge_base_url: str = ""
     judge_api_key_ref: str = "AI_SERVER_API_KEY"
     judge_timeout: float = 30.0
@@ -254,7 +254,7 @@ class Settings:
             stale_seconds=_int(os.environ.get("REPLAY_STALE_SECONDS"), 120, 10),
             auto_migrate=_truthy(os.environ.get("REPLAY_AUTO_MIGRATE"), True),
             judge_model=(os.environ.get("REPLAY_JUDGE_MODEL")
-                         or "deepseek-v4-pro").strip(),
+                         or "deepseek-flash").strip(),
             judge_base_url=(os.environ.get("REPLAY_JUDGE_BASE_URL")
                             or os.environ.get("AI_SERVER_BASE_URL")
                             or "").strip(),
