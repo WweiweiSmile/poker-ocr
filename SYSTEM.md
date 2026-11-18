@@ -447,6 +447,7 @@ STRATEGY_TABLES_PROFILE=sourced nv -m poker_ocr.live ...
 - **恒定段的池级频率常数是历史统计，不是当前桌**：`AGGRESSION` 里 40% 下注率 / 14–16% PFR / 跟注站阈值来自 2026-11-04 的 665 手复盘；与实测冲突时以实测为准。
 - **攻击块必须按街分支才能写半诈唬**：河牌没有听牌，`attack._attack_word()` 在河牌用「纯诈唬」口径；把「强听」写回河牌会与「场景：河牌」直接冲突。
 - **预选「让/弃」会把左键涂红，和「轮到我」的红一样**：`measure_hero_action_buttons` 以前取 `max(左,右)`，预选之后每一帧都判「轮到我」→ 建议链会去点**右侧**（跟注/加注），27o 上就是直接烧钱。现在只看右侧（跟注/加注/All in 的蓝），左侧红只作诊断（`left_colored`）；头像槽蓝仍是主判据。改这条判据前先读 `poker_ocr/prefold.py` 的文档。
+- **`hero_turn_probe`（预设钮 BB 值行）在「没有合法尺度」时会整块消失**：面对 all-in、或最小再加注已经超过后手（只剩全下可加注）时，客户端不渲染 1/3~1.2x 预设 → 探针读空 → `preset_text` 判据把「轮到我」判成 False → `hero_turn_false` 让建议链直接退出（2026-11-16 21:20 实盘 `20261116-3d8dff62a1`：4-bet 到 130、后手 178.5、最小再加注 210，整手一条建议没有）。现在 `measure_hero_turn` 在这条路径上**并上右侧蓝盘**（profile 的 `hero_call_button`，兜底只看蓝）；`measure_hero_action_buttons` 的候选框同时含手机硬编码矩形和 profile 槽位，取占比大的那个。改这两条前先看 `roi_reader` 里两个函数的 docstring。
 - **`table_default` 的 `region_gate.y_max=0.855` 会切掉 WPK 竖屏 hero 的筹码胶囊**：所以 `table_wpk_live.json` 改成 `0.99`。
 - **onnxruntime 的 session 不保证线程安全**：`api.py` 用一把锁串行推理（6 并发结果一致但排队）；要吞吐只能多进程（每个 worker 各加载一份模型，内存翻倍）。
 - **OBS 虚拟摄像头固定 1920×1080**：手机源竖屏铺满时必须 `--rotate 90`，否则 ROI 被横向压扁。

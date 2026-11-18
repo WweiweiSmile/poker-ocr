@@ -391,6 +391,71 @@ def test_preselected_fold_red_is_not_my_turn() -> None:
     check(turn is True, f"仅右蓝也应判轮到我：{turn} {ev}")
 
 
+def _web_felt(profile: Profile, *, pill=None, fold=None,
+              size=SIZE) -> np.ndarray:
+    """web 布局的合成帧：毛毡绿底 + 可选把 profile 槽位涂成按钮色。
+
+    和 `_action_button_image` 的区别：这里涂的是 **profile 槽位**（web 的
+    hero_call_button / hero_fold_button），不是判据自己的手机矩形。
+    """
+    img = np.full((size[1], size[0], 3), FELT, dtype=np.uint8)
+    for key, color in (("hero_call_button", pill), ("hero_fold_button", fold)):
+        if color is None:
+            continue
+        x1, y1, x2, y2 = profile.slot_to_px(profile.global_slots[key], size,
+                                            pad=0.0)
+        img[y1:y2, x1:x2] = color
+    return img
+
+
+def test_preset_text_falls_back_to_right_button_on_web_layout() -> None:
+    """预设行整块消失时，右侧蓝盘仍能证明「轮到我」（2026-11-16 实盘漏判）。
+
+    实盘 3d8dff62a1：CO KQo 被 4-bet 到 130，最小再加注要 210BB，而后手只有
+    178.5BB —— 只剩全下这一种「加注」，客户端干脆不渲染 1/3~1.2x 那套尺度
+    预设。`hero_turn_probe` 整块读空 → 文本判据判 False → 建议链在
+    `live.py` 的 hero_turn 闸门处退出，整手一条建议都没有（用户手动弃牌）。
+    面对 all-in 是同一个形状：只能弃牌/跟全下，同样没有尺度预设。
+
+    这条兜底只看**蓝**：左侧的红在「我已预选弃牌」时也有，会把预选之后
+    每一帧都骗成「轮到我」。
+    """
+    profile = Profile.load(WPK_MAC)
+    check(profile.thresholds.get("hero_turn_method") == "preset_text",
+          "本用例的前提是 preset_text 判据")
+
+    # 轮到我、但预设行没了：右侧蓝盘亮着
+    img = _web_felt(profile, pill=BLUE)
+    turn, ev = measure_hero_turn(img, profile, StubEngine({}))
+    check(turn is True, f"右侧蓝盘亮着应判轮到我：{turn} {ev}")
+    buttons = ev.get("action_buttons") or {}
+    # 抓住的是 profile 槽位而不是手机硬编码矩形：web 的 pill 在 x 0.58-0.64，
+    # 手机矩形从 0.66 起，套上来读到的是毛毡。
+    check(buttons.get("right_slot") ==
+          [float(v) for v in profile.global_slots["hero_call_button"]],
+          f"应认 profile 的 hero_call_button 槽位：{buttons}")
+    check(buttons.get("right_blue", 0) >= 0.15,
+          f"profile 槽位里的蓝占比应够门槛：{buttons}")
+
+    # 没轮到我：同一块地方是毛毡 → 文本空 + 没有蓝 → False
+    turn, ev = measure_hero_turn(_web_felt(profile), profile, StubEngine({}))
+    check(turn is False, f"毛毡空帧应判 False：{turn} {ev}")
+
+    # 预选「让/弃」把左键涂红：不能当成轮到我
+    turn, ev = measure_hero_turn(_web_felt(profile, fold=RED), profile,
+                                 StubEngine({}))
+    check(turn is False, f"只有左键红不该判轮到我：{turn} {ev}")
+
+    # 预设行还在、但读出来是「全下」而不是「NBB」（只剩全下可加注那一档）
+    marked = make_marked()
+    x1, y1, x2, y2 = profile.slot_to_px(profile.global_slots["hero_call_button"],
+                                        SIZE, pad=0.0)
+    marked[y1:y2, x1:x2] = BLUE
+    turn, ev = measure_hero_turn(marked, profile,
+                                 turn_engine(profile, "ALLIN", 0.95))
+    check(turn is True, f"『ALLIN』+ 右蓝应判轮到我：{turn} {ev}")
+
+
 def test_measure_fold_button_colors() -> None:
     """「让/弃」按钮颜色：预选生效 = 灰→红；没槽位的 profile 明确说不支持。"""
     profile = Profile.load(WPK_MAC)
@@ -538,6 +603,7 @@ def main() -> int:
         test_hero_turn_blue_button_without_legacy_probe,
         test_hero_turn_by_action_button_colors,
         test_preselected_fold_red_is_not_my_turn,
+        test_preset_text_falls_back_to_right_button_on_web_layout,
         test_measure_fold_button_colors,
         test_hero_turn_unknown_without_the_slot,
         test_score_is_the_worst_box_and_text_is_concatenated,
