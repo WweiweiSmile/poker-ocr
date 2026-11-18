@@ -116,6 +116,8 @@ def test_anchor_cases_are_traceable():
             anchors += 1
             rationale = by_name[case["specName"]]["content"]["rationale"]
             assert rationale.startswith("锚点：advice_row="), case["seedId"]
+            assert " canonical=20" in rationale, case["seedId"]
+            assert re.search(r" decision=\w+:\d+", rationale), case["seedId"]
             assert " decision=[]" not in rationale, case["seedId"]
             assert " decision=null" not in rationale, case["seedId"]
     assert anchors >= 55, f"锚点只有 {anchors} 条"

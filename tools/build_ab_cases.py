@@ -1,10 +1,17 @@
 #!/usr/bin/env python3
 """从真实历史建议记录派生「回归锚点」用例，追加进 tools/ab_set.json（#66）。
 
-锚点不是人工构造的期望，而是线上真实发生过的建议快照：
+锚点不是人工构造的期望，而是线上真实发生过的建议快照。选中的不是
+live advice 自己的 action_index，而是它对齐到的 canonical 决策点：
 
+  · 只取 `replay_live_advices.decision_id` join `replay_decisions.id` 得上的
+    行；case 的 street / action_index 用 d.street / d.action_index，
+    decision_key 用 d.street + d.seq（与 replay_cases 同口径，如 flop:2）。
+    没有 canonical_id 的行直接丢弃——seed 按 canonical 决策点解析，live
+    链路的序号对不上；
   · 过滤掉不能落成决策点的行（动作词不在 specs.ACTIONS、缺 uid / street /
-    action_index），并跳过 ab_set 里已经存在的 (hand, street, action_index)；
+    action_index / canonical / decision_key），并跳过 ab_set 里已经存在的
+    (hand, street, action_index)；同一 canonical 决策点只留一条；
   · 每条街的候选先按 prompt_version 日期从新到旧、同版本按 advice 行 id
     升序；再按 option_kind（bet/raise/call/check/fold/allin）轮转取，避免
     某一类动作（尤其 fold）占满整条街；
@@ -13,9 +20,9 @@
 
 产出条目只复用 ab_set 现有 case 的字段：expect 留空串（真实历史记录没有
 人工期望），new_advice 用 specs.ACTIONS 词表（allin 不写 all-in），note 固定为
-可追溯的一行：`锚点：advice_row=… hand=… street=… action_index=… version=…
-建议=…｜真实动作=…`；decision_key 只有非空且不是 "[]"/"null" 才追加
-` decision=…`；真实动作与建议不一致时末尾再补 `｜分歧`。
+可追溯的一行：`锚点：advice_row=… hand=… canonical=… street=… action_index=…
+version=… 建议=…｜真实动作=… decision=<street:seq>`；真实动作与建议不一致时
+末尾再补 `｜分歧`。
 
 用法：
 
@@ -67,14 +74,21 @@ _VERSION_RE = re.compile(r"(\d{4})-(\d{2})-(\d{2})(?:\.(\d+))?")
 _ACTION_ALIASES = {"all-in": "allin", "all_in": "allin", "allin": "allin"}
 
 _DB_SQL = """
-    SELECT a.id, a.street, a.action_index, a.decision_key,
-           a.option_id, a.option_kind, a.actual_action,
-           a.prompt_version, a.model, a.bucket, a.source,
-           a.hand_id, h.external_uid
+    SELECT a.id, d.canonical_id, d.street, d.action_index, d.seq,
+           a.option_kind, a.actual_action, a.prompt_version,
+           h.id AS hand_id, h.external_uid, hs.is_primary
       FROM replay_live_advices a
-      JOIN replay_imported_hands h ON h.id = a.hand_id
-     WHERE h.deleted_at IS NULL
-     ORDER BY a.id
+      JOIN replay_decisions d ON d.id = a.decision_id
+      JOIN replay_hand_sources hs ON hs.canonical_id = d.canonical_id
+      JOIN replay_imported_hands h
+        ON h.id = hs.source_hand_id AND h.source = hs.source
+     WHERE d.canonical_id IS NOT NULL
+       AND d.action_index IS NOT NULL
+       AND d.reconstruct_version = %s
+       AND h.deleted_at IS NULL
+       AND h.external_uid IS NOT NULL
+       AND h.external_uid <> ''
+     ORDER BY a.id, hs.is_primary DESC, h.id
 """
 
 
@@ -89,6 +103,37 @@ def _int_or(value: Any, default: int) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _decision_text(value: Any) -> str:
+    """decision_key 的空壳（空串 / "[]" / "null"）不写进 note。"""
+    text = _text(value)
+    return "" if text.lower() in ("", "[]", "null") else text
+
+
+def canonical_of(row: dict) -> int | None:
+    """canonical 决策点 id；没有就返回 None（这种行 seed 一定挂）。"""
+    value = row.get("canonical_id", row.get("canonicalId"))
+    try:
+        canonical = int(value)
+    except (TypeError, ValueError):
+        return None
+    return canonical if canonical > 0 else None
+
+
+def decision_key_of(row: dict) -> str:
+    """canonical 的稳定键：优先现成 decision_key，否则 street:seq。"""
+    text = _decision_text(row.get("decision_key"))
+    if text:
+        return text
+    street = _text(row.get("street"))
+    seq = row.get("seq")
+    if not street or seq is None:
+        return ""
+    try:
+        return f"{street}:{int(seq)}"
+    except (TypeError, ValueError):
+        return ""
 
 
 def normalize_action(value: Any) -> str:
@@ -126,13 +171,43 @@ def decision_of(row: dict) -> tuple[str, str, int] | None:
 
 
 def is_eligible(row: Any) -> bool:
-    """能不能做锚点：动作词合法、uid/street/action_index 齐全且街在四街内。"""
+    """能不能做锚点：动作合法、uid/街/序号/canonical/decision_key 齐全。
+
+    action_index 必须是正整数：seed 的 `_seed_target` 用
+    `int(row.get("action_index") or -1)` 匹配，0 会被当成缺失，落库必挂。
+    这里先跳过 0（真实记录里第一动作的序号），保证 seed 门禁零 ✗。
+    """
     if not isinstance(row, dict):
         return False
     if not normalize_action(row.get("option_kind")):
         return False
     key = decision_of(row)
-    return bool(key and key[1] in STREETS)
+    return bool(
+        key and key[1] in STREETS and key[2] > 0
+        and canonical_of(row) is not None
+        and decision_key_of(row))
+
+
+def _canonical_key(row: dict) -> tuple[int, str, int] | None:
+    canonical = canonical_of(row)
+    key = decision_of(row)
+    if canonical is None or key is None:
+        return None
+    return (canonical, key[1], key[2])
+
+
+def dedupe_joined_rows(rows: Iterable[dict]) -> list[dict]:
+    """同一 canonical 决策点只留第一条（DB 查询已按 primary、hand id 排好）。"""
+    seen: set[tuple[int, str, int]] = set()
+    kept: list[dict] = []
+    for row in rows:
+        key = _canonical_key(row)
+        if key is not None:
+            if key in seen:
+                continue
+            seen.add(key)
+        kept.append(row)
+    return kept
 
 
 def _existing_keys(existing_cases: Iterable[dict]) -> set[tuple[str, str, int]]:
@@ -290,12 +365,6 @@ def _next_seq(existing_cases: Sequence[dict], street: str) -> int:
     return biggest + 1
 
 
-def _decision_text(value: Any) -> str:
-    """decision_key 的空壳（空串 / "[]" / "null"）不写进 note。"""
-    text = _text(value)
-    return "" if text.lower() in ("", "[]", "null") else text
-
-
 def anchor_note(row: dict) -> str:
     """固定格式的一行溯源；真实动作缺失写「未记录」，不误标分歧。"""
     advice = normalize_action(row.get("option_kind"))
@@ -304,12 +373,13 @@ def anchor_note(row: dict) -> str:
     note = (
         f"锚点：advice_row={_text(row.get('id'))} "
         f"hand={_text(row.get('external_uid'))} "
+        f"canonical={_text(canonical_of(row))} "
         f"street={_text(row.get('street'))} "
         f"action_index={_int_or(row.get('action_index'), -1)} "
         f"version={_text(row.get('prompt_version')) or '（未知）'} "
         f"建议={advice}｜真实动作={actual}"
     )
-    decision = _decision_text(row.get("decision_key"))
+    decision = decision_key_of(row)
     if decision:
         note += f" decision={decision}"
     if actual_raw and normalize_action(actual_raw) != advice:
@@ -383,7 +453,7 @@ def load_rows(path: str | Path) -> list[dict]:
         rows = None
     if not isinstance(rows, list):
         raise ValueError(f"{source} 不是建议 dump：缺少 rows 数组")
-    return [row for row in rows if isinstance(row, dict)]
+    return dedupe_joined_rows(row for row in rows if isinstance(row, dict))
 
 
 def load_rows_from_db() -> list[dict]:
@@ -391,6 +461,7 @@ def load_rows_from_db() -> list[dict]:
     try:
         from replay.config import Settings
         from replay.db import Database
+        from replay.versioning import CURRENT_RECONSTRUCT_VERSION
         settings = Settings.from_env()
     except Exception as exc:  # noqa: BLE001 - CLI 要把原因完整带出去
         raise RuntimeError(f"无法初始化 MySQL 配置：{exc}") from exc
@@ -400,7 +471,8 @@ def load_rows_from_db() -> list[dict]:
     except Exception as exc:  # noqa: BLE001
         raise RuntimeError(f"无法初始化 MySQL 连接：{exc}") from exc
     try:
-        return db.query(_DB_SQL)
+        rows = db.query(_DB_SQL, (CURRENT_RECONSTRUCT_VERSION,))
+        return dedupe_joined_rows(rows)
     except Exception as exc:  # noqa: BLE001
         raise RuntimeError(
             f"连不上 MySQL {settings.db_host}:{settings.db_port}/"
@@ -456,6 +528,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         data = case_seed.load_ab_set(args.out)
         rows = (load_rows(args.source) if args.source
                 else load_rows_from_db())
+        if not any(canonical_of(row) for row in rows):
+            raise ValueError(
+                "候选没有 canonical 决策点：需要 replay_live_advices join "
+                "replay_decisions 的导出（含 canonical_id / street / "
+                "action_index / seq），旧的 live advice dump 不能直接生成锚点")
         existing = list(data["cases"])
         new_cases = plan_anchor_cases(
             rows, existing, per_street=args.per_street,

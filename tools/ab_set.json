@@ -405,15 +405,15 @@
   {
    "id": "C-preflop-01",
    "priority": "P1",
-   "hand": "20261116-3755569db1",
+   "hand": "20261116-3a69bb20b9",
    "street": "preflop",
-   "action_index": 1,
+   "action_index": 4,
    "category": "anchor_preflop_01",
    "source": "regression",
    "status": "ready",
    "expect": "",
    "new_advice": "raise",
-   "note": "锚点：advice_row=2021 hand=20261116-3755569db1 street=preflop action_index=1 version=lean-zh-2026-11-16.3 建议=raise｜真实动作=未记录"
+   "note": "锚点：advice_row=2024 hand=20261116-3a69bb20b9 canonical=2000000001158 street=preflop action_index=4 version=lean-zh-2026-11-16.3 建议=raise｜真实动作=raise decision=preflop:0"
   },
   {
    "id": "C-preflop-02",
@@ -426,207 +426,207 @@
    "status": "ready",
    "expect": "",
    "new_advice": "call",
-   "note": "锚点：advice_row=2028 hand=20261116-3d8dff62a1 street=preflop action_index=4 version=lean-zh-2026-11-16.3 建议=call｜真实动作=call"
+   "note": "锚点：advice_row=2028 hand=20261116-3d8dff62a1 canonical=2000000001166 street=preflop action_index=4 version=lean-zh-2026-11-16.3 建议=call｜真实动作=call decision=preflop:0"
   },
   {
    "id": "C-preflop-03",
    "priority": "P1",
-   "hand": "20261116-36c72f3a34",
+   "hand": "20261108-35018cad68",
    "street": "preflop",
-   "action_index": 5,
+   "action_index": 3,
    "category": "anchor_preflop_03",
    "source": "regression",
    "status": "ready",
    "expect": "",
    "new_advice": "check",
-   "note": "锚点：advice_row=2018 hand=20261116-36c72f3a34 street=preflop action_index=5 version=lean-zh-2026-11-16.3 建议=check｜真实动作=未记录"
+   "note": "锚点：advice_row=1660 hand=20261108-35018cad68 canonical=2000000000898 street=preflop action_index=3 version=lean-zh-2026-11-08.2 建议=check｜真实动作=check decision=preflop:0"
   },
   {
    "id": "C-preflop-04",
    "priority": "P1",
-   "hand": "20261116-038b378330",
+   "hand": "20261116-46eaf51aa4",
    "street": "preflop",
-   "action_index": 3,
+   "action_index": 6,
    "category": "anchor_preflop_04",
    "source": "regression",
    "status": "ready",
    "expect": "",
    "new_advice": "fold",
-   "note": "锚点：advice_row=2007 hand=20261116-038b378330 street=preflop action_index=3 version=lean-zh-2026-11-16.3 建议=fold｜真实动作=未记录"
+   "note": "锚点：advice_row=2029 hand=20261116-46eaf51aa4 canonical=2000000001133 street=preflop action_index=6 version=lean-zh-2026-11-16.3 建议=fold｜真实动作=fold decision=preflop:0"
   },
   {
    "id": "C-preflop-05",
    "priority": "P1",
-   "hand": "20261104-cbff08921f",
+   "hand": "20261116-c9dec99027",
    "street": "preflop",
    "action_index": 5,
    "category": "anchor_preflop_05",
    "source": "regression",
    "status": "ready",
    "expect": "",
-   "new_advice": "allin",
-   "note": "锚点：advice_row=1489 hand=20261104-cbff08921f street=preflop action_index=5 version=lean-zh-2026-11-04.1 建议=allin｜真实动作=未记录"
+   "new_advice": "raise",
+   "note": "锚点：advice_row=2071 hand=20261116-c9dec99027 canonical=2000000001173 street=preflop action_index=5 version=lean-zh-2026-11-16.3 建议=raise｜真实动作=raise decision=preflop:0"
   },
   {
    "id": "C-preflop-06",
    "priority": "P1",
-   "hand": "20261116-39e1a01ee1",
+   "hand": "20261112-30c7f7dbb0",
    "street": "preflop",
-   "action_index": 0,
+   "action_index": 1,
    "category": "anchor_preflop_06",
    "source": "regression",
    "status": "ready",
    "expect": "",
-   "new_advice": "raise",
-   "note": "锚点：advice_row=2023 hand=20261116-39e1a01ee1 street=preflop action_index=0 version=lean-zh-2026-11-16.3 建议=raise｜真实动作=未记录"
+   "new_advice": "call",
+   "note": "锚点：advice_row=2158 hand=20261112-30c7f7dbb0 canonical=2000000001102 street=preflop action_index=1 version=lean-zh-2026-11-11.1 建议=call｜真实动作=fold decision=preflop:0｜分歧"
   },
   {
    "id": "C-preflop-07",
    "priority": "P1",
-   "hand": "20261116-51d037ec76",
+   "hand": "20261109-0093f9b197",
    "street": "preflop",
-   "action_index": 6,
+   "action_index": 1,
    "category": "anchor_preflop_07",
    "source": "regression",
    "status": "ready",
    "expect": "",
-   "new_advice": "call",
-   "note": "锚点：advice_row=2036 hand=20261116-51d037ec76 street=preflop action_index=6 version=lean-zh-2026-11-16.3 建议=call｜真实动作=未记录"
+   "new_advice": "check",
+   "note": "锚点：advice_row=1902 hand=20261109-0093f9b197 canonical=2000000000962 street=preflop action_index=1 version=lean-zh-2026-11-08.2 建议=check｜真实动作=check decision=preflop:0"
   },
   {
    "id": "C-preflop-08",
    "priority": "P1",
-   "hand": "20261116-4c5785458b",
+   "hand": "20261116-743ad97f19",
    "street": "preflop",
-   "action_index": 5,
+   "action_index": 3,
    "category": "anchor_preflop_08",
    "source": "regression",
    "status": "ready",
    "expect": "",
-   "new_advice": "check",
-   "note": "锚点：advice_row=2033 hand=20261116-4c5785458b street=preflop action_index=5 version=lean-zh-2026-11-16.3 建议=check｜真实动作=未记录"
+   "new_advice": "fold",
+   "note": "锚点：advice_row=2045 hand=20261116-743ad97f19 canonical=2000000001121 street=preflop action_index=3 version=lean-zh-2026-11-16.3 建议=fold｜真实动作=fold decision=preflop:0"
   },
   {
    "id": "C-preflop-09",
    "priority": "P1",
-   "hand": "20261116-07fa240c8a",
+   "hand": "20261112-a5f4b59f9d",
    "street": "preflop",
-   "action_index": 0,
+   "action_index": 2,
    "category": "anchor_preflop_09",
    "source": "regression",
    "status": "ready",
    "expect": "",
-   "new_advice": "fold",
-   "note": "锚点：advice_row=2008 hand=20261116-07fa240c8a street=preflop action_index=0 version=lean-zh-2026-11-16.3 建议=fold｜真实动作=fold"
+   "new_advice": "raise",
+   "note": "锚点：advice_row=2191 hand=20261112-a5f4b59f9d canonical=2000000001075 street=preflop action_index=2 version=lean-zh-2026-11-11.1 建议=raise｜真实动作=raise decision=preflop:0"
   },
   {
    "id": "C-preflop-10",
    "priority": "P1",
-   "hand": "20261116-3a69bb20b9",
+   "hand": "20261112-b9e342e7d8",
    "street": "preflop",
-   "action_index": 4,
+   "action_index": 1,
    "category": "anchor_preflop_10",
    "source": "regression",
    "status": "ready",
    "expect": "",
-   "new_advice": "raise",
-   "note": "锚点：advice_row=2024 hand=20261116-3a69bb20b9 street=preflop action_index=4 version=lean-zh-2026-11-16.3 建议=raise｜真实动作=raise"
+   "new_advice": "call",
+   "note": "锚点：advice_row=2196 hand=20261112-b9e342e7d8 canonical=2000000001107 street=preflop action_index=1 version=lean-zh-2026-11-11.1 建议=call｜真实动作=call decision=preflop:0"
   },
   {
    "id": "C-preflop-11",
    "priority": "P1",
-   "hand": "20261116-a118a01e60",
+   "hand": "20261109-3ca270249e",
    "street": "preflop",
-   "action_index": 5,
+   "action_index": 1,
    "category": "anchor_preflop_11",
    "source": "regression",
    "status": "ready",
    "expect": "",
-   "new_advice": "call",
-   "note": "锚点：advice_row=2058 hand=20261116-a118a01e60 street=preflop action_index=5 version=lean-zh-2026-11-16.3 建议=call｜真实动作=未记录"
+   "new_advice": "check",
+   "note": "锚点：advice_row=1923 hand=20261109-3ca270249e canonical=2000000000991 street=preflop action_index=1 version=lean-zh-2026-11-08.2 建议=check｜真实动作=check decision=preflop:0"
   },
   {
    "id": "C-preflop-12",
    "priority": "P1",
-   "hand": "20261116-8d9b632469",
+   "hand": "20261116-7b9ebe23d3",
    "street": "preflop",
    "action_index": 6,
    "category": "anchor_preflop_12",
    "source": "regression",
    "status": "ready",
    "expect": "",
-   "new_advice": "check",
-   "note": "锚点：advice_row=2053 hand=20261116-8d9b632469 street=preflop action_index=6 version=lean-zh-2026-11-16.3 建议=check｜真实动作=未记录"
+   "new_advice": "fold",
+   "note": "锚点：advice_row=2048 hand=20261116-7b9ebe23d3 canonical=2000000001164 street=preflop action_index=6 version=lean-zh-2026-11-16.3 建议=fold｜真实动作=fold decision=preflop:0"
   },
   {
    "id": "C-preflop-13",
    "priority": "P1",
-   "hand": "20261116-11a2e4b9fb",
+   "hand": "20261112-d3f03fabfb",
    "street": "preflop",
-   "action_index": 2,
+   "action_index": 1,
    "category": "anchor_preflop_13",
    "source": "regression",
    "status": "ready",
    "expect": "",
-   "new_advice": "fold",
-   "note": "锚点：advice_row=2009 hand=20261116-11a2e4b9fb street=preflop action_index=2 version=lean-zh-2026-11-16.3 建议=fold｜真实动作=未记录"
+   "new_advice": "raise",
+   "note": "锚点：advice_row=2203 hand=20261112-d3f03fabfb canonical=2000000001089 street=preflop action_index=1 version=lean-zh-2026-11-11.1 建议=raise｜真实动作=call decision=preflop:0｜分歧"
   },
   {
    "id": "C-preflop-14",
    "priority": "P1",
-   "hand": "20261116-51d037ec76",
+   "hand": "20261112-e0e1f91a9a",
    "street": "preflop",
-   "action_index": 1,
+   "action_index": 5,
    "category": "anchor_preflop_14",
    "source": "regression",
    "status": "ready",
    "expect": "",
-   "new_advice": "raise",
-   "note": "锚点：advice_row=2035 hand=20261116-51d037ec76 street=preflop action_index=1 version=lean-zh-2026-11-16.3 建议=raise｜真实动作=未记录"
+   "new_advice": "call",
+   "note": "锚点：advice_row=2207 hand=20261112-e0e1f91a9a canonical=2000000001100 street=preflop action_index=5 version=lean-zh-2026-11-11.1 建议=call｜真实动作=call decision=preflop:0"
   },
   {
    "id": "C-preflop-15",
    "priority": "P1",
-   "hand": "20261112-30c7f7dbb0",
+   "hand": "20261109-59dd469d3e",
    "street": "preflop",
-   "action_index": 1,
+   "action_index": 4,
    "category": "anchor_preflop_15",
    "source": "regression",
    "status": "ready",
    "expect": "",
-   "new_advice": "call",
-   "note": "锚点：advice_row=2158 hand=20261112-30c7f7dbb0 street=preflop action_index=1 version=lean-zh-2026-11-11.1 建议=call｜真实动作=fold｜分歧"
+   "new_advice": "check",
+   "note": "锚点：advice_row=1941 hand=20261109-59dd469d3e canonical=2000000000998 street=preflop action_index=4 version=lean-zh-2026-11-08.2 建议=check｜真实动作=check decision=preflop:0"
   },
   {
    "id": "C-preflop-16",
    "priority": "P1",
-   "hand": "20261112-93bbeb8311",
+   "hand": "20261116-9797341b4b",
    "street": "preflop",
-   "action_index": 4,
+   "action_index": 3,
    "category": "anchor_preflop_16",
    "source": "regression",
    "status": "ready",
    "expect": "",
-   "new_advice": "check",
-   "note": "锚点：advice_row=2186 hand=20261112-93bbeb8311 street=preflop action_index=4 version=lean-zh-2026-11-11.1 建议=check｜真实动作=未记录"
+   "new_advice": "fold",
+   "note": "锚点：advice_row=2057 hand=20261116-9797341b4b canonical=2000000001143 street=preflop action_index=3 version=lean-zh-2026-11-16.3 建议=fold｜真实动作=fold decision=preflop:0"
   },
   {
    "id": "C-preflop-17",
    "priority": "P1",
-   "hand": "20261116-19a9032053",
+   "hand": "20261112-e6d6aa3e0c",
    "street": "preflop",
    "action_index": 2,
    "category": "anchor_preflop_17",
    "source": "regression",
    "status": "ready",
    "expect": "",
-   "new_advice": "fold",
-   "note": "锚点：advice_row=2010 hand=20261116-19a9032053 street=preflop action_index=2 version=lean-zh-2026-11-16.3 建议=fold｜真实动作=未记录"
+   "new_advice": "raise",
+   "note": "锚点：advice_row=2213 hand=20261112-e6d6aa3e0c canonical=2000000001101 street=preflop action_index=2 version=lean-zh-2026-11-11.1 建议=raise｜真实动作=call decision=preflop:0｜分歧"
   },
   {
    "id": "C-flop-01",
    "priority": "P1",
-   "hand": "20261116-3755569db1",
+   "hand": "20261116-79eb6493c8",
    "street": "flop",
    "action_index": 8,
    "category": "anchor_flop_01",
@@ -634,7 +634,7 @@
    "status": "ready",
    "expect": "",
    "new_advice": "bet",
-   "note": "锚点：advice_row=2022 hand=20261116-3755569db1 street=flop action_index=8 version=lean-zh-2026-11-16.3 建议=bet｜真实动作=未记录"
+   "note": "锚点：advice_row=2047 hand=20261116-79eb6493c8 canonical=2000000001128 street=flop action_index=8 version=lean-zh-2026-11-16.3 建议=bet｜真实动作=未记录 decision=flop:1"
   },
   {
    "id": "C-flop-02",
@@ -647,20 +647,20 @@
    "status": "ready",
    "expect": "",
    "new_advice": "raise",
-   "note": "锚点：advice_row=2160 hand=20261112-3289fcf736 street=flop action_index=12 version=lean-zh-2026-11-11.1 建议=raise｜真实动作=fold｜分歧"
+   "note": "锚点：advice_row=2160 hand=20261112-3289fcf736 canonical=2000000001105 street=flop action_index=12 version=lean-zh-2026-11-11.1 建议=raise｜真实动作=fold decision=flop:2｜分歧"
   },
   {
    "id": "C-flop-03",
    "priority": "P1",
-   "hand": "20261116-a118a01e60",
+   "hand": "20261109-4e5550360c",
    "street": "flop",
-   "action_index": 10,
+   "action_index": 12,
    "category": "anchor_flop_03",
    "source": "regression",
    "status": "ready",
    "expect": "",
    "new_advice": "call",
-   "note": "锚点：advice_row=2060 hand=20261116-a118a01e60 street=flop action_index=10 version=lean-zh-2026-11-16.3 建议=call｜真实动作=未记录"
+   "note": "锚点：advice_row=1933 hand=20261109-4e5550360c canonical=2000000000939 street=flop action_index=12 version=lean-zh-2026-11-08.2 建议=call｜真实动作=call decision=flop:2"
   },
   {
    "id": "C-flop-04",
@@ -673,33 +673,33 @@
    "status": "ready",
    "expect": "",
    "new_advice": "check",
-   "note": "锚点：advice_row=2016 hand=20261116-2e6d1d75d4 street=flop action_index=8 version=lean-zh-2026-11-16.3 建议=check｜真实动作=check"
+   "note": "锚点：advice_row=2016 hand=20261116-2e6d1d75d4 canonical=2000000001156 street=flop action_index=8 version=lean-zh-2026-11-16.3 建议=check｜真实动作=check decision=flop:1"
   },
   {
    "id": "C-flop-05",
    "priority": "P1",
-   "hand": "20261116-2e6d1d75d4",
+   "hand": "20261116-a2bcdfc7c9",
    "street": "flop",
-   "action_index": 12,
+   "action_index": 3,
    "category": "anchor_flop_05",
    "source": "regression",
    "status": "ready",
    "expect": "",
    "new_advice": "fold",
-   "note": "锚点：advice_row=2017 hand=20261116-2e6d1d75d4 street=flop action_index=12 version=lean-zh-2026-11-16.3 建议=fold｜真实动作=未记录"
+   "note": "锚点：advice_row=2063 hand=20261116-a2bcdfc7c9 canonical=2000000001168 street=flop action_index=3 version=lean-zh-2026-11-16.3 建议=fold｜真实动作=fold decision=flop:0"
   },
   {
    "id": "C-flop-06",
    "priority": "P1",
-   "hand": "20261116-3a69bb20b9",
+   "hand": "20261116-a118a01e60",
    "street": "flop",
-   "action_index": 10,
+   "action_index": 8,
    "category": "anchor_flop_06",
    "source": "regression",
    "status": "ready",
    "expect": "",
    "new_advice": "bet",
-   "note": "锚点：advice_row=2025 hand=20261116-3a69bb20b9 street=flop action_index=10 version=lean-zh-2026-11-16.3 建议=bet｜真实动作=未记录"
+   "note": "锚点：advice_row=2059 hand=20261116-a118a01e60 canonical=2000000001140 street=flop action_index=8 version=lean-zh-2026-11-16.3 建议=bet｜真实动作=bet decision=flop:1"
   },
   {
    "id": "C-flop-07",
@@ -712,20 +712,20 @@
    "status": "ready",
    "expect": "",
    "new_advice": "raise",
-   "note": "锚点：advice_row=1614 hand=20261108-141c5dc307 street=flop action_index=10 version=lean-zh-2026-11-08.2 建议=raise｜真实动作=raise"
+   "note": "锚点：advice_row=1614 hand=20261108-141c5dc307 canonical=2000000000892 street=flop action_index=10 version=lean-zh-2026-11-08.2 建议=raise｜真实动作=raise decision=flop:1"
   },
   {
    "id": "C-flop-08",
    "priority": "P1",
-   "hand": "20261109-4e5550360c",
+   "hand": "20261109-59dd469d3e",
    "street": "flop",
-   "action_index": 12,
+   "action_index": 13,
    "category": "anchor_flop_08",
    "source": "regression",
    "status": "ready",
    "expect": "",
    "new_advice": "call",
-   "note": "锚点：advice_row=1933 hand=20261109-4e5550360c street=flop action_index=12 version=lean-zh-2026-11-08.2 建议=call｜真实动作=call"
+   "note": "锚点：advice_row=1943 hand=20261109-59dd469d3e canonical=2000000000998 street=flop action_index=13 version=lean-zh-2026-11-08.2 建议=call｜真实动作=call decision=flop:2"
   },
   {
    "id": "C-flop-09",
@@ -738,25 +738,25 @@
    "status": "ready",
    "expect": "",
    "new_advice": "check",
-   "note": "锚点：advice_row=2019 hand=20261116-36c72f3a34 street=flop action_index=8 version=lean-zh-2026-11-16.3 建议=check｜真实动作=check"
+   "note": "锚点：advice_row=2019 hand=20261116-36c72f3a34 canonical=2000000001163 street=flop action_index=8 version=lean-zh-2026-11-16.3 建议=check｜真实动作=check decision=flop:1"
   },
   {
    "id": "C-flop-10",
    "priority": "P1",
-   "hand": "20261116-4bb8278d05",
+   "hand": "20261112-4ad69db2e2",
    "street": "flop",
-   "action_index": 8,
+   "action_index": 3,
    "category": "anchor_flop_10",
    "source": "regression",
    "status": "ready",
    "expect": "",
    "new_advice": "fold",
-   "note": "锚点：advice_row=2032 hand=20261116-4bb8278d05 street=flop action_index=8 version=lean-zh-2026-11-16.3 建议=fold｜真实动作=未记录"
+   "note": "锚点：advice_row=2168 hand=20261112-4ad69db2e2 canonical=2000000001056 street=flop action_index=3 version=lean-zh-2026-11-11.1 建议=fold｜真实动作=fold decision=flop:1"
   },
   {
    "id": "C-flop-11",
    "priority": "P1",
-   "hand": "20261116-79eb6493c8",
+   "hand": "20261116-c9dec99027",
    "street": "flop",
    "action_index": 8,
    "category": "anchor_flop_11",
@@ -764,20 +764,20 @@
    "status": "ready",
    "expect": "",
    "new_advice": "bet",
-   "note": "锚点：advice_row=2047 hand=20261116-79eb6493c8 street=flop action_index=8 version=lean-zh-2026-11-16.3 建议=bet｜真实动作=未记录"
+   "note": "锚点：advice_row=2072 hand=20261116-c9dec99027 canonical=2000000001173 street=flop action_index=8 version=lean-zh-2026-11-16.3 建议=bet｜真实动作=bet decision=flop:1"
   },
   {
    "id": "C-turn-01",
    "priority": "P1",
-   "hand": "20261116-c9dec99027",
+   "hand": "20261116-3a69bb20b9",
    "street": "turn",
-   "action_index": 9,
+   "action_index": 15,
    "category": "anchor_turn_01",
    "source": "regression",
    "status": "ready",
    "expect": "",
    "new_advice": "bet",
-   "note": "锚点：advice_row=2073 hand=20261116-c9dec99027 street=turn action_index=9 version=lean-zh-2026-11-16.3 建议=bet｜真实动作=未记录"
+   "note": "锚点：advice_row=2026 hand=20261116-3a69bb20b9 canonical=2000000001158 street=turn action_index=15 version=lean-zh-2026-11-16.3 建议=bet｜真实动作=bet decision=turn:2"
   },
   {
    "id": "C-turn-02",
@@ -790,7 +790,7 @@
    "status": "ready",
    "expect": "",
    "new_advice": "raise",
-   "note": "锚点：advice_row=1615 hand=20261108-141c5dc307 street=turn action_index=13 version=lean-zh-2026-11-08.2 建议=raise｜真实动作=raise"
+   "note": "锚点：advice_row=1615 hand=20261108-141c5dc307 canonical=2000000000892 street=turn action_index=13 version=lean-zh-2026-11-08.2 建议=raise｜真实动作=raise decision=turn:2"
   },
   {
    "id": "C-turn-03",
@@ -803,7 +803,7 @@
    "status": "ready",
    "expect": "",
    "new_advice": "call",
-   "note": "锚点：advice_row=878 hand=20261109-a088063358 street=turn action_index=14 version=lean-zh-2026-11-08.2 建议=call｜真实动作=call"
+   "note": "锚点：advice_row=878 hand=20261109-a088063358 canonical=2000000000951 street=turn action_index=14 version=lean-zh-2026-11-08.2 建议=call｜真实动作=call decision=turn:2"
   },
   {
    "id": "C-turn-04",
@@ -816,7 +816,7 @@
    "status": "ready",
    "expect": "",
    "new_advice": "check",
-   "note": "锚点：advice_row=2165 hand=20261112-48ed919467 street=turn action_index=12 version=lean-zh-2026-11-11.1 建议=check｜真实动作=check"
+   "note": "锚点：advice_row=2165 hand=20261112-48ed919467 canonical=2000000001052 street=turn action_index=12 version=lean-zh-2026-11-11.1 建议=check｜真实动作=check decision=turn:3"
   },
   {
    "id": "C-turn-05",
@@ -829,20 +829,20 @@
    "status": "ready",
    "expect": "",
    "new_advice": "fold",
-   "note": "锚点：advice_row=2157 hand=20261112-2912a826a2 street=turn action_index=15 version=lean-zh-2026-11-11.1 建议=fold｜真实动作=fold"
+   "note": "锚点：advice_row=2157 hand=20261112-2912a826a2 canonical=2000000001063 street=turn action_index=15 version=lean-zh-2026-11-11.1 建议=fold｜真实动作=fold decision=turn:2"
   },
   {
    "id": "C-turn-06",
    "priority": "P1",
-   "hand": "20261112-045e1c3b43",
+   "hand": "20261116-a118a01e60",
    "street": "turn",
-   "action_index": 8,
+   "action_index": 12,
    "category": "anchor_turn_06",
    "source": "regression",
    "status": "ready",
    "expect": "",
    "new_advice": "bet",
-   "note": "锚点：advice_row=2144 hand=20261112-045e1c3b43 street=turn action_index=8 version=lean-zh-2026-11-11.1 建议=bet｜真实动作=bet"
+   "note": "锚点：advice_row=2061 hand=20261116-a118a01e60 canonical=2000000001140 street=turn action_index=12 version=lean-zh-2026-11-16.3 建议=bet｜真实动作=bet decision=turn:2"
   },
   {
    "id": "C-turn-07",
@@ -855,7 +855,7 @@
    "status": "ready",
    "expect": "",
    "new_advice": "call",
-   "note": "锚点：advice_row=1935 hand=20261109-4e5550360c street=turn action_index=16 version=lean-zh-2026-11-08.2 建议=call｜真实动作=call"
+   "note": "锚点：advice_row=1935 hand=20261109-4e5550360c canonical=2000000000939 street=turn action_index=16 version=lean-zh-2026-11-08.2 建议=call｜真实动作=call decision=turn:4"
   },
   {
    "id": "C-turn-08",
@@ -868,7 +868,7 @@
    "status": "ready",
    "expect": "",
    "new_advice": "check",
-   "note": "锚点：advice_row=1688 hand=20261108-42f52dc742 street=turn action_index=13 version=lean-zh-2026-11-08.2 建议=check｜真实动作=check"
+   "note": "锚点：advice_row=1688 hand=20261108-42f52dc742 canonical=2000000000901 street=turn action_index=13 version=lean-zh-2026-11-08.2 建议=check｜真实动作=check decision=turn:2"
   },
   {
    "id": "C-turn-09",
@@ -881,20 +881,20 @@
    "status": "ready",
    "expect": "",
    "new_advice": "fold",
-   "note": "锚点：advice_row=2166 hand=20261112-48ed919467 street=turn action_index=15 version=lean-zh-2026-11-11.1 建议=fold｜真实动作=fold"
+   "note": "锚点：advice_row=2166 hand=20261112-48ed919467 canonical=2000000001052 street=turn action_index=15 version=lean-zh-2026-11-11.1 建议=fold｜真实动作=fold decision=turn:4"
   },
   {
    "id": "C-turn-10",
    "priority": "P1",
-   "hand": "20261112-b9e342e7d8",
+   "hand": "20261112-045e1c3b43",
    "street": "turn",
-   "action_index": 9,
+   "action_index": 8,
    "category": "anchor_turn_10",
    "source": "regression",
    "status": "ready",
    "expect": "",
    "new_advice": "bet",
-   "note": "锚点：advice_row=2198 hand=20261112-b9e342e7d8 street=turn action_index=9 version=lean-zh-2026-11-11.1 建议=bet｜真实动作=bet"
+   "note": "锚点：advice_row=2144 hand=20261112-045e1c3b43 canonical=2000000001070 street=turn action_index=8 version=lean-zh-2026-11-11.1 建议=bet｜真实动作=bet decision=turn:3"
   },
   {
    "id": "C-turn-11",
@@ -907,12 +907,12 @@
    "status": "ready",
    "expect": "",
    "new_advice": "call",
-   "note": "锚点：advice_row=1578 hand=20261106-968e80aaa2 street=turn action_index=15 version=lean-zh-2026-11-05.1 建议=call｜真实动作=call"
+   "note": "锚点：advice_row=1578 hand=20261106-968e80aaa2 canonical=2000000000702 street=turn action_index=15 version=lean-zh-2026-11-05.1 建议=call｜真实动作=call decision=turn:2"
   },
   {
    "id": "C-turn-12",
    "priority": "P1",
-   "hand": "20261109-59dd469d3e",
+   "hand": "20261111-687aa58a5d",
    "street": "turn",
    "action_index": 16,
    "category": "anchor_turn_12",
@@ -920,7 +920,7 @@
    "status": "ready",
    "expect": "",
    "new_advice": "check",
-   "note": "锚点：advice_row=1944 hand=20261109-59dd469d3e street=turn action_index=16 version=lean-zh-2026-11-08.2 建议=check｜真实动作=check"
+   "note": "锚点：advice_row=2103 hand=20261111-687aa58a5d canonical=2000000001030 street=turn action_index=16 version=lean-zh-2026-11-08.2 建议=check｜真实动作=check decision=turn:3"
   },
   {
    "id": "C-turn-13",
@@ -933,20 +933,20 @@
    "status": "ready",
    "expect": "",
    "new_advice": "fold",
-   "note": "锚点：advice_row=2174 hand=20261112-622ff1817e street=turn action_index=25 version=lean-zh-2026-11-11.1 建议=fold｜真实动作=fold"
+   "note": "锚点：advice_row=2174 hand=20261112-622ff1817e canonical=2000000001067 street=turn action_index=25 version=lean-zh-2026-11-11.1 建议=fold｜真实动作=fold decision=turn:2"
   },
   {
    "id": "C-turn-14",
    "priority": "P1",
-   "hand": "20261112-efe622b13e",
+   "hand": "20261112-b9e342e7d8",
    "street": "turn",
-   "action_index": 13,
+   "action_index": 9,
    "category": "anchor_turn_14",
    "source": "regression",
    "status": "ready",
    "expect": "",
    "new_advice": "bet",
-   "note": "锚点：advice_row=2218 hand=20261112-efe622b13e street=turn action_index=13 version=lean-zh-2026-11-11.1 建议=bet｜真实动作=bet"
+   "note": "锚点：advice_row=2198 hand=20261112-b9e342e7d8 canonical=2000000001107 street=turn action_index=9 version=lean-zh-2026-11-11.1 建议=bet｜真实动作=bet decision=turn:2"
   },
   {
    "id": "C-turn-15",
@@ -959,33 +959,33 @@
    "status": "ready",
    "expect": "",
    "new_advice": "call",
-   "note": "锚点：advice_row=1840 hand=20261108-b6e7fd2fa1 street=turn action_index=19 version=lean-zh-2026-11-05.1 建议=call｜真实动作=call"
+   "note": "锚点：advice_row=1840 hand=20261108-b6e7fd2fa1 canonical=2000000000794 street=turn action_index=19 version=lean-zh-2026-11-05.1 建议=call｜真实动作=call decision=turn:2"
   },
   {
    "id": "C-turn-16",
    "priority": "P1",
-   "hand": "20261111-687aa58a5d",
+   "hand": "20261108-1daee8c03e",
    "street": "turn",
-   "action_index": 16,
+   "action_index": 15,
    "category": "anchor_turn_16",
    "source": "regression",
    "status": "ready",
    "expect": "",
    "new_advice": "check",
-   "note": "锚点：advice_row=2103 hand=20261111-687aa58a5d street=turn action_index=16 version=lean-zh-2026-11-08.2 建议=check｜真实动作=check"
+   "note": "锚点：advice_row=1630 hand=20261108-1daee8c03e canonical=2000000000816 street=turn action_index=15 version=lean-zh-2026-11-08.1 建议=check｜真实动作=check decision=turn:2"
   },
   {
    "id": "C-river-01",
    "priority": "P1",
-   "hand": "20261116-c9dec99027",
+   "hand": "20261109-a088063358",
    "street": "river",
-   "action_index": 12,
+   "action_index": 18,
    "category": "anchor_river_01",
    "source": "regression",
    "status": "ready",
    "expect": "",
    "new_advice": "bet",
-   "note": "锚点：advice_row=2074 hand=20261116-c9dec99027 street=river action_index=12 version=lean-zh-2026-11-16.3 建议=bet｜真实动作=bet"
+   "note": "锚点：advice_row=879 hand=20261109-a088063358 canonical=2000000000951 street=river action_index=18 version=lean-zh-2026-11-08.2 建议=bet｜真实动作=bet decision=river:3"
   },
   {
    "id": "C-river-02",
@@ -998,7 +998,7 @@
    "status": "ready",
    "expect": "",
    "new_advice": "call",
-   "note": "锚点：advice_row=1579 hand=20261106-968e80aaa2 street=river action_index=18 version=lean-zh-2026-11-05.1 建议=call｜真实动作=未记录"
+   "note": "锚点：advice_row=1579 hand=20261106-968e80aaa2 canonical=2000000000702 street=river action_index=18 version=lean-zh-2026-11-05.1 建议=call｜真实动作=未记录 decision=river:3"
   },
   {
    "id": "C-river-03",
@@ -1011,7 +1011,7 @@
    "status": "ready",
    "expect": "",
    "new_advice": "check",
-   "note": "锚点：advice_row=2145 hand=20261112-045e1c3b43 street=river action_index=10 version=lean-zh-2026-11-11.1 建议=check｜真实动作=check"
+   "note": "锚点：advice_row=2145 hand=20261112-045e1c3b43 canonical=2000000001070 street=river action_index=10 version=lean-zh-2026-11-11.1 建议=check｜真实动作=check decision=river:4"
   },
   {
    "id": "C-river-04",
@@ -1024,20 +1024,20 @@
    "status": "ready",
    "expect": "",
    "new_advice": "fold",
-   "note": "锚点：advice_row=1738 hand=20261108-6236402a49 street=river action_index=23 version=lean-zh-2026-11-08.1 建议=fold｜真实动作=fold"
+   "note": "锚点：advice_row=1738 hand=20261108-6236402a49 canonical=2000000000861 street=river action_index=23 version=lean-zh-2026-11-08.1 建议=fold｜真实动作=fold decision=river:3"
   },
   {
    "id": "C-river-05",
    "priority": "P1",
-   "hand": "20261112-efe622b13e",
+   "hand": "20261109-f1a604c249",
    "street": "river",
-   "action_index": 15,
+   "action_index": 16,
    "category": "anchor_river_05",
    "source": "regression",
    "status": "ready",
    "expect": "",
    "new_advice": "bet",
-   "note": "锚点：advice_row=2219 hand=20261112-efe622b13e street=river action_index=15 version=lean-zh-2026-11-11.1 建议=bet｜真实动作=未记录"
+   "note": "锚点：advice_row=2004 hand=20261109-f1a604c249 canonical=2000000000972 street=river action_index=16 version=lean-zh-2026-11-08.2 建议=bet｜真实动作=bet decision=river:3"
   },
   {
    "id": "C-river-06",
@@ -1050,20 +1050,20 @@
    "status": "ready",
    "expect": "",
    "new_advice": "call",
-   "note": "锚点：advice_row=1680 hand=20261108-3f9d253c3e street=river action_index=20 version=lean-zh-2026-11-05.1 建议=call｜真实动作=call"
+   "note": "锚点：advice_row=1680 hand=20261108-3f9d253c3e canonical=2000000000796 street=river action_index=20 version=lean-zh-2026-11-05.1 建议=call｜真实动作=call decision=river:3"
   },
   {
    "id": "C-river-07",
    "priority": "P1",
    "hand": "20261108-42f52dc742",
    "street": "river",
-   "action_index": 14,
+   "action_index": 15,
    "category": "anchor_river_07",
    "source": "regression",
    "status": "ready",
    "expect": "",
    "new_advice": "check",
-   "note": "锚点：advice_row=1689 hand=20261108-42f52dc742 street=river action_index=14 version=lean-zh-2026-11-08.2 建议=check｜真实动作=未记录"
+   "note": "锚点：advice_row=1690 hand=20261108-42f52dc742 canonical=2000000000901 street=river action_index=15 version=lean-zh-2026-11-08.2 建议=check｜真实动作=check decision=river:3"
   },
   {
    "id": "C-river-08",
@@ -1076,20 +1076,20 @@
    "status": "ready",
    "expect": "",
    "new_advice": "fold",
-   "note": "锚点：advice_row=1647 hand=20261108-30687f3b79 street=river action_index=11 version=lean-zh-2026-11-05.1 建议=fold｜真实动作=fold"
+   "note": "锚点：advice_row=1647 hand=20261108-30687f3b79 canonical=2000000000721 street=river action_index=11 version=lean-zh-2026-11-05.1 建议=fold｜真实动作=fold decision=river:2"
   },
   {
    "id": "C-river-09",
    "priority": "P1",
-   "hand": "20261109-a088063358",
+   "hand": "20261111-bf90f8fdd0",
    "street": "river",
-   "action_index": 18,
+   "action_index": 24,
    "category": "anchor_river_09",
    "source": "regression",
    "status": "ready",
    "expect": "",
    "new_advice": "bet",
-   "note": "锚点：advice_row=879 hand=20261109-a088063358 street=river action_index=18 version=lean-zh-2026-11-08.2 建议=bet｜真实动作=bet"
+   "note": "锚点：advice_row=2128 hand=20261111-bf90f8fdd0 canonical=2000000001033 street=river action_index=24 version=lean-zh-2026-11-08.2 建议=bet｜真实动作=bet decision=river:6"
   },
   {
    "id": "C-river-10",
@@ -1102,20 +1102,20 @@
    "status": "ready",
    "expect": "",
    "new_advice": "call",
-   "note": "锚点：advice_row=1507 hand=20261104-d81bffc525 street=river action_index=16 version=lean-zh-2026-11-04.1 建议=call｜真实动作=fold｜分歧"
+   "note": "锚点：advice_row=1507 hand=20261104-d81bffc525 canonical=2000000000629 street=river action_index=16 version=lean-zh-2026-11-04.1 建议=call｜真实动作=fold decision=river:3｜分歧"
   },
   {
    "id": "C-river-11",
    "priority": "P1",
-   "hand": "20261111-687aa58a5d",
+   "hand": "20261108-3f9d253c3e",
    "street": "river",
-   "action_index": 19,
+   "action_index": 17,
    "category": "anchor_river_11",
    "source": "regression",
    "status": "ready",
    "expect": "",
    "new_advice": "check",
-   "note": "锚点：advice_row=2104 hand=20261111-687aa58a5d street=river action_index=19 version=lean-zh-2026-11-08.2 建议=check｜真实动作=未记录"
+   "note": "锚点：advice_row=1679 hand=20261108-3f9d253c3e canonical=2000000000796 street=river action_index=17 version=lean-zh-2026-11-05.1 建议=check｜真实动作=check decision=river:2"
   }
  ],
  "skipped": [
