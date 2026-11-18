@@ -1,6 +1,6 @@
 """复盘归因用的硬规则审计（**legacy offline only**）。
 
-`audit_advice_tags()` 不看 Value directive，只看可证伪的事实：牌力解析、
+`audit_advice_tags()` 不看价值指令，只看可证伪的事实：牌力解析、
 坚果校验、牌面结构、赔率。replay / compare_review_hands 用它回答
 「这次下注是否与事实矛盾」，不进入 live 提示词。
 """
@@ -16,10 +16,28 @@ from ...coach import (
 from ...hand_track import PREFLOP
 from ...pot_math import call_amount, winnable_pot
 from ...preflop_ranges import range_verdict, sb_completable
-from .strategy import IMPLIED_ODDS_CAP_PCT, _is_set_mine_pair
 
 if TYPE_CHECKING:                       # 只在类型检查时引入，避免循环 import
     from ...situation import Situation
+
+
+# 原在 legacy `strategy.py`：隐含赔率上限（0 表示只看即时赔率）。
+IMPLIED_ODDS_CAP_PCT = 0.0
+
+
+def _is_set_mine_pair(cards: tuple[str, ...] | list[str]) -> bool:
+    """22-99：只按「买 set」看的口袋对；TT+ 才算超对价值。
+
+    口径见 `preflop_ranges.is_set_mine_pair`；这里收牌面写法（'10h' → T）。
+    """
+    if len(cards) != 2 or not all(len(c) >= 2 for c in cards):
+        return False
+    ra, rb = cards[0][0].upper(), cards[1][0].upper()
+    if ra == "1":                       # '10h' 这种写法
+        ra = "T"
+    if rb == "1":
+        rb = "T"
+    return ra == rb and ra in "23456789"
 
 
 # ─────────────────── 离线审计（legacy offline only） ───────────────────

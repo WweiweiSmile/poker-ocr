@@ -49,10 +49,6 @@ class RangeGroup:
     combos: int
     examples: tuple[str, ...] = ()
 
-    def render(self) -> str:
-        ex = f" ({', '.join(self.examples)})" if self.examples else ""
-        return f"{self.name} {self.share:.1%}{ex}"
-
 
 @dataclass(frozen=True)
 class OpponentEdge:
@@ -119,85 +115,6 @@ class HandVsRanges:
     samples_requested: int = 0
     n_failed: int = 0
     cache_hit: bool = False
-
-    def render(self) -> str:
-        lines: list[str] = ["## Hand vs ranges" + (f" ({self.context})" if self.context else "")]
-        lines.append(f"Board: {self.board} | Your {self.hero} | {self.street} | "
-                     f"{self.samples} samples")
-        # 4+ 对手不逐家铺开：只展开最危险的三家，其余仍进入 equity/behind_any。
-        shown = self.opponents
-        more = 0
-        if len(shown) > 3:
-            shown = tuple(sorted(shown, key=lambda e: -e.behind)[:3])
-            more = len(self.opponents) - 3
-        lines.append("Ranges: " + " | ".join(
-            f"{o.label} {o.range_id} {o.eff_width_pct or o.width_pct:.1f}% "
-            f"({o.combos_after_removal} live combos)" for o in shown)
-            + (f" | +{more} more (in equity)" if more else "")
-            + (f" | +{self.random_opponents} random fill (unmodeled)"
-               if self.random_opponents else ""))
-        lines.append(f"Equity vs field (by river): {self.equity:.0%} "
-                     f"±{max(self.equity_ci * 100, 0.1):.1f}%"
-                     + (f" (incl. {self.random_opponents} random fill)"
-                        if self.random_opponents else ""))
-        lines.append(f"Made hand now: behind at least one {self.behind_any:.1%} "
-                     f"(tie {self.tie_any:.1%})"
-                     + (f"; {self.random_opponents} opponent(s) treated as random"
-                        if self.random_opponents else ""))
-        for edge in shown:
-            group_text = ""
-            if edge.beaten_by:
-                group_text = " — " + ", ".join(g.render() for g in edge.beaten_by[:2])
-            lines.append(f"- {edge.label} {edge.eff_width_pct or edge.width_pct:.1f}%:"
-                         f" behind {edge.behind:.1%} (tie {edge.tie:.1%}){group_text}")
-            comp = edge.composition
-            if comp is not None:
-                types = ", ".join(f"{name} {share:.0%}"
-                                  for name, share in comp.types[:3])
-                lines.append(f"  line={edge.line or 'n/a'} bucket={edge.bucket or 'n/a'}"
-                             f" | made {comp.made_hand:.0%} draw {comp.draw:.0%} "
-                             f"air {comp.air:.0%}" + (f" ({types})" if types else ""))
-        behind_by_type: dict[str, RangeGroup] = {}
-        for edge in self.opponents:
-            for group in edge.beaten_by:
-                old = behind_by_type.get(group.name)
-                if old is None or group.share > old.share:
-                    behind_by_type[group.name] = group
-        if behind_by_type:
-            groups = sorted(behind_by_type.values(), key=lambda g: -g.share)[:4]
-            lines.append("Behind by type: " + ", ".join(g.render() for g in groups))
-        if more:
-            lines.append(f"- +{more} more range(s) are included in equity / "
-                         "behind-at-least-one; not expanded here.")
-        ahead = self._ahead_names()
-        if ahead:
-            lines.append("Ahead of: " + ", ".join(ahead))
-        lines.append("Read: " + self._read())
-        if self.source:
-            lines.append(f"Source: {self.source}")
-        return "\n".join(lines)
-
-    def _ahead_names(self) -> tuple[str, ...]:
-        names: list[str] = []
-        for edge in self.opponents:
-            for group in edge.ahead_groups:
-                if group.name not in names:
-                    names.append(group.name)
-        return tuple(names[:4])
-
-    def _read(self) -> str:
-        if self.behind_any >= 0.5 and self.equity >= 0.33:
-            return ("behind now but the equity is still live — this is a draw / "
-                    "multiway spot, judge it by price, not by 'behind now'.")
-        if self.behind_any >= 0.5:
-            return ("behind now and low equity — weak against this range; needs "
-                    "a very good price to continue.")
-        if self.behind_any <= 0.2 and self.equity >= 0.55:
-            return ("ahead of this range now and enough equity — a value hand; "
-                    "the equity number, not the random-hand rank, is the truth.")
-        return ("mixed spot: 'behind now' is the current made hand, 'equity' is "
-                "by the river; do not use one as the other.")
-
 
 # ─────────────────────────── 输入整理 ───────────────────────────
 

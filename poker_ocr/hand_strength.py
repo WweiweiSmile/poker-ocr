@@ -7,7 +7,7 @@
   · `equity_tier`：权益相对平均分池线（1/N）的档次（strong / above_average /
     neutral / weak）；
   · `kind`：价值牌 / 听牌 / 弱牌（空气）/ 打牌面；
-  · `summary_en`：一行英文结论，直接注入提示词。
+  · `kind` / `size` / `equity_tier` 由 `prompt/user/strength.py` 渲染成中文事实。
 
 设计文档：docs/实时牌力解析-接入AI建议-设计.md
 """
@@ -61,30 +61,6 @@ class HandStrengthRead:
     equity: float             # 0..1
     avg: float                # 1 / (对手数 + 1)
     n: int                    # 对手数
-
-    def summary_en(self) -> str:
-        """给模型的单行事实。"""
-        head = ("DRAW" if self.kind == KIND_DRAW
-                else self.size.upper().replace("_", " "))
-        return (f"{head} {self.made_name}; behind now {self.behind_any:.0%}, "
-                f"equity {self.equity:.0%} vs {self.n + 1}-way avg "
-                f"{self.avg:.0%} ({self.equity_tier}) — {self._tail()}.")
-
-    def _tail(self) -> str:
-        if self.kind == KIND_DRAW:
-            return "a draw, judge by outs and price, not by behind-now"
-        if self.kind == KIND_WEAK:
-            return "no made hand, no draw"
-        if self.kind == KIND_BOARD_PLAY:
-            return "playing the board (everyone shares the best five)"
-        if self.nuts:
-            return "nuts / near-nuts — value hand"
-        if self.size == SIZE_MEDIUM:
-            if self.behind_any >= 0.35:
-                return "ahead pair, multiway behind; do not overplay"
-            return "medium made hand, thin value"
-        return "value hand"
-
 
 def enabled() -> bool:
     """与 HAND_VS_RANGES_ENABLED 解耦的开关。缺数据自动不输出，绝不猜。"""

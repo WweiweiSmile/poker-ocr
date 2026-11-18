@@ -182,8 +182,10 @@ def test_observed_fold_normalises_percent() -> None:
         return
     check(rep.observed is not None and close(rep.observed, 0.45, 1e-6),
           f"历史弃牌率应为 0.45，实际 {rep.observed}")
-    text = rep.render()
-    check("lifetime" in text, f"应把历史值渲染进事实：\n{text}")
+    from dataclasses import replace as _replace
+    from poker_ocr.prompt.user.exploit import render_exploit_zh
+    text = "\n".join(render_exploit_zh(_replace(sit, fold_eq=rep)))
+    check("历史平均 45%" in text, f"应把历史值渲染进事实：\n{text}")
 
 
 def test_folded_opponent_not_counted() -> None:
@@ -504,8 +506,6 @@ def test_multiway_has_no_size_ev() -> None:
     if rep is None:
         return
     check(rep.lines == (), f"多人池不该给尺寸 EV，实际 {len(rep.lines)} 条")
-    text = rep.render()
-    check("Multiway" in text, f"应说明为什么没有 EV：\n{text}")
 
 
 # ─────────────────────────── 接线 ───────────────────────────
@@ -554,11 +554,11 @@ def test_by_pot_fraction_matches_reported_lines() -> None:
 
 
 def test_prompt_renders_block() -> None:
-    from poker_ocr.prompt.offline.hand_facts import render_hand_facts
+    from poker_ocr.advice import render_facts_zh
 
     sit = _situation(to_call=2.0, pot=8.0)
-    user = render_hand_facts(sit)
-    check("Fold equity (range-conditional)" in user,
+    user = render_facts_zh(sit)
+    check("## 范围弱点与弃牌率" in user,
           f"提示词应包含条件弃牌率块：\n{user[-800:]}")
 
 
@@ -574,38 +574,6 @@ def test_disabled_returns_none() -> None:
 def test_preflop_returns_none() -> None:
     sit = _situation(street="preflop", board=(), to_call=1.0, pot=3.0)
     check(fe.lookup(sit) is None, "翻前不该有弃牌率报告")
-
-
-def test_no_fold_equity_uses_number() -> None:
-    """有数字时按数字判定，不再用「3 家以上」一刀切。"""
-    from poker_ocr.prompt.offline.strategy import _no_fold_equity
-    from poker_ocr.coach import STRONG_DRAW
-
-    sit = _situation(to_call=2.0, pot=8.0)
-    if sit.fold_eq is None:
-        return
-    fake_high = type(sit.fold_eq)(**{**sit.fold_eq.__dict__, "fold_equity": 0.42})
-    fake_low = type(sit.fold_eq)(**{**sit.fold_eq.__dict__, "fold_equity": 0.08})
-    from dataclasses import replace as _replace
-
-    sit_draw = _replace(sit, hand_tier=STRONG_DRAW)
-    check(_no_fold_equity(_replace(sit_draw, fold_eq=fake_high)) is False,
-          "弃牌率 42% 时不该判「没有弃牌率」")
-    check(_no_fold_equity(_replace(sit_draw, fold_eq=fake_low)) is True,
-          "弃牌率 8% 时应判「没有弃牌率」")
-
-
-def test_no_fold_equity_falls_back() -> None:
-    """没有报告时保留旧口径：3 家以上 + 听牌 = 没有弃牌率。"""
-    from poker_ocr.prompt.offline.strategy import _no_fold_equity
-    from poker_ocr.coach import STRONG_DRAW
-    from dataclasses import replace as _replace
-
-    sit = _situation(to_call=2.0, pot=8.0)
-    bare = _replace(sit, fold_eq=None, hand_tier=STRONG_DRAW, opponents_in_hand=3)
-    check(_no_fold_equity(bare) is True, "旧口径应保持：3 家 + 听牌 → 没有弃牌率")
-    heads_up = _replace(bare, opponents_in_hand=1)
-    check(_no_fold_equity(heads_up) is False, "单挑不该判没有弃牌率")
 
 
 def main() -> int:

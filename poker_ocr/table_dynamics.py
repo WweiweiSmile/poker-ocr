@@ -146,9 +146,9 @@ def is_passive_table(text: str | None) -> bool:
 def value_heavy_aggression(text: str | None) -> bool:
     """桌风是否明确说「对手的加注/连续下注以价值为主」。
 
-    这是给 `advice.value_directive()` 用的保守判据：只有用户写清楚了
-    松弱/紧弱/很少诈唬/尊重持续下注中的任意一类，才把边际成牌从「跟注」
-    改成「弃牌」。没有桌风、或写的是松凶/爱诈唬，都不触发。
+    这是 live 规则层（`prompt/user/rules.py` 与 `exploit.py`）的保守判据：
+    只有当用户写清楚了松弱/紧弱/很少诈唬/尊重持续下注中的任意一类，才把
+    边际成牌从「跟注」改成「弃牌」。没有桌风、或写的是松凶/爱诈唬，都不触发。
     """
     t = _positive_text(text)
     if not t:
@@ -164,7 +164,7 @@ def is_aggressive_table(text: str | None) -> bool:
 
     与 `value_heavy_aggression()` 的区别：混合桌可以**同时**有松弱和松浪，
     前者返回 False（不能假设全桌价值线），但后者仍返回 True——只要桌上
-    有松浪，`value_directive` 就不该对中等成牌默认做薄价值。
+    有松浪，规则层就不该对中等成牌默认做薄价值。
 
     只看显式标签，不靠「爱诈唬」这类泛化词：避免把「松凶但很少诈唬」
     误判成松浪。宁可漏判，也不要把被动桌当成激进桌。

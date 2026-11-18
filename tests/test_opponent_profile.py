@@ -18,9 +18,6 @@ sys.path.insert(0, str(ROOT))
 
 from poker_ocr import advice as advice_mod  # noqa: E402
 from poker_ocr.advice import advise, build_situation, render_facts_zh  # noqa: E402
-from poker_ocr.prompt.offline.strategy import (  # noqa: E402
-    _aggressive_context, decision_read, value_directive,
-)
 from poker_ocr.frame_state import FrameState, PlayerState  # noqa: E402
 from poker_ocr.hand_track import (  # noqa: E402
     ActionRecord, HandSnapshot, LiveHandTracker, OpponentSnapshot, StreetRecord,
@@ -1008,42 +1005,6 @@ MIXED = ("A. 松浪/松凶（芒果与西米、葡萄牙h）：open 8-11BB，翻
          "B. 松弱/跟注站（FatherTM、好运常在ok）：很少加注。")
 
 
-def test_advice_uses_per_opponent_read() -> None:
-    reads = (_read("midR", "芒果与西米", "maniac"),
-             _read("lowR", "好运常在ok", "station"))
-    point = _h8_point()
-    sit = build_situation(point, table_dynamics=MIXED,
-                          opponent_reads=reads)
-    check(sit.opponent_reads == reads, "Situation 应保存画像")
-    check(_aggressive_context(sit), "有松浪画像时应走 aggressive 分支")
-    directive = value_directive(sit) or ""
-    check("AGGRESSIVE TABLE" in directive and "DO NOT THIN-VALUE" in directive,
-          f"h8 类两对应压成 check：{directive}")
-    check("芒果与西米" in directive,
-          f"硬指令应点名是哪个对手：{directive}")
-
-    # 全部是被动型画像：即使 .table_dy 写的是混合桌，也不该按松浪处理
-    passive = (_read("midR", "芒果与西米", "station"),
-               _read("lowR", "好运常在ok", "nit"))
-    passive_sit = build_situation(point, table_dynamics=MIXED,
-                                  opponent_reads=passive)
-    check(not _aggressive_context(passive_sit),
-          "本手在局对手全是 station/nit 时不该走 aggressive 分支")
-    check("AGGRESSIVE TABLE" not in (value_directive(passive_sit) or ""),
-          f"被动型画像不应出现松浪硬指令：{value_directive(passive_sit)}")
-
-    # 面对下注：看下注的人，而不是桌上另一个人的标签
-    facing = _h8_point(to_call=10.0, bettor="lowR")
-    facing_sit = build_situation(facing, opponent_reads=(
-        _read("midR", "芒果与西米", "maniac"),
-        _read("lowR", "好运常在ok", "station")))
-    selected = decision_read(facing_sit)
-    check(selected is not None and selected.seat_id == "lowR",
-          f"面对下注应选中下注者：{selected}")
-    check(not _aggressive_context(facing_sit),
-          "下注者是 station 时不应按 LAG 抓诈")
-
-
 def test_advice_records_read_snapshot() -> None:
     reads = (_read("midR", "芒果与西米", "maniac"),
              _read("lowR", "好运常在ok", "station"))
@@ -1748,7 +1709,6 @@ def run() -> int:
         test_pool_keys_are_merged_globally,
         test_pool_suffix_keys_are_migrated_on_load,
         test_stats_for_opponents_is_current_table_only,
-        test_advice_uses_per_opponent_read,
         test_advice_records_read_snapshot,
         test_prompt_renders_opponent_reads,
         test_postflop_sequence_observations,

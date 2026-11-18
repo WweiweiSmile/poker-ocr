@@ -39,7 +39,7 @@ rois.json               # ⚠ 现在是「识别结果」文件，不是配置�
 config/                 # 牌桌几何 profile（归一化坐标、环序、阈值）+ 点击器坐标 + MediaMTX
                         # + prefold_trash.json（预点弃牌的排除名单，默认空）
 poker_ocr/              # 全部核心逻辑（64 个模块 + __init__，见 §4）
-  prompt/               # 提示词包：system / user / shared / offline
+  prompt/               # 提示词包：system / user / shared（offline 只剩审计）
   assets/               # 点数模板图集（工具生成，勿手改）
   tables/               # 策略表 JSON（26 张表：v0 手调 / v1 推导），改数字改这里
   live_web.py           # 本地 Web 看板（stdlib HTTP + SSE，只读）
@@ -55,7 +55,7 @@ tools/                  # 离线 CLI（回放 / 画像重建 / 报表 / SFT 数�
                         # hand_recognition_audit.py 手牌识别倒查 /
                         # import_case_seed.py 案例集 seed / backfill_advice_decisions.py）
 docs/                   # 56 篇设计文档与复盘（业务语义的真正来源）
-data/                   # 运行期数据：hand_outbox/、opponents/、sft/
+data/                   # 运行期数据：hand_outbox/、opponents/（SFT 数据已删，用 tools/build_sft_dataset.py 现生成）
 logs/                   # live.states.jsonl、复盘产物、incidents/
 images/                 # 标注样本与截图素材
 ```
@@ -243,7 +243,7 @@ poker_ocr.workbench :8030
 system/   输出契约、事实优先级、规则仲裁、决策顺序、指标口径、筹码深度、场景段
 user/     当前局面、行动线、翻前、实时牌力、范围、画像、攻击/剥削、数据质量、可选动作
 shared/   数字格式与中文词表
-offline/  旧英文提示词与策略层（只服务复盘，不进 live）
+offline/  只剩 `audit_advice_tags`（复盘归因硬规则审计；不进 live）
 ```
 
 对外只有三个入口：`build_messages(sit)`、`build_system(sit)`、`render_facts_zh(sit)`。
@@ -347,7 +347,7 @@ states 的 advice 行 join）。**这是另一份契约**：改它不动 `states
 
 - 当前版本：`PROMPT_VERSION = "lean-zh-2026-11-15.2"`（[poker_ocr/prompt/version.py](poker_ocr/prompt/version.py)）。
 - 只有**一套中文 lean**：不注入 Math gate、不做弃牌重问、不加载技能库。
-- prompt 里**不得出现 `offline/` 的英文规则**；`poker_ocr/prompt/offline/` 是 legacy，只服务离线审计与历史 A/B，不进 live prompt。
+- 只有一套中文 lean：旧的价值指令 / 赔率闸门 / 英文事实块已于 2026-11-18 删除，`poker_ocr/prompt/offline/` 只剩复盘审计用的 `audit_advice_tags`。
 - 版本号写进 `session_start` / advice JSONL；`replay/versioning.py` 的 `CURRENT_ADVICE_VERSION` 由它派生，**不要手工同步**。
 - 改动 system、事实块或模块顺序 ⇒ 必须 bump，并在 `version.py` 顶部写清「为什么改、依据哪次复盘」。
 - `advise()` 会把 `system/user/raw/reason_full` 与 `prompt_sha256` 一起带进 `Advice`；没调模型时显式标 `prompt_missing`。

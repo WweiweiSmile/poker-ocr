@@ -1,7 +1,7 @@
 ### 第二阶段 偏好对齐：ORPO（QLoRA 4bit）
 ###   llamafactory-cli train config/llamafactory/orpo_qlora.yaml
 ###
-### 数据集格式（sharegpt + ranking），data/sft/orpo.json：
+### 数据集格式（sharegpt + ranking），data/sft/orpo.json（需用 tools/ 现生成）：
 ### [
 ###   {
 ###     "system": "<与 SFT 完全相同的 system>",

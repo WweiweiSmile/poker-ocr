@@ -33,10 +33,6 @@ from poker_ocr.advice import (  # noqa: E402
     uncalled_excess, winnable_pot,
 )
 from poker_ocr.prompt.offline.audit import audit_advice_tags  # noqa: E402
-from poker_ocr.prompt.offline.hand_facts import render_hand_facts  # noqa: E402
-from poker_ocr.prompt.offline.strategy import (  # noqa: E402
-    math_gate, value_directive,
-)
 from poker_ocr.frame_state import FrameState, PlayerState  # noqa: E402
 from poker_ocr.hand_track import LiveHandTracker, street_of_board  # noqa: E402
 from poker_ocr.parse import Blinds  # noqa: E402
@@ -1203,8 +1199,8 @@ def test_table_size_uses_seats_not_players_in_hand() -> None:
           "落库的手牌记录也应保存座位数")
     check(point.players_dealt == 2,
           f"参与人数应按实际在局者 2，实际 {point.players_dealt}")
-    user = render_hand_facts(build_situation(point))
-    check("Table: 9-handed" in user, f"提示词桌型不对：\n{user}")
+    user = render_facts_zh(build_situation(point))
+    check("桌况：9 人桌" in user, f"提示词桌型不对：\n{user}")
 
 
 def test_bomb_pot_per_player_uses_players_dealt_not_seats() -> None:
@@ -1223,7 +1219,7 @@ def test_bomb_pot_per_player_uses_players_dealt_not_seats() -> None:
     check(pot_per_player(point) == 5.0,
           f"40BB ÷ 8 人应为 5BB：{pot_per_player(point)}")
     check(is_explosive_pot(point), "5BB/人应判炸弹池")
-    user = render_hand_facts(build_situation(point))
+    user = render_facts_zh(build_situation(point))
     check("40BB ÷ 8" in user, f"事实里的算式应按参与人数：\n{user}")
 
 
@@ -1364,279 +1360,13 @@ def test_options_no_bet_are_labelled_bets() -> None:
           f"面对下注仍应是加注：{facing['raise-1/2']}")
 
 
-def test_value_directive_covers_strong_hands() -> None:
-    """强牌默认拿价值；弱牌/翻前不该有指令。"""
-    # 口袋 K 在 K 高翻牌 = 暗三（强成牌），无人下注
-    set_sit = build_situation(make_point(hero_cards=("Kd", "Kc")))
-    d = value_directive(set_sit)
-    check(d is not None and "BET for value" in d,
-          f"暗三无人下注应默认下注：{d}")
-    # 同一手牌面对下注 → 默认加注
-    facing = build_situation(make_point(hero_cards=("Kd", "Kc"),
-                                        to_call=4.0, pot=10.0))
-    d = value_directive(facing)
-    check(d is not None and "RAISE for value" in d,
-          f"暗三面对下注应默认加注：{d}")
-    # 顶对强踢（AhKd 在 K 高翻牌）无人下注 → 下注
-    tptk = build_situation(make_point())
-    check((value_directive(tptk) or "").startswith("VALUE DEFAULT"),
-          f"顶对强踢应默认下注：{value_directive(tptk)}")
-    # 顶对弱踢面对下注 → 跟注为主，不该默认弃牌
-    tp_weak = build_situation(make_point(hero_cards=("Kh", "9d"),
-                                         to_call=4.0, pot=10.0))
-    check("SHOWDOWN DEFAULT" in (value_directive(tp_weak) or ""),
-          f"顶对弱踢应给跟注指令：{value_directive(tp_weak)}")
-    # 强听无人下注 → 半诈唬
-    draw = build_situation(make_point(hero_cards=("Ah", "Qh"),
-                                      board=("9h", "6h", "5s")))
-    check("SEMI-BLUFF" in (value_directive(draw) or ""),
-          f"强听应默认下注：{value_directive(draw)}")
-    # 空气 → 没有价值指令
-    air = build_situation(make_point(hero_cards=("3c", "4c")))
-    check(value_directive(air) is None, f"空气不该有价值指令：{value_directive(air)}")
 
 
-def test_one_pair_does_not_stack_off_against_a_raise() -> None:
-    """单对子面对加注/全下默认弃牌；面对普通下注才是跟注。"""
-    from poker_ocr.hand_track import ActionRecord, StreetRecord
-
-    raise_street = StreetRecord("flop", 6.0, (
-        ActionRecord("flop", "a", "老王", "BB", "raise", 20.0, False, False),))
-    tptk = build_situation(make_point(
-        to_call=14.0, pot=30.0,
-        streets=(StreetRecord("preflop", 0.0, ()), raise_street)))
-    d = value_directive(tptk)
-    check("ONE PAIR vs AGGRESSION" in (d or "") and "FOLD" in (d or ""),
-          f"顶对面对加注应默认弃牌：{d}")
-
-    tp_weak = build_situation(make_point(
-        hero_cards=("Kh", "9d"), to_call=14.0, pot=30.0,
-        streets=(StreetRecord("preflop", 0.0, ()), raise_street)))
-    d = value_directive(tp_weak)
-    check("FOLD" in (d or ""), f"顶对弱踢面对加注应弃牌：{d}")
-
-    # 同一手牌面对普通下注（没有 raise 动作）→ 允许跟注
-    bet_street = StreetRecord("flop", 6.0, (
-        ActionRecord("flop", "a", "老王", "BB", "bet", 14.0, False, False),))
-    tptk_bet = build_situation(make_point(
-        to_call=14.0, pot=30.0,
-        streets=(StreetRecord("preflop", 0.0, ()), bet_street)))
-    d = value_directive(tptk_bet)
-    check("VALUE/DEFEND" in (d or ""), f"顶对面对普通下注应允许跟注：{d}")
 
 
-def test_heads_up_flop_overpair_calls_a_single_raise() -> None:
-    """2026-10-23 h10：KK 在 8dTc4c 单挑翻牌被 BB check-raise 一枪。
-
-    68 池跟 22.5（25% 盈亏平衡），超对不是边际一对；价值指令必须给 CALL，
-    不能再写「一对面对加注就弃」。多人池 / 转河 / 赔率差时才弃。
-    """
-    from poker_ocr.hand_track import ActionRecord, OpponentSnapshot, StreetRecord
-
-    def spot(opponents, *, to_call=22.5, pot=68.0):
-        return build_situation(make_point(
-            street="flop", board=("8d", "10c", "4c"), hero_cards=("Kh", "Kc"),
-            opponents=opponents, to_call=to_call, pot=pot,
-            streets=(
-                StreetRecord("preflop", 0.0, ()),
-                StreetRecord("flop", 19.5, (
-                    ActionRecord("flop", "hero", "svsvbmbm", "HJ", "bet", 13.0,
-                                 False, True),
-                    ActionRecord("flop", "a", "老王", "BB", "raise", 35.5,
-                                 False, False),
-                )),
-            )))
-
-    heads_up = spot(
-        (OpponentSnapshot("a", "老王", "BB", 53.0, 35.5, False),))
-    d = value_directive(heads_up) or ""
-    check("ONE PAIR vs AGGRESSION" in d and "CALL" in d and "Do NOT fold" in d,
-          f"单挑翻牌超对面对一枪加注应跟：{d}")
-
-    # 多人池仍然弃：不是无脑跟
-    multi = spot((
-        OpponentSnapshot("a", "老王", "BB", 53.0, 35.5, False),
-        OpponentSnapshot("b", "小李", "CO", 90.0, 0.0, False),
-    ))
-    d2 = value_directive(multi) or ""
-    check("FOLD" in d2 and "CALL" not in d2,
-          f"多人池超对面对加注仍应弃：{d2}")
-
-    # 赔率太差（跟注额超过半个底池）→ 弃
-    bad = spot((OpponentSnapshot("a", "老王", "BB", 53.0, 35.5, False),),
-               to_call=40.0, pot=50.0)
-    d3 = value_directive(bad) or ""
-    check("FOLD" in d3 and "CALL" not in d3,
-          f"赔率不够时超对仍应弃：{d3}")
 
 
-def test_set_mine_pairs_do_not_stack_off() -> None:
-    """22-99 没中 set 时只是中等牌：超对不能打光，3-4 人池尤其明显。
 
-    2026-10-23 用户口径：TT 以下都按买 set 玩。99 在 752 上是超对，但 3 人池
-    里高张统治概率高（99 翻牌 ~79% 见高张），不能按价值牌 bet big / 打光。
-    """
-    from poker_ocr.hand_track import ActionRecord, OpponentSnapshot, StreetRecord
-
-    opps = (OpponentSnapshot("a", "老王", "BB", 97.0, 0.0, False),
-            OpponentSnapshot("b", "小李", "CO", 97.0, 0.0, False))
-    sit = build_situation(make_point(hero_cards=("9h", "9d"),
-                                     board=("7s", "5d", "2c"),
-                                     opponents=opps))
-    d = value_directive(sit) or ""
-    check("SET-MINE PAIR" in d and "MEDIUM" in d,
-          f"99 超对应给 set-mine/medium 指令：{d}")
-    check("stack-off" in d or "stack off" in d,
-          f"99 超对不该鼓励打光：{d}")
-
-    # TT 仍是超对价值，不该降级成 set-mine
-    tt = build_situation(make_point(hero_cards=("Th", "Td"),
-                                    board=("7s", "5d", "2c"),
-                                    opponents=opps))
-    check("SET-MINE" not in (value_directive(tt) or ""),
-          f"TT 不该走 set-mine 文案：{value_directive(tt)}")
-
-    # 面对加注 → 明确弃牌，不拿一对打光
-    raise_street = StreetRecord("flop", 6.0, (
-        ActionRecord("flop", "a", "老王", "BB", "raise", 20.0, False, False),))
-    raised = build_situation(make_point(
-        hero_cards=("9h", "9d"), board=("7s", "5d", "2c"), opponents=opps,
-        to_call=14.0, pot=30.0,
-        streets=(StreetRecord("preflop", 0.0, ()), raise_street)))
-    d2 = value_directive(raised) or ""
-    check("SET-MINE PAIR" in d2 and "FOLD" in d2,
-          f"99 面对加注应弃牌：{d2}")
-
-
-def test_straight_is_not_nuts_on_a_flush_board() -> None:
-    """三张同花面：顺子不是坚果，不能被价值指令推着加注。
-
-    990026 河牌 Jc8dKdQcAd：牌面三张方片（8d Kd Ad），对手拿两张方片就是同花。
-    这里正确动作是跟注/弃牌，不是 all-in。
-    """
-    straight = build_situation(make_point(
-        street="river", board=("Jc", "8d", "Kd", "Qc", "Ad"),
-        hero_cards=("As", "Th"), to_call=144.5, pot=358.0))
-    d = value_directive(straight)
-    check("VALUE CAUTION" in (d or "") and "NOT the nuts" in (d or ""),
-          f"三张同花面的顺子应提示不是坚果：{d}")
-    check("Do NOT raise" in (d or ""), f"不该鼓励加注：{d}")
-
-    # 同一张牌面，河牌成葫芦 → 不怕同花，仍然是价值下注
-    full_house = build_situation(make_point(
-        street="river", board=("2c", "4c", "2d", "5s", "6c"),
-        hero_cards=("2h", "5h"), to_call=0.0, pot=84.0))
-    d = value_directive(full_house)
-    check("VALUE DEFAULT" in (d or "") and "CAUTION" not in (d or ""),
-          f"葫芦在花面仍是价值牌：{d}")
-
-    # 牌面对子时，顺子也要提示葫芦可能
-    paired = build_situation(make_point(
-        street="river", board=("Jc", "Jd", "9d", "Qc", "Ad"),
-        hero_cards=("As", "Th"), to_call=0.0, pot=50.0))
-    check("VALUE CAUTION" in (value_directive(paired) or ""),
-          f"对子面的顺子应提示葫芦可能：{value_directive(paired)}")
-
-    # 对子面的两对面对正常大小下注：可以跟，不要因为「不是坚果」就弃
-    two_pair = build_situation(make_point(
-        street="turn", board=("Ks", "5s", "2h", "2c"),
-        hero_cards=("5d", "Jc"), to_call=44.0, pot=132.5))
-    d = value_directive(two_pair)
-    check("Call a normal-sized bet" in (d or "") and "Do NOT raise" in (d or ""),
-          f"对子面两对应允许跟正常下注：{d}")
-
-
-def test_multiway_draw_keeps_full_action_space() -> None:
-    """lean 不做策略过滤：多路纯听牌也把过牌/下注/加注全部交给模型。
-
-    旧 lean-rules 会把下注拿掉；现在 prompt 里用「没有弃牌率」的决策顺序
-    约束，而不是偷偷改动作空间。
-    """
-    from poker_ocr.hand_track import OpponentSnapshot
-
-    def multiway(n: int):
-        return tuple(OpponentSnapshot(f"o{i}", "", "BB", 90.0, 0.0, False)
-                     for i in range(n))
-
-    sit = build_situation(make_point(
-        street="turn", board=("8s", "Qh", "4s", "9h"), hero_cards=("7c", "6s"),
-        opponents=multiway(4), pot=10.0, to_call=0.0))
-    ids = [o.id for o in sit.options]
-    check(ids[:2] == ["call", "raise-1/3"], f"多路听牌应保留全部档位：{ids}")
-    check(sit.options[0].kind == "check", f"call 这个 id 应是过牌：{sit.options[0]}")
-    d = value_directive(sit) or ""
-    check(d.startswith("NO FOLD EQUITY"),
-          f"离线审计仍应给「没有弃牌率」指令：{d}")
-
-    # 面对下注：跟注/弃牌/加注都在，模型自己判断价格
-    facing = build_situation(make_point(
-        street="turn", board=("8s", "Qh", "4s", "9h"), hero_cards=("7c", "6s"),
-        opponents=multiway(4), pot=40.0, to_call=10.0, hero_stack=60.0))
-    fids = [o.id for o in facing.options]
-    check("fold" in fids and "call" in fids and "raise-1/2" in fids,
-          f"面对下注应保留弃牌/跟注/加注：{fids}")
-
-
-def test_prompt_renders_value_directive_and_draw_equity() -> None:
-    draw = build_situation(make_point(hero_cards=("Ah", "Qh"),
-                                      board=("9h", "6h", "5s")))
-    user = render_hand_facts(draw)
-    check("Value directive:" in user and "SEMI-BLUFF" in user,
-          f"提示词应带价值指令：{user}")
-    check("Estimated draw equity" in user, f"听牌应给四二法则胜率：{user}")
-
-    set_sit = build_situation(make_point(hero_cards=("Kd", "Kc")))
-    user = render_hand_facts(set_sit)
-    check("Estimated draw equity" not in user,
-          "成牌不该渲染四二法则胜率（outs 数的是改良张数，不是胜率）")
-
-
-def test_prompt_renders_implied_odds_for_pocket_pair() -> None:
-    """翻前口袋对应给出「有效筹码 / 跟注额」，模型才能判断抽 set 划不划算。"""
-    from poker_ocr.hand_track import OpponentSnapshot
-
-    def preflop(cards):
-        return build_situation(make_point(
-            street="preflop", board=(), to_call=1.0, pot=7.0,
-            hero_position="UTG+1", hero_cards=cards, hero_bet=0.0,
-            hero_stack=101.5,
-            opponents=(OpponentSnapshot("a", "老王", "BB", 56.0, 0.0, False),),
-            preflop_shapes=("limped",), cbet_spot=False))
-
-    user = render_hand_facts(preflop(("4s", "4h")))
-    check("Implied odds" in user and "56:1" in user,
-          f"口袋对翻前应渲染隐含赔率：{user}")
-    check("limpers are in, no raise" in user, f"limped 形态文案不对：{user}")
-
-    check("Implied odds" not in render_hand_facts(preflop(("Ah", "Kd"))),
-          "非口袋对不该渲染抽 set 隐含赔率")
-
-
-def test_small_pair_folds_to_three_bet_no_set_mining() -> None:
-    """面对 3-bet 的小对子不抽 set：10:1/15:1 隐含赔率在这里不成立。
-
-    3-bet 范围窄到 QQ+/AK：中 set 要么撞上更大的 set（反向隐含赔率），
-    要么他没中、翻后直接弃，拿不到支付。所以小对子直接弃，不给「够深就跟」。
-    """
-    from poker_ocr.hand_track import OpponentSnapshot
-
-    def preflop(cards):
-        return build_situation(make_point(
-            street="preflop", board=(), to_call=22.0, pot=33.0,
-            hero_position="CO", hero_cards=cards, hero_bet=0.0,
-            hero_stack=101.5,
-            opponents=(OpponentSnapshot("a", "老王", "BB", 120.0, 22.0, False),),
-            preflop_shapes=("three-bet",), cbet_spot=False))
-
-    facts = render_hand_facts(preflop(("4s", "4h")))
-    check("does NOT apply" in facts and "Do not set-mine" in facts,
-          f"小对子面对 3-bet 应明确不抽 set：{facts}")
-    check("15:1 or better makes set-mining profitable" not in facts,
-          f"3-bet 局不能再给「15:1 就能抽 set」的许可：{facts}")
-
-    # QQ 是强牌，不能被这条误伤成弃牌
-    qq = render_hand_facts(preflop(("Qd", "Qh")))
-    check("Do not set-mine" not in qq, f"QQ 面对 3-bet 不该被判弃：{qq}")
 
 
 
@@ -1789,14 +1519,13 @@ def test_three_bet_pot_warns_random_rank_is_upper_bound() -> None:
                       hero_cards=("Td", "Qd"), to_call=19.0, pot=75.0,
                       hero_position="UTG", hero_bet=0.0, hero_stack=100.0,
                       preflop_shapes=("three-bet",), cbet_spot=False)
-    facts = render_hand_facts(build_situation(snap))
-    check("3-bet pot" in facts and "UPPER bound" in facts, facts)
-    check("Facing another barrel" in facts, facts)
+    facts = render_facts_zh(build_situation(snap))
+    check("3-bet+ 池" in facts, facts)
 
     single = make_point(street="turn", board=("Th", "4h", "4d", "7s"),
                         hero_cards=("Td", "Qd"), to_call=19.0, pot=75.0,
                         preflop_shapes=("single-raise",), cbet_spot=False)
-    check("3-bet pot" not in render_hand_facts(build_situation(single)),
+    check("3-bet+ 池" not in render_facts_zh(build_situation(single)),
           "单加注池不该出现 3-bet 提示")
 
 
@@ -1818,8 +1547,8 @@ def test_limpers_count_from_state() -> None:
           f"4 个 limper 应按底池缩放到 {3.0 * scale:.2f}：{by['open-3'].amount}")
     check(abs(by["open-3.5"].amount - 3.5 * scale) < 0.01,
           f"4 个 limper 最大档应是 {3.5 * scale:.2f}：{by['open-3.5'].amount}")
-    facts = render_hand_facts(build_situation(snap))
-    check("Limpers before me: 4" in facts,
+    facts = render_facts_zh(build_situation(snap))
+    check("前面溜入人数：4" in facts,
           f"提示词事实应写出溜入人数：{facts}")
 
 
@@ -2130,14 +1859,13 @@ def test_covered_stack_has_only_fold_or_all_in() -> None:
     check(call.amount == 28.5 and "全下" in call.label,
           f"跟注应是后手全下 28.5BB：{call}")
 
-    user = render_hand_facts(sit)
-    check("To call: 28.5BB" in user, f"应显示实际跟注额 28.5：\n{user}")
-    check("Break-even equity to call: 14%" in user,
-          f"赔率门槛应按可争夺底池 207（28.5/207=14%）算：\n{user}")
-    check("Uncalled bet: 11.5BB" in user
-          and "winnable pot after my call is 207BB" in user,
+    user = render_facts_zh(sit)
+    check("需跟 28.5BB" in user, f"应显示实际跟注额 28.5：\n{user}")
+    check("可争夺底池 207BB = 13.8%" in user,
+          f"赔率门槛应按可争夺底池 207（28.5/207=13.8%）算：\n{user}")
+    check("含对手超额 11.5BB" in user,
           f"应说明超额下注被退回、可争夺底池只有 207：\n{user}")
-    check("raising is not possible" in user, f"应说明不能再加注：\n{user}")
+    check("call｜跟全下 28.5BB" in user, f"跟注应标全下：\n{user}")
     check("raise-1/2" not in user, f"不该出现加注选项：\n{user}")
 
     # 翻前面对超过后手的加注，同样只剩 fold / call all-in
@@ -2192,17 +1920,12 @@ def test_covered_all_in_uses_winnable_pot_not_table_pot() -> None:
     check(winnable_pot(point) == 433.5,
           f"可争夺底池应是 569-303.5+168=433.5：{winnable_pot(point)}")
 
-    user = render_hand_facts(build_situation(point))
-    check("Break-even equity to call: 39%" in user,
-          f"赔率门槛应按 433.5 算成 39%，不能再用 23%：\n{user}")
-    check("Uncalled bet: 303.5BB" in user and "433.5BB" in user,
-          f"要写清退回多少、可争夺多少：\n{user}")
+    user = render_facts_zh(build_situation(point))
+    check("可争夺底池 433.5BB = 38.8%" in user,
+          f"赔率门槛应按 433.5 算成 38.8%，不能再用 23%：\n{user}")
+    check("含对手超额 303.5BB" in user,
+          f"要写清退回多少：\n{user}")
 
-    gate = math_gate(build_situation(point))
-    check(gate is not None and gate.break_even_pct == 38.8,
-          f"Math gate 门槛应重算为 38.8：{gate}")
-    check(gate is not None and gate.verdict == "fold",
-          f"隐含赔率按 0 后，36% 对 39% 应直接 fold：{gate}")
 
 
 # ─────────────────────────── 提示词 ───────────────────────────
@@ -2215,25 +1938,25 @@ def test_prompt_marks_inferred_actions() -> None:
         ActionRecord("flop", "hero", None, "CO", "call", 22.0,
                      is_hero=True, inferred=True),
         ActionRecord("flop", "c", "阿强", "BTN", "call", 22.0, inferred=True)))
-    user = render_hand_facts(build_situation(make_point(
+    user = render_facts_zh(build_situation(make_point(
         to_call=0.0, pot=72.0,
         streets=(StreetRecord("preflop", 0.0, ()), flop))))
-    check("Hero calls 22.0BB (inferred)" in user,
+    check("Hero 跟注 22BB（推断）" in user,
           f"补记的跟注应带 inferred 标记：\n{user}")
-    check("BTN calls 22.0BB (inferred)" in user,
+    check("BTN 跟注 22BB（推断）" in user,
           f"补记的 BTN 跟注应带 inferred 标记：\n{user}")
-    check("SB bets 22.0BB" in user and "SB bets 22.0BB (inferred)" not in user,
+    check("SB 下注 22BB" in user and "SB 下注 22BB（推断）" not in user,
           f"直接抓到的下注不该被标成 inferred：\n{user}")
-    check('Actions tagged "inferred"' in user,
+    check("标注「推断」的动作" in user,
           f"应解释 inferred 的含义：\n{user}")
 
     # 没有补记时不要多出这段说明，避免提示词膨胀
-    plain = render_hand_facts(build_situation(make_point(
+    plain = render_facts_zh(build_situation(make_point(
         streets=(StreetRecord("preflop", 0.0, ()),
                  StreetRecord("flop", 6.0, (
                      ActionRecord("flop", "a", "老王", "SB", "bet", 22.0),))))))
-    check('Actions tagged "inferred"' not in plain,
-          f"没有补记时不该出现 inferred 说明：\n{plain}")
+    check("标注「推断」的动作" not in plain,
+          f"没有补记时不该出现推断说明：\n{plain}")
 
 
 def test_prompt_contains_full_action_line_and_options() -> None:
@@ -2491,68 +2214,6 @@ def test_value_heavy_aggression_flags() -> None:
         check(not value_heavy_aggression(text), f"不该判为价值线：{text}")
 
 
-def test_table_override_uses_the_actual_bettor_profile() -> None:
-    """混合桌：跟注站画像的转牌下注按价值线弃，松浪画像的下注按抓诈跟。"""
-    from poker_ocr.hand_track import ActionRecord, OpponentSnapshot, StreetRecord
-    from poker_ocr.opponent_profile import OpponentRead
-
-    def h8(bettor: str, seat: str):
-        return make_point(
-            hand_id="h8", street="turn", board=("Ad", "As", "Qc", "Kc"),
-            hero_cards=("Jh", "Qd"), hero_position="BB", hero_is_pfr=False,
-            cbet_spot=False, to_call=10.0, pot=47.5, pot_before_street=47.5,
-            opponents=(
-                OpponentSnapshot("midR", "芒果与西米", "BTN", 95.0, 0.0, False),
-                OpponentSnapshot("lowR", "好运常在ok", "SB", 95.0, 0.0, False)),
-            streets=(StreetRecord("preflop", 4.0, ()),
-                     StreetRecord("flop", 19.0, ()),
-                     StreetRecord("turn", 47.5, (
-                         ActionRecord("turn", seat, bettor, "SB", "bet", 10.0,
-                                      False, False),))),
-            players_dealt=9)
-
-    def read(seat: str, name: str, archetype: str) -> OpponentRead:
-        return OpponentRead(seat, name, name, archetype, 0.8, 20,
-                            45.0, 5.0, 1.2, "auto", "", "read")
-
-    reads = [read("lowR", "好运常在ok", "station"),
-             read("midR", "芒果与西米", "lag")]
-    station = value_directive(build_situation(
-        h8("好运常在ok", "lowR"), opponent_reads=reads))
-    check("TABLE DYNAMICS OVERRIDE" in (station or "") and "FOLD" in (station or ""),
-          f"跟注站画像的下注应按价值线弃：{station}")
-
-    lag = value_directive(build_situation(
-        h8("芒果与西米", "midR"), opponent_reads=reads))
-    check("AGGRESSIVE TABLE" in (lag or "") and "BLUFF-CATCH" in (lag or ""),
-          f"松浪画像的下注应按抓诈跟：{lag}")
-
-
-def test_value_directive_table_dynamics_override() -> None:
-    """松弱桌风 + 转/河牌被下注 + 两对 → 硬指令从 call 改成 fold。"""
-    dyn = "这些玩家都是松弱玩家，当他们加注、连续下注时，往往都是顶对以上的牌力"
-    turn = dict(street="turn", board=("5h", "5s", "2h", "Td"),
-                hero_cards=("Jd", "Jh"), to_call=37.5, pot=112.5)
-    river = dict(street="river", board=("5h", "5s", "2h", "Td", "8c"),
-                 hero_cards=("Jd", "Jh"), to_call=40.0, pot=190.0)
-
-    for street, kw in (("turn", turn), ("river", river)):
-        plain = value_directive(build_situation(make_point(**kw)))
-        check(plain and "Call a normal-sized bet" in plain,
-              f"{street} 无桌风时应保持默认跟注线：{plain}")
-        dyn_sit = build_situation(make_point(**kw), table_dynamics=dyn)
-        directive = value_directive(dyn_sit)
-        check(directive and "TABLE DYNAMICS OVERRIDE" in directive,
-              f"{street} 松弱桌风应触发覆盖：{directive}")
-        check("FOLD" in directive, f"{street} 覆盖指令应明确 fold：{directive}")
-
-    # 翻牌只有一条街，价格还够，不能被同一条桌风提前劝退
-    flop = build_situation(make_point(
-        street="flop", board=("5h", "5s", "2h"), hero_cards=("Jd", "Jh"),
-        to_call=15.0, pot=60.0), table_dynamics=dyn)
-    flop_directive = value_directive(flop)
-    check(flop_directive and "TABLE DYNAMICS OVERRIDE" not in flop_directive,
-          f"翻牌不该触发多街覆盖：{flop_directive}")
 
 
 MIXED_TABLE = (
@@ -2593,43 +2254,6 @@ def test_is_aggressive_table_flags() -> None:
     check(not value_heavy_aggression(MIXED_TABLE),
           "混合桌不能再判成纯价值线——否则会把松浪当跟注站")
 
-
-def test_value_directive_aggressive_table_checks_two_pair() -> None:
-    """h8 类：松浪桌上两对无人下注 → 不薄价值；面对单注 → 抓诈。"""
-    sit = build_situation(_h8_like_point(), table_dynamics=MIXED_TABLE)
-    directive = value_directive(sit)
-    check(bool(directive) and "AGGRESSIVE TABLE" in directive,
-          f"松浪桌两对应走 aggressive 分支：{directive}")
-    check("DO NOT THIN-VALUE" in (directive or "") and "CHECK" in (directive or ""),
-          f"松浪桌两对转牌应压成 check：{directive}")
-    check("BET for value" not in (directive or ""),
-          f"松浪桌两对不该默认价值下注：{directive}")
-
-    facing = build_situation(_h8_like_point(to_call=10.0),
-                             table_dynamics=MIXED_TABLE)
-    facing_directive = value_directive(facing)
-    check("BLUFF-CATCH" in (facing_directive or "")
-          and "CALL one bet" in (facing_directive or ""),
-          f"松浪桌两对面对单注应抓诈：{facing_directive}")
-
-    # 强牌（暗三）不压：松浪桌仍该价值下注，别把中等牌的规则套到强牌上。
-    strong = build_situation(make_point(
-        street="flop", board=("Ks", "7d", "2c"), hero_cards=("Kd", "Kh"),
-        to_call=0.0, pot=6.0), table_dynamics=MIXED_TABLE)
-    strong_directive = value_directive(strong)
-    check("BET for value" in (strong_directive or ""),
-          f"松浪桌暗三仍应价值下注：{strong_directive}")
-
-    # 纯松弱桌：不走 aggressive 分支，但 4 张卡顺也不该豁免「被统治」判定。
-    # 22.0% 刚好压 DOMINATED_BEAT_PCT，规则应给 NOT A VALUE → check。
-    passive = build_situation(
-        _h8_like_point(),
-        table_dynamics="桌上都是松弱玩家，跟注站，很少诈唬")
-    passive_directive = value_directive(passive)
-    check("AGGRESSIVE TABLE" not in (passive_directive or ""),
-          f"松弱桌不该走 aggressive 分支：{passive_directive}")
-    check("NOT A VALUE HAND" in (passive_directive or ""),
-          f"4 张卡顺不该让被统治的两对变成价值牌：{passive_directive}")
 
 
 def test_lean_system_priorities() -> None:
@@ -2830,12 +2454,11 @@ def test_lean_prompt_is_compact_facts_only() -> None:
     sit = build_situation(make_point(hero_cards=("Ah", "Qh"),
                                      board=("As", "Ks", "4d")))
     system, user = build_messages(sit)
-    for banned in ("## Preflop ranges", "RFI by position", "## Postflop",
-                   "## Explosive pot", "## Priority (highest first)"):
+    for banned in ("## 翻前范围表", "RFI by position", "## 翻后策略",
+                   "## 爆炸底池", "## 优先级（从高到低）"):
         check(banned not in system, f"system 不该再含策略段：{banned}")
-    for banned in ("Preflop range:", "Value directive:", "Math gate:",
-                   "My previous decision", "## Table context",
-                   "## Hand vs ranges", "## Board structure"):
+    for banned in ("翻前范围：", "价值指令：", "赔率闸门：",
+                   "我的上一街决定", "## 桌级背景", "## 计算事实"):
         check(banned not in user, f"facts 不该再含旧事实段：{banned}")
     check("## 实时牌力" in user, "应注入中文实时牌力")
     check("## 可选动作" in user, "仍要给合法选项")
@@ -2857,9 +2480,6 @@ def test_hand_vs_ranges_facts_block() -> None:
     check("对当前范围权益：" in text, "牌力块缺对当前范围权益")
     check("当前成牌落后至少一家：" in text, "牌力块缺 behind now")
     check("范围：" in text, "缺范围宽度")
-    # 旧英文事实块保留给离线审计。
-    legacy = render_hand_facts(sit)
-    check("## Hand vs ranges" in legacy, "离线事实块应保留 Hand vs ranges")
 
 
 def test_check_through_caps_range_facts() -> None:
@@ -3042,8 +2662,8 @@ def test_draw_facts_are_chinese_and_not_vetoed() -> None:
         to_call=4.0, pot=10.5, hero_stack=94.0))
     text = render_facts_zh(sit)
     check("牌力：强听牌" in text, f"听牌应标强听牌：\n{text}")
-    check("VERY SMALL" not in text, "听牌不该出现 VERY SMALL")
-    check("NOT THE NUTS" not in text, "听牌不该出现英文 NOT THE NUTS")
+    check("很小" not in text, "听牌不该出现 VERY SMALL")
+    check("不是坚果" not in text, "听牌不该出现英文 NOT THE NUTS")
     check("坚果：否（指当前成牌；听牌不代表最终输；更大牌型存在，但不代表对手一定持有）" in text,
           f"坚果否决应带说明：\n{text}")
     check("仅全下/无后续下注时可直接比门槛" in text,
@@ -3337,29 +2957,6 @@ def test_short_stack_is_flagged_not_silently_effective() -> None:
     check("side pot 未建模" in user,
           f"要说清 side pot 没建模：\n{user}")
 
-
-def test_math_gate_for_draws() -> None:
-    """听牌赔率由程序给结论：36% 权益对 29% 门槛不该再出现「太薄所以弃」。"""
-    call_sit = build_situation(make_point(
-        hero_cards=("Ah", "Qh"), board=("9h", "6h", "5s"),
-        to_call=30.0, pot=75.0, hero_stack=100.0))
-    gate = math_gate(call_sit)
-    check(gate is not None and gate.verdict == "call",
-          f"36% > 29% 应判 call：{gate}")
-    user = render_hand_facts(call_sit)
-    check("Math gate:" in user and "CALL is +EV" in user,
-          f"事实应带 Math gate：\n{user}")
-
-    fold_sit = build_situation(make_point(
-        hero_cards=("Ah", "Qh"), board=("9h", "6h", "5s"),
-        to_call=60.0, pot=60.0, hero_stack=100.0))
-    gate = math_gate(fold_sit)
-    check(gate is not None and gate.verdict == "fold",
-          f"38% < 50% 应判 fold：{gate}")
-
-    made = build_situation(make_point(to_call=4.0, pot=10.0))
-    check(math_gate(made) is None,
-          "成牌不该有 Math gate（枚举胜率不是对跟注范围）")
 
 
 def test_advice_carries_plan_and_confidence() -> None:
@@ -3949,10 +3546,6 @@ def test_explosive_pot_from_screen_banner() -> None:
     check("幸运暴击 / BOMB POT" in user,
           f"应说明是横幅确认：\n{user}")
 
-    d = value_directive(sit)
-    check("EXPLOSIVE POT" in (d or "") and "bomb pot" in (d or "")
-          and "forced ante" in (d or ""),
-          f"离线价值指令仍应写炸弹池强制前注：{d}")
 
 
 def test_bomb_pot_preflop_has_no_decision_point() -> None:
@@ -3988,45 +3581,6 @@ def test_tracker_latches_bomb_pot_across_frames() -> None:
     check(tr.hand is not None and not tr.hand.bomb_pot,
           "换手后不该继承上一手的爆炸标记")
 
-
-def test_explosive_pot_prompt_and_directive() -> None:
-    """爆炸底池要写进事实和系统提示词，并把顶对降级为中等牌。"""
-    spot = make_point(pot=30.0, pot_before_street=30.0, table_size=6)
-    sit = build_situation(spot)
-    check(sit.explosive_pot and sit.pot_per_player == 5.0,
-          f"Situation 应带爆炸标记：{sit.explosive_pot} / {sit.pot_per_player}")
-
-    user = render_facts_zh(sit)
-    check("爆炸底池：是" in user, f"事实里应标爆炸底池：\n{user}")
-    check("5.00BB/人" in user, f"事实里应写清口径：\n{user}")
-
-    system, _ = build_messages(sit)
-    check("爆炸底池" not in system or "顶对" not in system,
-          "system 不再写爆炸底池策略，交给事实")
-
-    # 顶对强踢、无人下注：不再默认「下注拿价值」，改成小注控池
-    d = value_directive(sit)
-    check("EXPLOSIVE POT" in (d or "") and "MEDIUM" in (d or ""),
-          f"顶对在爆炸池应降级：{d}")
-    check("bet small" in (d or ""), f"无人下注应建议小注控池：{d}")
-
-    # 面对普通下注：最多跟一个小注，不能加注
-    facing = build_situation(make_point(
-        pot=35.0, pot_before_street=30.0, to_call=5.0, table_size=6))
-    d = value_directive(facing)
-    check("EXPLOSIVE POT" in (d or "") and "do NOT raise" in (d or ""),
-          f"爆炸池顶对面对下注不该加注：{d}")
-
-    # 面对加注：直接弃牌
-    from poker_ocr.hand_track import ActionRecord, StreetRecord
-    raise_street = StreetRecord("flop", 30.0, (
-        ActionRecord("flop", "a", "老王", "BB", "raise", 20.0, False, False),))
-    vs_raise = build_situation(make_point(
-        pot=50.0, pot_before_street=30.0, to_call=20.0, table_size=6,
-        streets=(StreetRecord("preflop", 0.0, ()), raise_street)))
-    d = value_directive(vs_raise)
-    check("EXPLOSIVE POT" in (d or "") and "FOLD" in (d or ""),
-          f"爆炸池顶对面对加注应弃牌：{d}")
 
 
 # ─────────────────────────── 主流程 ───────────────────────────

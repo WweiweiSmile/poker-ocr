@@ -4,7 +4,7 @@
     nv tests/test_hand_strength.py
 
 纯判定层单测：构造 HandVsRanges 数字（不跑 Monte Carlo），验证 size / equity_tier /
-kind / summary_en 与设计文档 §4 / §7 一致。
+kind / size / equity_tier 与设计文档 §4 一致。
 """
 
 from __future__ import annotations
@@ -49,8 +49,6 @@ def test_two_pair_big_strong_value() -> None:
     check(r.equity_tier == hs.TIER_STRONG, f"3.2x 平均线应为 strong，实际 {r.equity_tier}")
     check(r.kind == hs.KIND_VALUE, f"应为 value，实际 {r.kind}")
     check(r.n == 3 and abs(r.avg - 0.25) < 1e-9, "n=3 平均线应为 0.25")
-    check("BIG Two pair" in r.summary_en(), f"summary 应以 BIG Two pair 开头：{r.summary_en()}")
-    check(r.summary_en().endswith("value hand."), "summary 结尾应是 value hand.")
 
 
 def test_two_pair_nuts_very_big() -> None:
@@ -68,8 +66,6 @@ def test_top_pair_multiway_behind_medium_weak() -> None:
     check(r.size == hs.SIZE_MEDIUM, f"多路落后顶对应降为 medium，实际 {r.size}")
     check(r.equity_tier == hs.TIER_WEAK, f"0.54x 平均线应为 weak，实际 {r.equity_tier}")
     check(r.kind == hs.KIND_VALUE, f"顶对仍是 value，实际 {r.kind}")
-    check("ahead pair, multiway behind; do not overplay" in r.summary_en(),
-          f"summary 应提示 multiway behind：{r.summary_en()}")
 
 
 def test_draw_is_always_draw() -> None:
@@ -79,9 +75,6 @@ def test_draw_is_always_draw() -> None:
     check(r is not None and r.kind == hs.KIND_DRAW,
           f"强听应标 draw，实际 {r and r.kind}")
     check(r.size == hs.SIZE_VERY_SMALL, "听牌不计成牌大小")
-    check(r.summary_en().startswith("DRAW "), f"summary 应以 DRAW 开头：{r.summary_en()}")
-    check("judge by outs and price, not by behind-now" in r.summary_en(),
-          "summary 应提示按 outs/赔率判断")
     # 弱听同样
     w = hs.compute_hand_strength(sit_stub(
         WEAK_DRAW, "Weak draw (4 outs)", behind_any=0.95, equity=0.16, n=1))
@@ -94,8 +87,6 @@ def test_air_very_small_weak() -> None:
     check(r is not None, "应产出结论")
     check(r.size == hs.SIZE_VERY_SMALL and r.kind == hs.KIND_WEAK,
           f"空气应为 very_small/weak，实际 {r.size}/{r.kind}")
-    check("no made hand, no draw" in r.summary_en(),
-          f"summary 应写 no made hand, no draw：{r.summary_en()}")
 
 
 def test_overpair_and_tptk_big() -> None:
@@ -114,8 +105,6 @@ def test_board_play_kind() -> None:
         BOARD_PLAY, "Two pair (board play)", behind_any=1.0, equity=0.0, n=2))
     check(r is not None and r.kind == hs.KIND_BOARD_PLAY,
           f"打牌面应标 board_play，实际 {r and r.kind}")
-    check("playing the board" in r.summary_en(),
-          "打牌面 summary 应提示 everyone shares the board")
 
 
 def test_boundaries() -> None:
@@ -144,21 +133,6 @@ def test_hand_ranges_none_is_none() -> None:
     empty = SimpleNamespace(hand_ranges=SimpleNamespace(opponents=()), hand_tier=TPTK,
                             hand_label_en="X", ground_truth=None)
     check(hs.compute_hand_strength(empty) is None, "空对手应返回 None")
-
-
-def test_summary_exact_format() -> None:
-    """锁定 §7 的行格式（两个完全确定例）。"""
-    r = hs.compute_hand_strength(sit_stub(
-        STRONG_MADE, "Two pair", behind_any=0.04, equity=0.80, n=3))
-    want = ("BIG Two pair; behind now 4%, equity 80% vs 4-way avg 25% "
-            "(strong) — value hand.")
-    check(r is not None and r.summary_en() == want,
-          f"两对 summary 应精确等于 {want!r}，实际 {r and r.summary_en()!r}")
-    air = hs.compute_hand_strength(sit_stub(AIR, "Air", behind_any=1.0, equity=0.0, n=1))
-    want_air = ("VERY SMALL Air; behind now 100%, equity 0% vs 2-way avg 50% "
-                "(weak) — no made hand, no draw.")
-    check(air is not None and air.summary_en() == want_air,
-          f"空气 summary 应精确等于 {want_air!r}，实际 {air and air.summary_en()!r}")
 
 
 def test_enabled_and_thresholds() -> None:
@@ -209,7 +183,6 @@ def main() -> int:
         test_board_play_kind,
         test_boundaries,
         test_hand_ranges_none_is_none,
-        test_summary_exact_format,
         test_enabled_and_thresholds,
         test_thresholds_bad_json_falls_back,
     ]

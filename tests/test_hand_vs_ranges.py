@@ -181,7 +181,7 @@ def test_deterministic_and_cached() -> None:
           f"同 key 清缓存后应确定，{a.equity} vs {c.equity}")
 
 
-def test_fail_open_and_render() -> None:
+def test_fail_open_and_filters() -> None:
     check(hand_vs_ranges.compute("AhQh", "AsKs", []) is None, "牌面不足应 None")
     check(hand_vs_ranges.compute("AhQh", "AsAs4d", []) is None, "重复牌应 None")
     check(hand_vs_ranges.compute("AhQh", "AsKs4d", []) is None, "空对手应 None")
@@ -194,12 +194,9 @@ def test_fail_open_and_render() -> None:
 
     rng2 = ranges.make_range("R", {c: 1.0 for c in keys_combos("QQ", "AKs", "KQo")})
     assert rng2 is not None
-    text = hand_vs_ranges.compute("AhQh", "AsKs4d", [("BTN", "BTN", rng2, "call")],
-                                  samples=3000, context="3-way: test").render()
-    for needle in ("## Hand vs ranges", "Equity vs field", "Made hand now",
-                   "Behind", "Read:"):
-        check(needle in text, f"渲染缺 {needle!r}")
-    check("[call]" in text, "渲染应写清 mode")
+    got2 = hand_vs_ranges.compute("AhQh", "AsKs4d", [("BTN", "BTN", rng2, "call")],
+                                  samples=3000, context="3-way: test")
+    check(got2 is not None and got2.context == "3-way: test", "context 应保留")
 
 
 def test_enabled_flag_and_sample_env() -> None:
@@ -243,7 +240,6 @@ def test_random_fill_opponents_are_in_mc() -> None:
           f"加入随机牌对手后权益不应更高：{base.equity:.3f} -> {fill.equity:.3f}")
     check(fill.behind_any >= base.behind_any - 0.02,
           f"加入随机牌对手后落后比例不应更低：{base.behind_any:.3f} -> {fill.behind_any:.3f}")
-    check("random fill" in fill.render(), f"渲染应标随机牌：\n{fill.render()}")
 
     only_random = hand_vs_ranges.compute(
         hero, board, [], samples=2000, random_opponents=2)
@@ -260,7 +256,7 @@ def main() -> int:
         test_card_removal_and_zero_weights,
         test_river_tie_splits_pot,
         test_deterministic_and_cached,
-        test_fail_open_and_render,
+        test_fail_open_and_filters,
         test_enabled_flag_and_sample_env,
         test_random_fill_opponents_are_in_mc,
     ]

@@ -25,12 +25,12 @@
   · 只保证**相对排序**：范围越强 → 弃牌率越低；下注越大 → 弃牌率越高；
     多人池 → 全部弃牌的概率连乘。
   · 绝对水平的校准（拿翻前先验另算一遍，把整条曲线缩放到历史值）留给 v2。
-  · `render()` 会把「本手估计」和「历史平均」并排放，让模型看到差距，
-    而不是把两个数混成一个。
+  · 中文渲染在 `prompt/user/exploit.py`：把「本手估计」和「历史平均」
+    并排放，让模型看到差距，而不是把两个数混成一个。
 
-和 `advice.math_gate` 的分工
-────────────────────────────
-`math_gate` 回答「这个价格跟不跟得起」（权益 vs 底池赔率），回答不了
+和「赔率门槛」（`prompt/user/price.py`）的分工
+────────────────────────────────────────────
+赔率门槛回答「这个价格跟不跟得起」（权益 vs 底池赔率），回答不了
 「我下注他会不会弃」。两个数一起才构成半诈唬判断：
 
     EV(下注) = FE × 现在能赢的底池 + (1−FE) × [权益 × 成池 − 投入]
@@ -488,51 +488,6 @@ class FoldEquityReport:
     @property
     def narrowed(self) -> bool:
         return self.observed is not None and self.fold_equity < self.observed - 0.05
-
-    def render(self) -> str:
-        pct = lambda v: f"{v * 100:.0f}%"          # noqa: E731
-        each = f"~{self.combos} combos each" if self.opponents > 1 else f"{self.combos} combos"
-        head = (f"His line left {each} "
-                f"({self.opponents} opponent{'s' if self.opponents != 1 else ''}); "
-                f"strong made {pct(self.strong_share)}; "
-                f"fold equity now {pct(self.fold_equity)}")
-        if self.observed is not None:
-            head += f" vs {pct(self.observed)} lifetime"
-            if abs(self.scale - 1.0) > 0.05:
-                head += f" (calibrated ×{self.scale:.2f})"
-        out = ["## Fold equity (range-conditional)", head]
-        if self.narrowed:
-            out.append(
-                "His line already removed the weak hands — his career fold rate "
-                "overstates him here. Judge the bluff on THIS number.")
-        elif self.observed is not None and self.fold_equity > self.observed + 0.10:
-            out.append("His line leaves a wide/capped range — he folds more than "
-                       "his career average here.")
-        top = sorted(self.shares, key=lambda kv: -kv[1])[:3]
-        if top:
-            out.append("Range mix: " + ", ".join(
-                f"{TIER_ZH.get(t, t)} {pct(s)}" for t, s in top))
-        if self.lines:
-            out.append("Bet sizes (fold equity vs break-even, EV in BB):")
-            for ln in self.lines:
-                need = ("needs no folds" if ln.breakeven <= 0.001
-                        else f"needs {pct(ln.breakeven)} folds")
-                line = (f"  {ln.label}: he folds {pct(ln.fold_equity)}, "
-                        f"{need} → EV {ln.ev:+.2f}BB ({ln.verdict})")
-                if self.range_equity and ln.equity_called + 0.02 < self.range_equity:
-                    # 只有「被跟之后明显变差」才提醒：这就是 EV 别拿整范围
-                    # 权益去算的原因，模型看得见才不会把诈唬估成价值。
-                    line += f" [if called you have {pct(ln.equity_called)}]"
-                out.append(line)
-        if self.opponents > 1:
-            out.append(
-                "Multiway: the fold-equity number above is the chance ALL of them "
-                "fold (product over the modelled opponents). Per-size EV is not "
-                "shown — the semi-bluff EV math is heads-up only.")
-        if self.call_line:
-            out.append(self.call_line)
-        return "\n".join(out)
-
 
 def _size_lines(options, pot_now: float, owed: float) -> list[tuple[str, float]]:
     """优先用牌桌上真实可选的加注额，退回底池比例。size = 跟注之外多投的部分。"""

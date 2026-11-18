@@ -130,11 +130,11 @@ nv -m poker_ocr.live --rotate 90 ...
 
 worker 在**轮到我**时把这一手的完整行动线交给模型（`--no-ai-advice` 可关闭）。
 现在只有一套**中文 lean** 提示词（`advice.PROMPT_VERSION = lean-zh-2026-11-08.2`）。
-提示词代码已按功能/场景拆到 `poker_ocr/prompt/`（system / user / shared / offline），
+提示词代码已按功能/场景拆到 `poker_ocr/prompt/`（system / user / shared；旧 offline 只剩复盘审计），
 几何与赔率纯计算在 `pot_math.py`，事实在 `situation.py`，选项在 `options.py`，
 `advice.py` 只负责模型调用与结果；
-常用入口（`build_messages` / `render_facts_zh` / `render_hand_facts` /
-`value_directive` / `audit_advice_tags` / `call_amount` …）仍从 `advice` re-export，
+常用入口（`build_messages` / `render_facts_zh` / `audit_advice_tags` /
+`call_amount` …）仍从 `advice` re-export，
 旧调用方不用改 import。结构、分段顺序与「怎么加一个新场景」见
 [`docs/提示词模块拆分-2026-11-03.md`](docs/提示词模块拆分-2026-11-03.md)。
 

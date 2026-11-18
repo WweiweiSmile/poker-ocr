@@ -21,8 +21,6 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from poker_ocr.advice import build_messages, build_situation, render_facts_zh  # noqa: E402
-from poker_ocr.prompt.offline.hand_facts import render_hand_facts  # noqa: E402
-from poker_ocr.prompt.offline.strategy import value_directive  # noqa: E402
 from poker_ocr.coach import CATEGORY_NAMES, parse_cards  # noqa: E402
 from poker_ocr.ground_truth import card_text, compute_ground_truth  # noqa: E402
 from poker_ocr.hand_track import (  # noqa: E402
@@ -65,12 +63,6 @@ def test_990010_turn_nut_straight_on_two_tone_board() -> None:
     assert gt.board_info.flush_made_possible is False
     assert gt.board_info.flush_draw_possible is True
 
-    text = gt.render()
-    assert "no made flush possible" in text
-    assert "NUTS" in text
-    assert "Beaten by: nothing" in text
-    # 绝不能把两张同花说成「花面」。
-    assert "FLUSH: possible" not in text
 
 
 def test_990009_river_straight_loses_to_flush() -> None:
@@ -82,8 +74,6 @@ def test_990009_river_straight_loses_to_flush() -> None:
     names = [b.name for b in gt.rank.beaten_by]
     assert "Flush" in names, f"顺子应被同花打败，实际 {names}"
     assert gt.board_info.flush_made_possible is True
-    assert "NOT THE NUTS" in gt.render()
-    assert "A flush is ALREADY possible" in gt.render()
 
 
 def test_proposal_case_flush_beats_straight() -> None:
@@ -130,7 +120,6 @@ def test_paired_board_allows_full_house() -> None:
     names = [b.name for b in gt.rank.beaten_by]
     assert "Full house" in names or "Quads" in names
     assert not gt.hero_is_nuts
-    assert "paired" in gt.render().lower()
 
 
 # ─────────────────────────── 最好五张 / 底牌贡献 ───────────────────────────
@@ -155,7 +144,6 @@ def test_board_play_uses_no_hole_cards() -> None:
     assert gt is not None
     assert gt.made.name == "Straight"
     assert gt.made.hero_cards_used == ()
-    assert "playing the board" in gt.render()
 
 
 # ─────────────────────────── 听牌口径 ───────────────────────────
@@ -199,10 +187,6 @@ def test_overcard_outs_get_future_outs() -> None:
     assert d.overcards and d.overcard_outs == 6
     assert d.total_outs == 6
     assert d.equity_pct == 24.0
-    text = gt.render()
-    assert "Future outs: two overcards (6 outs)" in text
-    assert "total 6 outs" in text
-    assert "rule of 4/2 equity 24%" in text
 
 
 def test_paired_top_card_has_no_overcard_outs() -> None:
@@ -246,15 +230,6 @@ def test_prompt_contains_ground_truth_and_forced_rules() -> None:
     assert "坚果：是" in facts
     assert "当前牌型：顺子" in facts
 
-    # 旧英文事实层保留给离线审计。
-    legacy = render_hand_facts(sit)
-    assert "GROUND TRUTH" in legacy
-    assert "no made flush possible" in legacy
-
-    directive = value_directive(sit) or ""
-    assert "ABSOLUTE NUTS" in directive
-    assert "RAISE" in directive
-
     system, user = build_messages(sit)
     assert "事实优先级" in system
     assert "坚果：是" in user
@@ -279,77 +254,6 @@ def test_river_prompt_says_flush_beats_straight() -> None:
     facts = render_facts_zh(sit)
     assert "坚果：否" in facts
     assert "同花" in facts
-    directive = value_directive(sit) or ""
-    assert "VALUE CAUTION" in directive
-    assert "Do NOT raise" in directive
-
-
-def test_draws_are_not_judged_by_made_hand_rank() -> None:
-    """坚果同花听牌此刻只是 A 高；排名低不代表该弃牌。"""
-    sit = build_situation(snap(board=("Qh", "9h", "2c"),
-                               hero_cards=("Ah", "Kh"), n_opp=2, pot=34.5))
-    facts = render_hand_facts(sit)
-    assert "does NOT apply to a draw" in facts
-    assert sit.ground_truth is not None
-    assert sit.ground_truth.draws.nut_flush_draw
-
-
-def test_rank_text_labels_equity_per_opponent_and_multiway() -> None:
-    """equity 是**单对手**口径；多人要单独的 at-least-one 数字。"""
-    gt = compute_ground_truth("Js3s", "Jd4d5s", opponents=5)
-    assert gt is not None
-    text = gt.render()
-    assert "PER OPPONENT" in text
-    assert "vs ONE opponent" in text
-    assert "Multiway: with 5 opponents" in text
-    assert "chance at least one is ahead" in text
-    expected = f"{gt.rank.beat_at_least_pct * 100:.1f}%"
-    assert expected in text, f"缺少多人 at-least-one 数字 {expected}"
-
-
-def test_draw_focus_hides_made_hand_nut_status() -> None:
-    """纯听牌不能渲染会压过 SEMI-BLUFF 的 NUT STATUS / Beaten by。"""
-    gt = compute_ground_truth("AsKd", "Ts8s9s")
-    assert gt is not None and gt.draws.nut_flush_draw
-    text = gt.render(draw_focus=True)
-    assert "NUT STATUS" not in text
-    assert "Beaten by:" not in text
-    assert "DRAW STATUS (action basis" in text
-    assert "semi-bluff is the baseline" in text
-    assert "NO FOLD EQUITY" in text
-    # 默认渲染仍保留成手牌口径，供非听牌场景使用。
-    assert "NUT STATUS" in gt.render()
-
-
-def test_h39_river_flush_completes_and_board_pair_two_pair() -> None:
-    """h39：TdQd 在 Th4h4d7sJh。
-
-    河牌 Jh 让三张红桃成花；TT44 里的 44 是公对面，JJ/QQ/KK/AA 都用它组成
-    更大的两对。模型当时仍写「two pair beats his bluffs」——这两条事实必须
-    由程序写进提示词。
-    """
-    gt = compute_ground_truth("TdQd", "Th4h4d7sJh", opponents=1)
-    assert gt is not None
-    assert gt.made.name == "Two pair"
-    text = gt.render()
-    assert "Street change:" in text
-    assert "completes a flush" in text
-    assert "One of your two pairs is the BOARD pair" in text
-    assert "bluff-catcher" in text
-
-
-def test_turn_card_that_changes_nothing_has_no_street_change() -> None:
-    """7s 既不补花也不成对：不该硬编一条「Street change」。"""
-    gt = compute_ground_truth("TdQd", "Th4h4d7s", opponents=1)
-    assert gt is not None
-    assert gt._street_change_text() is None
-    assert "Street change:" not in gt.render()
-
-
-def test_river_pairing_card_is_called_out() -> None:
-    gt = compute_ground_truth("AsKh", "Ks7d2c2h", opponents=1)
-    assert gt is not None
-    assert "pairs the board" in gt.render()
 
 
 if __name__ == "__main__":

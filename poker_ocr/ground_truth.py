@@ -77,14 +77,18 @@ def _pct(x: float) -> str:
     return f"{x * 100:.1f}%"
 
 
+# 花色 / 街道的中文名。只服务本模块的渲染（legacy 事实块），live 提示词
+# 用 `prompt/user/board.py` 里自己的一份，不从 core 层反向依赖 prompt。
+
+
 # ─────────────────────────── 数据结构 ───────────────────────────
 
 @dataclass(frozen=True)
 class MadeHand:
     category: int
-    name: str                       # 英文牌型名，给提示词
+    name: str                       # 英文牌型名（JSON facts 用，不是提示词）
     name_cn: str
-    detail: str                     # "A-high straight" / "Kings full of Sevens"
+    detail: str                     # 英文细节："A-high straight" / "Kings full of Sevens"
     best_five: tuple[Card, ...]
     hero_cards_used: tuple[Card, ...]
 
@@ -216,6 +220,8 @@ class GroundTruth:
     draws: DrawInfo
     rank: RankInfo
     board_info: BoardInfo
+    # `warnings` 是英文串，**live 提示词依赖它**：`prompt/user/board.py` 按
+    # 前缀把英文告警映射成中文（`_map_gt_warning`），所以这里不能翻译。
     warnings: tuple[str, ...] = ()
 
     @property
@@ -230,197 +236,6 @@ class GroundTruth:
                 "rank": self.rank.to_dict(),
                 "board_structure": self.board_info.to_dict(),
                 "warnings": list(self.warnings)}
-
-    # ── 渲染 ──────────────────────────────────────────────────
-
-    def _board_structure_text(self) -> str:
-        b = self.board_info
-        if b.flush_made_possible:
-            if b.monotone:
-                flush = f"FLUSH: possible (monotone board, {b.flush_suit_count} of one suit)"
-            else:
-                flush = (f"FLUSH: possible ({b.flush_suit_count} of one suit on board — "
-                         f"any opponent with two of that suit has a flush)")
-        elif b.flush_draw_possible:
-            if b.street == "river":
-                flush = ("FLUSH: no flush possible (at most 2 of any suit on the "
-                         "river board)")
-            else:
-                flush = ("FLUSH: no made flush possible (at most 2 of any suit — "
-                         "flush DRAW only)")
-        else:
-            flush = "FLUSH: no flush possible (rainbow board)"
-
-        straight = ("STRAIGHT: possible (an opponent can hold two cards that "
-                    "complete a straight)" if b.straight_possible else
-                    "STRAIGHT: not possible (no opponent holding completes a straight)")
-        if b.quads:
-            pair = "PAIRED: yes (trips on board — QUADS possible)"
-        elif b.trips:
-            pair = "PAIRED: yes (trips on board — full house / quads possible)"
-        elif b.paired:
-            pair = "PAIRED: yes (full house / quads possible)"
-        else:
-            pair = "PAIRED: no"
-        return f"{flush}｜{straight}｜{pair}"
-
-    def _rank_text(self) -> str:
-        r = self.rank
-        n = r.opponents
-        return (
-            f"Made-hand rank (exact enumeration over all {r.total} opponent "
-            f"holdings, {n} opponent{'s' if n != 1 else ''}): beaten by "
-            f"{r.beat_pct * 100:.1f}% of hands PER OPPONENT; ties "
-            f"{r.tie_pct * 100:.1f}% per opponent; equity "
-            f"{r.equity_pct * 100:.1f}% vs ONE opponent. "
-            f"Multiway: with {n} opponent{'s' if n != 1 else ''}, "
-            f"{r.beat_at_least_pct * 100:.1f}% chance at least one is ahead. "
-            f"Random hands are a LOWER bound — a calling/raising range is "
-            f"stronger than random."
-        )
-
-    def _nuts_text(self) -> str:
-        r = self.rank
-        if r.hero_is_nuts:
-            if r.tie_pct > 0:
-                return (f"NUT STATUS: NUTS — no opponent holding can beat you; "
-                        f"you can only chop ({r.tie_pct * 100:.1f}% of holdings tie).")
-            return ("NUT STATUS: ABSOLUTE NUTS — no opponent holding can beat you. "
-                    "Do not invent or imply any higher hand.")
-        names = ", ".join(f"{b.name} ({b.combos} combos)" for b in r.beaten_by)
-        best = r.best_opponent_name or "unknown"
-        ex = cards_text(r.best_opponent_cards) if r.best_opponent_cards else "?"
-        return (f"NUT STATUS: NOT THE NUTS — better hands exist: {names}. "
-                f"Best possible opponent hand: {best} ({ex}).")
-
-    def _draw_text(self) -> str:
-        d = self.draws
-        if not d.flush_draw and not d.straight_draw and not d.overcards:
-            return "Draws: none."
-        parts = []
-        if d.flush_draw:
-            parts.append(f"{'nut ' if d.nut_flush_draw else ''}flush draw "
-                         f"in {d.flush_suit} ({d.flush_outs} outs)")
-        if d.straight_draw:
-            kind = "open-ended/double-gutshot" if d.oesd else "gutshot"
-            parts.append(f"{kind} straight draw ({d.straight_outs} outs)")
-        if d.overcards:
-            kind = "two overcards" if d.overcard_outs >= 6 else "one overcard"
-            parts.append(f"{kind} ({d.overcard_outs} outs)")
-        prefix = "Draws:" if (d.flush_draw or d.straight_draw) else "Future outs:"
-        return (f"{prefix} {' + '.join(parts)}; total {d.total_outs} outs "
-                f"(rule of 4/2 equity {d.equity_pct:.0f}%).")
-
-    def _draw_status_text(self) -> str:
-        """听牌专用的事实头：它是行动依据，压过「当前未成牌」的排名。"""
-        d = self.draws
-        parts = []
-        if d.flush_draw:
-            parts.append(f"{'nut ' if d.nut_flush_draw else ''}flush draw "
-                         f"in {d.flush_suit} ({d.flush_outs} outs)")
-        if d.straight_draw:
-            kind = "open-ended/double-gutshot" if d.oesd else "gutshot"
-            parts.append(f"{kind} straight draw ({d.straight_outs} outs)")
-        return (f"DRAW STATUS (action basis — this is an unmade hand): "
-                f"{' + '.join(parts)}; total {d.total_outs} outs "
-                f"(rule of 4/2 equity {d.equity_pct:.0f}%). Use this and the "
-                f"draw directive; do NOT use the made-hand rank below to veto "
-                f"a semi-bluff.")
-
-    def _street_change_text(self) -> str | None:
-        """这一街新发的牌改变了什么：成花 / 公对面成三条 / 四条 / 成对。
-
-        模型在河牌最容易漏掉「这张牌让什么牌型成了」。h39 的 Jh 让牌面三张
-        红桃成花、JJ 成葫芦、任何 Jx 反超 TT44，模型却仍写「two pair beats
-        his bluffs」—— 它只看了自己的牌型名，没看新牌。这里用「当前牌面 vs
-        去掉最后一张」的差集算，不猜。
-        """
-        b = self.board
-        if len(b) < 4:                       # 翻牌没有「上一街」可比
-            return None
-        last, prev = b[-1], b[:-1]
-        changes: list[str] = []
-
-        # 成花：最后一张让某个花色在公共牌上达到 3 张。
-        suit = last[1]
-        now = sum(1 for c in b if c[1] == suit)
-        before = sum(1 for c in prev if c[1] == suit)
-        if now >= 3 and before < 3:
-            suit_name = {"s": "spades", "h": "hearts",
-                         "d": "diamonds", "c": "clubs"}.get(suit, suit)
-            changes.append(f"the {card_text(last)} completes a flush "
-                           f"({now} {suit_name} on the board)")
-
-        # 公对面：最后一张的点数此前已经出现过。
-        rank = last[0]
-        same = sum(1 for c in b if c[0] == rank)
-        before_same = sum(1 for c in prev if c[0] == rank)
-        if same >= 4:
-            changes.append(f"the {card_text(last)} puts QUADS on the board")
-        elif same == 3 and before_same == 2:
-            changes.append(f"the {card_text(last)} puts TRIPS on the board")
-        elif same == 2 and before_same == 1:
-            changes.append(f"the {card_text(last)} pairs the board")
-
-        if not changes:
-            return None
-        return "Street change: " + "; ".join(changes) + "."
-
-    def render(self, draw_focus: bool = False) -> str:
-        """固定格式的事实块。提示词里的模型只允许引用，不允许改写。
-
-        `draw_focus=True` 用于纯听牌：不渲染 `NUT STATUS` / `Beaten by`，
-        避免模型把「当前未成牌的 A 高」当成「不能下注」。桌面动态仍然可以
-        让模型过牌——但理由必须是「没有弃牌率」，不能是「我不是坚果」。
-        """
-        m = self.made
-        is_draw = bool(self.draws.flush_draw or self.draws.straight_draw)
-        draw_focus = bool(draw_focus and is_draw)
-        lines = [
-            "GROUND TRUTH (deterministic evaluator; authoritative — never "
-            "recompute, never contradict)",
-            f"Board: {cards_text(self.board)}｜{self.board_info.street}",
-            f"Board structure: {self._board_structure_text()}",
-            f"Made hand: {m.name.upper()} ({m.detail})｜best five: "
-            f"{cards_text(m.best_five)}｜hole cards used: "
-            f"{cards_text(m.hero_cards_used) if m.hero_cards_used else 'NONE (playing the board)'}",
-        ]
-        street_change = self._street_change_text()
-        if street_change:
-            lines.append(street_change)
-        if draw_focus:
-            lines.append(self._draw_status_text())
-            lines.append(
-                "DRAW RULE: heads-up with no bet in front, a semi-bluff is the "
-                "baseline; against a station that never folds you may check, but "
-                "the reason must be NO FOLD EQUITY — never «I am not the nuts». "
-                "With 3+ opponents, check.")
-            lines.append("Context only — CURRENT unmade hand (not the action basis):")
-            lines.append(self._rank_text())
-        else:
-            lines.extend([
-                self._rank_text(),
-                self._nuts_text(),
-                ("Beaten by: " + ", ".join(f"{b.name} (e.g. {cards_text(b.example)})"
-                                           for b in self.rank.beaten_by)
-                 if self.rank.beaten_by else "Beaten by: nothing."),
-                self._draw_text(),
-            ])
-        if self.warnings:
-            warnings = self.warnings
-            if draw_focus:
-                # 这几条描述的是「当前未成牌」，对听牌的行动选择没有指导意义；
-                # 保留「只是花听 / 听牌不是成牌 / 公对面花听」等有用警告。
-                warnings = tuple(
-                    w.replace("the rank/NUT STATUS above", "the context rank above")
-                    for w in warnings if not w.startswith(
-                        ("You are NOT the nuts", "A flush is ALREADY possible",
-                         "An opponent can complete a straight")))
-            if warnings:
-                lines.append("Warnings:")
-                lines.extend(f"- {w}" for w in warnings)
-        return "\n".join(lines)
-
 
 # ─────────────────────────── 成手牌/最好五张 ───────────────────────────
 
@@ -776,9 +591,3 @@ def compute_ground_truth(hero: str | list[str] | list[Card],
         rank=rank_info, board_info=board_info,
         warnings=_warnings(made, draws, rank_info, board_info),
     )
-
-
-def ground_truth_text(hero, board, opponents: int = 1) -> str:
-    """给提示词直接用的字符串；翻前/牌不全返回空串。"""
-    gt = compute_ground_truth(hero, board, opponents)
-    return gt.render() if gt else ""
