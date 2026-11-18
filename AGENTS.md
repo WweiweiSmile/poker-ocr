@@ -79,6 +79,7 @@ nv tools/export_rules.py --check                  # 规则台账静态校验（�
 - ❌ 新增配置项不带校验（在 `profile.py` 里 fail fast，不要静默默认）。
 - ❌ 改策略数字去动 `.py`（它们在 `poker_ocr/tables/*.json`）；❌ 把 `STRATEGY_TABLES_PROFILE` 写进 `.env`（import 时读，`.env` 后加载 → 静默不生效）。
 - ❌ 复活 `gto/`（2026-11-05 已整体移除）。
+- ❌ 自己跑 A/B 提示词对比实验（含 `tools/replay_live_decisions.py --model` 这类会真调模型的对跑）。**只能由维护者在 ab 测试集上手动执行**；agent 只准备工具、脚本与操作说明，不替人跑、不替人出对比结论。
 
 ## Agent skills
 
