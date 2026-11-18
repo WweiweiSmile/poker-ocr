@@ -17,6 +17,9 @@
     **不丢整帧** —— 单座一个坏字段不该把别人的筹码/底池/动作一起作废
     （见下面的质量闸）。降级时 `to_call` 依赖的最大下注不可信，改由调用方
     （`live.py`）跳过这一手的建议/点击，而不是让整帧消失。
+    **带单位但小数位 >1**（`9.5BB` 读成 `9.58B` / `9.58B0`）同理：牌桌
+    最多渲染 1 位小数，这种值不是「没读到」而是读到就不可能，按同一口径降级
+    （#48，量级闸拦不住 9.58 < 底池）。
   · **金额只做两侧清洗，不猜数字**：`5.5BB` 被读成 `55BB` 这种「小数点丢了」
     的量级错误**不修**（不猜小数点、不猜倍率，见 `parse.parse_amount`），
     交给上面那条几何闸降级成未知。清洗只裁掉贴在金额两侧的图标噪声
@@ -59,7 +62,8 @@ class PlayerState:
     position: str | None = None
     stack: float | None = None       # 后手筹码（BB）
     bet: float | None = None         # 本街已下注（BB）；None = 读到了但没读懂
-    # `bet` 读到的是**不可能**的值（本街下注 > 底池），已按未知处理。
+    # `bet` 读到的是**不可能**的值（本街下注 > 底池 / > 本街总额，或带单位
+    # 但小数位 >1 —— 牌桌最多显示 1 位），已按未知处理。
     # 和「没读懂」不同：这是明确知道这个读数不能用，不是没读到。
     # 见 build_state 的质量闸与 hand_track 的基线/水位处理。
     bet_unknown: bool = False
@@ -164,7 +168,8 @@ class FrameState:
     # 名字相关的诊断（改口/抖动/词表存疑）。**不进 errors**：名字读不准不该
     # 让整帧被质量闸丢掉，那会把牌面和底池一起扔了。
     name_warnings: list[str] = dc_field(default_factory=list)
-    # 本帧「本街下注读到不可能的值（> 底池）」的座位。**不进 errors**：那个
+    # 本帧「本街下注读到不可能的值（> 底池 / > 本街总额 / 小数位 >1）」的
+    # 座位。**不进 errors**：那个
     # 座位这一帧的下注按未知处理（`bet=None` + `bet_unknown=True`），帧里
     # 其余字段（别人的筹码/底池/动作）仍然可用。调用方据此**不给 AI 建议**：
     # to_call/水位依赖最大下注，静默少算一位会点错金额。
@@ -209,8 +214,9 @@ def _r(v: float | None, nd: int = 2) -> float | None:
 
 # 2026-11-13 起不再有「小数点量级修复」：曾经想按几何上限把 `55` 反推回
 # `5.5`，但那是在猜数字——猜对了多 1 手，猜错了就是一个 10 倍的 to_call。
+# 2026-11-17 同样不把 `9.58` 修成 `9.5`（#48）：那还是猜数字。
 # 现在金额只做两侧噪声清洗（见 `_parse_amount_slot` 与 `parse.parse_amount`），
-# 量级不可能时按未知降级，交给调用方跳过这一手建议。
+# 量级不可能 / 小数位超过显示口径时按未知降级，交给调用方跳过这一手建议。
 
 
 def _parse_amount_slot(frame: RoiFrame, key: str,
@@ -499,8 +505,13 @@ def _build_players(ctx: BuildContext):
                 chip = Amount(chip_raw, loose, "?", error=None)
                 chip_loose = True
         bet_a, bet_part_raw = _parse_amount_slot(frame, "bet", sid)
+        # 带单位但小数位 >1（`9.58B0` / `9.58B`）：不是「没读到下注」，而是
+        # 读到了一个牌桌不可能显示的金额。按与 bet>底池/本街总额同口径降级，
+        # 不能让 `bet:{seat}` 把整帧丢掉（#48）。
+        bet_unknown = bet_a.too_precise and bet_equity is None
         bet_loose = False
-        if lenient_chips and bet_raw.strip() and not bet_a.ok and bet_equity is None:
+        if (lenient_chips and bet_raw.strip() and not bet_a.ok
+                and not bet_a.too_precise and bet_equity is None):
             loose = parse_chip_loose(bet_raw)
             if loose is not None:
                 bet_a = Amount(bet_raw, loose, "?", error=None)
@@ -675,6 +686,9 @@ def _build_players(ctx: BuildContext):
             notes.append(f"bet: 标签文本 {bet_raw!r} → 本街 0")
         elif bet_loose:
             notes.append(f"bet: 宽松解析 {bet_raw!r} → {bet_a.value}")
+        elif bet_a.too_precise:
+            notes.append(f"bet: {bet_raw!r} 小数位超过 1 位"
+                         "（牌桌金额最多 1 位小数），按未知处理")
         elif bet_part_raw is not None:
             notes.append(f"bet: 多框，取金额框 {bet_part_raw!r}"
                          f"（整块 {bet_raw!r}）")
@@ -707,6 +721,7 @@ def _build_players(ctx: BuildContext):
             status = "folded"
             stack = None
             bet = 0.0
+            bet_unknown = False
             action = None
             notes = [n for n in notes
                      if not n.startswith(("chip:", "bet:", "equity:"))]
@@ -728,6 +743,7 @@ def _build_players(ctx: BuildContext):
                 status = "sitting_out"
                 stack = None
                 bet = 0.0
+                bet_unknown = False
                 action = None
                 name = None
                 notes = ["本手开始后入座，下一手再识别"]
@@ -735,6 +751,7 @@ def _build_players(ctx: BuildContext):
         players.append(PlayerState(
             seat_id=sid, name=name, stack=stack, bet=bet, action=action,
             fold=fold, in_hand=in_hand, all_in=all_in, equity=equity,
+            bet_unknown=bet_unknown,
             status=status, left=left_here, notes=notes,
             # 诊断字段：原始读数 / rec 分数 / tracker 的结论。名字被动作徽章
             # 盖住时 name_raw 是徽章文字，不写出来免得误导。
@@ -896,6 +913,10 @@ def _quality_gate(ctx: BuildContext, in_hand: list[PlayerState],
                 f"bet {p.bet:g} > 本街总额 {street_total:g}，按未知处理")
             p.bet = None
             p.bet_unknown = True
+            bet_warnings.append(p.seat_id)
+        # 解析层（小数位 >1，#48）与上面两道量级闸同口径：这一个字段不可用，
+        # 但整帧保留。补进 bet_warnings 方便看板/日志统一排查。
+        if p.bet_unknown and p.seat_id not in bet_warnings:
             bet_warnings.append(p.seat_id)
         if p.bet is None and not p.all_in and not p.bet_unknown and not showdown:
             errors.append(f"bet:{p.seat_id}")
