@@ -2667,7 +2667,9 @@ def test_lean_prompt_targets_aggression_frequency() -> None:
                                       StreetRecord)
 
     system, _ = build_messages(build_situation(make_point()))
-    for phrase in ("频率目标", "≥40%", "尺寸阶梯", "入池加注", "limp 例外"):
+    # 「尺寸阶梯」那句（干燥面 1/3 池 / 湿面 2/3 池）已随 #69 交给规则台账，
+    # prompt 里只剩「尺寸：默认半池 + L2/L3 例外」，所以不再要求这句字面。
+    for phrase in ("频率目标", "≥40%", "入池加注", "limp 例外"):
         check(phrase in system, f"system 缺少攻击频率目标：{phrase}")
     # #69：开池目标频率 / 「接近 100% 隔离」/「5.5BB + 1BB」被规则台账与
     # rule_params 取代，删掉的句子不许再回来（两套口径会互相打架）。
