@@ -206,6 +206,7 @@ poker_ocr.workbench :8030
 | `hand_strength.py` | 纯判定层：`size` / `equity_tier` / `kind` / `summary_en`（**只服务离线审计**，live 传 `include_strength=False` 不渲染） |
 | `fold_equity.py` | 逐座位条件弃牌率与各尺寸盈亏平衡（数字来自 `tables/fold_equity.json`） |
 | `strategy_tables.py` | 策略表加载器：profile → 变体，缺变体回落 v0 并标记 `fell_back` |
+| `rules/` | 规则台账骨架（票 #64）：`load_ledger()` → `facts_snapshot()` → `match_rules()` → `export_rules --check` 静态校验；规则只存「前提 + 引用」，数字住 `tables/` |
 | `pot_math.py` / `allin.py` / `preflop_ranges.py` / `ranges.py` / `field_ranges.py` | 底池赔率、全下判定、翻前范围与先验 |
 | `opponent_profile.py` | 对手画像：按机会计数统计 → 确定性分类；`n<8` 一律 unknown；人工 pin 优先 |
 | `table_dynamics.py` | 桌况/桌风描述 |

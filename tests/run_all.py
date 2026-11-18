@@ -104,7 +104,9 @@ SUITES = ["test_positions.py", "test_env.py", "test_coach.py",
           "test_range_trace.py", "test_range_cells.py", "test_range_table_diff.py",
           "test_prompt_refs.py", "test_hand_action_stack.py",
           # 票 #50（桶维度收成单一函数 bucket_of）新增套件
-          "test_buckets.py"]
+          "test_buckets.py",
+          # 票 #64（规则台账骨架与校验器）新增套件
+          "test_rules_ledger.py"]
 
 
 def main() -> int:

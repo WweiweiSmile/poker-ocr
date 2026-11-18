@@ -309,6 +309,20 @@ def hero_first_to_act(snap: HandSnapshot) -> bool | None:
                if _can_act(o) and o.position in order)
 
 
+def pot_odds(snap: HandSnapshot) -> float | None:
+    """赔率门槛：跟注额 / 跟注后能争夺的底池（0~1）。
+
+    分子分母必须来自 `call_amount` / `winnable_pot` 这一组口径，否则后手
+    不足、对手超额全下这两种局面的门槛会系统性算错。事实层与渲染层共用
+    这一个函数，不要再各算一份。
+    """
+    owed = call_amount(snap)
+    pot = winnable_pot(snap)
+    if owed <= 0 or pot <= 0:
+        return None
+    return owed / pot
+
+
 def pot_type(snap: HandSnapshot) -> str | None:
     """底池类型：翻前动作线决定翻后的范围宽度与 SPR 语义。
 

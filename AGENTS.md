@@ -59,6 +59,7 @@ nv tools/backfill_advice_decisions.py --dry-run                # 英雄动作缺
 nv tools/backfill_advice_decisions.py --refresh-stale --dry-run  # 重算回填后过期的 flags / 时间线 decisionId
 nv -m poker_ocr.strategy_tables --profile sourced # 策略表生效/回落情况
 nv tools/export_strategy_tables.py --check        # JSON↔代码逐值一致
+nv tools/export_rules.py --check                  # 规则台账静态校验（空台账 0 条也通过）
 ```
 
 ## 改提示词必须三步走（有 golden test 兜底）
