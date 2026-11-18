@@ -108,7 +108,9 @@ SUITES = ["test_positions.py", "test_env.py", "test_coach.py",
           # 票 #64（规则台账骨架与校验器）新增套件
           "test_rules_ledger.py",
           # 票 #66（复盘案例集扩容：真实记录锚点）新增套件
-          "test_build_ab_cases.py"]
+          "test_build_ab_cases.py",
+          # 票 #72（规则台账 A/B 对跑：新旧提示词分档对比）新增套件
+          "test_ab_compare.py"]
 
 
 def main() -> int:

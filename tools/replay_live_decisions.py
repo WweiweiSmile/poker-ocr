@@ -52,6 +52,7 @@ from poker_ocr.advice import (  # noqa: E402
     AISettings, advise, build_situation, render_facts_zh,
 )
 from poker_ocr.env import load_env  # noqa: E402
+from poker_ocr.prompt.version import PROMPT_VERSION  # noqa: E402
 from poker_ocr.hand_track import (  # noqa: E402
     ActionRecord, HandSnapshot, OpponentSnapshot, StreetRecord,
 )
@@ -410,14 +411,23 @@ def main(argv: list[str] | None = None) -> int:
         changed = []
         for i, r in enumerate(rows, 1):
             t0 = time.monotonic()
+            source, error = "model", None
             try:
                 a = advise(r["sit"], settings, timeout=args.timeout)
                 new = a.option.id
                 why = a.reason
+                # advise() 不抛异常：模型失败/未配置/异常帧都退化成一个
+                # 确定性兜底选项，source 标成 fallback(_rules)。
+                source, error = a.source, a.error
             except Exception as exc:                 # noqa: BLE001
                 new, why = "ERROR", f"{type(exc).__name__}: {exc}"
+                source, error = "error", f"{type(exc).__name__}: {exc}"
             r["new"] = new
             r["new_reason"] = why
+            r["new_source"] = source
+            r["new_error"] = error
+            # 「这次建议是不是模型真的答的」：A/B 只比较真模型点。
+            r["fallback"] = source != "model"
             r["ms"] = int((time.monotonic() - t0) * 1000)
             same = (new == r["old"])
             if not same:
@@ -463,6 +473,12 @@ def main(argv: list[str] | None = None) -> int:
                 "prompt_facts": r["facts"],
                 "new": r.get("new"), "new_reason": r.get("new_reason"),
                 "options": [o.id for o in sit.options],
+                # 判读三档分类/延迟/回滚所需的元信息（只在 --json 里多这几个键）。
+                "ms": r.get("ms"),
+                "prompt_version": PROMPT_VERSION,
+                "model": settings.model if settings else None,
+                "fallback": r.get("fallback"),
+                "error": r.get("new_error"),
             })
         Path(args.json).write_text(
             json.dumps(dump, ensure_ascii=False, indent=1), encoding="utf-8")
