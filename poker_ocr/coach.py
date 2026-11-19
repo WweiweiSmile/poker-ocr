@@ -379,6 +379,25 @@ def _rank_cached(hole: tuple[tuple[int, str], ...],
     )
 
 
+def at_least_one_behind(p: float, n: int) -> float:
+    """`n` 个对手里「至少一家牌力严格大于我」的**独立近似**，返回 0..1 比例。
+
+    `p` 是**单个**对手领先我的概率（0..1，`rank_hands` 的 `beat_pct` 口径）；
+    `n<=1` 时就等于 `p`。公式 `1-(1-p)**n` 假设各对手独立同分布，所以整批
+    随机牌**不放回**联合重抽会略高（人数越多偏得越多，3/4/5 人池实测均值
+    -0.42/-0.66/-0.84pp，见 `docs/至少一家领先-双口径偏差-2026-11-19.md`）。
+    这个数是**随机牌下界**，不是对对手范围的估计。
+
+    这是全仓唯一的闭式实现：评分/银行卡力（`rank_hands`）与提示词兜底
+    （`situation.py` 在 `hand_ranges is None` 时）都调这里。返回比例，
+    要百分数由调用点乘 100 并 round（两处量纲不同，别在函数里混）。
+    """
+    n = max(int(n), 1)
+    if n == 1:
+        return p
+    return 1.0 - (1.0 - p) ** n
+
+
 def rank_hands(hole: list[tuple[int, str]], board: list[tuple[int, str]],
                opponents: int = 1) -> RankDetail:
     """精确枚举对手所有两张暗牌，返回 `RankDetail`（含坚果校验）。
@@ -391,7 +410,7 @@ def rank_hands(hole: list[tuple[int, str]], board: list[tuple[int, str]],
     if n == 1:
         return detail
     return replace(detail,
-                   beat_at_least_pct=1.0 - (1.0 - detail.beat_pct) ** n)
+                   beat_at_least_pct=at_least_one_behind(detail.beat_pct, n))
 
 
 def beat_rate(hole: list[tuple[int, str]], board: list[tuple[int, str]],

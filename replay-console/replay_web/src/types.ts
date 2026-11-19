@@ -381,6 +381,7 @@ export interface OptionFacts {
   textureEn?: string | null
   equityPct?: number | null
   beatAtLeastPct?: number | null
+  beatAtLeastBasis?: string | null
   heroIsNuts?: boolean | null
   directive?: string | null
   madeNameCn?: string | null
@@ -388,6 +389,7 @@ export interface OptionFacts {
     kind: string
     size: string
     behindAny: number
+    behindAnyBasis?: string
     equity: number
     n: number
   } | null

@@ -136,3 +136,45 @@
 - **精确多人 equity 枚举**：对手 combo 组合爆炸；河牌已用 `[1-behind-tie, 1-behind]` 断言兜底。
 - **把 `fold_equity` 的 EV 折进 equity 块**：EV 依赖下注尺寸，属于 #7/看板建议侧，独立成块。
 - 跨手牌聚合 equity 分布（批量报表，已在 map 的 Out of scope）。
+
+## 8. 「至少一家领先我」：两条链路、两套算法、两个量纲
+
+> 量化与判据：`docs/至少一家领先-双口径偏差-2026-11-19.md`（票 #75）。
+> 代码收敛：票 #76 起闭式只有 `coach.at_least_one_behind` 一处实现，
+> `rank_hands` 与 `situation` 兜底分支都调它；不变量单测见
+> `tests/test_behind_any_single_source.py`。
+
+| | `handStrength.behindAny`（复盘）/ 提示词主路 | `beatAtLeastPct`（复盘 facts）/ 提示词兜底 |
+|---|---|---|
+| 算法 | `hand_vs_ranges._monte_carlo` 整组拒绝重抽、不放回 | `coach.at_least_one_behind`：`1-(1-p1)**n` 独立近似 |
+| 对手模型 | 建模范围 × N 家（未建模对手按随机牌补位） | 均匀随机牌 |
+| `p1` | 抽样估计 | 精确枚举单挑被压比例 |
+| 量纲 | 0..1 比例 | 0..100 百分数 |
+| 提示词落点 | `prompt/user/strength.py:214`（有范围时） | `prompt/user/strength.py:163`（仅 `hand_ranges is None`） |
+| 复盘 facts | `decisions.py` `handStrength.behindAny` + `behindAnyBasis` | `decisions.py` `beatAtLeastPct` + `beatAtLeastBasis` |
+| basis 值 | `"joint_resample_over_ranges"` | `"random_hands_independent_approx"` |
+
+**为什么保留两套。** 有对手范围时，「至少一家领先」的真值取决于各家范围与
+互相撞牌，只能用联合重抽；没有范围时退化成随机牌，此时唯一能给的闭式是
+独立近似，且提示词文案已写明「按随机牌下界」。两条分支互斥，不会在同一句
+事实里同时出现。票 #75 的判据没有触发改实现：3/4/5 人池的 \|均值差\| 最大
+0.84pp（阈值 5pp）、单点最坏 2.51pp（阈值 10pp），方向稳定为独立近似偏低；
+且这个数只喂兜底文案，不进任何数值判定线（`hand_strength._BEHIND_DEMOTE`
+读的是 `behind_any`）。改算法换不到可观测收益，只把口径写清。
+
+**为什么不能相加 / 替换。** 两者连「对手是谁」都不是同一个问题：
+
+- 量纲不同：一个是 0..1，一个是 0..100；相加/平均前必须显式换算，且换算后
+  仍不能相加（见下一条）。
+- 基准不同：`behindAny` 是对**进池范围**的联合估计，`beatAtLeastPct` 是对
+  **均匀随机牌**的下界。范围收窄带来的差是主体（票 #75 口径 B 的实测差
+  均值 -4.58pp），算法差只有几 pp；把后者当后者会低估危险。
+- 语义不同：联合重抽已经处理「对手之间互相撞牌 / 不放回」，独立近似假设
+  各家独立同分布；人数越多，独立近似偏低越多（3 人 -0.42pp / 4 人 -0.66pp
+  / 5 人 -0.84pp）。
+- 用途不同：`behindAny` 参与 `hand_strength` 的降档判定与提示词主路；
+  `beatAtLeastPct` 只喂兜底文案与复盘留痕。替换会同时改两条链路的输入口径。
+
+复盘 facts 已经给两个数各带 `basis`；控制台详情页在 `beatAtLeastPct`
+后标「（近似）」，读的人不需要猜。`beatAtLeastPct` 的数值形状（百分数、
+一位小数）保持不变，旧记录没有 `basis` 字段时按同一口径读。
