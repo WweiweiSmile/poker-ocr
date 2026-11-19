@@ -422,3 +422,63 @@ Resolver 规则：
   也命中、河牌卡不漏到转牌、9 张卡都落到合法 options、尺寸显式在卡里、
   印刷页/PDF 页偏移、诈唬混合渲染、strong_made 面对下注零匹配）；
   `tests/test_playbook_cards_multiway.py` 全库计数同步到 114。
+
+
+### M9 结果（2026-11-19，#91 面对 3-bet 层）
+
+- 两个新维度都只从事实派生，落在 `poker_ocr/playbook/schema.py`（不动
+  `hand_track.py` / `situation.py`）：
+  - `facing_level`：数 `snap.actions_of("preflop")` 里的加注动作（bet /
+    raise / all_in），2 次 = `three_bet`、3 次 = `four_bet`、4 次 =
+    `five_bet`，其余 `unknown`。不用 `preflop_shapes`：shape 只说
+    「three-bet 池」，分不出 4-bet/5-bet。
+  - `hero_role`：英雄不在加注序列 = `cold`（冷跟/盲注），下标 0 = `open`，
+    下标 1 = `three_bet`，更后或拿不到动作线 = `unknown`。
+  - 读不到动作线时两者都是 unknown（fail open），`from_dict` 不改；
+    `validate_cards` 校验两词表成员且只许出现在翻前卡上。
+- 大口袋对按书 p109 拆两段，词表 13 -> 14：`big_pair` 拆成
+  `big_pair_aa_kk`（AA-KK，面对 3-bet 继续 4-bet）与 `big_pair_qq`
+  （QQ，最多跟注）。旧 3 张 big_pair 卡（RFI / 面对单加注 / 溜入池）各自
+  拆成两张，计划与 priority 不变，共 6 张。
+- `poker_ocr/playbook/cards/harrington_cash_preflop.json` 从 70 张到 87 张：
+  新增 14 张 `preflop.vs_3bet.*`（`preflop_node=three_bet`、
+  `facing_level=three_bet`、`priority=100`、`offset_policy=size_only`）：
+  - AA-KK：再加注；书没给 4-bet 尺寸，卡只声明动作、尺寸交给本桌第一个
+    合法加注档（`plan.size=None`），why 里写明不编数字。
+  - QQ：跟注（p109「最多跟注」，弱手可再加注、强手只跟）。
+  - 其余 12 类全部弃：JJ-99 与 88-66（p111）、55-22（p113-114）、AK/AQ
+    （p115-116）、AJ-AT 与弱 A（p118）、KQ/KJ/QJ（p120）、KT/QT（p120）、
+    同花连张（p121，书的条件「有位置且已有跟注者」里「已有跟注者」在
+    `Spot` 里没有维度，凑不齐按默认弃）、投机牌与其它（p122）。
+  - 明写 5 张标 `explicit`（AA-KK、QQ、JJ-99、88-66、55-22），其余
+    9 张 `interpreted`，扩展口径都写在 why 里。
+- 4-bet / 5-bet 认得出来但不落卡：渲染回「书中无此局面」，不拿 3-bet 的
+  计划顶替（书里没讲这一层）。
+- 覆盖（`nv tools/preflop_book_coverage.py`，828 个去重翻前决策点，桶维度
+  改成 节点/加注层级/英雄角色，认不出层级的单列 unknown）：
+  命中 803（97.0%，#87 时 89.9%），书中无此局面 25，坏行 0，`choose_option`
+  选档失败 0，options 缺动作档 1（HJ KK 的 RFI 点，采集缺口，与 #87 同一个点）。
+  - `three_bet/three_bet/cold` 42/42、`three_bet/three_bet/open` 17/17，
+    即 59 个面对 3-bet 点全部可归因。
+  - `three_bet/four_bet/cold` 0/11、`four_bet/three_bet` 0/3、
+    `four_bet/open` 0/1、`five_bet/cold` 0/2：共 17 点显式 unknown。
+- 票面验收「每张 facing_level=three_bet 卡在 59 点里至少命中 1 次」有 2 张
+  做不到：59 点里没有 AA-KK（大对那 2 个点是 QQ），也没有 KQ/KJ/QJ
+  （trouble）。这 2 张卡由
+  `tests/test_playbook_cards_preflop.py::test_three_bet_layer_has_one_card_per_hand_class`
+  用合成局面覆盖，不因「没样本」删卡——删了会让这两类变成「书中无此局面」。
+- 提示词：`_spot_line` 的翻前行把 `facing_level` 渲染成「面对 3-bet /
+  4-bet / 5-bet」并带英雄角色（未加注过 / 本方开池 / 本方 3-bet），认不出
+  层级时退回旧的「面对加注」；手牌类映射同步成 14 键。`PROMPT_VERSION`
+  bump 到 `lean-zh-2026-11-19.9`（golden fixture 全是 flop，三个 hash 不变，
+  只更新 `EXPECTED_ADVICE_VERSION`）。
+- 测试：`tests/test_playbook_hand_class.py` 的 AA/KK/QQ 期望改成两段；
+  `tests/test_playbook_cards_preflop.py` 24 项（14 类各一张 3-bet 卡且解析
+  回自己、AA-KK 加注无尺寸、QQ 跟注、其余弃、4/5-bet 无卡、提示词渲染
+  层级与角色、`validate_cards` 拒绝翻后 facing_level 与非法值、每张卡
+  `choose_option` 落位）；`tests/test_playbook_cards_multiway.py` 全库计数
+  同步到 131。`nv tests/run_all.py` 84 个套件全过。
+- 仍未做（留给后续）：书页印刷 133-171 的漏扫内容（#89 已记）；同花连张
+  面对 3-bet 的「已有跟注者」维度；4-bet/5-bet 层没有书页可依，等有第二
+  来源或维护者拍板再谈。
+

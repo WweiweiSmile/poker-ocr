@@ -39,6 +39,10 @@ DRAWS = ("none", "flush", "oesd", "gutshot", "combo", "other", "unknown")
 BOARDS = ("dry", "flush", "straight", "flush_straight", "paired", "unknown")
 SPRS = ("lt3", "3to6", "gt6", "unknown")
 FACINGS = ("none", "bet", "raise", "unknown")
+# 面对加注的层级（翻前专用）：书里只有到 3-bet 的决策，4/5-bet 显式 unknown。
+FACING_LEVELS = ("three_bet", "four_bet", "five_bet", "unknown")
+# 英雄在翻前加注序列里的角色；cold = 一次都没加注过（含冷跟/盲注）。
+HERO_ROLES = ("cold", "open", "three_bet", "unknown")
 COMMITMENTS = ("committed", "uncommitted", "unknown")
 OPPONENTS = ("unknown", "loose_passive", "tight_passive", "aggressive")
 
@@ -139,6 +143,47 @@ def _norm_draw(sit: Any) -> str:
     return "other" if getattr(sit, "has_draw", False) else "none"
 
 
+# 翻前的加注动作；与 preflop_shapes 的口径一致（bet/raise 一定算加注）。
+_AGGRESSIVE_ACTIONS = ("bet", "raise", "all_in")
+
+# 加注次数 -> 面对层级：开池(1)+3-bet(2) 就是「面对 3-bet」，再往上同理。
+_FACING_LEVEL_BY_RAISES = {2: "three_bet", 3: "four_bet", 4: "five_bet"}
+
+# 英雄在序列里的下标 -> 角色：第 1 个加注是开池，第 2 个是 3-bet。
+_HERO_ROLE_BY_INDEX = {0: "open", 1: "three_bet"}
+
+
+def _preflop_raises(snap: Any) -> tuple[Any, ...]:
+    """翻前加注序列（按时间顺序）；快照没给动作线时返回空元组。
+
+    只读事实、不猜：拿不到 actions_of 或动作线读坏，就退化成空序列，
+    由调用方把层级/角色写成 unknown（fail open）。
+    """
+    getter = getattr(snap, "actions_of", None)
+    if not callable(getter):
+        return ()
+    try:
+        actions = tuple(getter("preflop") or ())
+    except (KeyError, TypeError):
+        return ()
+    return tuple(action for action in actions
+                 if getattr(action, "action", "") in _AGGRESSIVE_ACTIONS)
+
+
+def _facing_level(raises: tuple[Any, ...]) -> str:
+    return _FACING_LEVEL_BY_RAISES.get(len(raises), "unknown")
+
+
+def _hero_role(raises: tuple[Any, ...]) -> str:
+    """英雄加注过就是加注者；一次都没加注 = cold；拿不到动作线 = unknown。"""
+    if not raises:
+        return "unknown"
+    for index, action in enumerate(raises):
+        if getattr(action, "is_hero", False):
+            return _HERO_ROLE_BY_INDEX.get(index, "unknown")
+    return "cold"
+
+
 def _norm_preflop_node(snap: Any) -> str:
     shapes = tuple(getattr(snap, "preflop_shapes", ()) or ())
     if "three-bet" in shapes:
@@ -175,6 +220,11 @@ class Spot:
     position_bucket: str | None = None
     # 是否同花：书里按花色分流（前位只玩 KQs/AJs），翻前才有值。
     hand_suited: bool | None = None
+    # 面对加注的层级（翻前专用）：2/3/4 次加注 = 面对 3-bet/4-bet/5-bet。
+    # 书只写到 3-bet，4/5-bet 认得出来但故意不落卡（#91）。
+    facing_level: str | None = None
+    # 英雄在翻前加注序列里的角色；书在 3-bet 层不分冷跟/开池，但统计要看。
+    hero_role: str | None = None
 
     def matches(self, other: "Spot") -> bool:
         """本卡是否覆盖 `other`；None 字段不限制。"""
@@ -242,6 +292,7 @@ class Spot:
                       if street == "preflop" else None)
         hand_suited = (preflop_suited(hero_cards)
                        if street == "preflop" else None)
+        raises = _preflop_raises(snap) if street == "preflop" else ()
         return cls(
             street=street or "unknown",
             preflop_node=preflop_node,
@@ -260,6 +311,8 @@ class Spot:
             position_bucket=position_bucket(
                 getattr(snap, "hero_position", None)),
             hand_suited=hand_suited,
+            facing_level=_facing_level(raises) if street == "preflop" else None,
+            hero_role=_hero_role(raises) if street == "preflop" else None,
         )
 
 
@@ -418,6 +471,17 @@ def validate_cards(cards: Iterable[Card]) -> list[str]:
                 errors.append(
                     f"{card.id}: hand_suited 只对翻前有意义（street="
                     f"{card.spot.street!r}）")
+        for name, allowed in (("facing_level", FACING_LEVELS),
+                             ("hero_role", HERO_ROLES)):
+            value = getattr(card.spot, name)
+            if value is None:
+                continue
+            if card.spot.street != "preflop":
+                errors.append(
+                    f"{card.id}: {name} 只对翻前有意义（street="
+                    f"{card.spot.street!r}）")
+            if value not in allowed:
+                errors.append(f"{card.id}: {name} 非法 {value!r}")
         if (card.spot.position_bucket is not None
                 and card.spot.position_bucket not in POSITION_BUCKETS):
             errors.append(

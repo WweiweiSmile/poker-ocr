@@ -26,9 +26,10 @@ RANKS = ("A", "K", "Q", "J", "T", "9", "8", "7", "6", "5", "4", "3", "2")
 
 
 @pytest.mark.parametrize("cards,expected", [
-    (("Ah", "Ad"), "big_pair"),
-    (("Kh", "Kd"), "big_pair"),
-    (("Qh", "Qd"), "big_pair"),
+    # #91：大口袋对按书 p109 拆两段——AA-KK 能继续 4-bet，QQ 最多跟注。
+    (("Ah", "Ad"), "big_pair_aa_kk"),
+    (("Kh", "Kd"), "big_pair_aa_kk"),
+    (("Qh", "Qd"), "big_pair_qq"),
     (("Jh", "Jd"), "medium_pair"),
     (("Th", "Td"), "medium_pair"),
     (("9h", "9d"), "medium_pair"),

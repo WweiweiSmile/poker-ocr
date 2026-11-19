@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""翻前书卡（票 #87）的验收：三个主桶、每张卡的来源页与 options 落位。
+"""翻前书卡（票 #87、#91）的验收：主桶、面对 3-bet 层、来源页与 options 落位。
 
     nv -m pytest tests/test_playbook_cards_preflop.py -q
 
@@ -11,8 +11,8 @@
   3. 每张卡都能通过 choose_option 落到本桌合法 options（失败 0）；
   4. 0.5BB 前注：卡里只写书的 3BB 基线，最终尺寸由偏移层夹到本桌合法档，
      动作不被偏移改写；
-  5. 未做的桶（3-bet/4-bet、翻前已经无人下注的非大盲位）显式 unknown，
-     不伪造书页。
+  5. 面对 3-bet 层（#91）：14 个手牌类各一张卡，AA-KK 再加注、QQ 跟注、
+     其余弃；4-bet/5-bet 仍然显式 unknown，不伪造书页。
 """
 
 from __future__ import annotations
@@ -46,10 +46,20 @@ def _table_options():
                     ("raise", 3.0), ("raise", 6.0), ("allin", 100.0))
 
 
+def _raises(count):
+    """交替的加注序列：1 = 对手开池，2 = 开池 + 本方 3-bet，3 = 再加注……"""
+    return tuple(("hero" if index % 2 else "villain", "raise")
+                 for index in range(count))
+
+
 def _sit(*, street="preflop", node="unopened", facing="bet", cards=("Kh", "Kd"),
          position="BTN", in_position=False, pot_type="unopened pot",
-         to_call=1.0, pot=6.0, ante=None, options=None):
+         to_call=1.0, pot=6.0, ante=None, options=None, raises=None):
     shape = {"raised": "single-raise", "three_bet": "three-bet"}.get(node, node)
+    if raises is None:
+        raises = {"raised": _raises(1), "three_bet": _raises(2)}.get(node, ())
+    actions = tuple(SimpleNamespace(action=action, is_hero=(who == "hero"))
+                    for who, action in raises)
     if to_call == 0.0 and facing == "bet":
         to_call = 0.0
     snap = SimpleNamespace(
@@ -59,6 +69,7 @@ def _sit(*, street="preflop", node="unopened", facing="bet", cards=("Kh", "Kd"),
         to_call=to_call,
         pot=pot,
         blinds=SimpleNamespace(small=0.5, big=1.0, ante=ante),
+        actions_of=lambda street: actions if street == "preflop" else (),
     )
     return SimpleNamespace(
         street=street, pot_type=pot_type, opponents_in_hand=8,
@@ -74,7 +85,7 @@ def _spot(**kwargs):
 
 def test_preflop_deck_loads_and_validates():
     cards = load_cards(CARDS)
-    assert len(cards) == 70
+    assert len(cards) == 87
     assert validate_cards(cards) == []
     for card in cards:
         got = resolve(cards, card.spot)
@@ -96,8 +107,9 @@ def test_every_card_has_print_and_pdf_pages():
 
 def test_rfi_cards_hit_positions_and_suits():
     cases = [
-        (dict(cards=("Ah", "Ad"), position="UTG"), "preflop.rfi.big_pair"),
-        (dict(cards=("Kh", "Kd"), position="HJ"), "preflop.rfi.big_pair"),
+        (dict(cards=("Ah", "Ad"), position="UTG"), "preflop.rfi.big_pair_aa_kk"),
+        (dict(cards=("Kh", "Kd"), position="HJ"), "preflop.rfi.big_pair_aa_kk"),
+        (dict(cards=("Qh", "Qd"), position="HJ"), "preflop.rfi.big_pair_qq"),
         (dict(cards=("Jh", "Jd"), position="UTG"), "preflop.rfi.medium_pair.early"),
         (dict(cards=("Jh", "Jd"), position="HJ"), "preflop.rfi.medium_pair.middle"),
         (dict(cards=("9h", "9d"), position="CO"), "preflop.rfi.medium_pair.late"),
@@ -181,8 +193,12 @@ def test_facing_one_raise_uses_position():
     assert unknown.plan.action == "fold" and unknown.priority < ip.priority
 
     big = resolve(cards, _spot(cards=("Ah", "Ad"), **kwargs)).card
-    assert big.id == "preflop.vs_raise.big_pair"
+    assert big.id == "preflop.vs_raise.big_pair_aa_kk"
     assert big.plan.action == "raise" and big.plan.size.value == 9.0
+    # QQ 在单加注池里同样再加注；分岔要等面对 3-bet 才出现（p109）。
+    queens = resolve(cards, _spot(cards=("Qh", "Qd"), **kwargs)).card
+    assert queens.id == "preflop.vs_raise.big_pair_qq"
+    assert queens.plan.action == "raise" and queens.plan.size.value == 9.0
 
 
 def test_limped_pot_cards():
@@ -194,7 +210,9 @@ def test_limped_pot_cards():
     weak_ace = resolve(cards, _spot(cards=("Ah", "9h"), **kwargs)).card
     junk = resolve(cards, _spot(cards=("7h", "2d"), **kwargs)).card
     pair = resolve(cards, _spot(cards=("5h", "5d"), **kwargs)).card
-    assert big.id == "preflop.limped.big_pair" and big.plan.action == "raise"
+    assert big.id == "preflop.limped.big_pair_aa_kk" and big.plan.action == "raise"
+    queens = resolve(cards, _spot(cards=("Qh", "Qd"), **kwargs)).card
+    assert queens.id == "preflop.limped.big_pair_qq" and queens.plan.action == "raise"
     # 书 p129：攻击溜入者时 AA-TT 加注，TT 不能平跟。
     assert tens.id == "preflop.limped.medium_pair" and tens.plan.action == "raise"
     assert low.id == "preflop.limped.low_pair" and low.plan.action == "call"
@@ -229,7 +247,7 @@ def test_every_card_maps_onto_legal_options():
 
 def test_ante_offset_only_changes_size():
     cards = load_cards(CARDS)
-    card = next(c for c in cards if c.id == "preflop.rfi.big_pair")
+    card = next(c for c in cards if c.id == "preflop.rfi.big_pair_aa_kk")
     sit = _sit(cards=("Ah", "Ad"), position="UTG", ante=0.5,
                options=_options(("fold", None), ("call", 1.0),
                                 ("raise", 5.5), ("raise", 7.5)))
@@ -242,17 +260,96 @@ def test_ante_offset_only_changes_size():
 
 def test_no_ante_no_offset():
     cards = load_cards(CARDS)
-    card = next(c for c in cards if c.id == "preflop.rfi.big_pair")
+    card = next(c for c in cards if c.id == "preflop.rfi.big_pair_aa_kk")
     sit = _sit(cards=("Ah", "Ad"), position="UTG", ante=None)
     assert apply_offsets(card, sit) == ()
 
 
-def test_three_bet_remains_unknown():
+# 面对 3-bet 的 14 类各一手样本（词表见 hand_class.py）。
+_THREE_BET_HANDS = {
+    "big_pair_aa_kk": ("Ah", "Ad"),
+    "big_pair_qq": ("Qh", "Qd"),
+    "medium_pair": ("Jh", "Jd"),
+    "low_pair": ("8h", "8d"),
+    "small_pair": ("5h", "5d"),
+    "ak": ("Ah", "Kh"),
+    "aq": ("Ah", "Qh"),
+    "ace_broadway": ("Ah", "Jh"),
+    "weak_ace": ("Ah", "9h"),
+    "trouble": ("Kh", "Qh"),
+    "weak_trouble": ("Kh", "Th"),
+    "suited_connector": ("Jh", "Th"),
+    "speculative": ("9h", "7h"),
+    "other": ("7h", "2d"),
+}
+
+
+def _three_bet_spot(cards, *, raises=2):
+    return _spot(node="three_bet", pot_type="3-bet+ pot", facing="raise",
+                 to_call=23.0, pot=37.0, cards=cards, raises=_raises(raises))
+
+
+def test_three_bet_layer_has_one_card_per_hand_class():
+    """14 个手牌类各一张面对 3-bet 卡；书只讲到这一层（#91）。"""
     cards = load_cards(CARDS)
-    got = resolve(cards, _spot(node="three_bet", pot_type="3-bet+ pot",
-                               facing="raise", to_call=23.0, pot=37.0,
-                               cards=("Ah", "Ad")))
-    assert got.card is None
+    three = [card for card in cards if card.spot.facing_level == "three_bet"]
+    assert len(three) == len(_THREE_BET_HANDS)
+    assert {card.spot.hand_class for card in three} == set(_THREE_BET_HANDS)
+    for card in three:
+        got = resolve(cards, _three_bet_spot(_THREE_BET_HANDS[card.spot.hand_class]))
+        assert got.card is not None and got.card.id == card.id, card.id
+
+
+def test_three_bet_actions_follow_book():
+    """书 p109：AA-KK 再加注、QQ 最多跟注；p111-122：其余弃。"""
+    cards = load_cards(CARDS)
+    aa = resolve(cards, _three_bet_spot(("Ah", "Ad"))).card
+    assert aa.id == "preflop.vs_3bet.big_pair_aa_kk"
+    assert aa.plan.action == "raise" and aa.plan.size is None
+    queens = resolve(cards, _three_bet_spot(("Qh", "Qd"))).card
+    assert queens.id == "preflop.vs_3bet.big_pair_qq"
+    assert queens.plan.action == "call"
+    for hand in (("Jh", "Jd"), ("8h", "8d"), ("Ah", "Kh"),
+                 ("Kh", "Qh"), ("7h", "2d")):
+        got = resolve(cards, _three_bet_spot(hand)).card
+        assert got.plan.action == "fold", (hand, got.id)
+
+
+def test_four_and_five_bet_stay_unknown():
+    """书里没有 4-bet/5-bet 的决策：认得出来，但必须显式无卡。"""
+    cards = load_cards(CARDS)
+    for raises in (3, 4):
+        got = resolve(cards, _three_bet_spot(("Ah", "Ad"), raises=raises))
+        assert got.card is None, raises
+
+
+def test_prompt_renders_facing_level():
+    sit = _sit(node="three_bet", pot_type="3-bet+ pot", facing="raise",
+               to_call=23.0, pot=37.0, cards=("Qh", "Qd"), position="BTN")
+    text = "\n".join(render_book_plan_zh(sit))
+    assert "面对 3-bet" in text and "本方 3-bet" in text
+    assert "大口袋对（QQ）" in text
+    assert "计划: 跟注" in text and "p109" in text
+
+
+def test_validate_rejects_facing_level_outside_preflop():
+    import dataclasses
+    from poker_ocr.playbook.prompt import _all_cards
+    flop = next(c for c in _all_cards() if c.street == "flop")
+    bad = dataclasses.replace(
+        flop, spot=dataclasses.replace(flop.spot, facing_level="three_bet"))
+    errors = validate_cards([bad])
+    assert any("facing_level" in e for e in errors), errors
+
+
+def test_validate_rejects_unknown_facing_level():
+    import dataclasses
+    from poker_ocr.playbook.prompt import _all_cards
+    card = next(c for c in _all_cards() if c.id == "preflop.vs_3bet.ak")
+    bad = dataclasses.replace(
+        card, spot=dataclasses.replace(card.spot, facing_level="four_bet_x"))
+    errors = validate_cards([bad])
+    assert any("facing_level" in e for e in errors), errors
 
 
 def test_raised_pot_without_bet_remains_unknown():

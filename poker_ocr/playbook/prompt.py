@@ -52,8 +52,16 @@ MADE_HAND_ZH = {
     "unknown": "未知牌力",
 }
 FACING_ZH = {"none": "无人下注", "bet": "面对下注", "raise": "面对加注", "unknown": "行动未知"}
+# 翻前的「面对」比翻后细：同一句「面对加注」在 3-bet 池里是另一个决策（#91）。
+FACING_LEVEL_ZH = {
+    "three_bet": "面对 3-bet",
+    "four_bet": "面对 4-bet",
+    "five_bet": "面对 5-bet",
+}
+HERO_ROLE_ZH = {"cold": "未加注过", "open": "本方开池", "three_bet": "本方 3-bet"}
 HAND_CLASS_ZH = {
-    "big_pair": "大口袋对",
+    "big_pair_aa_kk": "大口袋对（AA-KK）",
+    "big_pair_qq": "大口袋对（QQ）",
     "medium_pair": "中口袋对（JJ-99）",
     "low_pair": "中口袋对（88-66）",
     "small_pair": "小口袋对",
@@ -126,9 +134,17 @@ def _spot_line(spot: Spot) -> str:
         parts.append(HAND_CLASS_ZH.get(spot.hand_class or "", ""))
         # 书按花色分流（前位只玩 KQs/AJs），不知道就不写，别默认非同花。
         parts.append(SUITED_ZH.get(spot.hand_suited, ""))
+        # 加注层级已知就照写（书只写到 3-bet，4/5-bet 也照样如实显示层级，
+        # 由卡集决定有没有计划）；认不出层级时退回粗粒度「面对加注」。
+        level = FACING_LEVEL_ZH.get(spot.facing_level or "", "")
+        if level:
+            parts.append(level)
+            parts.append(HERO_ROLE_ZH.get(spot.hero_role or "", ""))
+        else:
+            parts.append(FACING_ZH.get(spot.facing or "", spot.facing or ""))
     else:
         parts.append(MADE_HAND_ZH.get(spot.made_hand or "", spot.made_hand or ""))
-    parts.append(FACING_ZH.get(spot.facing or "", spot.facing or ""))
+        parts.append(FACING_ZH.get(spot.facing or "", spot.facing or ""))
     return " / ".join(part for part in parts if part)
 
 

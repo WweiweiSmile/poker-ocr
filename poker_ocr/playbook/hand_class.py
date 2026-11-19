@@ -20,6 +20,8 @@ Axs 也算投机牌。同一手牌在任何位置、任何筹码深度下都是�
   88-66 前位 30% 加注；p129 攻击溜入者时只把 AA-TT 算作加注牌。
 - 麻烦牌型再分两段，因为书 p120 把 KQ/KJ/QJ 与 KT/QT 分开讲：后者中位
   直接弃。
+- 大口袋对再分两段（#91）：面对 3-bet 时书 p109 让 AA/KK 继续再加注，QQ 只
+  到「最多跟注」；同一句「大口袋对」会把 QQ 也说成 4-bet。
 """
 
 from __future__ import annotations
@@ -30,7 +32,8 @@ from ..preflop_ranges import RANKS, hand_key
 # 书里逐个讨论过的牌型（Harrington 第 1 卷第三章）。这里只是词表 + 成员校验，
 # 顺序不承载优先级：分类由 `preflop_hand_class` 里的规则决定。
 PREFLOP_HAND_CLASSES = (
-    "big_pair",          # AA KK QQ（书：大口袋对）
+    "big_pair_aa_kk",    # AA KK（书：大口袋对里可以 4-bet 的两手）
+    "big_pair_qq",       # QQ（书：面对 3-bet 最多跟注）
     "medium_pair",       # JJ TT 99（书：中口袋对里较大的一段，前位 70% 加注）
     "low_pair",          # 88 77 66（书：中口袋对里较小的一段，前位 30% 加注）
     "small_pair",        # 55 44 33 22（书：小口袋对，抽三条）
@@ -62,7 +65,8 @@ _POSITION_BUCKET = {
     BB: "blind",
 }
 
-_PAIRS_BIG = frozenset({"AA", "KK", "QQ"})
+_PAIRS_BIG = frozenset({"AA", "KK"})
+_PAIRS_BIG_QQ = frozenset({"QQ"})
 _PAIRS_MEDIUM = frozenset({"JJ", "TT", "99"})
 _PAIRS_LOW = frozenset({"88", "77", "66"})
 _PAIRS_SMALL = frozenset({"55", "44", "33", "22"})
@@ -97,7 +101,9 @@ def preflop_hand_class(cards) -> str | None:
     hi, lo, suited = _split(key)
     if hi == lo:
         if key in _PAIRS_BIG:
-            return "big_pair"
+            return "big_pair_aa_kk"
+        if key in _PAIRS_BIG_QQ:
+            return "big_pair_qq"
         if key in _PAIRS_MEDIUM:
             return "medium_pair"
         if key in _PAIRS_LOW:

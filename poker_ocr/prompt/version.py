@@ -179,5 +179,12 @@ from __future__ import annotations
 # （两对与三条以上在 Spot 里拆不开）与顶对强踢无人下注故意留空，渲染回「书中
 # 无此局面」。河牌卡只按牌力与是否面对下注分流、不按人数（Ch7 的河牌建议本身
 # 不按人数切）。golden fixture 全是 flop，三个 hash 不变。
-PROMPT_VERSION = "lean-zh-2026-11-19.8"
+# 2026-11-19.9：翻前面对 3-bet 层落地（#91，父设计 §5 M9）——书中计划段的
+# 翻前行新增「面对 3-bet / 4-bet / 5-bet」层级与英雄角色（未加注过 / 本方
+# 开池 / 本方 3-bet），认不出层级时退回旧的「面对加注」。同时把大口袋对拆成
+# AA-KK 与 QQ：书 p109 让 AA-KK 继续 4-bet、QQ 最多跟注，同一句「大口袋对」
+# 会把 QQ 也说成 4-bet。新增库 87 张翻前卡（原 70 张 + 拆出的 3 张 + 面对
+# 3-bet 的 14 张），4-bet/5-bet 仍显式 unknown。golden fixture 全是 flop，
+# 三个 hash 不变。
+PROMPT_VERSION = "lean-zh-2026-11-19.9"
 PROMPT_LANGUAGE = "zh"

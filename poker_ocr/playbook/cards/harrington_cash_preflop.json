@@ -3,10 +3,10 @@
   "volume": 1,
   "chapter": "ch3",
   "version": "2026-11-19.preflop",
-  "note": "翻前书卡：RFI / 面对加注 / 溜入池；页码为印刷页，pdf_pages 为 PDF 页（印刷页+10）。",
+  "note": "翻前书卡：RFI / 面对加注 / 溜入池；页码为印刷页，pdf_pages 为 PDF 页（印刷页+10）。；#91 增加面对 3-bet 层（facing_level=three_bet）并把大口袋对拆成 AA-KK / QQ。",
   "cards": [
     {
-      "id": "preflop.rfi.big_pair",
+      "id": "preflop.rfi.big_pair_aa_kk",
       "book": "harrington_cash",
       "volume": 1,
       "chapter": "ch3",
@@ -23,7 +23,7 @@
         "street": "preflop",
         "preflop_node": "unopened",
         "facing": "bet",
-        "hand_class": "big_pair"
+        "hand_class": "big_pair_aa_kk"
       },
       "plan": {
         "action": "raise",
@@ -33,7 +33,50 @@
         },
         "freq": 0.9
       },
-      "why": "大口袋对翻前永远加注，无论位置；偶尔平跟只是平衡（p108）。",
+      "why": "AA-KK 翻前永远加注，无论位置；偶尔平跟只是平衡（p108）。拆出 AA-KK 是因为面对 3-bet 它们还要再加注（p109）。",
+      "confidence": "explicit",
+      "priority": 100,
+      "offset_policy": "size_only",
+      "mix": [
+        {
+          "action": "call",
+          "size": {
+            "kind": "bb",
+            "value": 1.0
+          },
+          "freq": 0.1
+        }
+      ]
+    },
+    {
+      "id": "preflop.rfi.big_pair_qq",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        108,
+        109
+      ],
+      "pdf_pages": [
+        118,
+        119
+      ],
+      "street": "preflop",
+      "spot": {
+        "street": "preflop",
+        "preflop_node": "unopened",
+        "facing": "bet",
+        "hand_class": "big_pair_qq"
+      },
+      "plan": {
+        "action": "raise",
+        "size": {
+          "kind": "bb",
+          "value": 3.0
+        },
+        "freq": 0.9
+      },
+      "why": "QQ 和 AA-KK 一样，无人开池时永远加注（p108）。拆出来是因为面对 3-bet 只有 QQ 停在跟注，不能跟着 4-bet（p109）。",
       "confidence": "explicit",
       "priority": 100,
       "offset_policy": "size_only",
@@ -1241,7 +1284,7 @@
       "offset_policy": "size_only"
     },
     {
-      "id": "preflop.vs_raise.big_pair",
+      "id": "preflop.vs_raise.big_pair_aa_kk",
       "book": "harrington_cash",
       "volume": 1,
       "chapter": "ch3",
@@ -1258,7 +1301,7 @@
         "street": "preflop",
         "preflop_node": "raised",
         "facing": "bet",
-        "hand_class": "big_pair"
+        "hand_class": "big_pair_aa_kk"
       },
       "plan": {
         "action": "raise",
@@ -1267,7 +1310,39 @@
           "value": 9.0
         }
       },
-      "why": "大口袋对面对加注一律再加注；开注 3BB 时加到约 9BB（p108-109）。",
+      "why": "大口袋对面对单次加注一律再加注；开注 3BB 时加到约 9BB（p108-109）。AA-KK 是其中可以继续 4-bet 的两手。",
+      "confidence": "explicit",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "preflop.vs_raise.big_pair_qq",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        108,
+        109
+      ],
+      "pdf_pages": [
+        118,
+        119
+      ],
+      "street": "preflop",
+      "spot": {
+        "street": "preflop",
+        "preflop_node": "raised",
+        "facing": "bet",
+        "hand_class": "big_pair_qq"
+      },
+      "plan": {
+        "action": "raise",
+        "size": {
+          "kind": "bb",
+          "value": 9.0
+        }
+      },
+      "why": "书 p108-109 把 AA-QQ 一起说「面对加注一律再加注」，所以这里也是加到 9BB；QQ 与 AA-KK 的分岔要等再被 3-bet 才出现（p109）。",
       "confidence": "explicit",
       "priority": 100,
       "offset_policy": "size_only"
@@ -1821,7 +1896,7 @@
       "offset_policy": "size_only"
     },
     {
-      "id": "preflop.limped.big_pair",
+      "id": "preflop.limped.big_pair_aa_kk",
       "book": "harrington_cash",
       "volume": 1,
       "chapter": "ch3",
@@ -1836,7 +1911,7 @@
         "street": "preflop",
         "preflop_node": "limped",
         "facing": "bet",
-        "hand_class": "big_pair"
+        "hand_class": "big_pair_aa_kk"
       },
       "plan": {
         "action": "raise",
@@ -1845,7 +1920,37 @@
           "value": 3.0
         }
       },
-      "why": "攻击溜入者：AA-TT 加注，别让大盲便宜看翻牌（p129）。",
+      "why": "攻击溜入者：AA-TT 一律加注，别让大盲便宜看翻牌（p129）。",
+      "confidence": "explicit",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "preflop.limped.big_pair_qq",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        129
+      ],
+      "pdf_pages": [
+        139
+      ],
+      "street": "preflop",
+      "spot": {
+        "street": "preflop",
+        "preflop_node": "limped",
+        "facing": "bet",
+        "hand_class": "big_pair_qq"
+      },
+      "plan": {
+        "action": "raise",
+        "size": {
+          "kind": "bb",
+          "value": 3.0
+        }
+      },
+      "why": "攻击溜入者：书 p129 的 AA-TT 含 QQ，同样加注到 3BB。",
       "confidence": "explicit",
       "priority": 100,
       "offset_policy": "size_only"
@@ -2254,6 +2359,390 @@
       "why": "大盲面对溜入池免费看翻牌，过牌（p123、p129）。",
       "confidence": "explicit",
       "priority": 50,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "preflop.vs_3bet.big_pair_aa_kk",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        109
+      ],
+      "pdf_pages": [
+        119
+      ],
+      "street": "preflop",
+      "spot": {
+        "street": "preflop",
+        "preflop_node": "three_bet",
+        "facing": "raise",
+        "facing_level": "three_bet",
+        "hand_class": "big_pair_aa_kk"
+      },
+      "plan": {
+        "action": "raise"
+      },
+      "why": "书 p109：AA-KK 面对 3-bet 继续再加注（4-bet）；书里没给 4-bet 的尺寸，这里只声明动作，尺寸交给本桌第一个合法加注档，不编数字。",
+      "confidence": "explicit",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "preflop.vs_3bet.big_pair_qq",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        109
+      ],
+      "pdf_pages": [
+        119
+      ],
+      "street": "preflop",
+      "spot": {
+        "street": "preflop",
+        "preflop_node": "three_bet",
+        "facing": "raise",
+        "facing_level": "three_bet",
+        "hand_class": "big_pair_qq"
+      },
+      "plan": {
+        "action": "call"
+      },
+      "why": "书 p109：QQ 面对 3-bet 最多跟注（弱手可再加注、强手只跟）；卡取「最多跟注」这一侧，不再 4-bet。",
+      "confidence": "explicit",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "preflop.vs_3bet.medium_pair",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        111
+      ],
+      "pdf_pages": [
+        121
+      ],
+      "street": "preflop",
+      "spot": {
+        "street": "preflop",
+        "preflop_node": "three_bet",
+        "facing": "raise",
+        "facing_level": "three_bet",
+        "hand_class": "medium_pair"
+      },
+      "plan": {
+        "action": "fold"
+      },
+      "why": "书 p111：中口袋对 JJ-99 遇到加注再加注直接弃。",
+      "confidence": "explicit",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "preflop.vs_3bet.low_pair",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        111
+      ],
+      "pdf_pages": [
+        121
+      ],
+      "street": "preflop",
+      "spot": {
+        "street": "preflop",
+        "preflop_node": "three_bet",
+        "facing": "raise",
+        "facing_level": "three_bet",
+        "hand_class": "low_pair"
+      },
+      "plan": {
+        "action": "fold"
+      },
+      "why": "书 p111：88-66 遇到加注再加注同样弃，别用 set-mine 的价格硬跟。",
+      "confidence": "explicit",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "preflop.vs_3bet.small_pair",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        113,
+        114
+      ],
+      "pdf_pages": [
+        123,
+        124
+      ],
+      "street": "preflop",
+      "spot": {
+        "street": "preflop",
+        "preflop_node": "three_bet",
+        "facing": "raise",
+        "facing_level": "three_bet",
+        "hand_class": "small_pair"
+      },
+      "plan": {
+        "action": "fold"
+      },
+      "why": "书 p113-114：小口袋对遇到再加注默认弃，没有跟注者时更没赔率。",
+      "confidence": "explicit",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "preflop.vs_3bet.ak",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        115,
+        116
+      ],
+      "pdf_pages": [
+        125,
+        126
+      ],
+      "street": "preflop",
+      "spot": {
+        "street": "preflop",
+        "preflop_node": "three_bet",
+        "facing": "raise",
+        "facing_level": "three_bet",
+        "hand_class": "ak"
+      },
+      "plan": {
+        "action": "fold"
+      },
+      "why": "书 p115-116：AK 面对单次加注可以跟，面对「加注 + 再加注」弃；本卡只覆盖后一种局面。",
+      "confidence": "interpreted",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "preflop.vs_3bet.aq",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        115,
+        116
+      ],
+      "pdf_pages": [
+        125,
+        126
+      ],
+      "street": "preflop",
+      "spot": {
+        "street": "preflop",
+        "preflop_node": "three_bet",
+        "facing": "raise",
+        "facing_level": "three_bet",
+        "hand_class": "aq"
+      },
+      "plan": {
+        "action": "fold"
+      },
+      "why": "书 p115-116：AQ 与 AK 同一条线——面对再被加注就弃。",
+      "confidence": "interpreted",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "preflop.vs_3bet.ace_broadway",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        118
+      ],
+      "pdf_pages": [
+        128
+      ],
+      "street": "preflop",
+      "spot": {
+        "street": "preflop",
+        "preflop_node": "three_bet",
+        "facing": "raise",
+        "facing_level": "three_bet",
+        "hand_class": "ace_broadway"
+      },
+      "plan": {
+        "action": "fold"
+      },
+      "why": "书 p118：Ax（含 AJ-AT）面对加注全弃，面对 3-bet 更不例外。",
+      "confidence": "interpreted",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "preflop.vs_3bet.weak_ace",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        118
+      ],
+      "pdf_pages": [
+        128
+      ],
+      "street": "preflop",
+      "spot": {
+        "street": "preflop",
+        "preflop_node": "three_bet",
+        "facing": "raise",
+        "facing_level": "three_bet",
+        "hand_class": "weak_ace"
+      },
+      "plan": {
+        "action": "fold"
+      },
+      "why": "书 p118：弱 A 面对加注全弃，3-bet 池里没有它的位置。",
+      "confidence": "interpreted",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "preflop.vs_3bet.trouble",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        120
+      ],
+      "pdf_pages": [
+        130
+      ],
+      "street": "preflop",
+      "spot": {
+        "street": "preflop",
+        "preflop_node": "three_bet",
+        "facing": "raise",
+        "facing_level": "three_bet",
+        "hand_class": "trouble"
+      },
+      "plan": {
+        "action": "fold"
+      },
+      "why": "书 p120：麻烦牌型 KQ/KJ/QJ 面对加注就弃，面对 3-bet 更弃。",
+      "confidence": "interpreted",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "preflop.vs_3bet.weak_trouble",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        120
+      ],
+      "pdf_pages": [
+        130
+      ],
+      "street": "preflop",
+      "spot": {
+        "street": "preflop",
+        "preflop_node": "three_bet",
+        "facing": "raise",
+        "facing_level": "three_bet",
+        "hand_class": "weak_trouble"
+      },
+      "plan": {
+        "action": "fold"
+      },
+      "why": "书 p120：KT/QT 中位直接弃；面对 3-bet 没有例外。",
+      "confidence": "interpreted",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "preflop.vs_3bet.suited_connector",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        121
+      ],
+      "pdf_pages": [
+        131
+      ],
+      "street": "preflop",
+      "spot": {
+        "street": "preflop",
+        "preflop_node": "three_bet",
+        "facing": "raise",
+        "facing_level": "three_bet",
+        "hand_class": "suited_connector"
+      },
+      "plan": {
+        "action": "fold"
+      },
+      "why": "书 p121：同花连张跟 3-bet 要同时有位置、且已有跟注者；Spot 里没有「已有跟注者」这一维，凑不齐条件就按书的默认弃。",
+      "confidence": "interpreted",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "preflop.vs_3bet.speculative",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        122
+      ],
+      "pdf_pages": [
+        132
+      ],
+      "street": "preflop",
+      "spot": {
+        "street": "preflop",
+        "preflop_node": "three_bet",
+        "facing": "raise",
+        "facing_level": "three_bet",
+        "hand_class": "speculative"
+      },
+      "plan": {
+        "action": "fold"
+      },
+      "why": "书 §3.9（p122）：弱牌/投机牌遇到再加注直接弃。",
+      "confidence": "interpreted",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "preflop.vs_3bet.other",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        122
+      ],
+      "pdf_pages": [
+        132
+      ],
+      "street": "preflop",
+      "spot": {
+        "street": "preflop",
+        "preflop_node": "three_bet",
+        "facing": "raise",
+        "facing_level": "three_bet",
+        "hand_class": "other"
+      },
+      "plan": {
+        "action": "fold"
+      },
+      "why": "书 §3.9（p122）：没有牌力的牌面对再加注直接弃。",
+      "confidence": "interpreted",
+      "priority": 100,
       "offset_policy": "size_only"
     }
   ]

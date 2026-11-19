@@ -63,9 +63,15 @@ def _dedup(rows) -> list[dict]:
 
 
 def _bucket(spot: Spot) -> tuple:
-    """统计桶：翻前看节点/面对，翻后看街/牌力/听牌/面对。"""
+    """统计桶：翻前看节点/加注层级/英雄角色，翻后看街/牌力/听牌/面对。
+
+    加注层级（#91）：3-bet 池是独立决策点，和单加注池混在一个桶里会把
+    覆盖率磨平。认不出层级的点单列成 unknown 一行，不并进任何节点的桶。
+    """
     if spot.street == "preflop":
-        return "preflop", (spot.preflop_node, spot.facing)
+        if spot.facing_level in (None, "", "unknown"):
+            return "preflop", ("unknown",)
+        return "preflop", (spot.preflop_node, spot.facing_level, spot.hero_role)
     return spot.street, (spot.made_hand, spot.draw, spot.facing)
 
 
