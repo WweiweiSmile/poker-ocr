@@ -572,6 +572,9 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         path = urlsplit(self.path).path
+        if path == "/api/anchor":
+            self._anchor()
+            return
         if path not in ("/api/control/click", "/api/control/prefold"):
             self.send_error(404)
             return
@@ -617,6 +620,47 @@ class _Handler(BaseHTTPRequestHandler):
         except Exception:  # noqa: BLE001
             pass
         self._json(state, status=(200 if state.get("ok", True) else 400))
+
+    def _anchor(self) -> None:
+        """`POST /api/anchor`：把点击时刻附近的帧与日志落成一个锚点目录。
+
+        body：`{"seq": 123}` 或 `{}`（取最新帧）。只在本机 + token 下可用；
+        落盘由调用方（AnchorCapture）做，这里只做协议校验和错误映射。
+        """
+        if not self._authorized():
+            self._json({"ok": False, "detail": "缺少或错误的 X-Workbench-Token"},
+                       status=403)
+            return
+        anchor = getattr(self.server, "anchor", None)
+        if not callable(anchor):
+            self._json({"ok": False, "detail": "本次运行没有锚点"}, status=404)
+            return
+        try:
+            length = min(int(self.headers.get("Content-Length") or 0), 4096)
+            raw = self.rfile.read(length) if length else b"{}"
+            body = json.loads(raw.decode("utf-8") or "{}")
+        except (ValueError, UnicodeDecodeError):
+            self._json({"ok": False, "detail": "请求体不是合法 JSON"}, status=400)
+            return
+        if not isinstance(body, dict):
+            self._json({"ok": False, "detail": "请求体必须是 JSON 对象"},
+                       status=400)
+            return
+        seq = body.get("seq")
+        if seq is not None and (isinstance(seq, bool)
+                                or not isinstance(seq, int)):
+            self._json({"ok": False, "detail": "seq 必须是整数或 null"},
+                       status=400)
+            return
+        try:
+            result = anchor(seq)
+        except Exception as exc:  # noqa: BLE001 — 落盘失败要让人看见原因
+            self._json({"ok": False,
+                        "detail": f"{type(exc).__name__}: {exc}"}, status=500)
+            return
+        if not isinstance(result, dict):
+            result = {"ok": bool(result)}
+        self._json(result, status=(200 if result.get("ok", True) else 409))
 
     def _range(self) -> None:
         """`GET /api/range?hand=&street=&actions=`：只读一条 trace 记录。
@@ -772,12 +816,14 @@ class LiveWebServer:
                  preview: PreviewStore | None = None,
                  meta: Callable[[], dict] | None = None,
                  range_query: Callable[..., dict] | None = None,
+                 anchor: Callable[[int | None], dict] | None = None,
                  token: str | None = None,
                  run_id: str | None = None) -> None:
         self.store = LiveWebStore(session=session, layout=layout)
         self.control = control
         self.preview = preview
         self.meta = meta
+        self.anchor = anchor
         self.token = token
         self.run_id = run_id
         self._log = log or (lambda _msg: None)
@@ -788,10 +834,16 @@ class LiveWebServer:
         self._httpd.preview = preview  # type: ignore[attr-defined]
         self._httpd.meta = meta  # type: ignore[attr-defined]
         self._httpd.range_query = range_query  # type: ignore[attr-defined]
+        self._httpd.anchor = anchor  # type: ignore[attr-defined]
         self._httpd.token = token  # type: ignore[attr-defined]
         self._httpd.run_id = run_id  # type: ignore[attr-defined]
         self._thread = threading.Thread(target=self._httpd.serve_forever,
                                         name="live-web", daemon=True)
+
+    def set_anchor(self, anchor: Callable[[int | None], dict] | None) -> None:
+        """运行中挂上锚点（processor 晚于 Web 服务构造，不能走构造参数）。"""
+        self.anchor = anchor
+        self._httpd.anchor = anchor  # type: ignore[attr-defined]
 
     @property
     def port(self) -> int:

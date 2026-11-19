@@ -35,6 +35,7 @@ import os
 import re
 import threading
 import time
+from collections import deque
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -112,14 +113,24 @@ class ConsoleLog:
         self._lock = threading.Lock()
         self._fh = open(self.path, "a" if append else "w",
                         encoding="utf-8", newline="\n")
+        # 最近若干行：锚点要按「点击时刻 ±10 秒」回捞控制台，落盘文件不适合
+        # 反查（一场几十分钟、还要解析时间前缀）。只留内存，进程退出即丢。
+        self._recent: deque[tuple[float, str]] = deque(maxlen=400)
 
     def write(self, message: str) -> None:
         line = f"{_now()} {strip_ansi(message)}\n"
+        now = time.time()
         with self._lock:
+            self._recent.append((now, line))
             if self._fh.closed:
                 return
             self._fh.write(line)
             self._fh.flush()
+
+    def recent_between(self, start: float, end: float) -> list[str]:
+        """墙钟 `[start, end]` 内的控制台行（锚点用；最多最近 400 行）。"""
+        with self._lock:
+            return [line for ts, line in self._recent if start <= ts <= end]
 
     def close(self) -> None:
         with self._lock:
@@ -145,6 +156,9 @@ class LiveEventLog:
                              else started_mono)
         self._lock = threading.Lock()
         self._seq = 0
+        # 最近若干条事件（墙钟 + 已落盘记录）：锚点按 ±10 秒回捞用。
+        # 不读文件反查：一场会话事件上万条，按行解析比重放一遍还慢。
+        self._recent: deque[tuple[float, dict]] = deque(maxlen=500)
         needs_newline = False
         if append and self.path.is_file() and self.path.stat().st_size > 0:
             with open(self.path, "rb") as fh:
@@ -177,7 +191,13 @@ class LiveEventLog:
             self._fh.write(json.dumps(_jsonable(record), ensure_ascii=False)
                            + "\n")
             self._fh.flush()
+            self._recent.append((time.time(), record))
             return record
+
+    def recent_between(self, start: float, end: float) -> list[dict]:
+        """墙钟 `[start, end]` 内的事件记录（锚点用；最多最近 500 条）。"""
+        with self._lock:
+            return [rec for ts, rec in self._recent if start <= ts <= end]
 
     def close(self) -> None:
         with self._lock:

@@ -402,6 +402,92 @@ def test_range_api() -> None:
         server.close()
 
 
+def test_anchor_endpoint() -> None:
+    """POST /api/anchor：token 校验、seq 校验、无锚点 404、失败 409。"""
+    calls: list[int | None] = []
+    server = LiveWebServer(session={"session_id": "s-1"}, layout={}, port=0,
+                           token="tok-123456", run_id="r-1",
+                           anchor=lambda seq: (calls.append(seq)
+                                               or {"ok": True,
+                                                   "center_seq": seq or 7}))
+    server.start()
+    try:
+        base = server.url
+
+        def post(payload, token="tok-123456"):
+            body = payload if isinstance(payload, bytes) else json.dumps(payload).encode()
+            headers = {"Content-Type": "application/json"}
+            if token:
+                headers["X-Workbench-Token"] = token
+            req = urllib.request.Request(base + "/api/anchor", data=body,
+                                         method="POST", headers=headers)
+            try:
+                with urllib.request.urlopen(req, timeout=3) as resp:
+                    return resp.status, json.loads(resp.read())
+            except urllib.error.HTTPError as exc:
+                return exc.code, json.loads(exc.read() or b"{}")
+
+        code, res = post({"seq": 12}, token=None)
+        check(code == 403, f"无 token 应 403：{code} {res}")
+        check(calls == [], "未授权不该触发锚点")
+
+        code, res = post({"seq": 12})
+        check(code == 200 and res["center_seq"] == 12, f"带 seq：{code} {res}")
+        check(calls == [12], f"回调应收到 seq：{calls}")
+
+        code, res = post({})
+        check(code == 200 and calls[-1] is None, f"空 body 取最新：{code} {res}")
+
+        code, res = post({"seq": "abc"})
+        check(code == 400 and len(calls) == 2, f"非法 seq 应 400：{code} {res}")
+
+        code, res = post({"seq": True})
+        check(code == 400 and len(calls) == 2, f"bool 不算 int：{code} {res}")
+
+        code, res = post(b"not json")
+        check(code == 400 and len(calls) == 2, f"坏 JSON 应 400：{code} {res}")
+    finally:
+        server.close()
+
+    # 没有挂锚点（比如纯 CLI 启动）：明确 404，不是 500。
+    server = LiveWebServer(session={"session_id": "s-1"}, layout={}, port=0,
+                           token="tok-123456")
+    server.start()
+    try:
+        req = urllib.request.Request(
+            server.url + "/api/anchor", data=b"{}", method="POST",
+            headers={"Content-Type": "application/json",
+                     "X-Workbench-Token": "tok-123456"})
+        try:
+            urllib.request.urlopen(req, timeout=3)
+            check(False, "无锚点应 404")
+        except urllib.error.HTTPError as exc:
+            check(exc.code == 404, f"无锚点应 404：{exc.code}")
+    finally:
+        server.close()
+
+    # 落盘失败（比如磁盘满）：409，让页面能提示原因。
+    server = LiveWebServer(session={"session_id": "s-1"}, layout={}, port=0,
+                           token="tok-123456",
+                           anchor=lambda seq: {"ok": False,
+                                               "detail": "写不进去"})
+    server.start()
+    try:
+        req = urllib.request.Request(
+            server.url + "/api/anchor", data=b"{}", method="POST",
+            headers={"Content-Type": "application/json",
+                     "X-Workbench-Token": "tok-123456"})
+        try:
+            urllib.request.urlopen(req, timeout=3)
+            check(False, "锚点失败应 409")
+        except urllib.error.HTTPError as exc:
+            body = json.loads(exc.read() or b"{}")
+            check(exc.code == 409 and body["detail"] == "写不进去",
+                  f"失败应 409：{exc.code} {body}")
+    finally:
+        server.close()
+
+
 def main() -> int:
     tests = [test_cli_defaults, test_layout_uses_name_slot_centers,
              test_store_tracks_frames_advice_hands,
@@ -409,7 +495,8 @@ def main() -> int:
              test_http_snapshot_static_and_sse,
              test_prefold_control,
              test_meta_preview_and_click_control,
-             test_range_api]
+             test_range_api,
+             test_anchor_endpoint]
     print("── 实时 Web 看板 ──────────────────────────────")
     for t in tests:
         before = len(FAILS)

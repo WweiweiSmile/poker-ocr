@@ -127,6 +127,11 @@ DEFAULT_INCIDENT_MAX = 20
 GATE_LOG_SECONDS = 5.0       # 同一类原因最多多久打一行
 GATE_DUMP_LIMIT = 3          # 单次会话最多为几类丢帧原因存样本
 GATE_DUMP_MIN_GAP = 10.0     # 两次落盘至少间隔多久（秒）
+# ── 错误段证据（人工定位用） ──
+# 连续丢弃帧凑够 ERROR_SEGMENT_FRAMES 帧才算「一段」并落一张现场图；单帧
+# 瞬闪不存，避免整场 19% 的丢弃率把磁盘写满。
+ERROR_SEGMENT_FRAMES = 3
+ERROR_DUMP_LIMIT = 120       # 单次会话最多存多少张错误段现场图
 ZERO_ACCEPT_WARN_AFTER = 20  # 处理这么多帧仍 0 接受就告警
 # 默认不节流：处理完当前帧立刻取邮箱里的最新帧，中间帧直接丢弃。
 # `--every` 仍保留给调试/降压用（>0 时按该间隔采样）。
@@ -1227,6 +1232,7 @@ class LiveProcessor:
                  incident_dir: Path | None = None,
                  incident_frames: int = 10,
                  incident_max: int = DEFAULT_INCIDENT_MAX,
+                 error_dir: Path | None = None,
                  card_confirm_frames: int = 2,
                  card_doubt_window: float = DEFAULT_DOUBT_WINDOW,
                  clock=time.monotonic, log=_log,
@@ -1373,6 +1379,18 @@ class LiveProcessor:
         self._frame_ring: deque | None = (
             deque(maxlen=max(1, int(incident_frames)))
             if self.incident_dir is not None else None)
+        # 人工锚点环形缓冲：与疑惑帧独立，无条件常开。
+        # 只存引用（seq/epoch/t/frame_id/原图），点击时才编码落盘。
+        self._anchor_ring: deque[tuple[int, int, float, str, np.ndarray]] = deque(
+            maxlen=20)
+        self._anchor_lock = threading.Lock()
+        # 错误段证据：连续丢弃帧凑够 3 帧才存一张，给错误行做缩略图。
+        self.error_dir = Path(error_dir) if error_dir is not None else None
+        self._discard_streak = 0
+        self._discard_start_seq: int | None = None
+        self._discard_cats: tuple[str, ...] = ()
+        self._error_dumps = 0
+        self._frame_evidence: dict | None = None
         # 疑惑节流：按类别记录「本次异常从什么时候开始」以及是否已经落过盘。
         # 持续几分钟的同一个异常只存一次，而不是每 5 秒重复存 10 帧。
         self.incident_max = max(0, int(incident_max))
@@ -1485,6 +1503,10 @@ class LiveProcessor:
         if self._frame_ring is not None:
             self._frame_ring.append((packet.seq, round(t, 2), frame_id,
                                      packet.image))
+        # 锚点缓冲无条件常开：人点「锚点」时按 seq 回捞最近 20 帧。
+        with self._anchor_lock:
+            self._anchor_ring.append((packet.seq, packet.epoch, round(t, 2),
+                                      frame_id, packet.image))
         t0 = self.clock()
         # 每帧读一次牌。纯 OpenCV，几个毫秒；失败不致命，记一次日志后继续。
         cards = self._read_cards(packet.image)
@@ -1508,7 +1530,12 @@ class LiveProcessor:
             cards_sig = self._cards_signature(cards)
         self._check_card_incident(packet, t, frame_id, cards)
         if outcome.kind == "discard":
-            self._note_gate_discard(packet, outcome, t)
+            self._note_gate_discard(packet, outcome, t, cards)
+        else:
+            # 段结束：下一次丢弃重新计 3 帧确认。
+            self._discard_streak = 0
+            self._discard_start_seq = None
+            self._discard_cats = ()
         proc_ms = (self.clock() - t0) * 1000
         self.processed += 1
         self.total_proc_ms += proc_ms
@@ -1551,6 +1578,34 @@ class LiveProcessor:
         self._publish_frame(packet, t, frame_id, age, proc_ms, outcome,
                             cards, body)
         return outcome.kind
+
+    # ── 人工锚点 ─────────────────────────────────────────
+
+    def anchor_frames(self) -> list[tuple[int, int, float, str, np.ndarray]]:
+        """最近 20 帧的副本（锚点「点击后 3 秒」收集用）。"""
+        with self._anchor_lock:
+            return list(self._anchor_ring)
+
+    def anchor_snapshot(self, seq: int | None = None
+                        ) -> tuple[list[tuple[int, int, float, str, np.ndarray]],
+                                   bool]:
+        """取锚点中心帧及其之前的帧，返回 `(帧列表, 是否降级)`。
+
+        `seq=None` 取最新；`seq` 不在环里（比最旧还旧、或客户端给的序号
+        超前）时取最近的可用帧并把 `degraded` 置真——宁可锚到邻近帧，
+        也不要因为序号对不上让用户白点一次。
+        """
+        frames = self.anchor_frames()
+        if not frames:
+            return [], False
+        if seq is None:
+            return frames, False
+        picked = [f for f in frames if f[0] <= seq]
+        if not picked:
+            return [frames[0]], True
+        if picked[-1][0] != seq:
+            return picked, True
+        return picked, False
 
     def _publish_preview(self, packet: FramePacket, t: float,
                          frame_id: str) -> None:
@@ -1685,21 +1740,32 @@ class LiveProcessor:
         }
         if body is not None:
             payload["state"] = body
+        if self._frame_evidence is not None:
+            payload["evidence"] = self._frame_evidence
+            self._frame_evidence = None
         self._publish("frame", payload)
 
     # ── 质量闸丢帧的现场 ─────────────────────────────────
 
     def _note_gate_discard(self, packet: FramePacket, outcome,
-                           t: float) -> None:
-        """一帧被质量闸丢掉：节流打印原因，必要时落一帧样本。
+                           t: float, cards=None) -> None:
+        """一帧被质量闸丢掉：计错误段、节流打印原因，必要时落样本。
 
-        只把原因留到退出汇总，会让「启动后只看到 [状态] 行」变成黑盒：
-        用户不知道是哪几个字段没读出来。这里在丢帧当场说清楚，并把
-        第一帧同类样本存进 `logs/incidents/…_gate_…`，方便直接看画面。
+        段计数与日志节流无关：错误段证据要按「连续第 3 帧」确认，不能因为
+        这一帧的日志被节流掉就漏计。
         """
         errors = list(outcome.errors or ())
         cats = (tuple(sorted({e.split(":", 1)[0] for e in errors}))
                 or ("unknown",))
+        self._discard_streak += 1
+        if self._discard_streak == 1:
+            self._discard_start_seq = packet.seq
+            self._discard_cats = cats
+        if (self._discard_streak == ERROR_SEGMENT_FRAMES
+                and self.error_dir is not None
+                and self._error_dumps < ERROR_DUMP_LIMIT):
+            self._dump_error_frame(packet, outcome, self._discard_cats,
+                                   cards, t)
         now = self.clock()
         if (cats == self._gate_sig
                 and now - self._gate_logged_at < GATE_LOG_SECONDS):
@@ -1747,6 +1813,46 @@ class LiveProcessor:
         self._last_gate_dump = self.clock()
         self.gate_dumps += 1
         self.last_gate_dump = str(folder)
+
+    def _dump_error_frame(self, packet: FramePacket, outcome,
+                          cats: tuple[str, ...], cards, t: float) -> None:
+        """错误段确认帧落盘：给事件流的错误行一张能点开的现场图。"""
+        if self.error_dir is None:
+            return
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        folder = self.error_dir / f"{stamp}_{'-'.join(cats)[:48]}"
+        hand = self._current_hand()
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            ok = cv2.imwrite(str(folder / "frame.jpg"), packet.image,
+                             [cv2.IMWRITE_JPEG_QUALITY, 92])
+            if not ok:
+                raise OSError("cv2.imwrite 返回 False")
+            (folder / "meta.json").write_text(json.dumps({
+                "schema": "live.error.v1",
+                "kind": "discard_segment",
+                "created_at": _iso_now(),
+                "seq": packet.seq,
+                "epoch": packet.epoch,
+                "t": round(t, 2),
+                "errors": list(outcome.errors or ()),
+                "cats": list(cats),
+                "segment_start_seq": self._discard_start_seq,
+                "segment_frames": self._discard_streak,
+                "cards": self._cards_event(cards),
+                "hand_id": (hand or {}).get("hand_id"),
+                "street": (hand or {}).get("street"),
+            }, ensure_ascii=False, indent=2), encoding="utf-8")
+        except OSError as exc:          # 落盘失败不能拖垮识别
+            self.log(f"[警告] 错误段截图失败：{exc}")
+            return
+        self._error_dumps += 1
+        self._frame_evidence = {
+            "path": str(folder / "frame.jpg"),
+            "folder": str(folder),
+            "segment_start_seq": self._discard_start_seq,
+            "frames": self._discard_streak,
+        }
 
     # ── 翻前预点弃牌 ────────────────────────────────────────────
     def set_prefold_mode(self, mode: str) -> None:
@@ -3169,6 +3275,220 @@ class LiveProcessor:
 
 # ─────────────────────────── CLI ───────────────────────────
 
+ANCHOR_SCHEMA = "live.anchor.v1"
+ANCHOR_WINDOW_SECONDS = 10.0
+# 锚点 meta 里不重复提示词原文：几 KB 的文本对事后排查没用，还会把
+# meta.json 撑大。建议的其余字段（选项/理由/计划/事实/来源）全留。
+_ADVICE_PROMPT_KEYS = ("prompt_system", "prompt_user", "raw_response")
+
+
+def _anchor_advice(payload: dict | None) -> dict | None:
+    if not isinstance(payload, dict):
+        return None
+    return {k: v for k, v in payload.items() if k not in _ADVICE_PROMPT_KEYS}
+
+
+class AnchorCapture:
+    """一次人工锚点：前 20 帧 + 后 3 秒帧 + ±10 秒事件/控制台 + 当时建议。
+
+    与 incident（自动疑惑帧）分开：人点了就必须落盘，不受自动节流与单场
+    上限影响；目录落在 `<run_dir>/anchors/<stamp>_manual/`，和
+    `live.events.jsonl` / `live.log` 同目录，方便整包带走排查。
+
+    线程模型：`trigger()` 在 HTTP 处理线程里同步写完 pre 帧并返回；post
+    帧由后台线程轮询 `frames()` 收集 3 秒，再补写 meta。帧只存引用
+    （和 incident 环一样），编码在后台做，不阻塞识别主循环。
+    """
+
+    def __init__(self, *, run_dir: Path,
+                 pre_frames: Callable[[int | None], tuple[list, bool]],
+                 frames: Callable[[], list],
+                 publish: Callable[[str, dict], None] | None = None,
+                 session_id: str = "", run_id: str | None = None,
+                 event_log: LiveEventLog | None = None,
+                 console_log: ConsoleLog | None = None,
+                 current_hand: Callable[[], dict | None] | None = None,
+                 last_advice: Callable[[], dict | None] | None = None,
+                 table: Callable[[], dict | None] | None = None,
+                 post_seconds: float = 3.0, poll_seconds: float = 0.05,
+                 clock: Callable[[], float] = time.time,
+                 log: Callable[[str], None] = _log) -> None:
+        self.run_dir = Path(run_dir)
+        self._pre_frames = pre_frames
+        self._frames = frames
+        self._publish = publish
+        self.session_id = session_id
+        self.run_id = run_id
+        self._event_log = event_log
+        self._console_log = console_log
+        self._current_hand = current_hand
+        self._last_advice = last_advice
+        self._table = table
+        self.post_seconds = max(0.0, float(post_seconds))
+        self.poll_seconds = max(0.01, float(poll_seconds))
+        self._clock = clock
+        self.log = log
+        self._threads: list[threading.Thread] = []
+        self._lock = threading.Lock()
+
+    # ── 对外 ──
+
+    def trigger(self, seq: int | None = None) -> dict:
+        """落一次锚点；返回给 HTTP 的摘要（post 帧在后台继续收集）。"""
+        pre, degraded = self._pre_frames(seq)
+        if not pre:
+            return {"ok": False, "detail": "还没有可用帧（刚启动？）"}
+        center_seq, center_epoch, center_t = pre[-1][0], pre[-1][1], pre[-1][2]
+        center_wall = self._clock()
+        created = datetime.now()
+        stamp = created.strftime("%Y%m%d_%H%M%S_%f")
+        folder = self.run_dir / "anchors" / f"{stamp}_manual"
+        frames_dir = folder / "frames"
+        frames_dir.mkdir(parents=True, exist_ok=True)
+        meta_frames: list[dict] = []
+        pre_written = self._write_frames(frames_dir, pre, meta_frames)
+        hand = self._safe(self._current_hand)
+        advice = _anchor_advice(self._safe(self._last_advice))
+        table = self._safe(self._table)
+        meta = {
+            "schema": ANCHOR_SCHEMA,
+            "kind": "manual",
+            "created_at": created.astimezone().isoformat(
+                timespec="milliseconds"),
+            "session_id": self.session_id,
+            "run_id": self.run_id,
+            "hand_id": (hand or {}).get("hand_id"),
+            "street": (hand or {}).get("street"),
+            "center_seq": center_seq,
+            "center_epoch": center_epoch,
+            "center_t": center_t,
+            "center_wall": datetime.fromtimestamp(center_wall).astimezone(
+            ).isoformat(timespec="milliseconds"),
+            "degraded": bool(degraded),
+            "pre_frames": pre_written,
+            "post_seconds": self.post_seconds,
+            "frames": meta_frames,
+            "events": [],
+            "console_log": [],
+            "advice": advice,
+            "table": table,
+            "note": "",
+        }
+        # 先落骨架：进程被杀也不会只剩一个空目录。
+        self._write_meta(folder, meta)
+        self._emit({"folder": str(folder), "center_seq": center_seq,
+                    "degraded": bool(degraded), "frames": pre_written,
+                    "done": False})
+        thread = threading.Thread(
+            target=self._collect_post,
+            args=(folder, frames_dir, center_seq, center_wall, meta),
+            name="anchor-post", daemon=True)
+        with self._lock:
+            self._threads.append(thread)
+        thread.start()
+        return {"ok": True, "folder": str(folder), "center_seq": center_seq,
+                "degraded": bool(degraded), "frames": pre_written}
+
+    def wait(self, timeout: float | None = 10.0) -> None:
+        """测试/退出用：等后台 post 收集结束。"""
+        with self._lock:
+            threads = list(self._threads)
+        for thread in threads:
+            thread.join(timeout)
+
+    # ── 内部 ──
+
+    def _safe(self, fn):
+        if fn is None:
+            return None
+        try:
+            return fn()
+        except Exception as exc:  # noqa: BLE001 — 上下文取不到不能拖垮锚点
+            self.log(f"[警告] 锚点取上下文失败：{type(exc).__name__}: {exc}")
+            return None
+
+    def _emit(self, payload: dict) -> None:
+        if self._publish is None:
+            return
+        try:
+            self._publish("anchor", payload)
+        except Exception as exc:  # noqa: BLE001
+            self.log(f"[警告] 锚点事件发布失败：{type(exc).__name__}: {exc}")
+
+    def _write_frames(self, frames_dir: Path, frames: list,
+                      meta_frames: list[dict]) -> int:
+        written = 0
+        for seq, epoch, t, frame_id, image in frames:
+            name = f"{len(meta_frames):02d}_e{epoch}_{seq}.jpg"
+            path = frames_dir / name
+            try:
+                ok = cv2.imwrite(str(path), image,
+                                 [cv2.IMWRITE_JPEG_QUALITY, 92])
+            except Exception as exc:  # noqa: BLE001
+                self.log(f"[警告] 锚点帧编码失败 seq={seq}：{exc}")
+                ok = False
+            if not ok:
+                continue
+            meta_frames.append({"seq": seq, "epoch": epoch, "t": t,
+                                "frame_id": frame_id,
+                                "file": f"frames/{name}"})
+            written += 1
+        return written
+
+    def _collect_post(self, folder: Path, frames_dir: Path, center_seq: int,
+                      center_wall: float, meta: dict) -> None:
+        deadline = self._clock() + self.post_seconds
+        seen = {f["seq"] for f in meta["frames"]}
+        try:
+            while self._clock() < deadline:
+                batch = [f for f in self._frames()
+                         if f[0] > center_seq and f[0] not in seen]
+                if batch:
+                    self._write_frames(frames_dir, batch, meta["frames"])
+                    seen.update(f[0] for f in batch)
+                time.sleep(self.poll_seconds)
+            # sleep 边界后再收一次，避免最后一帧落在轮询间隔里。
+            batch = [f for f in self._frames()
+                     if f[0] > center_seq and f[0] not in seen]
+            if batch:
+                self._write_frames(frames_dir, batch, meta["frames"])
+            start = center_wall - ANCHOR_WINDOW_SECONDS
+            end = center_wall + ANCHOR_WINDOW_SECONDS
+            if self._event_log is not None:
+                try:
+                    meta["events"] = self._event_log.recent_between(start, end)
+                except Exception as exc:  # noqa: BLE001
+                    self.log(f"[警告] 锚点取事件失败：{exc}")
+            if self._console_log is not None:
+                try:
+                    meta["console_log"] = self._console_log.recent_between(
+                        start, end)
+                except Exception as exc:  # noqa: BLE001
+                    self.log(f"[警告] 锚点取控制台失败：{exc}")
+            meta["post_frames"] = (len(meta["frames"])
+                                   - int(meta.get("pre_frames") or 0))
+            meta["window"] = {
+                "start": datetime.fromtimestamp(start).astimezone(
+                ).isoformat(timespec="milliseconds"),
+                "end": datetime.fromtimestamp(end).astimezone(
+                ).isoformat(timespec="milliseconds"),
+            }
+            meta["finished_at"] = _iso_now()
+            self._write_meta(folder, meta)
+            self._emit({"folder": str(folder), "center_seq": center_seq,
+                        "degraded": bool(meta.get("degraded")),
+                        "frames": len(meta["frames"]), "done": True})
+        except Exception as exc:  # noqa: BLE001 — 后台线程不能静默死掉
+            self.log(f"[警告] 锚点后 3 秒收集失败：{type(exc).__name__}: {exc}")
+
+    @staticmethod
+    def _write_meta(folder: Path, meta: dict) -> None:
+        tmp = folder / "meta.json.tmp"
+        tmp.write_text(json.dumps(meta, ensure_ascii=False, indent=2,
+                                  default=str) + "\n", encoding="utf-8")
+        os.replace(tmp, folder / "meta.json")
+
+
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
         description="实时拉虚拟摄像头/RTSP 流，按间隔识别牌桌状态并写 JSONL")
@@ -3728,7 +4048,13 @@ def _build_runtime(ap: argparse.ArgumentParser, args, env_load) -> _Runtime:
 
     # 统一事件出口：同一份事件先落 JSONL，再推看板。任何一边失败都不能
     # 反噬识别 —— 两个 sink 都包在 try 里。
+    # 锚点要带「点击那一刻的建议全文」：advice 事件只在这里经过一次。
+    last_advice: dict | None = None
+
     def publish(kind: str, payload: dict) -> None:
+        nonlocal last_advice
+        if kind == "advice":
+            last_advice = payload
         if event_log is not None:
             try:
                 event_log.write(kind, payload)
@@ -4115,6 +4441,7 @@ def _build_runtime(ap: argparse.ArgumentParser, args, env_load) -> _Runtime:
         incident_dir=(None if args.no_incident else args.incident_dir),
         incident_frames=args.incident_frames,
         incident_max=args.incident_max,
+        error_dir=args.out.parent / "errors",
         card_confirm_frames=args.card_confirm_frames,
         card_doubt_window=args.card_doubt_window,
         control=control, preview=preview,
@@ -4127,6 +4454,25 @@ def _build_runtime(ap: argparse.ArgumentParser, args, env_load) -> _Runtime:
     # 切走时若预选还挂着，processor 会按一下取消。
     control.add_prefold_listener(processor.set_prefold_mode)
     meta_state["processor"] = processor
+
+    # 人工锚点：只在有 Web 控制面时暴露（工作台带 token 调 POST /api/anchor）。
+    if web is not None:
+        anchor_capture = AnchorCapture(
+            run_dir=args.out.parent,
+            pre_frames=processor.anchor_snapshot,
+            frames=processor.anchor_frames,
+            publish=publish,
+            session_id=session_id,
+            run_id=args.run_id,
+            event_log=event_log,
+            console_log=console_log,
+            current_hand=processor._current_hand,
+            last_advice=lambda: last_advice,
+            table=lambda: web.store.snapshot().get("table"),
+        )
+        web.set_anchor(anchor_capture.trigger)
+        _log(f"[锚点] 已启用 → {args.out.parent / 'anchors'}"
+             "（点击时存前 20 帧 + 后 3 秒）")
 
     # 动作区静止闸只用于 roi 路线：它的区域来自固定槽位；full 路线没有布局。
     settle_gate = (SettleGate(profile, settle=args.settle,
