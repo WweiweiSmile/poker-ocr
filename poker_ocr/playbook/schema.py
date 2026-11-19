@@ -1,0 +1,431 @@
+"""Harrington 场景卡的 schema、静态校验与解析。
+
+设计口径（docs/harrington-决策层-设计-2026-11-19.md）：
+
+  · 场景卡按「局面 -> 计划」组织，不是互不相干的 if/then 规则堆；
+  · 同一局面只允许一张卡胜出；同优先级有交集是编译期错误；
+  · 零匹配返回 unknown，不编造书页；
+  · 书只描述动作/尺寸/后续街计划，不直接改 prompt。
+
+这里不 import `poker_ocr.situation`：`Spot.from_situation` 用鸭子类型，
+只读字段，避免事实层与书中层循环依赖。
+"""
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Iterable, Mapping
+
+STREETS = ("preflop", "flop", "turn", "river")
+PREFLOP_NODES = ("unopened", "limped", "raised", "three_bet", "four_bet", "unknown")
+POT_TYPES = ("unopened", "limped", "single_raised", "three_bet_plus", "bomb", "unknown")
+PLAYERS = ("2", "3", "4+", "unknown")
+IN_POSITION = (True, False)
+MADE_HANDS = (
+    "strong_made", "overpair", "top_pair_top_kicker", "top_pair_weak_kicker",
+    "middle_or_bottom_pair", "board_play", "draw", "air", "unknown",
+)
+DRAWS = ("none", "flush", "oesd", "gutshot", "combo", "other", "unknown")
+BOARDS = ("dry", "flush", "straight", "flush_straight", "paired", "unknown")
+SPRS = ("lt3", "3to6", "gt6", "unknown")
+FACINGS = ("none", "bet", "raise", "unknown")
+COMMITMENTS = ("committed", "uncommitted", "unknown")
+OPPONENTS = ("unknown", "loose_passive", "tight_passive", "aggressive")
+
+ACTIONS = ("check", "bet", "call", "raise", "fold", "all_in")
+BOOK_CONFIDENCE = ("explicit", "interpreted")
+OFFSET_POLICIES = ("size_only", "none", "action_allowed")
+SIZE_KINDS = ("pct_pot", "bb", "table")
+
+
+def _norm(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _bucket_players(opponents_in_hand: Any) -> str:
+    try:
+        n = int(opponents_in_hand)
+    except (TypeError, ValueError):
+        return "unknown"
+    if n <= 0:
+        return "unknown"
+    if n == 1:
+        return "2"
+    if n == 2:
+        return "3"
+    return "4+"
+
+
+def _bucket_spr(spr: Any) -> str:
+    try:
+        value = float(spr)
+    except (TypeError, ValueError):
+        return "unknown"
+    if value < 3:
+        return "lt3"
+    if value <= 6:
+        return "3to6"
+    return "gt6"
+
+
+def _norm_alias(value: Any, aliases: dict[str, str],
+                allowed: tuple[str, ...]) -> str:
+    """事实文案 -> 卡片词表；认不出的值一律 unknown（不猜）。"""
+    text = _norm(value)
+    if text is None:
+        return "unknown"
+    return aliases.get(text, text if text in allowed else "unknown")
+
+
+def _norm_pot_type(value: Any) -> str:
+    return _norm_alias(value, {
+        "unopened pot": "unopened",
+        "limped pot": "limped",
+        "single-raised pot": "single_raised",
+        "3-bet+ pot": "three_bet_plus",
+        "bomb pot": "bomb",
+    }, POT_TYPES)
+
+
+def _norm_board(value: Any) -> str:
+    return _norm_alias(value, {
+        "干燥": "dry",
+        "花面": "flush",
+        "顺面": "straight",
+        "花顺面": "flush_straight",
+        "公对面": "paired",
+    }, BOARDS)
+
+
+def _norm_made_hand(value: Any) -> str:
+    return _norm_alias(value, {
+        "强成牌": "strong_made",
+        "超对": "overpair",
+        "顶对强踢": "top_pair_top_kicker",
+        "顶对弱踢": "top_pair_weak_kicker",
+        "中底对": "middle_or_bottom_pair",
+        "打牌面": "board_play",
+        "强听": "draw",
+        "弱听": "draw",
+        "空气": "air",
+    }, MADE_HANDS)
+
+
+def _norm_draw(sit: Any) -> str:
+    gt = getattr(sit, "ground_truth", None)
+    draws = getattr(gt, "draws", None) if gt is not None else None
+    if draws is not None:
+        if getattr(draws, "flush_draw", False) and getattr(draws, "straight_draw", False):
+            return "combo"
+        if getattr(draws, "flush_draw", False):
+            return "flush"
+        if getattr(draws, "oesd", False):
+            return "oesd"
+        if getattr(draws, "gutshot", False):
+            return "gutshot"
+    return "other" if getattr(sit, "has_draw", False) else "none"
+
+
+def _norm_preflop_node(snap: Any) -> str:
+    shapes = tuple(getattr(snap, "preflop_shapes", ()) or ())
+    if "three-bet" in shapes:
+        return "three_bet"
+    if "single-raise" in shapes:
+        return "raised"
+    if "limped" in shapes:
+        return "limped"
+    if "unopened" in shapes:
+        return "unopened"
+    return "unknown"
+
+
+@dataclass(frozen=True)
+class Spot:
+    """一个局面分类。字段为 None = 不限制；匹配时只看非 None 字段。"""
+
+    street: str
+    preflop_node: str | None = None
+    pot_type: str | None = None
+    players: str | None = None
+    hero_position: str | None = None
+    in_position: bool | None = None
+    made_hand: str | None = None
+    draw: str | None = None
+    board: str | None = None
+    spr: str | None = None
+    facing: str | None = None
+    commitment: str | None = None
+    opponent: str | None = None
+
+    def matches(self, other: "Spot") -> bool:
+        """本卡是否覆盖 `other`；None 字段不限制。"""
+        for key in self.__dataclass_fields__:
+            want = getattr(self, key)
+            if want is None:
+                continue
+            if getattr(other, key) != want:
+                return False
+        return True
+
+    def specificity(self) -> int:
+        return sum(1 for key in self.__dataclass_fields__
+                   if getattr(self, key) is not None)
+
+    def overlaps(self, other: "Spot") -> bool:
+        """两张卡的 spot 是否有交集（逐字段相等或任一方 None）。"""
+        for key in self.__dataclass_fields__:
+            a, b = getattr(self, key), getattr(other, key)
+            if a is not None and b is not None and a != b:
+                return False
+        return True
+
+    def to_dict(self) -> dict:
+        return {k: getattr(self, k) for k in self.__dataclass_fields__
+                if getattr(self, k) is not None}
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "Spot":
+        allowed = set(cls.__dataclass_fields__)
+        extra = set(data) - allowed
+        if extra:
+            raise ValueError(f"spot 未知字段: {sorted(extra)}")
+        return cls(**{k: _norm(v) if k != "in_position" else v
+                      for k, v in data.items()})
+
+    @classmethod
+    def from_situation(cls, sit: Any) -> "Spot":
+        """从 Situation 派生；只读事实，计算不出就是 unknown。"""
+        snap = getattr(sit, "snap", None)
+        pot_type = _norm_pot_type(getattr(sit, "pot_type", None))
+        street = _norm(getattr(sit, "street", None))
+        if street == "preflop":
+            preflop_node = _norm_preflop_node(snap)
+        else:
+            preflop_node = {
+                "single_raised": "raised",
+                "three_bet_plus": "three_bet",
+                "limped": "limped",
+                "unopened": "unopened",
+            }.get(pot_type, "unknown")
+        facing = "unknown"
+        to_call = getattr(snap, "to_call", None)
+        if to_call is not None:
+            facing = "none" if float(to_call) <= 0 else (
+                "raise" if preflop_node in ("three_bet", "four_bet") else "bet")
+        spr = getattr(sit, "spr", None)
+        spr_bucket = _bucket_spr(spr)
+        commitment = ("unknown" if spr_bucket == "unknown"
+                      else "committed" if spr_bucket == "lt3" else "uncommitted")
+        return cls(
+            street=street or "unknown",
+            preflop_node=preflop_node,
+            pot_type=pot_type,
+            players=_bucket_players(getattr(sit, "opponents_in_hand", None)),
+            hero_position=_norm(getattr(snap, "hero_position", None)),
+            in_position=getattr(sit, "in_position", None),
+            made_hand=_norm_made_hand(getattr(sit, "hand_tier", None)),
+            draw=_norm_draw(sit),
+            board=_norm_board(getattr(sit, "texture", None)),
+            spr=spr_bucket,
+            facing=facing,
+            commitment=commitment,
+            opponent="unknown",
+        )
+
+
+@dataclass(frozen=True)
+class Size:
+    kind: str
+    value: float
+    table: str | None = None
+
+    def to_dict(self) -> dict:
+        out = {"kind": self.kind, "value": self.value}
+        if self.table:
+            out["table"] = self.table
+        return out
+
+
+@dataclass(frozen=True)
+class Plan:
+    action: str
+    size: Size | None = None
+    future: dict[str, str] = field(default_factory=dict)
+    freq: float = 1.0
+
+    def to_dict(self) -> dict:
+        out: dict[str, Any] = {"action": self.action}
+        if self.size is not None:
+            out["size"] = self.size.to_dict()
+        if self.future:
+            out["future"] = dict(self.future)
+        if self.freq != 1.0:
+            out["freq"] = self.freq
+        return out
+
+
+def _plan_from_dict(data: Mapping[str, Any]) -> Plan:
+    size_data = data.get("size")
+    size = (Size(kind=str(size_data["kind"]), value=float(size_data["value"]),
+                 table=size_data.get("table"))
+            if isinstance(size_data, Mapping) else None)
+    return Plan(
+        action=str(data.get("action") or ""),
+        size=size,
+        future={str(k): str(v) for k, v in (data.get("future") or {}).items()},
+        freq=float(data.get("freq") or 1.0),
+    )
+
+
+@dataclass(frozen=True)
+class Card:
+    id: str
+    book: str
+    volume: int
+    chapter: str
+    pages: tuple[int, ...]
+    street: str
+    spot: Spot
+    plan: Plan
+    why: str
+    confidence: str = "interpreted"
+    priority: int = 100
+    offset_policy: str = "size_only"
+    pdf_pages: tuple[int, ...] = ()
+    # 书里的混合频率：plan 是主行动，mix 是其余分支；freq 合计应为 1。
+    mix: tuple[Plan, ...] = ()
+
+    def to_dict(self) -> dict:
+        out = {
+            "id": self.id,
+            "book": self.book,
+            "volume": self.volume,
+            "chapter": self.chapter,
+            "pages": list(self.pages),
+            "street": self.street,
+            "spot": self.spot.to_dict(),
+            "plan": self.plan.to_dict(),
+            "why": self.why,
+            "confidence": self.confidence,
+            "priority": self.priority,
+            "offset_policy": self.offset_policy,
+        }
+        if self.pdf_pages:
+            out["pdf_pages"] = list(self.pdf_pages)
+        if self.mix:
+            out["mix"] = [p.to_dict() for p in self.mix]
+        return out
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "Card":
+        return cls(
+            id=str(data["id"]),
+            book=str(data.get("book") or ""),
+            volume=int(data.get("volume") or 0),
+            chapter=str(data.get("chapter") or ""),
+            pages=tuple(int(p) for p in data.get("pages") or ()),
+            street=str(data["street"]),
+            spot=Spot.from_dict(data.get("spot") or {}),
+            plan=_plan_from_dict(data.get("plan") or {}),
+            why=str(data.get("why") or ""),
+            confidence=str(data.get("confidence") or "interpreted"),
+            priority=int(data.get("priority") or 100),
+            offset_policy=str(data.get("offset_policy") or "size_only"),
+            pdf_pages=tuple(int(p) for p in data.get("pdf_pages") or ()),
+            mix=tuple(_plan_from_dict(p) for p in (data.get("mix") or ())),
+        )
+
+
+@dataclass(frozen=True)
+class Resolution:
+    card: Card | None
+    matched_fields: int = 0
+
+    @property
+    def unknown(self) -> bool:
+        return self.card is None
+
+
+def validate_cards(cards: Iterable[Card]) -> list[str]:
+    """编译期静态校验；返回错误列表，空列表 = 通过。"""
+    errors: list[str] = []
+    seen: dict[str, Card] = {}
+    for card in cards:
+        if not card.id:
+            errors.append("card.id 为空")
+            continue
+        if card.id in seen:
+            errors.append(f"id 重复: {card.id}")
+        seen[card.id] = card
+        if card.street not in STREETS:
+            errors.append(f"{card.id}: street 非法 {card.street!r}")
+        if card.spot.street != card.street:
+            errors.append(f"{card.id}: spot.street 与 street 不一致")
+        if card.confidence not in BOOK_CONFIDENCE:
+            errors.append(f"{card.id}: confidence 非法 {card.confidence!r}")
+        if card.offset_policy not in OFFSET_POLICIES:
+            errors.append(f"{card.id}: offset_policy 非法 {card.offset_policy!r}")
+        if not card.pages:
+            errors.append(f"{card.id}: pages 为空")
+        if not card.why.strip():
+            errors.append(f"{card.id}: why 为空")
+        if card.priority < 0:
+            errors.append(f"{card.id}: priority 必须 >=0")
+        plans = (card.plan,) + tuple(card.mix)
+        for plan in plans:
+            if plan.action not in ACTIONS:
+                errors.append(f"{card.id}: action 非法 {plan.action!r}")
+            if not (0 < plan.freq <= 1):
+                errors.append(f"{card.id}: freq 必须在 (0,1]")
+            if plan.size is not None:
+                size = plan.size
+                if size.kind not in SIZE_KINDS:
+                    errors.append(f"{card.id}: size.kind 非法 {size.kind!r}")
+                if size.kind == "pct_pot" and not (0 < size.value <= 2):
+                    errors.append(f"{card.id}: pct_pot 必须在 (0,2]")
+                if size.kind == "bb" and size.value <= 0:
+                    errors.append(f"{card.id}: bb 必须 >0")
+        total = sum(p.freq for p in plans)
+        if total > 1.001:
+            errors.append(f"{card.id}: freq 合计 {total:.3f} 超过 1")
+
+    ordered = list(seen.values())
+    for i, a in enumerate(ordered):
+        for b in ordered[i + 1:]:
+            if a.street != b.street:
+                continue
+            if a.priority != b.priority:
+                continue
+            if a.spot.overlaps(b.spot):
+                errors.append(
+                    f"同优先级且 spot 有交集: {a.id} / {b.id}（priority={a.priority}）")
+    return errors
+
+
+def load_cards(path: Path | str) -> list[Card]:
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    rows = data.get("cards") if isinstance(data, Mapping) else data
+    if not isinstance(rows, list):
+        raise ValueError(f"{path}: 期望 cards 数组")
+    return [Card.from_dict(row) for row in rows]
+
+
+def resolve(cards: Iterable[Card], spot: Spot) -> Resolution:
+    """选最具体、优先级最高的一张；同分不同卡 -> 编译期错误。"""
+    matched = [card for card in cards if card.spot.matches(spot)]
+    if not matched:
+        return Resolution(card=None)
+    matched.sort(key=lambda c: (c.priority, c.spot.specificity()), reverse=True)
+    best = matched[0]
+    tied = [c for c in matched
+            if c.priority == best.priority
+            and c.spot.specificity() == best.spot.specificity()]
+    if len(tied) > 1:
+        ids = ", ".join(c.id for c in tied)
+        raise ValueError(f"同一局面多张同分卡: {ids}")
+    return Resolution(card=best, matched_fields=best.spot.specificity())

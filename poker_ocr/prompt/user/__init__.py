@@ -15,6 +15,7 @@ from ..refs import collecting, section
 from ..system import build_system
 from .action_line import render_action_line_zh
 from .attack import attack_signals, render_attack_zh
+from .book import render_book_plan_zh
 from .exploit import render_exploit_zh
 from .explosive import render_explosive_pot_zh
 from .geometry import render_geometry_zh, render_side_pot_zh
@@ -71,6 +72,15 @@ def render_facts_zh(sit) -> str:
     # 空台账返回空列表 -> 一个字节都不加（空行、标题都不留）。
     with section("rules") as sec:
         sec.extend(render_rules_zh(sit))
+    if sec.lines:
+        lines.append("")
+        lines.extend(sec.lines)
+
+    # ── 书中计划（Harrington 场景卡；#80 只加不删）──
+    # 旧规则段暂时保留，两段相邻便于对照；解析失败时整段不出现（fail open），
+    # 零匹配仍由渲染器写「书中无此局面」，不伪造书页。
+    with section("book_plan") as sec:
+        sec.extend(render_book_plan_zh(sit))
     if sec.lines:
         lines.append("")
         lines.extend(sec.lines)

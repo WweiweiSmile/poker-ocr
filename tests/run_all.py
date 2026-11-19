@@ -117,7 +117,11 @@ SUITES = ["test_positions.py", "test_env.py", "test_profile_8p.py", "test_coach.
           # 票 #76（「至少一家领先」单一实现 + 近似口径显式标注）新增套件
           "test_behind_any_single_source.py",
           # 票 #78（冷跟先验按入池人数分桶）新增套件
-          "test_cold_call_buckets.py"]
+          "test_cold_call_buckets.py",
+          # 票 #80（书计划接进 live 提示词，只加不删）新增套件
+          "test_playbook_schema.py", "test_playbook_cards.py",
+          "test_playbook_cards_multiway.py", "test_playbook_prompt.py",
+          "test_prompt_rules.py", "test_prompt_book_plan.py"]
 
 
 def main() -> int:

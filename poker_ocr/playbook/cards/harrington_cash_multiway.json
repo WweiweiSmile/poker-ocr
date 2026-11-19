@@ -1,0 +1,560 @@
+{
+  "book": "harrington_cash",
+  "version": "2026-11-19.multiway",
+  "cards": [
+    {
+      "id": "flop.mw.air.check",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch5",
+      "pages": [
+        285
+      ],
+      "pdf_pages": [
+        295
+      ],
+      "street": "flop",
+      "spot": {
+        "street": "flop",
+        "players": "4+",
+        "made_hand": "air",
+        "draw": "none",
+        "facing": "none"
+      },
+      "plan": {
+        "action": "check",
+        "freq": 1.0,
+        "future": {
+          "turn": "无人下注可考虑转牌偷池，有人下注则弃牌"
+        }
+      },
+      "why": "多人局空气不诈唬，过牌看免费牌",
+      "confidence": "explicit",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "flop.mw.air.facing_bet",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch5",
+      "pages": [
+        302
+      ],
+      "pdf_pages": [
+        312
+      ],
+      "street": "flop",
+      "spot": {
+        "street": "flop",
+        "players": "4+",
+        "made_hand": "air",
+        "draw": "none",
+        "facing": "bet"
+      },
+      "plan": {
+        "action": "fold",
+        "freq": 1.0
+      },
+      "why": "多人局有人下注，空气直接弃牌",
+      "confidence": "explicit",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "flop.mw.middle_pair.check",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch5",
+      "pages": [
+        289
+      ],
+      "pdf_pages": [
+        299
+      ],
+      "street": "flop",
+      "spot": {
+        "street": "flop",
+        "players": "4+",
+        "made_hand": "middle_or_bottom_pair",
+        "draw": "none",
+        "facing": "none"
+      },
+      "plan": {
+        "action": "check",
+        "freq": 1.0,
+        "future": {
+          "turn": "无人下注可在转牌再评估，有人下注则弃牌"
+        }
+      },
+      "why": "多人局中对只在干燥弱桌偷池，默认过牌控损",
+      "confidence": "interpreted",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "flop.mw.middle_pair.facing_bet",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch5",
+      "pages": [
+        292
+      ],
+      "pdf_pages": [
+        302
+      ],
+      "street": "flop",
+      "spot": {
+        "street": "flop",
+        "players": "4+",
+        "made_hand": "middle_or_bottom_pair",
+        "draw": "none",
+        "facing": "bet"
+      },
+      "plan": {
+        "action": "fold",
+        "freq": 1.0
+      },
+      "why": "多人局中对面对下注不追，尽早弃牌",
+      "confidence": "explicit",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "flop.mw.draw.facing_bet",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch5",
+      "pages": [
+        296
+      ],
+      "pdf_pages": [
+        306
+      ],
+      "street": "flop",
+      "spot": {
+        "street": "flop",
+        "players": "4+",
+        "made_hand": "draw",
+        "facing": "bet"
+      },
+      "plan": {
+        "action": "call",
+        "freq": 1.0,
+        "future": {
+          "turn": "成牌则争取最大价值，未成牌按赔率再评估"
+        }
+      },
+      "why": "多人局听牌可接受稍差赔率，成牌回报更大",
+      "confidence": "explicit",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "flop.mw.strong_made.bet",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch5",
+      "pages": [
+        288
+      ],
+      "pdf_pages": [
+        298
+      ],
+      "street": "flop",
+      "spot": {
+        "street": "flop",
+        "players": "4+",
+        "made_hand": "strong_made",
+        "draw": "none",
+        "facing": "none"
+      },
+      "plan": {
+        "action": "bet",
+        "size": {
+          "kind": "pct_pot",
+          "value": 0.67
+        },
+        "freq": 1.0,
+        "future": {
+          "turn": "转牌继续下注约 2/3 池，河牌按牌力收价值"
+        }
+      },
+      "why": "多人局第二类强牌（暗三/两对/顺）直接下注约 2/3 池",
+      "confidence": "interpreted",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "flop.mw.overpair.bet",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch5",
+      "pages": [
+        287
+      ],
+      "pdf_pages": [
+        297
+      ],
+      "street": "flop",
+      "spot": {
+        "street": "flop",
+        "players": "4+",
+        "made_hand": "overpair",
+        "draw": "none",
+        "facing": "none"
+      },
+      "plan": {
+        "action": "bet",
+        "size": {
+          "kind": "pct_pot",
+          "value": 0.67
+        },
+        "freq": 1.0,
+        "future": {
+          "turn": "空白牌再下约半池；两个跟注则转牌过牌"
+        }
+      },
+      "why": "多人局超对要下注保护，约 2/3 池；被两人跟注转牌控池",
+      "confidence": "interpreted",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "turn.mw.top_pair.facing_bet",
+      "book": "harrington_cash",
+      "volume": 2,
+      "chapter": "ch6",
+      "pages": [
+        24
+      ],
+      "pdf_pages": [
+        30
+      ],
+      "street": "turn",
+      "spot": {
+        "street": "turn",
+        "players": "4+",
+        "made_hand": "top_pair_weak_kicker",
+        "draw": "none",
+        "facing": "bet"
+      },
+      "plan": {
+        "action": "fold",
+        "freq": 1.0
+      },
+      "why": "翻前加注、翻牌持续下注都被跟，转牌被下注/加注的顶对通常已落后",
+      "confidence": "explicit",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "turn.mw.strong_made.bet",
+      "book": "harrington_cash",
+      "volume": 2,
+      "chapter": "ch6",
+      "pages": [
+        47
+      ],
+      "pdf_pages": [
+        53
+      ],
+      "street": "turn",
+      "spot": {
+        "street": "turn",
+        "players": "4+",
+        "made_hand": "strong_made",
+        "draw": "none",
+        "facing": "none"
+      },
+      "plan": {
+        "action": "bet",
+        "size": {
+          "kind": "pct_pot",
+          "value": 0.67
+        },
+        "freq": 1.0,
+        "future": {
+          "river": "河牌继续收价值，牌面完成听牌则过牌"
+        }
+      },
+      "why": "转牌牌力增强时价值更高，继续下注约 2/3 池",
+      "confidence": "interpreted",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "turn.mw.air.facing_bet",
+      "book": "harrington_cash",
+      "volume": 2,
+      "chapter": "ch6",
+      "pages": [
+        58
+      ],
+      "pdf_pages": [
+        64
+      ],
+      "street": "turn",
+      "spot": {
+        "street": "turn",
+        "players": "4+",
+        "made_hand": "air",
+        "draw": "none",
+        "facing": "bet"
+      },
+      "plan": {
+        "action": "fold",
+        "freq": 1.0
+      },
+      "why": "转牌空气面对下注直接弃牌，不追",
+      "confidence": "interpreted",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "flop.mw.draw.check",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch5",
+      "pages": [
+        296
+      ],
+      "pdf_pages": [
+        306
+      ],
+      "street": "flop",
+      "spot": {
+        "street": "flop",
+        "players": "4+",
+        "made_hand": "draw",
+        "facing": "none"
+      },
+      "plan": {
+        "action": "check",
+        "freq": 1.0,
+        "future": {
+          "turn": "成牌则收价值，未成牌按赔率再评估"
+        }
+      },
+      "why": "多人局听牌无人下注时先过牌看免费牌，不主动造池",
+      "confidence": "interpreted",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "flop.mw.board_play.check",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch5",
+      "pages": [
+        285
+      ],
+      "pdf_pages": [
+        295
+      ],
+      "street": "flop",
+      "spot": {
+        "street": "flop",
+        "players": "4+",
+        "made_hand": "board_play",
+        "facing": "none"
+      },
+      "plan": {
+        "action": "check",
+        "freq": 1.0,
+        "future": {
+          "turn": "无人下注可再评估，有人下注则弃牌"
+        }
+      },
+      "why": "多人局打牌面属中等牌力，默认过牌不造池",
+      "confidence": "interpreted",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "flop.mw.board_play.facing_bet",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch5",
+      "pages": [
+        302
+      ],
+      "pdf_pages": [
+        312
+      ],
+      "street": "flop",
+      "spot": {
+        "street": "flop",
+        "players": "4+",
+        "made_hand": "board_play",
+        "facing": "bet"
+      },
+      "plan": {
+        "action": "fold",
+        "freq": 1.0
+      },
+      "why": "多人局打牌面面对下注不追",
+      "confidence": "interpreted",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "flop.mw.top_pair_weak.bet",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch5",
+      "pages": [
+        287
+      ],
+      "pdf_pages": [
+        297
+      ],
+      "street": "flop",
+      "spot": {
+        "street": "flop",
+        "players": "4+",
+        "made_hand": "top_pair_weak_kicker",
+        "facing": "none"
+      },
+      "plan": {
+        "action": "bet",
+        "size": {
+          "kind": "pct_pot",
+          "value": 0.67
+        },
+        "freq": 1.0,
+        "future": {
+          "turn": "空白牌再下半池，危险牌过牌"
+        }
+      },
+      "why": "多人局顶对弱踢仍要下注保护，约 2/3 池；被加注要谨慎",
+      "confidence": "interpreted",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "flop.mw.top_pair_top.bet",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch5",
+      "pages": [
+        287
+      ],
+      "pdf_pages": [
+        297
+      ],
+      "street": "flop",
+      "spot": {
+        "street": "flop",
+        "players": "4+",
+        "made_hand": "top_pair_top_kicker",
+        "facing": "none"
+      },
+      "plan": {
+        "action": "bet",
+        "size": {
+          "kind": "pct_pot",
+          "value": 0.67
+        },
+        "freq": 1.0,
+        "future": {
+          "turn": "空白牌再下半池，危险牌过牌"
+        }
+      },
+      "why": "多人局顶对强踢下注约 2/3 池拿价值/保护，被加注再评估",
+      "confidence": "interpreted",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "turn.mw.middle_pair.check",
+      "book": "harrington_cash",
+      "volume": 2,
+      "chapter": "ch6",
+      "pages": [
+        22
+      ],
+      "pdf_pages": [
+        28
+      ],
+      "street": "turn",
+      "spot": {
+        "street": "turn",
+        "players": "4+",
+        "made_hand": "middle_or_bottom_pair",
+        "facing": "none"
+      },
+      "plan": {
+        "action": "check",
+        "freq": 1.0,
+        "future": {
+          "river": "无人下注可考虑薄价值，否则过牌比牌"
+        }
+      },
+      "why": "转牌中对无人下注时过牌控池，小牌小池",
+      "confidence": "interpreted",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "turn.mw.draw.call",
+      "book": "harrington_cash",
+      "volume": 2,
+      "chapter": "ch6",
+      "pages": [
+        5
+      ],
+      "pdf_pages": [
+        11
+      ],
+      "street": "turn",
+      "spot": {
+        "street": "turn",
+        "players": "4+",
+        "made_hand": "draw",
+        "facing": "bet"
+      },
+      "plan": {
+        "action": "call",
+        "freq": 1.0,
+        "future": {
+          "river": "成牌收价值，未成牌放弃"
+        }
+      },
+      "why": "转牌听牌按赔率跟注，成牌回报大；未成牌河牌放弃",
+      "confidence": "interpreted",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "turn.mw.air.check",
+      "book": "harrington_cash",
+      "volume": 2,
+      "chapter": "ch6",
+      "pages": [
+        20
+      ],
+      "pdf_pages": [
+        26
+      ],
+      "street": "turn",
+      "spot": {
+        "street": "turn",
+        "players": "4+",
+        "made_hand": "air",
+        "facing": "none"
+      },
+      "plan": {
+        "action": "check",
+        "freq": 1.0,
+        "future": {
+          "river": "无人下注可考虑诈唬，否则放弃"
+        }
+      },
+      "why": "转牌空气无人下注时过牌，准备放弃",
+      "confidence": "interpreted",
+      "priority": 100,
+      "offset_policy": "size_only"
+    }
+  ]
+}

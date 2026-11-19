@@ -41,12 +41,13 @@ from poker_ocr.hand_track import (  # noqa: E402
 from poker_ocr.parse import Blinds  # noqa: E402
 from poker_ocr.prompt.user.rules import render_rules_zh  # noqa: E402
 
-# lean-zh-2026-11-18.1 下整段 prompt 的 sha256：
+# lean-zh-2026-11-19.3 下整段 prompt（空台账分支）的 sha256：
 #   sha256(system + "\n---\n" + user)，fixture 见下面 _flop_sit()。
 # 空台账时这个值必须一直成立——它就是「规则段一个字都不加」的证据；
-# 提示词版本 bump（#69 删散装句）后基线随之更新，规则段本身仍须贡献 0 字节。
+# 提示词版本 bump（#80 接入书中计划段）后基线随之更新，规则段本身仍须贡献
+# 0 字节（#80 的书计划段不属于规则段，见 tests/test_prompt_book_plan.py）。
 EMPTY_LEDGER_PROMPT_HASH = (
-    "236f9e3a8edfcfa3ae3683922fe84a1d1fa1eca935609aa0ae8520b5a3962684"
+    "2f67b9994886422ce327b129812aeac7f4b1d828eb255602ab3e5b21c0cfedeb"
 )
 
 # 「牌力段之后、render_options_zh 之前」的锚点：这两行必须把规则段夹在中间。
@@ -289,3 +290,7 @@ def test_size_label_mapping(monkeypatch, tmp_path, ratio, label):
     lines = render_rules_zh(sit)
     assert len(lines) == 2
     assert lines[1] == f"尺寸: 单挑翻牌先行动 → {label} [书 p35]"
+
+if __name__ == "__main__":
+    import pytest
+    raise SystemExit(pytest.main([__file__, "-q"]))
