@@ -4,7 +4,7 @@
    页面结构：#/ 工作区列表 · #/w/<id>[/config|preflight|history] 详情 ·
             #/w/<id>/run 运行页 · #/w/<id>/calibrate 标定页。 */
 
-const TOKEN = window.__WB_TOKEN__ || '';
+let TOKEN = window.__WB_TOKEN__ || '';
 const rootEl = document.getElementById('app');
 const modalEl = document.getElementById('modal');
 const toastEl = document.getElementById('toast');
@@ -31,13 +31,40 @@ let toastTimer = null;
 
 class ApiError extends Error {
   constructor(status, data) {
-    super((data && (data.error || data.detail)) || `HTTP ${status}`);
+    const detail = data && data.detail;
+    super((data && data.error)
+      || (detail && typeof detail === 'object' ? detail.message : detail)
+      || `HTTP ${status}`);
     this.status = status;
     this.data = data || {};
+    this.code = (data && data.code) || (detail && detail.code) || '';
   }
 }
 
-async function api(path, opts = {}) {
+/* 换一次当前进程的 token。工作台重启后旧页面手里的 token 会失效（403
+   token_mismatch），这里静默换新再重试，不用整页刷新丢编辑。 */
+async function refreshToken() {
+  try {
+    const resp = await fetch('/api/token', { cache: 'no-store' });
+    if (resp.ok) {
+      const data = await resp.json();
+      if (data && data.token) { TOKEN = data.token; return true; }
+    }
+  } catch (e) { /* 落到下面的 HTML 兜底 */ }
+  // 老后端没有 /api/token：从首页 HTML 里取（和页面加载时注入的是同一份）。
+  try {
+    const page = await fetch('/', { cache: 'no-store' });
+    if (!page.ok) return false;
+    const m = (await page.text()).match(/window\.__WB_TOKEN__\s*=\s*"([^"]*)"/);
+    if (!m || !m[1]) return false;
+    TOKEN = m[1];
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+async function api(path, opts = {}, retried = false) {
   const { method = 'GET', body } = opts;
   const headers = {};
   if (body !== undefined) headers['Content-Type'] = 'application/json';
@@ -49,9 +76,20 @@ async function api(path, opts = {}) {
   const text = await resp.text();
   let data = null;
   try { data = text ? JSON.parse(text) : null; } catch (e) { data = { error: text }; }
-  if (!resp.ok) throw new ApiError(resp.status, data || {});
+  if (!resp.ok) {
+    const err = new ApiError(resp.status, data || {});
+    // 写操作在 token 校验处就被挡下了，没有副作用，换 token 重试是安全的。
+    if (err.code === 'token_mismatch' && !retried) {
+      if (await refreshToken()) return api(path, opts, true);
+      err.message += '（工作台可能已重启，请刷新页面）';
+    }
+    throw err;
+  }
   return data;
 }
+
+// 页面可能来自旧进程或静态副本：启动时先对一次当前进程的 token。
+refreshToken();
 
 function esc(value) {
   return String(value == null ? '' : value)

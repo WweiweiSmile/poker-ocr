@@ -23,6 +23,11 @@ from .service import WorkbenchError, WorkbenchService
 
 WEB_ROOT = Path(__file__).resolve().parent / "static"
 
+# token 校验失败的响应体。带 code 是为了让前端认出「页面 token 过期」，
+# 而不是把 403 都当成业务错误（跨源写请求也是 403，但没有这个 code）。
+TOKEN_MISMATCH = {"code": "token_mismatch",
+                  "message": "缺少或错误的 X-Workbench-Token"}
+
 
 def _error_response(exc: WorkbenchError) -> JSONResponse:
     return JSONResponse(exc.to_dict(), status_code=exc.status)
@@ -79,8 +84,7 @@ def create_app(*, service: WorkbenchService | None = None,
 
     def require_token(request: Request) -> None:
         if request.headers.get("x-workbench-token") != token:
-            raise HTTPException(status_code=403,
-                                detail="缺少或错误的 X-Workbench-Token")
+            raise HTTPException(status_code=403, detail=dict(TOKEN_MISMATCH))
 
     @app.exception_handler(WorkbenchError)
     async def _workbench_error(_request: Request, exc: WorkbenchError):
@@ -127,6 +131,18 @@ def create_app(*, service: WorkbenchService | None = None,
     @app.get("/api/profiles")
     def profiles() -> dict:
         return {"profiles": svc.profiles()}
+
+    @app.get("/api/token")
+    def current_token() -> Response:
+        """当前进程的写操作 token（同源页面可读）。
+
+        token 只活在进程内存里，工作台重启后旧页面手里那份就失效了。页面
+        用这个接口换一次新 token 再重试，而不是整页刷新——刷新会丢掉还没
+        保存的配置/标定编辑。token 本来就已经写在 `/` 的 HTML 里，这里只是
+        多给一个同源 JSON 入口，跨源页面读不到响应体。
+        """
+        return JSONResponse({"token": token},
+                            headers={"Cache-Control": "no-store"})
 
     # ── 工作区 ──────────────────────────────────────────
     @app.get("/api/workspaces")
