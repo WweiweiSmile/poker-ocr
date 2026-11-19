@@ -959,6 +959,19 @@ def test_http_routes_and_token() -> None:
             "source": {"kind": "window", "spec": "window:title:WePoker-H5"}}
     resp = client.post("/api/workspaces", json=body)
     check(resp.status_code == 403, f"无 token 写操作应 403：{resp.status_code}")
+    detail = resp.json().get("detail") or {}
+    check(isinstance(detail, dict) and detail.get("code") == "token_mismatch",
+          f"缺 token 的 403 应带 code（前端据此换 token 重试）：{resp.text[:200]}")
+
+    tok = client.get("/api/token")
+    check(tok.status_code == 200 and tok.json().get("token") == "test-token-123",
+          f"/api/token 应返回当前进程的 token：{tok.text[:200]}")
+    check(tok.headers.get("cache-control") == "no-store",
+          "/api/token 不应被浏览器缓存")
+
+    resp = client.post("/api/workspaces", json=body,
+                       headers={"X-Workbench-Token": "stale-token"})
+    check(resp.status_code == 403, "旧 token 写操作应 403")
 
     resp = client.post("/api/workspaces", json=body,
                        headers={"X-Workbench-Token": "test-token-123"})
