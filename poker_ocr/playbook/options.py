@@ -28,6 +28,18 @@ def kinds_for_action(action: str) -> tuple[str, ...]:
     return KINDS_FOR_ACTION.get(str(action), ())
 
 
+def action_candidates(options: Iterable[Any], action: str) -> list[Any]:
+    """本桌 options 里能承载该动作的档（选档与覆盖统计共用）。"""
+    kinds = kinds_for_action(action)
+    return [option for option in options or ()
+            if getattr(option, "kind", None) in kinds]
+
+
+def action_available(options: Iterable[Any], action: str) -> bool:
+    """options 里有没有能承载该动作的档；认不出的动作返回 False。"""
+    return bool(action_candidates(options, action))
+
+
 @dataclass(frozen=True)
 class OptionMatch:
     option: Any
@@ -55,10 +67,7 @@ def _size_target(plan: Any, pot_bb: float, to_call_bb: float) -> float | None:
 def choose_option(options: Iterable[Any], plan: Any, *,
                   pot_bb: float, to_call_bb: float) -> OptionMatch | None:
     """按动作与尺寸选最近的可执行 option；找不到返回 None。"""
-    kinds = kinds_for_action(getattr(plan, "action", ""))
-    if not kinds:
-        return None
-    candidates = [o for o in options if o.kind in kinds]
+    candidates = action_candidates(options, getattr(plan, "action", ""))
     if not candidates:
         return None
 

@@ -216,6 +216,7 @@ Resolver 规则：
 - M4 提示词重建 + golden（进行中；#80 只加不删已接入，#81 待做）
 - M5 用户 A/B，决定是否扩到 Ch3/Ch5/Ch7
 - M6 翻前书卡（#87，完成；Ch3 的 RFI / 面对加注 / 溜入池三桶，70 张）
+- M7 转牌缺口卡（#83，完成；7 张，flop+turn 覆盖 520/591 = 88.0%）
 
 ### M2 结果（2026-11-19）
 
@@ -326,3 +327,35 @@ Resolver 规则：
 - 卡面 why 里的附加条件（对手筹码 ≥ 25 倍加注额才追小对、跟加注需已有
   跟注者、前位加注且后面人多时弃 AQo）当前没有对应的事实维度，卡只按最
   保守的那一支落，条件和理由留在 why 里给模型读。
+
+### M7 结果（2026-11-19，#83 转牌缺口卡）
+
+- 新增 7 张转牌卡进 `poker_ocr/playbook/cards/harrington_cash_multiway.json`
+  （25 张，全库 105 张）：
+  - `turn.mw.draw.bet`：听牌 / 无人下注 → 下注 0.67 池（半诈唬，p60）。
+  - `turn.mw.board_play.check`：打牌面 / 无人下注 → 过牌控池（p21）。
+  - `turn.mw.middle_pair.facing_bet`：中对 / 面对下注 → 弃牌（p45）。
+  - `turn.mw.top_pair_weak.check`：顶对弱踢 / 无听牌 / 无人下注 → 过牌（p47）。
+  - `turn.mw.strong_made.facing_bet`：强成牌 / 面对下注 → 加注一池（p12）。
+  - `turn.mw.strong_made.facing_raise`：强成牌 / 面对加注 → 加注一池（p35）。
+  - `turn.mw.board_play.facing_bet`：打牌面 / 面对下注 → 弃牌（p24）。
+  全部 `priority=100`、`confidence=interpreted`、印刷页与 PDF 页差 6。
+- 票面点名的三类缺口：听牌无人下注 32/32、打牌面无人下注 13/13、
+  中对面对下注 11/11 现在都有卡可落。听牌卡不限制人数（Ch6 的转牌建议
+  本身不按人数分流），因此 3 人池的两个残留点也一并命中。
+- 覆盖（`nv tools/book_coverage.py`，flop+turn 591 个去重决策点）：
+  命中 520（88.0%），书中无此局面 71，坏行 0；分街 flop 353/397、
+  turn 167/194。新卡命中：draw.bet 32、board_play.check 13、
+  middle_pair.facing_bet 11、strong_made.facing_bet 6、
+  top_pair_weak.check 5、strong_made.facing_raise 5、
+  board_play.facing_bet 4。`choose_option` 选档失败 0，缺动作档 0。
+- 覆盖工具收成一份：`tools/book_coverage.py` 支持 `--streets all` 与
+  `--json`，`tools/preflop_book_coverage.py` 变成 `--streets preflop` 的
+  薄包装，翻前 89.9% 的旧口径不变。
+- 测试：`tests/test_playbook_turn_gap_cards.py`（26 项：四类听牌都落到
+  `turn.mw.draw.bet`、3 人池听牌也命中、六个缺口 Spot 各自命中、七张卡都
+  落到合法 options、印刷页/PDF 页偏移、七张卡各有一条渲染断言）；多人池
+  计数同步到 25 / 全库 105。
+- 仍未覆盖的 flop 缺口（44 点，strong_made bet 7、top_pair_weak bet 6、
+  overpair bet 5 等）留给下一批；转牌剩 27 点，主要是 overpair、
+  top_pair_top、draw 面对加注这些没有对应卡的分支。

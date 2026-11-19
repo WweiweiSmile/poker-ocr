@@ -126,6 +126,8 @@ SUITES = ["test_positions.py", "test_env.py", "test_profile_8p.py", "test_coach.
           "test_playbook_offsets.py",
           # 票 #87（翻前书卡：RFI / 面对加注 / 溜入池）新增套件
           "test_playbook_hand_class.py", "test_playbook_cards_preflop.py",
+          # 票 #83（转牌缺口卡：听牌无人下注 / 打牌面 / 中对面对下注）新增套件
+          "test_playbook_turn_gap_cards.py",
           # 票 #81（推倒旧提示词，切到事实+书计划+options 契约）：旧规则
           # 台账渲染器删除，test_prompt_rules 随之下线；新增契约验收在
           # replay-console/tests/test_prompt_golden.py 与本文件的历史套件里。

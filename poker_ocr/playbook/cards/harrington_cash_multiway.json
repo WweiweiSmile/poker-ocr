@@ -555,6 +555,222 @@
       "confidence": "interpreted",
       "priority": 100,
       "offset_policy": "size_only"
+    },
+    {
+      "id": "turn.mw.draw.bet",
+      "book": "harrington_cash",
+      "volume": 2,
+      "chapter": "ch6",
+      "pages": [
+        60
+      ],
+      "pdf_pages": [
+        66
+      ],
+      "street": "turn",
+      "spot": {
+        "street": "turn",
+        "made_hand": "draw",
+        "facing": "none"
+      },
+      "plan": {
+        "action": "bet",
+        "size": {
+          "kind": "pct_pot",
+          "value": 0.67
+        },
+        "freq": 1.0,
+        "future": {
+          "river": "成牌收价值；未成牌看牌面与对手行动决定是否继续诈唬"
+        }
+      },
+      "why": "转牌无人下注用半诈唬下注约 2/3 池：拿弃牌率，成牌还能收价值；不限人数（书 Ch6 的转牌建议不按人数分流），书中例十三四人池下注接近一池，这里取 2/3 池作基线",
+      "confidence": "interpreted",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "turn.mw.board_play.check",
+      "book": "harrington_cash",
+      "volume": 2,
+      "chapter": "ch6",
+      "pages": [
+        21
+      ],
+      "pdf_pages": [
+        27
+      ],
+      "street": "turn",
+      "spot": {
+        "street": "turn",
+        "players": "4+",
+        "made_hand": "board_play",
+        "facing": "none"
+      },
+      "plan": {
+        "action": "check",
+        "freq": 1.0,
+        "future": {
+          "river": "无人下注可比牌，有人下注弃牌"
+        }
+      },
+      "why": "打牌面只有摊牌价值，转牌无人下注时过牌控池，小牌小底池",
+      "confidence": "interpreted",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "turn.mw.middle_pair.facing_bet",
+      "book": "harrington_cash",
+      "volume": 2,
+      "chapter": "ch6",
+      "pages": [
+        45
+      ],
+      "pdf_pages": [
+        51
+      ],
+      "street": "turn",
+      "spot": {
+        "street": "turn",
+        "players": "4+",
+        "made_hand": "middle_or_bottom_pair",
+        "facing": "bet"
+      },
+      "plan": {
+        "action": "fold",
+        "freq": 1.0
+      },
+      "why": "转牌中对面对下注通常已落后；书中例六被加注后直接弃牌",
+      "confidence": "interpreted",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "turn.mw.top_pair_weak.check",
+      "book": "harrington_cash",
+      "volume": 2,
+      "chapter": "ch6",
+      "pages": [
+        47
+      ],
+      "pdf_pages": [
+        53
+      ],
+      "street": "turn",
+      "spot": {
+        "street": "turn",
+        "players": "4+",
+        "made_hand": "top_pair_weak_kicker",
+        "draw": "none",
+        "facing": "none"
+      },
+      "plan": {
+        "action": "check",
+        "freq": 1.0,
+        "future": {
+          "river": "无人下注可比牌，有人下注再评估"
+        }
+      },
+      "why": "顶对中等踢脚转牌无人下注时过牌控池：底池已经套入，过牌比下注风险小",
+      "confidence": "interpreted",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "turn.mw.strong_made.facing_bet",
+      "book": "harrington_cash",
+      "volume": 2,
+      "chapter": "ch6",
+      "pages": [
+        12
+      ],
+      "pdf_pages": [
+        18
+      ],
+      "street": "turn",
+      "spot": {
+        "street": "turn",
+        "players": "4+",
+        "made_hand": "strong_made",
+        "facing": "bet"
+      },
+      "plan": {
+        "action": "raise",
+        "size": {
+          "kind": "pct_pot",
+          "value": 1.0
+        },
+        "freq": 1.0,
+        "future": {
+          "river": "不出危险牌继续收价值"
+        }
+      },
+      "why": "转牌强成牌面对下注加注做大底池，为河牌收价值；书中要求强牌在转牌把底池做大（理由六）",
+      "confidence": "interpreted",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "turn.mw.strong_made.facing_raise",
+      "book": "harrington_cash",
+      "volume": 2,
+      "chapter": "ch6",
+      "pages": [
+        35
+      ],
+      "pdf_pages": [
+        41
+      ],
+      "street": "turn",
+      "spot": {
+        "street": "turn",
+        "players": "4+",
+        "made_hand": "strong_made",
+        "facing": "raise"
+      },
+      "plan": {
+        "action": "raise",
+        "size": {
+          "kind": "pct_pot",
+          "value": 1.0
+        },
+        "freq": 1.0,
+        "future": {
+          "river": "不出危险牌继续收价值"
+        }
+      },
+      "why": "Spot 把 3-bet+ 池里面对下注记为 facing=raise；强成牌在这种大底池不弃牌，书中暗三条被加注也不考虑弃牌；本卡取一池加注，options 有全下档时按最近尺寸落全下",
+      "confidence": "interpreted",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "turn.mw.board_play.facing_bet",
+      "book": "harrington_cash",
+      "volume": 2,
+      "chapter": "ch6",
+      "pages": [
+        24
+      ],
+      "pdf_pages": [
+        30
+      ],
+      "street": "turn",
+      "spot": {
+        "street": "turn",
+        "players": "4+",
+        "made_hand": "board_play",
+        "facing": "bet"
+      },
+      "plan": {
+        "action": "fold",
+        "freq": 1.0
+      },
+      "why": "转牌强势下注代表比顶对好的牌；只打牌面的弱摊牌价值直接弃牌",
+      "confidence": "interpreted",
+      "priority": 100,
+      "offset_policy": "size_only"
     }
   ]
 }
