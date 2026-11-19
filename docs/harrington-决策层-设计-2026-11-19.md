@@ -217,6 +217,7 @@ Resolver 规则：
 - M5 用户 A/B，决定是否扩到 Ch3/Ch5/Ch7
 - M6 翻前书卡（#87，完成；Ch3 的 RFI / 面对加注 / 溜入池三桶，70 张）
 - M7 转牌缺口卡（#83，完成；7 张，flop+turn 覆盖 520/591 = 88.0%）
+- M8 河牌书卡（#84，完成；9 张，river 覆盖 115/129 = 89.1%，14 点故意留空）
 
 ### M2 结果（2026-11-19）
 
@@ -359,3 +360,65 @@ Resolver 规则：
 - 仍未覆盖的 flop 缺口（44 点，strong_made bet 7、top_pair_weak bet 6、
   overpair bet 5 等）留给下一批；转牌剩 27 点，主要是 overpair、
   top_pair_top、draw 面对加注这些没有对应卡的分支。
+
+### M8 结果（2026-11-19，#84 河牌书卡）
+
+- 新增 9 张河牌卡，独立成 `poker_ocr/playbook/cards/harrington_cash_river.json`
+  （全库 114 张）。河牌卡的 `spot` 只写 `made_hand` + `facing`，**不写
+  `players`**：Ch7 的河牌建议本身不按人数分流，3 人池与单挑池的河牌点
+  也应命中（转牌 `turn.mw.draw.bet` 同理）。全部 `priority=100`、
+  `offset_policy=size_only`、印刷页与 PDF 页差 6：
+  - 价值：`river.value.strong_made.bet`，强成牌 / 无人下注 → 下注 0.67 池
+    （3.3 好牌要下注 p71；4.1 越接近坚果下越大 p82）。
+  - 诈唬：`river.bluff.air.bet`，空气 / 无人下注 → 下注 0.67 池、频率 50%，
+    混合过牌 50%（3.7 用最弱牌诈唬 p78；4.1 诈唬尺寸匹配假装牌力 p82；
+    书里标准是过牌，诈唬只在前置条件成立时）；`river.bluff.air.facing_bet`，
+    空气 / 面对下注 → 弃牌（3.7 标准线 p78，唯一标 `explicit` 的一张）。
+  - 抓诈唬：`river.bluff_catch.middle_pair.facing_bet` /
+    `river.bluff_catch.top_pair_weak.facing_bet` → 跟注（3.5 哭泣跟注/抓诈唬
+    p75；第五节「必须跟一部分」p84-85）。命名跟既有 `turn.tptk.bluff_catch`
+    对齐，不再用 `river.catch.*`。
+  - 摊牌：`river.check.middle_pair` / `river.check.board_play` /
+    `river.check.top_pair_weak` → 过牌（3.5「一点价值以最小代价熬到亮牌」
+    p74-75）。
+  - 弃牌：`river.fold.board_play.facing_bet` → 弃牌（只打牌面只能分池，
+    3.7 无价值弃牌 p78）。
+- 覆盖（`nv tools/book_coverage.py --streets river`，129 个去重河牌决策点）：
+  命中 115（89.1%），书中无此局面 14，坏行 0；选项缺动作档 0，`choose_option`
+  选档失败 0。逐卡命中：value.strong_made.bet 31、check.board_play 25、
+  bluff.air.bet 22、check.middle_pair 20、bluff_catch.middle_pair 6、
+  check.top_pair_weak 5、bluff.air.facing_bet 2、fold.board_play 2、
+  bluff_catch.top_pair_weak 2。
+- 故意留空的 14 点（不写卡，渲染回「书中无此局面」，不硬塞会错一半的基线）：
+  - **strong_made 面对下注 12 点**：书的河牌「中等牌力」明确含两对（p84），
+    「强牌」才加注（p85）；`hand_tier=强成牌` 把两对与三条/顺/葫芦并在一起，
+    这 12 点里 6 个是两对、6 个是三条以上。一张卡只能二选一：跟注会少收
+    三条以上的价值，加注会让两对被更强牌反噬。等 `Spot` 能拆「两对」与
+    「三条以上」时再补两张。
+  - **top_pair_top_kicker 无人下注 2 点**：p71 说「认为可能最好就下注」，
+    p84 又说顶对好踢在河牌已降为中等牌力；书没有给出无位置/无下注时的
+    明确分支，故不落卡。
+- 尺寸只写在卡里（0.67 池），不读旧 `rule_params.json` 的 `river_value_band`，
+  也不在代码里写死；`choose_option` 按本桌 options 的离散金额取最近档。
+  0.67 是编译基线：书只给方向（越接近坚果下越大、诈唬尺寸匹配故事、
+  对手不会跟大注时 30-50% 池），没给固定比例，卡上的 why 已写明「基线」。
+- 书页与分类器的取舍（都标 `interpreted` 并在 why 里写明）：
+  - **空气无人下注用 50/50 混合**：书的默认是过牌、诈唬是选择性的（3.7
+    六条条件）。当前 `Spot` 没有对手类型/行动线强弱维度，无法把「对手示弱、
+    故事连贯、恐怖牌」编码成匹配键；用主计划「下注 0.67 池、频率 50%」+
+    混合「过牌 50%」把「不能总诈唬」落进渲染，而不是无条件下注。50/50 是
+    本层编译的均衡基线，书未给频率，等 A/B 或更深的事实维度再校准。
+  - **抓诈唬以跟注为基线**：书里「必须跟一部分」且按注码/故事分支（p85、
+    p75）；`Spot` 没有底池赔率与对手故事维度，按最保守的「跟」落卡，
+    小注/大注的差别留在 why 给模型结合现场判断。中底对与顶对弱踢属于 3.5
+    的「有一点价值」，河牌跟注是这两类牌的正确基线（转牌同牌力是弃牌）。
+- 未编码的书页内容：先行动时的 1/3 池阻挡下注（3.5/3.6，p75-77）——`Spot`
+  的 `in_position` 在 96% 的 replay 点为 None，没有分支可用；4.2 的
+  「筹码=2 倍池会套池」只影响下注后是否弃牌，不影响本层动作。
+- 提示词：`_spot_line` 的河牌行原本就能渲染牌力/面对，未改渲染代码；
+  `PROMPT_VERSION` bump 到 `lean-zh-2026-11-19.8`（golden fixture 全是 flop，
+  三个 hash 不变，只更新 `EXPECTED_ADVICE_VERSION`）。
+- 测试：`tests/test_playbook_river_cards.py`（9 张卡各自命中、3 人/单挑池
+  也命中、河牌卡不漏到转牌、9 张卡都落到合法 options、尺寸显式在卡里、
+  印刷页/PDF 页偏移、诈唬混合渲染、strong_made 面对下注零匹配）；
+  `tests/test_playbook_cards_multiway.py` 全库计数同步到 114。

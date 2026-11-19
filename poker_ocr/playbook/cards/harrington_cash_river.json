@@ -1,0 +1,262 @@
+{
+  "book": "harrington_cash",
+  "version": "2026-11-19.river",
+  "cards": [
+    {
+      "id": "river.value.strong_made.bet",
+      "book": "harrington_cash",
+      "volume": 2,
+      "chapter": "ch7",
+      "pages": [
+        71,
+        82
+      ],
+      "pdf_pages": [
+        77,
+        88
+      ],
+      "street": "river",
+      "spot": {
+        "street": "river",
+        "made_hand": "strong_made",
+        "facing": "none"
+      },
+      "plan": {
+        "action": "bet",
+        "size": {
+          "kind": "pct_pot",
+          "value": 0.67
+        },
+        "freq": 1.0
+      },
+      "why": "认为可能最好就下注；越接近坚果下越大，基线 2/3 池",
+      "confidence": "interpreted",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "river.bluff.air.bet",
+      "book": "harrington_cash",
+      "volume": 2,
+      "chapter": "ch7",
+      "pages": [
+        78,
+        82
+      ],
+      "pdf_pages": [
+        84,
+        88
+      ],
+      "street": "river",
+      "spot": {
+        "street": "river",
+        "made_hand": "air",
+        "facing": "none"
+      },
+      "plan": {
+        "action": "bet",
+        "size": {
+          "kind": "pct_pot",
+          "value": 0.67
+        },
+        "freq": 0.5
+      },
+      "why": "一半过牌；仅对手示弱/故事连贯/恐怖牌时用最弱牌诈唬",
+      "confidence": "interpreted",
+      "priority": 100,
+      "offset_policy": "size_only",
+      "mix": [
+        {
+          "action": "check",
+          "freq": 0.5
+        }
+      ]
+    },
+    {
+      "id": "river.bluff.air.facing_bet",
+      "book": "harrington_cash",
+      "volume": 2,
+      "chapter": "ch7",
+      "pages": [
+        78
+      ],
+      "pdf_pages": [
+        84
+      ],
+      "street": "river",
+      "spot": {
+        "street": "river",
+        "made_hand": "air",
+        "facing": "bet"
+      },
+      "plan": {
+        "action": "fold",
+        "freq": 1.0
+      },
+      "why": "空气面对河牌下注直接弃牌，不浪费筹码抓诈唬",
+      "confidence": "explicit",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "river.bluff_catch.middle_pair.facing_bet",
+      "book": "harrington_cash",
+      "volume": 2,
+      "chapter": "ch7",
+      "pages": [
+        75,
+        85
+      ],
+      "pdf_pages": [
+        81,
+        91
+      ],
+      "street": "river",
+      "spot": {
+        "street": "river",
+        "made_hand": "middle_or_bottom_pair",
+        "facing": "bet"
+      },
+      "plan": {
+        "action": "call",
+        "freq": 1.0
+      },
+      "why": "有一点价值：小注按赔率哭泣跟注，大注只看故事抓诈唬",
+      "confidence": "interpreted",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "river.bluff_catch.top_pair_weak.facing_bet",
+      "book": "harrington_cash",
+      "volume": 2,
+      "chapter": "ch7",
+      "pages": [
+        75
+      ],
+      "pdf_pages": [
+        81
+      ],
+      "street": "river",
+      "spot": {
+        "street": "river",
+        "made_hand": "top_pair_weak_kicker",
+        "facing": "bet"
+      },
+      "plan": {
+        "action": "call",
+        "freq": 1.0
+      },
+      "why": "顶对弱踢也是一点价值，按赔率跟中小注，故事连贯则弃",
+      "confidence": "interpreted",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "river.fold.board_play.facing_bet",
+      "book": "harrington_cash",
+      "volume": 2,
+      "chapter": "ch7",
+      "pages": [
+        78
+      ],
+      "pdf_pages": [
+        84
+      ],
+      "street": "river",
+      "spot": {
+        "street": "river",
+        "made_hand": "board_play",
+        "facing": "bet"
+      },
+      "plan": {
+        "action": "fold",
+        "freq": 1.0
+      },
+      "why": "只打牌面只能分池，面对下注直接弃",
+      "confidence": "interpreted",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "river.check.middle_pair",
+      "book": "harrington_cash",
+      "volume": 2,
+      "chapter": "ch7",
+      "pages": [
+        74,
+        75
+      ],
+      "pdf_pages": [
+        80,
+        81
+      ],
+      "street": "river",
+      "spot": {
+        "street": "river",
+        "made_hand": "middle_or_bottom_pair",
+        "facing": "none"
+      },
+      "plan": {
+        "action": "check",
+        "freq": 1.0
+      },
+      "why": "有一点价值先求摊牌：对手过牌就过牌比牌",
+      "confidence": "interpreted",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "river.check.board_play",
+      "book": "harrington_cash",
+      "volume": 2,
+      "chapter": "ch7",
+      "pages": [
+        74
+      ],
+      "pdf_pages": [
+        80
+      ],
+      "street": "river",
+      "spot": {
+        "street": "river",
+        "made_hand": "board_play",
+        "facing": "none"
+      },
+      "plan": {
+        "action": "check",
+        "freq": 1.0
+      },
+      "why": "打牌面只有摊牌/分池价值，无人下注时过牌不造池",
+      "confidence": "interpreted",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "river.check.top_pair_weak",
+      "book": "harrington_cash",
+      "volume": 2,
+      "chapter": "ch7",
+      "pages": [
+        74
+      ],
+      "pdf_pages": [
+        80
+      ],
+      "street": "river",
+      "spot": {
+        "street": "river",
+        "made_hand": "top_pair_weak_kicker",
+        "facing": "none"
+      },
+      "plan": {
+        "action": "check",
+        "freq": 1.0
+      },
+      "why": "顶对弱踢在河牌只算一点价值，默认过牌比牌",
+      "confidence": "interpreted",
+      "priority": 100,
+      "offset_policy": "size_only"
+    }
+  ]
+}

@@ -50,10 +50,10 @@ def check(cond: bool, msg: str) -> None:
         FAILS.append(msg)
 
 
-def _multiway_snapshot(*, street: str = "flop") -> HandSnapshot:
-    """4+ 人池、hero 拿 KK 击中暗三、没人下注：replay 里最常见的强成牌节点。"""
-    board = ("Ks", "7d", "2c") if street == "flop" else (
-        "Ks", "7d", "2c", "9h")
+def _multiway_snapshot(*, street: str = "flop", to_call: float = 0.0) -> HandSnapshot:
+    """4+ 人池、hero 拿 KK 击中暗三：replay 里最常见的强成牌节点。"""
+    board = {"flop": ("Ks", "7d", "2c"), "turn": ("Ks", "7d", "2c", "9h"),
+             "river": ("Ks", "7d", "2c", "9h", "3s")}[street]
     opponents = tuple(
         OpponentSnapshot(f"p{i}", None, f"p{i}", 100.0, 0.0, False)
         for i in range(3))
@@ -61,7 +61,7 @@ def _multiway_snapshot(*, street: str = "flop") -> HandSnapshot:
         hand_id="book-wire", hand_index=0, street=street,
         board=board, hero_cards=("Kh", "Kd"),
         hero_position="BTN", hero_stack=100.0, hero_bet=0.0,
-        hero_invested=4.0, to_call=0.0, second_bet=None,
+        hero_invested=4.0, to_call=to_call, second_bet=None,
         pot=10.0, pot_before_street=9.0, table_size=4,
         blinds=Blinds(0.5, 1.0, None, "0.5/1.0"),
         opponents=opponents,
@@ -81,8 +81,8 @@ def _multiway_snapshot(*, street: str = "flop") -> HandSnapshot:
     )
 
 
-def _sit(*, street: str = "flop"):
-    return build_situation(_multiway_snapshot(street=street),
+def _sit(*, street: str = "flop", to_call: float = 0.0):
+    return build_situation(_multiway_snapshot(street=street, to_call=to_call),
                            table_dynamics="")
 
 
@@ -129,8 +129,12 @@ def test_replay_decision_prompt_contains_readable_book_plan() -> None:
 
 
 def test_zero_match_says_no_book_spot_without_page_number() -> None:
-    """② 零匹配：明说书中无此局面，不伪造页码。"""
-    sit = _sit(street="river")
+    """② 零匹配：明说书中无此局面，不伪造页码。
+
+    河牌强成牌面对下注故意留空（两对 vs 三条以上在 Spot 里拆不开，
+    见设计稿 M8 残余），用真实生产路径验证零匹配，而不是塞空卡集。
+    """
+    sit = _sit(street="river", to_call=5.0)
     _, user = build_messages(sit)
     section = _section(user)
     check("书中无此局面" in section, f"零匹配没明说：{section}")

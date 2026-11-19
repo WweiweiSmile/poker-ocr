@@ -34,7 +34,8 @@ def test_multiway_strong_made_renders_book_plan():
 
 
 def test_zero_match_says_no_page_without_faking_one():
-    lines = render_book_plan_zh(_sit(street="river"))
+    # 河牌在 #84 之后已被全量覆盖；用「未知牌力」的转牌点当零匹配样本。
+    lines = render_book_plan_zh(_sit(street="turn", hand_tier="未知牌力"))
     text = "\n".join(lines)
     assert "书中无此局面" in text
     assert "p" not in text.replace("## 书中计划", "")
