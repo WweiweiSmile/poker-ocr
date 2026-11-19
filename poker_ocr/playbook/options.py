@@ -10,6 +10,24 @@ from dataclasses import dataclass
 from typing import Any, Iterable
 
 
+# 动作 -> 能承载它的 option kind。raise 可以落在 raise 或全下档；bet 在
+# 「面对下注/加注」的选项里同样以 raise 档出现。只有这一份映射：选档、
+# 覆盖统计、「options 缺动作档」的判定都查它。
+KINDS_FOR_ACTION: dict[str, tuple[str, ...]] = {
+    "check": ("check",),
+    "call": ("call",),
+    "fold": ("fold",),
+    "all_in": ("allin",),
+    "bet": ("bet", "raise", "allin"),
+    "raise": ("raise", "allin"),
+}
+
+
+def kinds_for_action(action: str) -> tuple[str, ...]:
+    """动作能落到哪些 option kind；认不出的动作返回空。"""
+    return KINDS_FOR_ACTION.get(str(action), ())
+
+
 @dataclass(frozen=True)
 class OptionMatch:
     option: Any
@@ -37,22 +55,10 @@ def _size_target(plan: Any, pot_bb: float, to_call_bb: float) -> float | None:
 def choose_option(options: Iterable[Any], plan: Any, *,
                   pot_bb: float, to_call_bb: float) -> OptionMatch | None:
     """按动作与尺寸选最近的可执行 option；找不到返回 None。"""
-    action = getattr(plan, "action", "")
-    opts = list(options)
-    if action == "check":
-        candidates = [o for o in opts if o.kind == "check"]
-    elif action == "call":
-        candidates = [o for o in opts if o.kind == "call"]
-    elif action == "fold":
-        candidates = [o for o in opts if o.kind == "fold"]
-    elif action == "all_in":
-        candidates = [o for o in opts if o.kind == "allin"]
-    elif action == "bet":
-        candidates = [o for o in opts if o.kind in ("bet", "raise", "allin")]
-    elif action == "raise":
-        candidates = [o for o in opts if o.kind in ("raise", "allin")]
-    else:
+    kinds = kinds_for_action(getattr(plan, "action", ""))
+    if not kinds:
         return None
+    candidates = [o for o in options if o.kind in kinds]
     if not candidates:
         return None
 

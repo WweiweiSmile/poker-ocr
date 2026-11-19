@@ -163,5 +163,9 @@ from __future__ import annotations
 # 匹配桌况或没有 options 就不产生偏移。提示词逐条渲染「适用桌况 + 依据」；
 # 偏移只改文本，不覆盖 options 的合法金额。golden fixture 都无前注，三个
 # hash 不变。
-PROMPT_VERSION = "lean-zh-2026-11-19.5"
+# 2026-11-19.6：翻前书卡落地（#87，父设计 §5 M6）——书中计划段的「局面」行在
+# 翻前改渲染位置分区/手牌类/同花状态（翻前无公共牌，旧行只剩「翻前 / 人数 /
+# 未知牌力」，卡怎么分都读不出区别）。只改翻前行，翻后行不变；golden fixture
+# 全是 flop，三个 hash 不变。
+PROMPT_VERSION = "lean-zh-2026-11-19.6"
 PROMPT_LANGUAGE = "zh"

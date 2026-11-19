@@ -215,6 +215,7 @@ Resolver 规则：
 - M3 Resolver + 20 个 replay 决策点（完成；444 点）
 - M4 提示词重建 + golden（进行中；#80 只加不删已接入，#81 待做）
 - M5 用户 A/B，决定是否扩到 Ch3/Ch5/Ch7
+- M6 翻前书卡（#87，完成；Ch3 的 RFI / 面对加注 / 溜入池三桶，70 张）
 
 ### M2 结果（2026-11-19）
 
@@ -254,36 +255,74 @@ Resolver 规则：
   页码、800 字硬上限（超限先丢后续/混合行）、多页来源每页带 p、渲染异常
   fail open 不阻塞主循环。
 
-## 5. 风险与待定
+### M6 结果（2026-11-19，#87 翻前书卡）
 
-- **页码映射**：第 1 卷 PDF 页码 = 印刷页码 + 10（已抽样确认）；第 2 卷
-  前 6 页为封面/目录，Ch6 从 PDF 7 开始，需逐章复核。
-- **牌例页**：大量手牌图是图片，OCR 读不出花色/筹码；牌例暂不进卡，
-  只抽正文原则。
-- **分类器覆盖**：`made_hand`/`draw` 的边界（如顶对+听牌）需要定义
-  优先级；先写测试再写分类。
-- **书里的模糊尺度**：Harrington 常用「足够大」「约半池」；编译成
-  `pct_pot` 时标 `interpreted`，不假装是原文数字。
-- **旧 LGB 台账**：不删除、不扩展；新链路不读。是否物理删除等用户拍板。
-
-## 6. 实施票（2026-11-19）
-
-已按 `/to-tickets` 拆成 8 张 tracer-bullet 票，全部 `ready-for-agent`：
-
-| 票 | 标题 | 阻塞于 |
-|---|---|---|
-| [#80](https://github.com/WweiweiSmile/poker-ocr/issues/80) | 书计划接进 live 提示词（只加不删） | 无 |
-| [#81](https://github.com/WweiweiSmile/poker-ocr/issues/81) | 推倒旧提示词，切到事实 + 书计划 + options 契约 | #80 |
-| [#82](https://github.com/WweiweiSmile/poker-ocr/issues/82) | 桌况偏移层：只改尺寸与频率 | #81 |
-| [#83](https://github.com/WweiweiSmile/poker-ocr/issues/83) | 转牌缺口卡 | #81 |
-| [#84](https://github.com/WweiweiSmile/poker-ocr/issues/84) | 河牌书卡：价值、诈唬、抓诈唬 | #81 |
-| [#85](https://github.com/WweiweiSmile/poker-ocr/issues/85) | 书页逐条回查与来源台账 | #81 |
-| [#86](https://github.com/WweiweiSmile/poker-ocr/issues/86) | AB 对照准备（人工执行） | #81 |
-| [#87](https://github.com/WweiweiSmile/poker-ocr/issues/87) | 翻前书卡：RFI、面对加注、溜入池 | #81、#82 |
-
-本轮拍板的四条：
-
-1. 书卡给计划，模型只在 `options` 里选，代码只校验（不代码硬定动作）。
-2. 提示词一次原子切换；先离线构建 + 更新 golden，不调模型；保留 git revert。
-3. 偏移层独立配置，只改尺寸/频率，不改动作；每条偏移必须写依据。
-4. 先切提示词，再补 turn 缺口与书页回查。
+- 翻前没有公共牌，`situation._read` 直接返回 None，`Spot.made_hand` 恒为
+  unknown。只按 `preflop_node` 建卡会对任何两张牌说同一句话（72o 也加注），
+  所以给 `Spot` 补三个**确定性派生**维度，都只由事实算出、算不出为 None：
+  - `hand_class`：`poker_ocr/playbook/hand_class.py` 从 `hero_cards` 派生，
+    词表按书里的牌型分而且**切在书给的频率边界上**——big_pair(AA-QQ) /
+    medium_pair(JJ-99) / low_pair(88-66) / small_pair(55-22) / ak / aq /
+    ace_broadway(AJ、AT) / weak_ace(A9-A2) / trouble(KQ、KJ、QJ) /
+    weak_trouble(KT、QT) / suited_connector(JT-54 同花) /
+    speculative(非同花连张与同花隔张) / other。
+    中口袋对拆两段是因为 p110 给了两套频率（JJ-99 前位 70% 加注、88-66
+    30%），且 p129 攻击溜入者只把 AA-TT 算进加注名单；麻烦牌型拆两段是
+    因为 p120 把 KT/QT 单列（中位直接弃）。
+  - `position_bucket`：书按前位/中位/后位讲，映射成 early(UTG..UTG+2) /
+    middle(LJ、HJ) / late(CO、BTN) / blind(SB、BB)。座位名从
+    `poker_ocr/positions.py` 取，不重抄。
+  - `hand_suited`：书反复按花色分流（前位只玩 KQs/AJs、KQo 弃），而
+    `hand_class` 到「麻烦牌型」就到底了，所以同花与否单独成维；未知写 None，
+    不默认非同花。
+- 新卡文件 `poker_ocr/playbook/cards/harrington_cash_preflop.json`，70 张，
+  全部带印刷页 + PDF 页；翻前卡只写动作与书里的尺寸基线（开注 3BB /
+  溜入跟注 1BB / 再加注 9BB），0.5BB 前注由 `offsets.json` 的
+  `ante.open_size` 夹到本桌合法档，动作不改。
+- 三个主桶的卡：
+  - RFI：大口袋对 90% 加注；中口袋对按位置 70%/80% 加注（书 p110 的混合
+    频率写进 mix）；小口袋对前中位平跟、后位 80% 加注；AK 75% / AQ 70%
+    加注；AJ-AT 与麻烦牌型前位**同花平跟、非同花弃**，中后位加注；
+    弱 A 前位弃、中位同花跟/非同花弃、后位 80% 加注；KT/QT 前中位弃、
+    后位加注；同花连张前位 20% 加注其余弃、中位平跟、后位加注；
+    投机牌只有后位玩。
+  - 面对单次加注：大口袋对再加注（书 p108-109 的 3 倍开注 = 9BB）；
+    中/低/小口袋对与同花连张有位置跟注、没位置弃牌；AK/AQ 跟注；
+    弱 A、AJ-AT、麻烦牌型、KT/QT、投机牌弃；位置未知时按「没位置」兜底
+    （priority 90，被有位置信息的卡覆盖）。
+  - 溜入池：AA-TT 与 AK/AQ 加注隔离（p129）；88-66 与更小对子、同花连张、
+    投机牌、AJ-AT、KQ/KJ 平跟进池；弱 A、KT/QT 与书外牌弃牌。
+  - 大盲免费看牌：两张 priority 50 的兜底 check 卡（写死 `hero_position=BB`，
+    避免误伤按钮位的「不用跟注」点）。它们不在票面的三个主桶里，但去掉
+    会让 44 个真实翻前点重新变成「书中无此局面」，故保留并在此注明。
+- 覆盖（`nv tools/preflop_book_coverage.py`，828 个去重翻前决策点）：
+  命中 744（89.9%），书中无此局面 84，坏行 0，`choose_option` 选档失败 0。
+  - limped/bet 293/293、raised/bet 292/292、unopened/bet 115/115、
+    unopened/none 5/5、limped/none 39/40。
+  - 未覆盖：three_bet/raise 0/75、three_bet/none 0/1、raised/none 0/7，
+    以及 limped/none 的 1 个按钮位怪点（facing=none 却进溜入池）。
+  - `in_position` 在 828 点里 718 点为 None，所以 `.ip` 卡命中 0，
+    vs_raise 的实际落点全在 priority 90 的位置未知兜底卡上；这是采集缺口
+    （动作线没给出相对位置），不是卡错。
+  - options 缺动作档 1 例：`preflop.rfi.big_pair` 一个 HJ KK 点，options
+    只有 fold + call，没有 raise。属采集缺口，工具单独计数、不计卡错。
+- 未做：3-bet / 4-bet 桶（76 点，0%）。书里 AA/KK 与 QQ 面对 3-bet 的处理
+  不同（QQ 最多跟注），需要把 big_pair 再拆；本票按「三个主桶」范围不做，
+  在票面写明留给后续票。
+- 提示词：`_spot_line` 在翻前改渲染「位置分区 / 手牌类 / 同花状态」，翻后行
+  一字未动；`PROMPT_VERSION` 随之 bump 到 `lean-zh-2026-11-19.6`
+  （golden fixture 全是 flop，三个 hash 不变，只更新
+  `EXPECTED_ADVICE_VERSION`）。
+- 测试：`tests/test_playbook_hand_class.py`（62 项，含 169 手牌全枚举、座位
+  覆盖红警、'10h' 记法的同花识别）、`tests/test_playbook_cards_preflop.py`
+  （19 项，含书页频率断言：JJ 前位 0.7 加注、88 前位 0.7 平跟、TT 攻击溜入者
+  加注、KQs 前位跟/KQo 弃、KT 中位弃、每张卡 choose_option 落位、前注只改
+  尺寸、翻后带 hand_suited 会被 validate_cards 拒绝）。
+- 书页没覆盖到的地方一律标 `interpreted` 并在 why 里写明扩展了什么，不假装是
+  书里原话：99 随 TT 加注（p129 只列 AA-TT）、AKo/AQo 随 AKs/AQs 加注、
+  QJ 随 KQ/KJ 在溜入池跟注、中位非同花弱 A 弃（p118 的「AJ-A7 可玩」未分
+  花色，这里取保守口径）。`validate_cards` 会校验 `hand_suited` 必须是布尔
+  且只出现在翻前。
+- 卡面 why 里的附加条件（对手筹码 ≥ 25 倍加注额才追小对、跟加注需已有
+  跟注者、前位加注且后面人多时弃 AQo）当前没有对应的事实维度，卡只按最
+  保守的那一支落，条件和理由留在 why 里给模型读。

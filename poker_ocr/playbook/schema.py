@@ -18,6 +18,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
+# 翻前专用维度（见 hand_class.py）：翻前没有 board，made_hand 恒为 unknown，
+# 不补这几维就没法把「AA 加注 / 72o 弃牌」写成同一批卡。词表只定义一次，
+# 这里直接复用；hand_class 不 import 本模块，所以没有循环依赖。
+from .hand_class import (
+    POSITION_BUCKETS, PREFLOP_HAND_CLASSES, position_bucket, preflop_hand_class,
+    preflop_suited,
+)
+
 STREETS = ("preflop", "flop", "turn", "river")
 PREFLOP_NODES = ("unopened", "limped", "raised", "three_bet", "four_bet", "unknown")
 POT_TYPES = ("unopened", "limped", "single_raised", "three_bet_plus", "bomb", "unknown")
@@ -161,6 +169,12 @@ class Spot:
     facing: str | None = None
     commitment: str | None = None
     opponent: str | None = None
+    # 翻前手牌类（见 hand_class.py）；只有翻前有值，翻后一律 None。
+    hand_class: str | None = None
+    # 位置分区（前/中/后/盲注）：翻前翻后都能算，翻前卡用它落书里的位置差异。
+    position_bucket: str | None = None
+    # 是否同花：书里按花色分流（前位只玩 KQs/AJs），翻前才有值。
+    hand_suited: bool | None = None
 
     def matches(self, other: "Spot") -> bool:
         """本卡是否覆盖 `other`；None 字段不限制。"""
@@ -194,7 +208,9 @@ class Spot:
         extra = set(data) - allowed
         if extra:
             raise ValueError(f"spot 未知字段: {sorted(extra)}")
-        return cls(**{k: _norm(v) if k != "in_position" else v
+        # in_position / hand_suited 是布尔值，不能过 _norm（True -> "True"）。
+        booleans = ("in_position", "hand_suited")
+        return cls(**{k: v if k in booleans else _norm(v)
                       for k, v in data.items()})
 
     @classmethod
@@ -221,6 +237,11 @@ class Spot:
         spr_bucket = _bucket_spr(spr)
         commitment = ("unknown" if spr_bucket == "unknown"
                       else "committed" if spr_bucket == "lt3" else "uncommitted")
+        hero_cards = getattr(snap, "hero_cards", None)
+        hand_class = (preflop_hand_class(hero_cards)
+                      if street == "preflop" else None)
+        hand_suited = (preflop_suited(hero_cards)
+                       if street == "preflop" else None)
         return cls(
             street=street or "unknown",
             preflop_node=preflop_node,
@@ -235,6 +256,10 @@ class Spot:
             facing=facing,
             commitment=commitment,
             opponent="unknown",
+            hand_class=hand_class,
+            position_bucket=position_bucket(
+                getattr(snap, "hero_position", None)),
+            hand_suited=hand_suited,
         )
 
 
@@ -376,6 +401,27 @@ def validate_cards(cards: Iterable[Card]) -> list[str]:
             errors.append(f"{card.id}: why 为空")
         if card.priority < 0:
             errors.append(f"{card.id}: priority 必须 >=0")
+        if card.spot.hand_class is not None:
+            if card.spot.street != "preflop":
+                errors.append(
+                    f"{card.id}: hand_class 只对翻前有意义（street="
+                    f"{card.spot.street!r}）")
+            if card.spot.hand_class not in PREFLOP_HAND_CLASSES:
+                errors.append(
+                    f"{card.id}: hand_class 非法 {card.spot.hand_class!r}")
+        if card.spot.hand_suited is not None:
+            if not isinstance(card.spot.hand_suited, bool):
+                errors.append(
+                    f"{card.id}: hand_suited 必须是布尔值，"
+                    f"当前 {card.spot.hand_suited!r}")
+            if card.spot.street != "preflop":
+                errors.append(
+                    f"{card.id}: hand_suited 只对翻前有意义（street="
+                    f"{card.spot.street!r}）")
+        if (card.spot.position_bucket is not None
+                and card.spot.position_bucket not in POSITION_BUCKETS):
+            errors.append(
+                f"{card.id}: position_bucket 非法 {card.spot.position_bucket!r}")
         plans = (card.plan,) + tuple(card.mix)
         for plan in plans:
             if plan.action not in ACTIONS:

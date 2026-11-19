@@ -1,0 +1,2260 @@
+{
+  "book": "harrington_cash",
+  "volume": 1,
+  "chapter": "ch3",
+  "version": "2026-11-19.preflop",
+  "note": "翻前书卡：RFI / 面对加注 / 溜入池；页码为印刷页，pdf_pages 为 PDF 页（印刷页+10）。",
+  "cards": [
+    {
+      "id": "preflop.rfi.big_pair",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        108,
+        109
+      ],
+      "pdf_pages": [
+        118,
+        119
+      ],
+      "street": "preflop",
+      "spot": {
+        "street": "preflop",
+        "preflop_node": "unopened",
+        "facing": "bet",
+        "hand_class": "big_pair"
+      },
+      "plan": {
+        "action": "raise",
+        "size": {
+          "kind": "bb",
+          "value": 3.0
+        },
+        "freq": 0.9
+      },
+      "why": "大口袋对翻前永远加注，无论位置；偶尔平跟只是平衡（p108）。",
+      "confidence": "explicit",
+      "priority": 100,
+      "offset_policy": "size_only",
+      "mix": [
+        {
+          "action": "call",
+          "size": {
+            "kind": "bb",
+            "value": 1.0
+          },
+          "freq": 0.1
+        }
+      ]
+    },
+    {
+      "id": "preflop.rfi.medium_pair.early",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        110
+      ],
+      "pdf_pages": [
+        120
+      ],
+      "street": "preflop",
+      "spot": {
+        "street": "preflop",
+        "preflop_node": "unopened",
+        "facing": "bet",
+        "hand_class": "medium_pair",
+        "position_bucket": "early"
+      },
+      "plan": {
+        "action": "raise",
+        "size": {
+          "kind": "bb",
+          "value": 3.0
+        },
+        "freq": 0.7
+      },
+      "why": "前位 JJ-99 约 70% 加注、30% 平跟（p110）。",
+      "confidence": "explicit",
+      "priority": 100,
+      "offset_policy": "size_only",
+      "mix": [
+        {
+          "action": "call",
+          "size": {
+            "kind": "bb",
+            "value": 1.0
+          },
+          "freq": 0.3
+        }
+      ]
+    },
+    {
+      "id": "preflop.rfi.medium_pair.middle",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        110
+      ],
+      "pdf_pages": [
+        120
+      ],
+      "street": "preflop",
+      "spot": {
+        "street": "preflop",
+        "preflop_node": "unopened",
+        "facing": "bet",
+        "hand_class": "medium_pair",
+        "position_bucket": "middle"
+      },
+      "plan": {
+        "action": "raise",
+        "size": {
+          "kind": "bb",
+          "value": 3.0
+        },
+        "freq": 0.8
+      },
+      "why": "中后位中口袋对 80% 加注、20% 平跟（p110）。",
+      "confidence": "explicit",
+      "priority": 100,
+      "offset_policy": "size_only",
+      "mix": [
+        {
+          "action": "call",
+          "size": {
+            "kind": "bb",
+            "value": 1.0
+          },
+          "freq": 0.2
+        }
+      ]
+    },
+    {
+      "id": "preflop.rfi.medium_pair.late",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        110
+      ],
+      "pdf_pages": [
+        120
+      ],
+      "street": "preflop",
+      "spot": {
+        "street": "preflop",
+        "preflop_node": "unopened",
+        "facing": "bet",
+        "hand_class": "medium_pair",
+        "position_bucket": "late"
+      },
+      "plan": {
+        "action": "raise",
+        "size": {
+          "kind": "bb",
+          "value": 3.0
+        },
+        "freq": 0.8
+      },
+      "why": "中后位中口袋对 80% 加注、20% 平跟（p110）。",
+      "confidence": "explicit",
+      "priority": 100,
+      "offset_policy": "size_only",
+      "mix": [
+        {
+          "action": "call",
+          "size": {
+            "kind": "bb",
+            "value": 1.0
+          },
+          "freq": 0.2
+        }
+      ]
+    },
+    {
+      "id": "preflop.rfi.low_pair.early",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        110
+      ],
+      "pdf_pages": [
+        120
+      ],
+      "street": "preflop",
+      "spot": {
+        "street": "preflop",
+        "preflop_node": "unopened",
+        "facing": "bet",
+        "hand_class": "low_pair",
+        "position_bucket": "early"
+      },
+      "plan": {
+        "action": "call",
+        "size": {
+          "kind": "bb",
+          "value": 1.0
+        },
+        "freq": 0.7
+      },
+      "why": "前位 88-66 约 30% 加注、70% 平跟（p110）。",
+      "confidence": "explicit",
+      "priority": 100,
+      "offset_policy": "size_only",
+      "mix": [
+        {
+          "action": "raise",
+          "size": {
+            "kind": "bb",
+            "value": 3.0
+          },
+          "freq": 0.3
+        }
+      ]
+    },
+    {
+      "id": "preflop.rfi.low_pair.middle",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        110
+      ],
+      "pdf_pages": [
+        120
+      ],
+      "street": "preflop",
+      "spot": {
+        "street": "preflop",
+        "preflop_node": "unopened",
+        "facing": "bet",
+        "hand_class": "low_pair",
+        "position_bucket": "middle"
+      },
+      "plan": {
+        "action": "raise",
+        "size": {
+          "kind": "bb",
+          "value": 3.0
+        },
+        "freq": 0.8
+      },
+      "why": "中后位 88-66 也按 80% 加注、20% 平跟（p110）。",
+      "confidence": "explicit",
+      "priority": 100,
+      "offset_policy": "size_only",
+      "mix": [
+        {
+          "action": "call",
+          "size": {
+            "kind": "bb",
+            "value": 1.0
+          },
+          "freq": 0.2
+        }
+      ]
+    },
+    {
+      "id": "preflop.rfi.low_pair.late",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        110
+      ],
+      "pdf_pages": [
+        120
+      ],
+      "street": "preflop",
+      "spot": {
+        "street": "preflop",
+        "preflop_node": "unopened",
+        "facing": "bet",
+        "hand_class": "low_pair",
+        "position_bucket": "late"
+      },
+      "plan": {
+        "action": "raise",
+        "size": {
+          "kind": "bb",
+          "value": 3.0
+        },
+        "freq": 0.8
+      },
+      "why": "中后位 88-66 也按 80% 加注、20% 平跟（p110）。",
+      "confidence": "explicit",
+      "priority": 100,
+      "offset_policy": "size_only",
+      "mix": [
+        {
+          "action": "call",
+          "size": {
+            "kind": "bb",
+            "value": 1.0
+          },
+          "freq": 0.2
+        }
+      ]
+    },
+    {
+      "id": "preflop.rfi.small_pair.early",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        111,
+        112
+      ],
+      "pdf_pages": [
+        121,
+        122
+      ],
+      "street": "preflop",
+      "spot": {
+        "street": "preflop",
+        "preflop_node": "unopened",
+        "facing": "bet",
+        "hand_class": "small_pair",
+        "position_bucket": "early"
+      },
+      "plan": {
+        "action": "call",
+        "size": {
+          "kind": "bb",
+          "value": 1.0
+        }
+      },
+      "why": "小口袋对本质是抽三条的听牌；书说前位大部分平跟、偶尔加注（p111-112），本卡取平跟这一支。",
+      "confidence": "interpreted",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "preflop.rfi.small_pair.middle",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        112
+      ],
+      "pdf_pages": [
+        122
+      ],
+      "street": "preflop",
+      "spot": {
+        "street": "preflop",
+        "preflop_node": "unopened",
+        "facing": "bet",
+        "hand_class": "small_pair",
+        "position_bucket": "middle"
+      },
+      "plan": {
+        "action": "call",
+        "size": {
+          "kind": "bb",
+          "value": 1.0
+        }
+      },
+      "why": "中位小口袋对同样以平跟看翻牌为主（p112）。",
+      "confidence": "interpreted",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "preflop.rfi.small_pair.late",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        112
+      ],
+      "pdf_pages": [
+        122
+      ],
+      "street": "preflop",
+      "spot": {
+        "street": "preflop",
+        "preflop_node": "unopened",
+        "facing": "bet",
+        "hand_class": "small_pair",
+        "position_bucket": "late"
+      },
+      "plan": {
+        "action": "raise",
+        "size": {
+          "kind": "bb",
+          "value": 3.0
+        },
+        "freq": 0.8
+      },
+      "why": "后位小口袋对多数加注，混少量平跟（p112）。",
+      "confidence": "explicit",
+      "priority": 100,
+      "offset_policy": "size_only",
+      "mix": [
+        {
+          "action": "call",
+          "size": {
+            "kind": "bb",
+            "value": 1.0
+          },
+          "freq": 0.2
+        }
+      ]
+    },
+    {
+      "id": "preflop.rfi.ak",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        115
+      ],
+      "pdf_pages": [
+        125
+      ],
+      "street": "preflop",
+      "spot": {
+        "street": "preflop",
+        "preflop_node": "unopened",
+        "facing": "bet",
+        "hand_class": "ak"
+      },
+      "plan": {
+        "action": "raise",
+        "size": {
+          "kind": "bb",
+          "value": 3.0
+        },
+        "freq": 0.75
+      },
+      "why": "AK 前位约 75% 加注、25% 平跟，中后位更多加注（p115）。",
+      "confidence": "explicit",
+      "priority": 100,
+      "offset_policy": "size_only",
+      "mix": [
+        {
+          "action": "call",
+          "size": {
+            "kind": "bb",
+            "value": 1.0
+          },
+          "freq": 0.25
+        }
+      ]
+    },
+    {
+      "id": "preflop.rfi.aq",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        116
+      ],
+      "pdf_pages": [
+        126
+      ],
+      "street": "preflop",
+      "spot": {
+        "street": "preflop",
+        "preflop_node": "unopened",
+        "facing": "bet",
+        "hand_class": "aq"
+      },
+      "plan": {
+        "action": "raise",
+        "size": {
+          "kind": "bb",
+          "value": 3.0
+        },
+        "freq": 0.7
+      },
+      "why": "AQ 第一个入局大部分加注、少数平跟（p116）。",
+      "confidence": "explicit",
+      "priority": 100,
+      "offset_policy": "size_only",
+      "mix": [
+        {
+          "action": "call",
+          "size": {
+            "kind": "bb",
+            "value": 1.0
+          },
+          "freq": 0.3
+        }
+      ]
+    },
+    {
+      "id": "preflop.rfi.ace_broadway.early.suited",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        118
+      ],
+      "pdf_pages": [
+        128
+      ],
+      "street": "preflop",
+      "spot": {
+        "street": "preflop",
+        "preflop_node": "unopened",
+        "facing": "bet",
+        "hand_class": "ace_broadway",
+        "position_bucket": "early",
+        "hand_suited": true
+      },
+      "plan": {
+        "action": "call",
+        "size": {
+          "kind": "bb",
+          "value": 1.0
+        }
+      },
+      "why": "前位只玩 AJs（偶尔 ATs），加注与平跟混合（p118）。",
+      "confidence": "explicit",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "preflop.rfi.ace_broadway.early.offsuit",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        118
+      ],
+      "pdf_pages": [
+        128
+      ],
+      "street": "preflop",
+      "spot": {
+        "street": "preflop",
+        "preflop_node": "unopened",
+        "facing": "bet",
+        "hand_class": "ace_broadway",
+        "position_bucket": "early",
+        "hand_suited": false
+      },
+      "plan": {
+        "action": "fold"
+      },
+      "why": "前位非同花 AJ/AT 易被压制，直接弃（p118）。",
+      "confidence": "explicit",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "preflop.rfi.ace_broadway.middle",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        118
+      ],
+      "pdf_pages": [
+        128
+      ],
+      "street": "preflop",
+      "spot": {
+        "street": "preflop",
+        "preflop_node": "unopened",
+        "facing": "bet",
+        "hand_class": "ace_broadway",
+        "position_bucket": "middle"
+      },
+      "plan": {
+        "action": "raise",
+        "size": {
+          "kind": "bb",
+          "value": 3.0
+        },
+        "freq": 0.75
+      },
+      "why": "中位 AJ-A7 可玩，强的 75% 加注、25% 平跟（p118）。",
+      "confidence": "explicit",
+      "priority": 100,
+      "offset_policy": "size_only",
+      "mix": [
+        {
+          "action": "call",
+          "size": {
+            "kind": "bb",
+            "value": 1.0
+          },
+          "freq": 0.25
+        }
+      ]
+    },
+    {
+      "id": "preflop.rfi.ace_broadway.late",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        118
+      ],
+      "pdf_pages": [
+        128
+      ],
+      "street": "preflop",
+      "spot": {
+        "street": "preflop",
+        "preflop_node": "unopened",
+        "facing": "bet",
+        "hand_class": "ace_broadway",
+        "position_bucket": "late"
+      },
+      "plan": {
+        "action": "raise",
+        "size": {
+          "kind": "bb",
+          "value": 3.0
+        },
+        "freq": 0.9
+      },
+      "why": "后位 Ax 可玩，加注比例 80/20 或 90/10（p118）。",
+      "confidence": "explicit",
+      "priority": 100,
+      "offset_policy": "size_only",
+      "mix": [
+        {
+          "action": "call",
+          "size": {
+            "kind": "bb",
+            "value": 1.0
+          },
+          "freq": 0.1
+        }
+      ]
+    },
+    {
+      "id": "preflop.rfi.weak_ace.early",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        118
+      ],
+      "pdf_pages": [
+        128
+      ],
+      "street": "preflop",
+      "spot": {
+        "street": "preflop",
+        "preflop_node": "unopened",
+        "facing": "bet",
+        "hand_class": "weak_ace",
+        "position_bucket": "early"
+      },
+      "plan": {
+        "action": "fold"
+      },
+      "why": "前位除 AJs（偶尔 ATs）外的 Ax 全弃（p118）。",
+      "confidence": "explicit",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "preflop.rfi.weak_ace.middle.suited",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        118,
+        119
+      ],
+      "pdf_pages": [
+        128,
+        129
+      ],
+      "street": "preflop",
+      "spot": {
+        "street": "preflop",
+        "preflop_node": "unopened",
+        "facing": "bet",
+        "hand_class": "weak_ace",
+        "position_bucket": "middle",
+        "hand_suited": true
+      },
+      "plan": {
+        "action": "call",
+        "size": {
+          "kind": "bb",
+          "value": 1.0
+        }
+      },
+      "why": "中位 A9-A2 同花可低成本看翻牌（p118-119）。",
+      "confidence": "interpreted",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "preflop.rfi.weak_ace.middle.offsuit",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        118
+      ],
+      "pdf_pages": [
+        128
+      ],
+      "street": "preflop",
+      "spot": {
+        "street": "preflop",
+        "preflop_node": "unopened",
+        "facing": "bet",
+        "hand_class": "weak_ace",
+        "position_bucket": "middle",
+        "hand_suited": false
+      },
+      "plan": {
+        "action": "fold"
+      },
+      "why": "p118 说中位 AJ-A7 可玩但没分花色；本卡取更保守的口径：中位非同花弱 A （A9o-A2o）弃，只留同花（编译归纳）。",
+      "confidence": "interpreted",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "preflop.rfi.weak_ace.late",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        118
+      ],
+      "pdf_pages": [
+        128
+      ],
+      "street": "preflop",
+      "spot": {
+        "street": "preflop",
+        "preflop_node": "unopened",
+        "facing": "bet",
+        "hand_class": "weak_ace",
+        "position_bucket": "late"
+      },
+      "plan": {
+        "action": "raise",
+        "size": {
+          "kind": "bb",
+          "value": 3.0
+        },
+        "freq": 0.8
+      },
+      "why": "后位所有 Ax 可玩，80% 加注、20% 平跟（p118）。",
+      "confidence": "explicit",
+      "priority": 100,
+      "offset_policy": "size_only",
+      "mix": [
+        {
+          "action": "call",
+          "size": {
+            "kind": "bb",
+            "value": 1.0
+          },
+          "freq": 0.2
+        }
+      ]
+    },
+    {
+      "id": "preflop.rfi.trouble.early.suited",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        120
+      ],
+      "pdf_pages": [
+        130
+      ],
+      "street": "preflop",
+      "spot": {
+        "street": "preflop",
+        "preflop_node": "unopened",
+        "facing": "bet",
+        "hand_class": "trouble",
+        "position_bucket": "early",
+        "hand_suited": true
+      },
+      "plan": {
+        "action": "call",
+        "size": {
+          "kind": "bb",
+          "value": 1.0
+        }
+      },
+      "why": "前位只玩 KQs，加注或平跟混合（p120）。",
+      "confidence": "explicit",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "preflop.rfi.trouble.early.offsuit",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        120
+      ],
+      "pdf_pages": [
+        130
+      ],
+      "street": "preflop",
+      "spot": {
+        "street": "preflop",
+        "preflop_node": "unopened",
+        "facing": "bet",
+        "hand_class": "trouble",
+        "position_bucket": "early",
+        "hand_suited": false
+      },
+      "plan": {
+        "action": "fold"
+      },
+      "why": "前位非同花 KQ/KJ/QJ 被 A 高张压制，弃（p120）。",
+      "confidence": "explicit",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "preflop.rfi.trouble.middle",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        120
+      ],
+      "pdf_pages": [
+        130
+      ],
+      "street": "preflop",
+      "spot": {
+        "street": "preflop",
+        "preflop_node": "unopened",
+        "facing": "bet",
+        "hand_class": "trouble",
+        "position_bucket": "middle"
+      },
+      "plan": {
+        "action": "raise",
+        "size": {
+          "kind": "bb",
+          "value": 3.0
+        },
+        "freq": 0.7
+      },
+      "why": "中位 KQ 多数加注、KJ/QJ 加注与平跟混合（p120）。",
+      "confidence": "explicit",
+      "priority": 100,
+      "offset_policy": "size_only",
+      "mix": [
+        {
+          "action": "call",
+          "size": {
+            "kind": "bb",
+            "value": 1.0
+          },
+          "freq": 0.3
+        }
+      ]
+    },
+    {
+      "id": "preflop.rfi.trouble.late",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        120
+      ],
+      "pdf_pages": [
+        130
+      ],
+      "street": "preflop",
+      "spot": {
+        "street": "preflop",
+        "preflop_node": "unopened",
+        "facing": "bet",
+        "hand_class": "trouble",
+        "position_bucket": "late"
+      },
+      "plan": {
+        "action": "raise",
+        "size": {
+          "kind": "bb",
+          "value": 3.0
+        },
+        "freq": 0.9
+      },
+      "why": "后位五种麻烦牌型都可加注偷盲（p120）。",
+      "confidence": "explicit",
+      "priority": 100,
+      "offset_policy": "size_only",
+      "mix": [
+        {
+          "action": "call",
+          "size": {
+            "kind": "bb",
+            "value": 1.0
+          },
+          "freq": 0.1
+        }
+      ]
+    },
+    {
+      "id": "preflop.rfi.weak_trouble.early",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        120
+      ],
+      "pdf_pages": [
+        130
+      ],
+      "street": "preflop",
+      "spot": {
+        "street": "preflop",
+        "preflop_node": "unopened",
+        "facing": "bet",
+        "hand_class": "weak_trouble",
+        "position_bucket": "early"
+      },
+      "plan": {
+        "action": "fold"
+      },
+      "why": "前位弱麻烦牌型被压制，弃（p120）。",
+      "confidence": "explicit",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "preflop.rfi.weak_trouble.middle",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        120
+      ],
+      "pdf_pages": [
+        130
+      ],
+      "street": "preflop",
+      "spot": {
+        "street": "preflop",
+        "preflop_node": "unopened",
+        "facing": "bet",
+        "hand_class": "weak_trouble",
+        "position_bucket": "middle"
+      },
+      "plan": {
+        "action": "fold"
+      },
+      "why": "KT/QT 在中位直接弃（p120）。",
+      "confidence": "explicit",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "preflop.rfi.weak_trouble.late",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        120
+      ],
+      "pdf_pages": [
+        130
+      ],
+      "street": "preflop",
+      "spot": {
+        "street": "preflop",
+        "preflop_node": "unopened",
+        "facing": "bet",
+        "hand_class": "weak_trouble",
+        "position_bucket": "late"
+      },
+      "plan": {
+        "action": "raise",
+        "size": {
+          "kind": "bb",
+          "value": 3.0
+        }
+      },
+      "why": "后位 KT/QT 可以加注偷盲（p120）。",
+      "confidence": "explicit",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "preflop.rfi.suited_connector.early",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        121
+      ],
+      "pdf_pages": [
+        131
+      ],
+      "street": "preflop",
+      "spot": {
+        "street": "preflop",
+        "preflop_node": "unopened",
+        "facing": "bet",
+        "hand_class": "suited_connector",
+        "position_bucket": "early"
+      },
+      "plan": {
+        "action": "raise",
+        "size": {
+          "kind": "bb",
+          "value": 3.0
+        },
+        "freq": 0.2
+      },
+      "why": "前位只用 15%-25% 的同花连牌加注，其余弃（p121）。",
+      "confidence": "interpreted",
+      "priority": 100,
+      "offset_policy": "size_only",
+      "mix": [
+        {
+          "action": "fold",
+          "freq": 0.8
+        }
+      ]
+    },
+    {
+      "id": "preflop.rfi.suited_connector.middle",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        121
+      ],
+      "pdf_pages": [
+        131
+      ],
+      "street": "preflop",
+      "spot": {
+        "street": "preflop",
+        "preflop_node": "unopened",
+        "facing": "bet",
+        "hand_class": "suited_connector",
+        "position_bucket": "middle"
+      },
+      "plan": {
+        "action": "call",
+        "size": {
+          "kind": "bb",
+          "value": 1.0
+        },
+        "freq": 0.7
+      },
+      "why": "中位 JTs-67s，一部分加注一部分平跟（p121）。",
+      "confidence": "explicit",
+      "priority": 100,
+      "offset_policy": "size_only",
+      "mix": [
+        {
+          "action": "raise",
+          "size": {
+            "kind": "bb",
+            "value": 3.0
+          },
+          "freq": 0.3
+        }
+      ]
+    },
+    {
+      "id": "preflop.rfi.suited_connector.late",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        121
+      ],
+      "pdf_pages": [
+        131
+      ],
+      "street": "preflop",
+      "spot": {
+        "street": "preflop",
+        "preflop_node": "unopened",
+        "facing": "bet",
+        "hand_class": "suited_connector",
+        "position_bucket": "late"
+      },
+      "plan": {
+        "action": "raise",
+        "size": {
+          "kind": "bb",
+          "value": 3.0
+        },
+        "freq": 0.9
+      },
+      "why": "后位基本所有同花连牌可玩，大部分加注（p121）。",
+      "confidence": "explicit",
+      "priority": 100,
+      "offset_policy": "size_only",
+      "mix": [
+        {
+          "action": "call",
+          "size": {
+            "kind": "bb",
+            "value": 1.0
+          },
+          "freq": 0.1
+        }
+      ]
+    },
+    {
+      "id": "preflop.rfi.speculative.early",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        122
+      ],
+      "pdf_pages": [
+        132
+      ],
+      "street": "preflop",
+      "spot": {
+        "street": "preflop",
+        "preflop_node": "unopened",
+        "facing": "bet",
+        "hand_class": "speculative",
+        "position_bucket": "early"
+      },
+      "plan": {
+        "action": "fold"
+      },
+      "why": "非同花连张/同花隔张要好位置与紧桌，前中位弃（p122）。",
+      "confidence": "explicit",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "preflop.rfi.speculative.middle",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        122
+      ],
+      "pdf_pages": [
+        132
+      ],
+      "street": "preflop",
+      "spot": {
+        "street": "preflop",
+        "preflop_node": "unopened",
+        "facing": "bet",
+        "hand_class": "speculative",
+        "position_bucket": "middle"
+      },
+      "plan": {
+        "action": "fold"
+      },
+      "why": "非同花连张/同花隔张要好位置与紧桌，前中位弃（p122）。",
+      "confidence": "explicit",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "preflop.rfi.speculative.late",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        122,
+        123
+      ],
+      "pdf_pages": [
+        132,
+        133
+      ],
+      "street": "preflop",
+      "spot": {
+        "street": "preflop",
+        "preflop_node": "unopened",
+        "facing": "bet",
+        "hand_class": "speculative",
+        "position_bucket": "late"
+      },
+      "plan": {
+        "action": "raise",
+        "size": {
+          "kind": "bb",
+          "value": 3.0
+        },
+        "freq": 0.8
+      },
+      "why": "后位可低成本偷盲或看翻牌，多数加注（p122-123）。",
+      "confidence": "explicit",
+      "priority": 100,
+      "offset_policy": "size_only",
+      "mix": [
+        {
+          "action": "call",
+          "size": {
+            "kind": "bb",
+            "value": 1.0
+          },
+          "freq": 0.2
+        }
+      ]
+    },
+    {
+      "id": "preflop.rfi.other",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        95,
+        107
+      ],
+      "pdf_pages": [
+        105,
+        117
+      ],
+      "street": "preflop",
+      "spot": {
+        "street": "preflop",
+        "preflop_node": "unopened",
+        "facing": "bet",
+        "hand_class": "other"
+      },
+      "plan": {
+        "action": "fold"
+      },
+      "why": "书未列入起手牌，翻前直接弃（p095-107）。",
+      "confidence": "explicit",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "preflop.vs_raise.big_pair",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        108,
+        109
+      ],
+      "pdf_pages": [
+        118,
+        119
+      ],
+      "street": "preflop",
+      "spot": {
+        "street": "preflop",
+        "preflop_node": "raised",
+        "facing": "bet",
+        "hand_class": "big_pair"
+      },
+      "plan": {
+        "action": "raise",
+        "size": {
+          "kind": "bb",
+          "value": 9.0
+        }
+      },
+      "why": "大口袋对面对加注一律再加注；开注 3BB 时加到约 9BB（p108-109）。",
+      "confidence": "explicit",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "preflop.vs_raise.medium_pair.ip",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        110,
+        114
+      ],
+      "pdf_pages": [
+        120,
+        124
+      ],
+      "street": "preflop",
+      "spot": {
+        "street": "preflop",
+        "preflop_node": "raised",
+        "facing": "bet",
+        "hand_class": "medium_pair",
+        "in_position": true
+      },
+      "plan": {
+        "action": "call"
+      },
+      "why": "有位置时所有中口袋对可跟注，别把 JJ-99 打成再加注（p110）。",
+      "confidence": "interpreted",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "preflop.vs_raise.medium_pair.oop",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        112,
+        114
+      ],
+      "pdf_pages": [
+        122,
+        124
+      ],
+      "street": "preflop",
+      "spot": {
+        "street": "preflop",
+        "preflop_node": "raised",
+        "facing": "bet",
+        "hand_class": "medium_pair",
+        "in_position": false
+      },
+      "plan": {
+        "action": "fold"
+      },
+      "why": "没位置时中小口袋对追三条的隐含赔率不够，弃（p112-114）。",
+      "confidence": "interpreted",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "preflop.vs_raise.medium_pair.unknown",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        112,
+        114
+      ],
+      "pdf_pages": [
+        122,
+        124
+      ],
+      "street": "preflop",
+      "spot": {
+        "street": "preflop",
+        "preflop_node": "raised",
+        "facing": "bet",
+        "hand_class": "medium_pair"
+      },
+      "plan": {
+        "action": "fold"
+      },
+      "why": "位置未知时按没位置处理，弃（保守兜底）。",
+      "confidence": "interpreted",
+      "priority": 90,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "preflop.vs_raise.low_pair.ip",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        110,
+        114
+      ],
+      "pdf_pages": [
+        120,
+        124
+      ],
+      "street": "preflop",
+      "spot": {
+        "street": "preflop",
+        "preflop_node": "raised",
+        "facing": "bet",
+        "hand_class": "low_pair",
+        "in_position": true
+      },
+      "plan": {
+        "action": "call"
+      },
+      "why": "88-66 有位置时跟注当抽三条听牌（p110、p114）。",
+      "confidence": "interpreted",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "preflop.vs_raise.low_pair.oop",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        112,
+        114
+      ],
+      "pdf_pages": [
+        122,
+        124
+      ],
+      "street": "preflop",
+      "spot": {
+        "street": "preflop",
+        "preflop_node": "raised",
+        "facing": "bet",
+        "hand_class": "low_pair",
+        "in_position": false
+      },
+      "plan": {
+        "action": "fold"
+      },
+      "why": "没位置时中小口袋对追三条的隐含赔率不够，弃（p112-114）。",
+      "confidence": "interpreted",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "preflop.vs_raise.low_pair.unknown",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        112,
+        114
+      ],
+      "pdf_pages": [
+        122,
+        124
+      ],
+      "street": "preflop",
+      "spot": {
+        "street": "preflop",
+        "preflop_node": "raised",
+        "facing": "bet",
+        "hand_class": "low_pair"
+      },
+      "plan": {
+        "action": "fold"
+      },
+      "why": "位置未知时按没位置处理，弃（保守兜底）。",
+      "confidence": "interpreted",
+      "priority": 90,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "preflop.vs_raise.small_pair.ip",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        110,
+        114
+      ],
+      "pdf_pages": [
+        120,
+        124
+      ],
+      "street": "preflop",
+      "spot": {
+        "street": "preflop",
+        "preflop_node": "raised",
+        "facing": "bet",
+        "hand_class": "small_pair",
+        "in_position": true
+      },
+      "plan": {
+        "action": "call"
+      },
+      "why": "小口袋对只在有位置时跟注抽三条；对手筹码不足 25 倍加注额就弃（p112-114）。",
+      "confidence": "interpreted",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "preflop.vs_raise.small_pair.oop",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        112,
+        114
+      ],
+      "pdf_pages": [
+        122,
+        124
+      ],
+      "street": "preflop",
+      "spot": {
+        "street": "preflop",
+        "preflop_node": "raised",
+        "facing": "bet",
+        "hand_class": "small_pair",
+        "in_position": false
+      },
+      "plan": {
+        "action": "fold"
+      },
+      "why": "没位置时中小口袋对追三条的隐含赔率不够，弃（p112-114）。",
+      "confidence": "interpreted",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "preflop.vs_raise.small_pair.unknown",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        112,
+        114
+      ],
+      "pdf_pages": [
+        122,
+        124
+      ],
+      "street": "preflop",
+      "spot": {
+        "street": "preflop",
+        "preflop_node": "raised",
+        "facing": "bet",
+        "hand_class": "small_pair"
+      },
+      "plan": {
+        "action": "fold"
+      },
+      "why": "位置未知时按没位置处理，弃（保守兜底）。",
+      "confidence": "interpreted",
+      "priority": 90,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "preflop.vs_raise.ak",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        115,
+        116
+      ],
+      "pdf_pages": [
+        125,
+        126
+      ],
+      "street": "preflop",
+      "spot": {
+        "street": "preflop",
+        "preflop_node": "raised",
+        "facing": "bet",
+        "hand_class": "ak"
+      },
+      "plan": {
+        "action": "call"
+      },
+      "why": "前面有人加注就跟注，现金桌不翻前全押（p115-116）。",
+      "confidence": "explicit",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "preflop.vs_raise.aq",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        116
+      ],
+      "pdf_pages": [
+        126
+      ],
+      "street": "preflop",
+      "spot": {
+        "street": "preflop",
+        "preflop_node": "raised",
+        "facing": "bet",
+        "hand_class": "aq"
+      },
+      "plan": {
+        "action": "call"
+      },
+      "why": "只有一个加注者时 AQ 跟注（p116）。",
+      "confidence": "explicit",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "preflop.vs_raise.ace_broadway",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        119
+      ],
+      "pdf_pages": [
+        129
+      ],
+      "street": "preflop",
+      "spot": {
+        "street": "preflop",
+        "preflop_node": "raised",
+        "facing": "bet",
+        "hand_class": "ace_broadway"
+      },
+      "plan": {
+        "action": "fold"
+      },
+      "why": "Ax 面对加注一般弃，除非加注者是公认差手（p119）。",
+      "confidence": "explicit",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "preflop.vs_raise.weak_ace",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        122
+      ],
+      "pdf_pages": [
+        132
+      ],
+      "street": "preflop",
+      "spot": {
+        "street": "preflop",
+        "preflop_node": "raised",
+        "facing": "bet",
+        "hand_class": "weak_ace"
+      },
+      "plan": {
+        "action": "fold"
+      },
+      "why": "弱 A 面对加注赢小输大，弃（p119）。",
+      "confidence": "explicit",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "preflop.vs_raise.trouble",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        120
+      ],
+      "pdf_pages": [
+        130
+      ],
+      "street": "preflop",
+      "spot": {
+        "street": "preflop",
+        "preflop_node": "raised",
+        "facing": "bet",
+        "hand_class": "trouble"
+      },
+      "plan": {
+        "action": "fold"
+      },
+      "why": "麻烦牌型不要用来跟加注（p120）。",
+      "confidence": "explicit",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "preflop.vs_raise.weak_trouble",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        120
+      ],
+      "pdf_pages": [
+        130
+      ],
+      "street": "preflop",
+      "spot": {
+        "street": "preflop",
+        "preflop_node": "raised",
+        "facing": "bet",
+        "hand_class": "weak_trouble"
+      },
+      "plan": {
+        "action": "fold"
+      },
+      "why": "KT/QT 面对加注全弃（p120）。",
+      "confidence": "explicit",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "preflop.vs_raise.speculative",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        122
+      ],
+      "pdf_pages": [
+        132
+      ],
+      "street": "preflop",
+      "spot": {
+        "street": "preflop",
+        "preflop_node": "raised",
+        "facing": "bet",
+        "hand_class": "speculative"
+      },
+      "plan": {
+        "action": "fold"
+      },
+      "why": "投机牌跟加注需要好位置与多个跟注者，这里不做第一个跟注者（p121-122）。",
+      "confidence": "interpreted",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "preflop.vs_raise.other",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        122
+      ],
+      "pdf_pages": [
+        132
+      ],
+      "street": "preflop",
+      "spot": {
+        "street": "preflop",
+        "preflop_node": "raised",
+        "facing": "bet",
+        "hand_class": "other"
+      },
+      "plan": {
+        "action": "fold"
+      },
+      "why": "书未列入起手牌，面对加注弃（p095-107）。",
+      "confidence": "explicit",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "preflop.vs_raise.suited_connector.ip",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        121
+      ],
+      "pdf_pages": [
+        131
+      ],
+      "street": "preflop",
+      "spot": {
+        "street": "preflop",
+        "preflop_node": "raised",
+        "facing": "bet",
+        "hand_class": "suited_connector",
+        "in_position": true
+      },
+      "plan": {
+        "action": "call"
+      },
+      "why": "有位置且至少已有一个跟注者时才跟加注，不做第一个跟注的人（p121）。",
+      "confidence": "interpreted",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "preflop.vs_raise.suited_connector.oop",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        121
+      ],
+      "pdf_pages": [
+        131
+      ],
+      "street": "preflop",
+      "spot": {
+        "street": "preflop",
+        "preflop_node": "raised",
+        "facing": "bet",
+        "hand_class": "suited_connector",
+        "in_position": false
+      },
+      "plan": {
+        "action": "fold"
+      },
+      "why": "没位置不跟加注做第一个跟注者（p121）。",
+      "confidence": "interpreted",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "preflop.vs_raise.suited_connector.unknown",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        121
+      ],
+      "pdf_pages": [
+        131
+      ],
+      "street": "preflop",
+      "spot": {
+        "street": "preflop",
+        "preflop_node": "raised",
+        "facing": "bet",
+        "hand_class": "suited_connector"
+      },
+      "plan": {
+        "action": "fold"
+      },
+      "why": "位置未知时按没位置处理，弃（保守兜底）。",
+      "confidence": "interpreted",
+      "priority": 90,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "preflop.limped.big_pair",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        129
+      ],
+      "pdf_pages": [
+        139
+      ],
+      "street": "preflop",
+      "spot": {
+        "street": "preflop",
+        "preflop_node": "limped",
+        "facing": "bet",
+        "hand_class": "big_pair"
+      },
+      "plan": {
+        "action": "raise",
+        "size": {
+          "kind": "bb",
+          "value": 3.0
+        }
+      },
+      "why": "攻击溜入者：AA-TT 加注，别让大盲便宜看翻牌（p129）。",
+      "confidence": "explicit",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "preflop.limped.medium_pair",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        129
+      ],
+      "pdf_pages": [
+        139
+      ],
+      "street": "preflop",
+      "spot": {
+        "street": "preflop",
+        "preflop_node": "limped",
+        "facing": "bet",
+        "hand_class": "medium_pair"
+      },
+      "plan": {
+        "action": "raise",
+        "size": {
+          "kind": "bb",
+          "value": 3.0
+        }
+      },
+      "why": "书只把 AA-TT 列进加注名单（p129）；99 按 p110 归在较大的中口袋对里，本卡让它随 TT 一起加注（编译归纳）。",
+      "confidence": "interpreted",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "preflop.limped.low_pair",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        129
+      ],
+      "pdf_pages": [
+        139
+      ],
+      "street": "preflop",
+      "spot": {
+        "street": "preflop",
+        "preflop_node": "limped",
+        "facing": "bet",
+        "hand_class": "low_pair"
+      },
+      "plan": {
+        "action": "call",
+        "size": {
+          "kind": "bb",
+          "value": 1.0
+        }
+      },
+      "why": "不在 AA-TT/AKs/AQs 名单里就平跟看翻牌（p129）。",
+      "confidence": "interpreted",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "preflop.limped.small_pair",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        112,
+        129
+      ],
+      "pdf_pages": [
+        122,
+        139
+      ],
+      "street": "preflop",
+      "spot": {
+        "street": "preflop",
+        "preflop_node": "limped",
+        "facing": "bet",
+        "hand_class": "small_pair"
+      },
+      "plan": {
+        "action": "call",
+        "size": {
+          "kind": "bb",
+          "value": 1.0
+        }
+      },
+      "why": "小口袋对平跟进池抽三条（p112、p129）。",
+      "confidence": "interpreted",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "preflop.limped.ak",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        129
+      ],
+      "pdf_pages": [
+        139
+      ],
+      "street": "preflop",
+      "spot": {
+        "street": "preflop",
+        "preflop_node": "limped",
+        "facing": "bet",
+        "hand_class": "ak"
+      },
+      "plan": {
+        "action": "raise",
+        "size": {
+          "kind": "bb",
+          "value": 3.0
+        }
+      },
+      "why": "攻击溜入者时 AKs 加注（p129）；非同花 AK 按同一加注处理（编译归纳）。",
+      "confidence": "interpreted",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "preflop.limped.aq",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        129
+      ],
+      "pdf_pages": [
+        139
+      ],
+      "street": "preflop",
+      "spot": {
+        "street": "preflop",
+        "preflop_node": "limped",
+        "facing": "bet",
+        "hand_class": "aq"
+      },
+      "plan": {
+        "action": "raise",
+        "size": {
+          "kind": "bb",
+          "value": 3.0
+        }
+      },
+      "why": "攻击溜入者时 AQs 加注（p129）；非同花 AQ 按同一加注处理（编译归纳）。",
+      "confidence": "interpreted",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "preflop.limped.ace_broadway",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        128
+      ],
+      "pdf_pages": [
+        138
+      ],
+      "street": "preflop",
+      "spot": {
+        "street": "preflop",
+        "preflop_node": "limped",
+        "facing": "bet",
+        "hand_class": "ace_broadway"
+      },
+      "plan": {
+        "action": "call",
+        "size": {
+          "kind": "bb",
+          "value": 1.0
+        }
+      },
+      "why": "前面多人平跟时 AJ/AT 跟注，不主动加注（p128）。",
+      "confidence": "explicit",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "preflop.limped.weak_ace",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        128
+      ],
+      "pdf_pages": [
+        138
+      ],
+      "street": "preflop",
+      "spot": {
+        "street": "preflop",
+        "preflop_node": "limped",
+        "facing": "bet",
+        "hand_class": "weak_ace"
+      },
+      "plan": {
+        "action": "fold"
+      },
+      "why": "平跟池里弱 A 只输不赢，弃（p128）。",
+      "confidence": "explicit",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "preflop.limped.trouble",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        120
+      ],
+      "pdf_pages": [
+        130
+      ],
+      "street": "preflop",
+      "spot": {
+        "street": "preflop",
+        "preflop_node": "limped",
+        "facing": "bet",
+        "hand_class": "trouble"
+      },
+      "plan": {
+        "action": "call",
+        "size": {
+          "kind": "bb",
+          "value": 1.0
+        }
+      },
+      "why": "前面几个人平跟时 KQ/KJ 可跟注（p129）；QJ 按同组跟注（编译归纳）。",
+      "confidence": "interpreted",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "preflop.limped.weak_trouble",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        120
+      ],
+      "pdf_pages": [
+        130
+      ],
+      "street": "preflop",
+      "spot": {
+        "street": "preflop",
+        "preflop_node": "limped",
+        "facing": "bet",
+        "hand_class": "weak_trouble"
+      },
+      "plan": {
+        "action": "fold"
+      },
+      "why": "KT/QT 弃（p120）。",
+      "confidence": "explicit",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "preflop.limped.suited_connector",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        121
+      ],
+      "pdf_pages": [
+        131
+      ],
+      "street": "preflop",
+      "spot": {
+        "street": "preflop",
+        "preflop_node": "limped",
+        "facing": "bet",
+        "hand_class": "suited_connector"
+      },
+      "plan": {
+        "action": "call",
+        "size": {
+          "kind": "bb",
+          "value": 1.0
+        }
+      },
+      "why": "前面 2 个以上平跟就平跟进池（p121）。",
+      "confidence": "explicit",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "preflop.limped.speculative",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        122
+      ],
+      "pdf_pages": [
+        132
+      ],
+      "street": "preflop",
+      "spot": {
+        "street": "preflop",
+        "preflop_node": "limped",
+        "facing": "bet",
+        "hand_class": "speculative"
+      },
+      "plan": {
+        "action": "call",
+        "size": {
+          "kind": "bb",
+          "value": 1.0
+        }
+      },
+      "why": "低成本看翻牌的场合可以平跟（p122）。",
+      "confidence": "interpreted",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "preflop.limped.other",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        95,
+        107
+      ],
+      "pdf_pages": [
+        105,
+        117
+      ],
+      "street": "preflop",
+      "spot": {
+        "street": "preflop",
+        "preflop_node": "limped",
+        "facing": "bet",
+        "hand_class": "other"
+      },
+      "plan": {
+        "action": "fold"
+      },
+      "why": "书未列入起手牌，弃（p095-107）。",
+      "confidence": "explicit",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "preflop.bb.check.unopened",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        123
+      ],
+      "pdf_pages": [
+        133
+      ],
+      "street": "preflop",
+      "spot": {
+        "street": "preflop",
+        "preflop_node": "unopened",
+        "facing": "none",
+        "hero_position": "BB"
+      },
+      "plan": {
+        "action": "check"
+      },
+      "why": "大盲无人加注时免费看翻牌，过牌（p123）。",
+      "confidence": "explicit",
+      "priority": 50,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "preflop.bb.check.limped",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        123,
+        129
+      ],
+      "pdf_pages": [
+        133,
+        139
+      ],
+      "street": "preflop",
+      "spot": {
+        "street": "preflop",
+        "preflop_node": "limped",
+        "facing": "none",
+        "hero_position": "BB"
+      },
+      "plan": {
+        "action": "check"
+      },
+      "why": "大盲面对溜入池免费看翻牌，过牌（p123、p129）。",
+      "confidence": "explicit",
+      "priority": 50,
+      "offset_policy": "size_only"
+    }
+  ]
+}

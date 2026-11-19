@@ -52,6 +52,23 @@ MADE_HAND_ZH = {
     "unknown": "未知牌力",
 }
 FACING_ZH = {"none": "无人下注", "bet": "面对下注", "raise": "面对加注", "unknown": "行动未知"}
+HAND_CLASS_ZH = {
+    "big_pair": "大口袋对",
+    "medium_pair": "中口袋对（JJ-99）",
+    "low_pair": "中口袋对（88-66）",
+    "small_pair": "小口袋对",
+    "ak": "AK",
+    "aq": "AQ",
+    "ace_broadway": "AJ-AT",
+    "weak_ace": "弱 A",
+    "trouble": "麻烦牌型",
+    "weak_trouble": "弱麻烦牌型",
+    "suited_connector": "同花连张",
+    "speculative": "投机牌",
+    "other": "其他牌",
+}
+POSITION_ZH = {"early": "前位", "middle": "中位", "late": "后位", "blind": "盲注"}
+SUITED_ZH = {True: "同花", False: "非同花"}
 CONFIDENCE_ZH = {"explicit": "书中明确", "interpreted": "编译归纳"}
 
 
@@ -101,9 +118,17 @@ def _spot_line(spot: Spot) -> str:
     parts = [
         STREET_ZH.get(spot.street, spot.street),
         PLAYERS_ZH.get(spot.players or "", spot.players or ""),
-        MADE_HAND_ZH.get(spot.made_hand or "", spot.made_hand or ""),
-        FACING_ZH.get(spot.facing or "", spot.facing or ""),
     ]
+    if spot.street == "preflop":
+        # 翻前没有公共牌，made_hand 恒为 unknown；书层的手牌分类与位置分区
+        # 才是这段局面的信息（见 hand_class.py）。
+        parts.append(POSITION_ZH.get(spot.position_bucket or "", ""))
+        parts.append(HAND_CLASS_ZH.get(spot.hand_class or "", ""))
+        # 书按花色分流（前位只玩 KQs/AJs），不知道就不写，别默认非同花。
+        parts.append(SUITED_ZH.get(spot.hand_suited, ""))
+    else:
+        parts.append(MADE_HAND_ZH.get(spot.made_hand or "", spot.made_hand or ""))
+    parts.append(FACING_ZH.get(spot.facing or "", spot.facing or ""))
     return " / ".join(part for part in parts if part)
 
 
