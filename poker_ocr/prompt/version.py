@@ -156,5 +156,12 @@ from __future__ import annotations
 # 留在 poker_ocr/rules/ledger/ 归档，运行时不读、不渲染。三个 golden fixture
 # 的 system+user 从约 7.8k 字降到约 2.4k 字，书中计划段照常渲染（零匹配仍写
 # 「书中无此局面」）。回滚手段是 git revert 这一个提交。
-PROMPT_VERSION = "lean-zh-2026-11-19.4"
+# 2026-11-19.5：桌况偏移层落地（#82，父设计 §2.3）——新增独立
+# poker_ocr/playbook/offsets.json 与 playbook/offset.py：书计划之后、最终决策
+# 之前按桌况只改尺寸/频率，不改动作；0.5BB 前注桌的固定开注低于本桌合法
+# options 时，clamp_options 把它抬到最小合法档（书 3BB -> 本桌 7BB），没有
+# 匹配桌况或没有 options 就不产生偏移。提示词逐条渲染「适用桌况 + 依据」；
+# 偏移只改文本，不覆盖 options 的合法金额。golden fixture 都无前注，三个
+# hash 不变。
+PROMPT_VERSION = "lean-zh-2026-11-19.5"
 PROMPT_LANGUAGE = "zh"

@@ -150,6 +150,13 @@ Resolver 规则：
 - 偏移结果必须保留 `baseline` 和 `deltas[]`，prompt 同时渲染两者，
   便于复盘「书说多少、桌况改成多少」。
 
+> **#82 实现补充（2026-11-19）**：示例里的 `add 0.0` 只适用于「书中尺寸
+> 本来就在本桌合法 options 里」的桌。0.5BB 前注把本桌最小合法开注抬到
+> 7BB 时，最终尺寸必须落在 options 的离散金额上；因此新增 `clamp_options`
+> op：把书尺寸移到最近的合法 options 金额（3BB -> 7BB），仍然只改尺寸、
+> 不改动作。对应规则同时收窄为 `street=preflop` +
+> `preflop_node=unopened` + `ante_bb>=0.5`，避免误伤 3-bet 等翻前加注。
+
 ### 2.4 L3 决策层：提示词重建
 
 推倒现有 system/user 中的**策略段**，保留最小输出契约。保留/删除清单：

@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "ante.open_size",
+      "when": {
+        "street": "preflop",
+        "preflop_node": "unopened",
+        "ante_bb": {
+          "gte": 0.5
+        }
+      },
+      "target": "size_bb",
+      "op": "clamp_options",
+      "priority": 10,
+      "reason": "0.5BB 前注把翻前底池抬高；书里的固定开注按本桌合法选项修正，低于最小档时抬到最小合法档，动作不变",
+      "source": "table_profile"
+    }
+  ]
+}

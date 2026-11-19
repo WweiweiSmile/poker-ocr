@@ -10,7 +10,7 @@
 #81（2026-11-19.4）把旧策略段整体删掉：aggression / hand_type / scenario /
 ante / metrics / arbitration / decision / stack 八段 system、attack / exploit /
 pool / rules 四段 user、翻前范围结论与隔离尺寸都不再渲染。这里除了三个 hash，
-还显式钉住「旧段不会回来」「书计划没被挤掉」「偏移 #82 之前不出现」。
+还显式钉住「旧段不会回来」「书计划没被挤掉」「无匹配桌况时不出现偏移」。
 旧 LGB 台账文件仍在仓库里归档（`poker_ocr/rules/ledger/`），运行时不读。
 """
 
@@ -30,7 +30,7 @@ from poker_ocr.prompt.user.offsets import (
 
 from replay.versioning import CURRENT_ADVICE_VERSION
 
-EXPECTED_ADVICE_VERSION = "advice-2026-11-19.4"
+EXPECTED_ADVICE_VERSION = "advice-2026-11-19.5"
 EXPECTED_PROMPT_HASH = "15abe076bf529fa260cfaf98b4979c66c37e97f5954d4900a230b12c983cabe6"
 EXPECTED_THREE_BET_PROMPT_HASH = "06c6dd6ac384019d810b561b28b5eb4b01e28310089d2c167c36ea2bcbe85083"
 EXPECTED_AIR_PROMPT_HASH = "a90c6c391821c6fcfa50135d36e035c77465c4344b485ad023b5b13c33d2c5a8"
@@ -276,8 +276,8 @@ def test_book_plan_segment_survives_on_a_matched_spot():
     assert len(system) + len(user) < 4000, "切换后不应回到 4k 以上"
 
 
-def test_offsets_stay_out_until_ticket_82():
-    """偏移段是 #82 的缝：没有偏移时一个字节都不加。"""
+def test_offsets_stay_out_without_a_matching_table():
+    """#82：没有匹配的桌况时，偏移段一个字节都不加。"""
     _, user = build_messages(
         build_situation(_golden_snapshot(), table_dynamics=""))
     assert "## 偏移" not in user

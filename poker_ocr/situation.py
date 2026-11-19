@@ -38,6 +38,7 @@ if TYPE_CHECKING:                       # 只在类型检查时引入，避免�
     from .advice import Advice
     from .options import Option
     from .opponent_profile import OpponentRead, PooledStats
+    from .playbook.offset import OffsetDelta
 
 
 # ─────────────────────────── 牌况 ───────────────────────────
@@ -138,6 +139,9 @@ class Situation:
     # 条件弃牌率：用本手收窄后的范围按权重算「他会不会弃」，并给出各尺寸的
     # 盈亏平衡弃牌率与 EV。见 fold_equity 模块。None = 翻前/无范围/已关闭。
     fold_eq: "object | None" = None
+    # 桌况偏移：书计划 -> 本桌修正。只改尺寸/频率，不改动作；空 = 没有
+    # 匹配的桌况，书页原样照用。见 playbook/offset.py。
+    plan_offsets: "tuple[OffsetDelta, ...]" = ()
     # 翻后状态帧显示在局对手为 0、底池却有钱：事实自相矛盾。
     # 这种帧必须硬闸：不渲染筹码几何/牌力落后，只给过牌/弃牌。
     abnormal_no_opponents: bool = False
@@ -557,6 +561,13 @@ def build_situation(snap: HandSnapshot,
             sit = replace(sit, fold_eq=report)
     except Exception:  # noqa: BLE001
         pass
+    # 桌况偏移：书卡解析之后、最终决策之前。只改尺寸/频率；没有匹配的
+    # 桌况就返回空，绝不猜。任何异常 fail open，不阻塞 OCR 主循环。
+    try:
+        from .playbook.offset import offsets_for_situation
+        sit = replace(sit, plan_offsets=offsets_for_situation(sit))
+    except Exception:  # noqa: BLE001
+        pass
     return sit
 
 
@@ -574,4 +585,3 @@ def _coach_actions(snap: HandSnapshot) -> list[dict]:
             "street": rec.street,
         })
     return out
-
