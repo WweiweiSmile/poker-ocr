@@ -1,5 +1,8 @@
 'use strict';
 
+/* 工作台内嵌范围推导 tab（range_tab.js 以嵌入式模式工作） */
+window.RANGE_TAB_EMBEDDED = true;
+
 /* 工作台前端：无构建步骤的原生 ES2020。
    页面结构：#/ 工作区列表 · #/w/<id>[/config|preflight|history] 详情 ·
             #/w/<id>/run 运行页 · #/w/<id>/calibrate 标定页。 */
@@ -1187,6 +1190,7 @@ async function pageRun(id) {
     <div class="run-head">
       <h1 id="run-title">${esc(STATUS_TEXT[status.state] || '运行')} · ${esc(ws.name)}</h1>
       <span id="run-pill">${statusPill(status.state)}</span>
+      <span id="run-conn" class="pill pill-idle" title="事件流连接状态">未连接</span>
       <div class="right inline">
         <button class="btn btn-sm btn-primary" id="btn-start"
           ${['running', 'paused_click', 'starting'].includes(status.state) ? 'style="display:none"' : ''}>启动</button>
@@ -1200,7 +1204,6 @@ async function pageRun(id) {
         <a class="btn btn-sm" href="#/w/${esc(id)}/calibrate">标定</a>
         <button class="btn btn-sm" id="btn-restart">重启</button>
         <button class="btn btn-sm btn-danger" id="btn-stop">停止</button>
-        <a class="btn btn-sm" id="btn-dashboard" target="_blank" rel="noreferrer">打开完整看板</a>
       </div>
     </div>
     <div class="run-metrics" id="run-metrics"></div>
@@ -1208,23 +1211,70 @@ async function pageRun(id) {
       <div class="run-left">
         <section class="panel">
           <div class="panel-head">
-            <h2>实时预览</h2>
+            <div class="chips" id="left-tabs">
+              <button type="button" data-left="table" class="active">牌桌</button>
+              <button type="button" data-left="preview">实时预览</button>
+            </div>
             <div class="groups" id="run-groups"></div>
           </div>
-          <div class="panel-body tight">
+          <div class="panel-body tight" id="left-table">
+            <div class="table-wrap" id="table-wrap">
+              <div class="felt"></div>
+              <div class="felt-ring"></div>
+              <div class="seats" id="seats"></div>
+              <div class="table-center">
+                <div class="pot-chip">
+                  <span class="pot-label">底池</span><strong id="pot">—</strong><span class="pot-unit">BB</span>
+                  <span class="pot-sub" id="street-bet-total"></span>
+                </div>
+                <div class="bet-strip" id="bet-strip"></div>
+                <div class="board" id="board"></div>
+                <div class="blinds" id="blinds"></div>
+              </div>
+              <div class="hero-panel is-empty" id="hero-panel">
+                <div class="hero-top">
+                  <span class="seat-pos" id="hero-position">—</span>
+                  <span class="hero-name" id="hero-name">hero</span>
+                  <span class="pill pill-good" id="hero-turn" hidden>轮到我</span>
+                </div>
+                <div class="hero-cards" id="hero-cards"></div>
+                <div class="hero-bottom"><span id="hero-stack">— BB</span><span id="hero-bet"></span></div>
+              </div>
+              <div class="table-empty" id="table-empty">等待牌桌识别…</div>
+            </div>
+            <div class="table-status">
+              <span class="pill pill-idle" id="cards-badge">牌面未知</span>
+              <span class="hint" id="table-foot"></span>
+            </div>
+          </div>
+          <div class="panel-body tight" id="left-preview" hidden>
             <div class="canvas-wrap" id="run-wrap">
               <img id="run-img" alt="live 预览" style="display:none">
               <canvas id="run-canvas"></canvas>
               <div class="empty" id="run-placeholder" style="position:absolute">等待首帧…</div>
             </div>
             <div class="hint" id="frame-meta" style="margin-top:8px"></div>
+            <div class="panel-head" style="border-top:1px solid var(--line)">
+              <h2>选中槽位</h2><span class="faint" id="sel-hint">点预览里的框选中</span>
+            </div>
+            <div class="panel-body inspector" id="run-inspector">
+              <div class="empty">还没有选中槽位</div>
+            </div>
           </div>
-          <div class="panel-head" style="border-top:1px solid var(--line)">
-            <h2>选中槽位</h2><span class="faint" id="sel-hint">点预览里的框选中</span>
+        </section>
+        <section class="panel">
+          <div class="panel-head">
+            <h2>本手行动线</h2>
+            <span class="pill pill-idle" id="hand-quality"></span>
+            <span class="faint" id="hand-pot"></span>
+            <span class="faint" id="hand-id"></span>
+            <span class="faint" id="hand-street"></span>
           </div>
-          <div class="panel-body inspector" id="run-inspector">
-            <div class="empty">还没有选中槽位</div>
-          </div>
+          <div class="panel-body tight" id="hand-actions"><div class="empty">还没有行动线</div></div>
+        </section>
+        <section class="panel">
+          <div class="panel-head"><h2>最近手牌</h2><span class="faint" id="hand-count"></span></div>
+          <div class="panel-body tight"><div class="hand-list" id="hand-list"><div class="empty">还没有结束的手牌</div></div></div>
         </section>
       </div>
       <aside class="run-right">
@@ -1281,11 +1331,27 @@ async function pageRun(id) {
         </div>
         <pre class="log" id="run-log"></pre>
       </div>
+    </div>
+    <div class="live-modal" id="live-modal" hidden>
+      <div class="modal-card">
+        <div class="modal-head">
+          <div><h3 id="lm-title"></h3><div class="faint" id="lm-sub"></div></div>
+          <div class="modal-tools">
+            <button type="button" class="btn btn-sm" id="lm-copy">复制</button>
+            <button type="button" class="btn btn-sm btn-ghost" id="lm-close">关闭</button>
+          </div>
+        </div>
+        <div class="modal-tabs" id="lm-tabs"></div>
+        <div class="modal-body" id="lm-body"></div>
+        <div class="modal-foot" id="lm-foot"></div>
+      </div>
     </div>`;
   renderRunGroups();
   updateRunPage(status);
   bindRunControls(ws);
   bindMergePanel();
+  bindLeftTabs();
+  bindLiveModal();
   syncLiveConnection();
 
   timer(pollRunStatus, 1000);
@@ -1348,10 +1414,6 @@ function bindRunControls(ws) {
       toast('已重启', 'ok');
       route();
     } catch (err) { toast(err.message, 'err'); }
-  });
-  const dash = document.getElementById('btn-dashboard');
-  dash.addEventListener('click', (ev) => {
-    if (!dash.href || dash.href.endsWith('#')) { ev.preventDefault(); toast('live 还没起来', 'err'); }
   });
   document.getElementById('btn-pause').addEventListener('click', async () => {
     const paused = runState.status && runState.status.click && runState.status.click.paused;
@@ -1453,12 +1515,16 @@ function updateRunPage(status) {
       ? '本次运行没有可用点击器：只能「只记录」'
       : '预点弃牌：翻前拿到垃圾牌时，在别人行动就先点「让/弃」';
   }
-  const dash = document.getElementById('btn-dashboard');
-  if (dash) {
-    if (status.live_url) dash.href = status.live_url;
-    else dash.removeAttribute('href');
-  }
   liveState.meta = status.meta || null;
+  if (status.snapshot) {
+    const snap = status.snapshot;
+    if (snap.table) liveState.table = snap.table;
+    if (snap.frame) liveState.frame = snap.frame;
+    if (Array.isArray(snap.hands) && snap.hands.length) liveState.hands = snap.hands;
+    if (Array.isArray(snap.advices)) liveState.advices = snap.advices;
+  }
+  renderTablePanel();
+  renderHandLine();
   renderFrameMeta(status);
   renderErrorStrip();
   renderConsoleLog(status);
@@ -1505,6 +1571,7 @@ const liveState = {
   rows: [], nodes: new Map(), segTimer: null, pendingTimer: null,
   activeSeg: null, segments: [],
   anchors: [], adviceSkips: 0, lastErrorAt: null, lastCardsWarn: '',
+  layout: null, hands: [], advices: [], modal: null,
 };
 
 function fmtNum(value, digits = 2) {
@@ -1570,6 +1637,7 @@ function disconnectLive() {
   liveState.connected = false;
   if (liveState.segTimer) { clearInterval(liveState.segTimer); liveState.segTimer = null; }
   if (liveState.pendingTimer) { clearInterval(liveState.pendingTimer); liveState.pendingTimer = null; }
+  closeLiveModal();
 }
 
 function syncLiveConnection() {
@@ -1597,6 +1665,9 @@ function onLiveSnapshot(snap) {
   liveState.advice = snap.advice || null;
   liveState.pending = snap.pending || null;
   liveState.pendingSince = snap.pending ? Date.now() : 0;
+  liveState.layout = snap.layout || liveState.layout;
+  if (Array.isArray(snap.hands) && snap.hands.length) liveState.hands = snap.hands;
+  if (Array.isArray(snap.advices)) liveState.advices = snap.advices;
   if (!liveState.seeded) {
     seedRows(snap.events || []);
     liveState.seeded = true;
@@ -1605,6 +1676,9 @@ function onLiveSnapshot(snap) {
   renderErrorStrip();
   renderAnchorList();
   renderFrameMeta();
+  renderTablePanel();
+  renderHandLine();
+  renderHandList();
 }
 
 function seedRows(events) {
@@ -1780,6 +1854,7 @@ function segHtml(seg) {
 function onAdviceEvent(d) {
   liveState.advice = d;
   liveState.pending = null;
+  liveState.advices = [d, ...(liveState.advices || [])].slice(0, 100);
   if (liveState.pendingTimer) { clearInterval(liveState.pendingTimer); liveState.pendingTimer = null; }
   const option = d.option || {};
   pushRow({ key: nextKey('advice'), cls: 'advice-row', focus: true, ts: Date.now(),
@@ -1824,6 +1899,12 @@ function onCardsEvent(d) {
 }
 
 function onHandEvent(d) {
+  if (d.hand_id) {
+    const hands = (liveState.hands || []).filter((h) => String(h.hand_id) !== String(d.hand_id));
+    hands.unshift(d);
+    liveState.hands = hands.slice(0, 8);
+  }
+  renderHandList();
   const quality = d.data_quality || {};
   pushRow({ key: nextKey('hand'), cls: 'hand-row', focus: true, ts: Date.now(),
     html: streamLine('🂠', `手牌 ${esc(d.hand_id || '')} ${d.partial ? '部分' : '结束'}`
@@ -2325,6 +2406,647 @@ function bindMergePanel() {
       if (runState.logAuto && log) log.scrollTop = log.scrollHeight;
     });
   }
+}
+
+/* ───────────── 左栏：牌桌 · 行动线 · 最近手牌 · 弹窗 ───────────── */
+
+const TBL_ACTION_ZH = {
+  fold: '弃牌', check: '过牌', call: '跟注', bet: '下注', raise: '加注',
+  all_in: '全下', allin: '全下', open: '开池',
+};
+const TBL_SUITS = { h: '♥', d: '♦', c: '♣', s: '♠' };
+const tblState = { boardKey: '', heroKey: '', sig: '', bound: false };
+
+function el(tag, cls, text) {
+  const node = document.createElement(tag);
+  if (cls) node.className = cls;
+  if (text !== undefined && text !== null) node.textContent = String(text);
+  return node;
+}
+
+function tblClamp(n, lo, hi) { return Math.min(hi, Math.max(lo, n)); }
+
+function tblFmt(value, digits = 2) {
+  if (value === null || value === undefined || value === '') return '—';
+  const n = Number(value);
+  if (!Number.isFinite(n)) return String(value);
+  return n.toFixed(digits).replace(/\.0+$/, '').replace(/(\.\d*[1-9])0+$/, '$1');
+}
+
+function tblStreet(street) { return STREET_ZH[street] || street || '—'; }
+function tblStreetFromBoard(n) { return ({ 0: 'preflop', 3: 'flop', 4: 'turn', 5: 'river' })[n] || 'showdown'; }
+function tblAction(action) { return TBL_ACTION_ZH[action] || action || ''; }
+
+function tblCard(code, extra = '') {
+  const node = el('div', `card ${extra}`.trim());
+  const raw = String(code || '').trim();
+  if (!raw || raw === '?' || raw === '??') { node.classList.add('card-back'); return node; }
+  const suit = raw.slice(-1).toLowerCase();
+  let rank = raw.slice(0, -1);
+  if (rank === 'T') rank = '10';
+  const cls = { s: 'suit-s', h: 'suit-h', c: 'suit-c', d: 'suit-d' }[suit];
+  if (cls) node.classList.add(cls);
+  node.append(el('div', 'rank', rank || '?'), el('div', 'suit', TBL_SUITS[suit] || ''));
+  return node;
+}
+
+function tblCardsKey(cards) { return (cards || []).join(','); }
+
+function tblSetCards(box, cards) {
+  if (!box) return;
+  box.replaceChildren();
+  (cards || []).forEach((code) => box.append(tblCard(code)));
+}
+
+function tableState() { return (liveState.table && liveState.table.state) || null; }
+function tableFrame() { return (liveState.table && liveState.table.frame) || liveState.frame || null; }
+
+function heroSeatId() {
+  const st = tableState() || {};
+  return (liveState.layout && liveState.layout.hero_seat_id) || st.hero_seat_id || '';
+}
+
+function findSeatPlayer(seatId) {
+  const st = tableState();
+  if (!st) return null;
+  if (st.hero && String(st.hero.seat_id) === String(seatId)) return st.hero;
+  return (st.opponents || []).find((p) => String(p.seat_id) === String(seatId)) || null;
+}
+
+function heroPlayer() {
+  const st = tableState();
+  if (!st) return null;
+  return st.hero || (st.opponents || []).find((p) => p.seat_id === st.hero_seat_id) || null;
+}
+
+function seatPositions() {
+  const st = tableState();
+  const players = st ? [st.hero, ...(st.opponents || [])].filter(Boolean) : [];
+  const layout = liveState.layout || null;
+  const heroId = heroSeatId();
+  let seats = [];
+  if (layout && Array.isArray(layout.seats) && layout.seats.length) {
+    seats = layout.seats
+      .filter((s) => !s.is_hero && String(s.seat_id) !== String(heroId))
+      .map((s, i) => ({ ...s, index: i }));
+  } else {
+    const n = Math.max(1, players.length);
+    seats = players.map((p, i) => {
+      const angle = (Math.PI / 2) + (i * 2 * Math.PI / n);
+      return {
+        seat_id: p.seat_id,
+        is_hero: String(p.seat_id) === String(heroId),
+        center: [0.5 + 0.42 * Math.cos(angle), 0.46 + 0.36 * Math.sin(angle)],
+        index: i,
+      };
+    }).filter((s) => !s.is_hero);
+  }
+  const seen = new Set(seats.map((s) => String(s.seat_id)));
+  const extras = players.filter((p) => String(p.seat_id) !== String(heroId) && !seen.has(String(p.seat_id)));
+  const n = Math.max(1, seats.length + extras.length);
+  extras.forEach((p, i) => {
+    const angle = (Math.PI / 2) + ((seats.length + i) * 2 * Math.PI / n);
+    seats.push({
+      seat_id: p.seat_id,
+      is_hero: false,
+      center: [0.5 + 0.42 * Math.cos(angle), 0.46 + 0.36 * Math.sin(angle)],
+      index: seats.length,
+    });
+  });
+  return seats;
+}
+
+function seatActionText(player) {
+  let action = player.all_in ? 'all_in' : player.action;
+  if (!action && (player.fold || player.status === 'folded')) action = 'fold';
+  if (player.left) return '离桌';
+  if (!action) return '';
+  const amount = Number(player.bet);
+  const withAmount = ['call', 'bet', 'raise', 'all_in'].includes(action)
+    && Number.isFinite(amount) && amount > 0;
+  return `${tblAction(action)}${withAmount ? ` ${tblFmt(amount)}` : ''}`;
+}
+
+function renderSeats() {
+  const root = document.getElementById('seats');
+  if (!root) return;
+  root.replaceChildren();
+  const st = tableState();
+  if (!st) return;
+  const dealer = st.dealer;
+  const heroId = heroSeatId();
+  for (const seat of seatPositions()) {
+    if (String(seat.seat_id) === String(heroId)) continue;
+    const player = findSeatPlayer(seat.seat_id);
+    const node = el('div', 'seat');
+    if (!player) node.classList.add('is-empty');
+    if (player && (player.fold === true || player.status === 'folded')) node.classList.add('is-folded');
+    if (player && player.left) node.classList.add('is-left');
+    if (player && ['away', 'sitting_out', 'buying_in'].includes(player.status)) node.classList.add('is-empty');
+    if (st.hero_turn === true && player && player.seat_id === st.hero_seat_id) node.classList.add('is-turn');
+
+    const top = el('div', 'seat-top');
+    top.append(el('span', 'seat-name', (player && player.name) || (player ? seat.seat_id : '空位')));
+    if (player && player.position) top.append(el('span', 'seat-pos', player.position));
+    node.append(top);
+
+    if (player) {
+      const stack = player.stack;
+      const info = el('div', 'seat-info');
+      info.append(el('span', 'seat-stack', stack === null || stack === undefined ? '— BB' : `${tblFmt(stack)} BB`));
+      if (player.bet) info.append(el('span', 'seat-bet', `本街 ${tblFmt(player.bet)}`));
+      node.append(info);
+      const actionText = seatActionText(player);
+      if (actionText) {
+        const action = player.left ? 'fold' : (player.all_in ? 'all_in' : (player.action || 'fold'));
+        const cls = String(action).replace(/[^a-z_]/gi, '');
+        node.classList.add(`act-${cls}`);
+        node.append(el('span', `seat-action action-${cls}`, actionText));
+      }
+      const shown = (st.shows || []).find((x) => String(x.seat_id) === String(seat.seat_id));
+      if (shown && Array.isArray(shown.cards) && shown.cards.length) {
+        const row = el('div', 'seat-show');
+        for (const code of shown.cards) row.append(tblCard(code));
+        node.append(row);
+      }
+    } else {
+      node.append(el('div', 'seat-stack', '—'));
+    }
+
+    if (dealer && String(seat.seat_id) === String(dealer)) node.append(el('span', 'dealer-chip', 'D'));
+
+    const rawCx = Array.isArray(seat.center) ? seat.center[0] : 0.5;
+    const rawCy = Array.isArray(seat.center) ? seat.center[1] : 0.3;
+    const cx = 0.5 + (rawCx - 0.5) * 1.12;
+    let cy = rawCy;
+    if (rawCy < 0.2) cy = rawCy * 0.75;
+    else if (rawCy > 0.2 && rawCy < 0.75) cy = 0.5 + (rawCy - 0.5) * 1.18;
+    node.style.left = `${tblClamp(cx * 100, 8, 92)}%`;
+    node.style.top = `${tblClamp(cy * 100, 9, 78)}%`;
+    root.append(node);
+  }
+}
+
+function tableSignature(st, frame) {
+  if (!st) return 'null';
+  const hero = st.hero || {};
+  return JSON.stringify([
+    st.pot, st.street_bet_total, st.dealer, st.hero_turn, st.players_in_hand,
+    hero.stack, hero.bet, hero.name, hero.position,
+    (st.hero_cards || []).join(','), (st.board || []).join(','),
+    st.cards_reliable, (st.cards_warnings || []).length,
+    (st.opponents || []).map((p) => [p.seat_id, p.stack, p.bet, p.action, p.fold, p.all_in, p.left, p.name, p.position, p.status].join('|')).join(';'),
+    (st.shows || []).map((s) => `${s.seat_id}:${(s.cards || []).join(',')}`).join(';'),
+    st.blinds ? [st.blinds.sb, st.blinds.bb, st.blinds.ante, st.blinds.source].join('/') : '',
+    frame ? [frame.seq, frame.kind, (frame.errors || []).length, frame.hand_id].join('/') : '',
+  ]);
+}
+
+function renderTablePanel() {
+  const wrap = document.getElementById('seats');
+  if (!wrap) return;
+  const st = tableState();
+  const frame = tableFrame();
+  const sig = tableSignature(st, frame);
+  if (sig === tblState.sig) return;
+  tblState.sig = sig;
+
+  renderSeats();
+  const empty = document.getElementById('table-empty');
+  const pot = document.getElementById('pot');
+  if (!st) {
+    if (empty) empty.hidden = false;
+    if (pot) pot.textContent = '—';
+    const total = document.getElementById('street-bet-total');
+    if (total) total.textContent = '本街 0 BB';
+    const strip = document.getElementById('bet-strip');
+    if (strip) strip.replaceChildren();
+    tblSetCards(document.getElementById('board'), []);
+    const heroPanel = document.getElementById('hero-panel');
+    if (heroPanel) heroPanel.classList.add('is-empty');
+    tblSetCards(document.getElementById('hero-cards'), []);
+    const street = document.getElementById('hand-street');
+    if (street) street.textContent = '等待一手牌';
+    const handId = document.getElementById('hand-id');
+    if (handId) handId.textContent = '—';
+    const badge = document.getElementById('cards-badge');
+    if (badge) { badge.textContent = '牌面未知'; badge.className = 'pill pill-idle'; }
+    const foot = document.getElementById('table-foot');
+    if (foot) foot.textContent = '等待牌桌识别…';
+    return;
+  }
+  if (empty) empty.hidden = true;
+  if (pot) pot.textContent = tblFmt(st.pot);
+  const streetBet = Number(st.street_bet_total || 0);
+  const total = document.getElementById('street-bet-total');
+  if (total) total.textContent = `本街 ${tblFmt(streetBet)} BB`;
+
+  const boardKey = tblCardsKey(st.board);
+  if (boardKey !== tblState.boardKey) {
+    tblState.boardKey = boardKey;
+    tblSetCards(document.getElementById('board'), st.board);
+  }
+
+  const hero = heroPlayer();
+  const betRoot = document.getElementById('bet-strip');
+  if (betRoot) {
+    betRoot.replaceChildren();
+    const bettors = [hero, ...(st.opponents || [])]
+      .filter((p) => p && Number(p.bet) > 0)
+      .sort((a, b) => Number(b.bet) - Number(a.bet));
+    if (bettors.length) {
+      for (const p of bettors) {
+        const isHero = String(p.seat_id) === String(st.hero_seat_id);
+        const chip = el('span', `bet-chip${isHero ? ' is-hero' : ''}`);
+        chip.title = `${p.name || p.position || p.seat_id} 本街已投入 ${tblFmt(p.bet)} BB`;
+        chip.append(el('b', null, p.name || p.position || p.seat_id || '?'),
+                    el('i', null, tblFmt(p.bet)));
+        betRoot.append(chip);
+      }
+    } else {
+      betRoot.append(el('span', 'bet-empty', '本街暂无下注'));
+    }
+  }
+
+  const panel = document.getElementById('hero-panel');
+  const heroCardsKey = tblCardsKey(st.hero_cards);
+  if (heroCardsKey !== tblState.heroKey) {
+    tblState.heroKey = heroCardsKey;
+    tblSetCards(document.getElementById('hero-cards'), st.hero_cards);
+  }
+  if (panel) {
+    panel.classList.toggle('is-empty', !hero);
+    panel.classList.toggle('is-turn', st.hero_turn === true);
+  }
+  const heroIsDealer = Boolean(st.dealer && hero && String(st.dealer) === String(hero.seat_id));
+  const pos = document.getElementById('hero-position');
+  if (pos) pos.textContent = `${(hero && hero.position) || st.hero_position || '—'}${heroIsDealer ? ' · D' : ''}`;
+  const name = document.getElementById('hero-name');
+  if (name) name.textContent = (hero && hero.name) || 'hero';
+  const turn = document.getElementById('hero-turn');
+  if (turn) turn.hidden = st.hero_turn !== true;
+  const stack = document.getElementById('hero-stack');
+  if (stack) stack.textContent = hero && hero.stack !== null && hero.stack !== undefined
+    ? `${tblFmt(hero.stack)} BB` : '— BB';
+  const bet = document.getElementById('hero-bet');
+  if (bet) bet.textContent = hero && hero.bet ? `本街 ${tblFmt(hero.bet)} BB` : '';
+
+  const blinds = st.blinds;
+  const blindsEl = document.getElementById('blinds');
+  if (blindsEl) {
+    blindsEl.textContent = blinds
+      ? `盲注 ${tblFmt(blinds.sb)}/${tblFmt(blinds.bb)}${blinds.ante ? ` + 前注 ${tblFmt(blinds.ante)}` : ''}${blinds.source === 'carried' ? '（沿用）' : ''}`
+      : '盲注 —';
+  }
+
+  const street = (frame && frame.hand && frame.hand.street) || tblStreetFromBoard((st.board || []).length);
+  const streetEl = document.getElementById('hand-street');
+  if (streetEl) streetEl.textContent = `${tblStreet(street)} · ${st.players_in_hand ?? '—'} 人在局`;
+  const handIdEl = document.getElementById('hand-id');
+  if (handIdEl) handIdEl.textContent = (frame && (frame.hand_id || (frame.hand && frame.hand.hand_id))) || '—';
+
+  const cardsOk = st.cards_reliable !== false;
+  const warnings = (st.cards_warnings || []).length;
+  const badge = document.getElementById('cards-badge');
+  if (badge) {
+    badge.textContent = cardsOk ? (warnings ? `牌面 ${warnings} 条警告` : '牌面可靠') : '牌面不可靠';
+    badge.className = `pill ${cardsOk ? (warnings ? 'pill-warn' : 'pill-good') : 'pill-bad'}`;
+  }
+  const foot = document.getElementById('table-foot');
+  if (foot) {
+    foot.textContent = [
+      blinds ? `盲注 ${tblFmt(blinds.sb)}/${tblFmt(blinds.bb)}` : null,
+      `庄位 ${st.dealer || '—'}`,
+      `本街下注 ${tblFmt(st.street_bet_total ?? 0)} BB`,
+      st.pot_before_street !== null && st.pot_before_street !== undefined
+        ? `上一街底池 ${tblFmt(st.pot_before_street)}` : null,
+    ].filter(Boolean).join('　·　');
+  }
+
+  const f = frame;
+  const metaEl = document.getElementById('frame-meta');
+  if (metaEl) {
+    if (f) {
+      const errs = (f.errors || []).length;
+      const stamp = f.ts ? fmtTime(f.ts) : clockOf((f.t || 0) * 1000);
+      metaEl.textContent = `帧 #${f.seq ?? '—'} · ${f.kind || '?'}${errs ? ` · ${errs} 个字段错误` : ''} · ${tblFmt(f.proc_ms, 0)}ms · ${stamp}`;
+    } else {
+      metaEl.textContent = '—';
+    }
+  }
+}
+
+function renderHandLine() {
+  const frame = liveState.frame || {};
+  const hand = frame.hand || null;
+  const quality = document.getElementById('hand-quality');
+  const st = tableState();
+  const cardsOk = !st || st.cards_reliable !== false;
+  const warnings = st ? (st.cards_warnings || []).length : 0;
+  if (quality) {
+    quality.textContent = cardsOk ? (warnings ? `牌面警告 ${warnings}` : '牌面可靠') : '牌面不可靠';
+    quality.className = `pill ${cardsOk ? (warnings ? 'pill-warn' : 'pill-good') : 'pill-bad'}`;
+  }
+  const potEl = document.getElementById('hand-pot');
+  if (potEl) potEl.textContent = hand && hand.pot !== undefined && hand.pot !== null ? `底池 ${tblFmt(hand.pot)} BB` : '';
+
+  const root = document.getElementById('hand-actions');
+  if (!root) return;
+  root.replaceChildren();
+  if (!hand || !Array.isArray(hand.actions) || !hand.actions.length) {
+    root.append(el('div', 'placeholder', hand
+      ? '这一手还没有抓到行动；轮到我或对手行动后会逐步出现。'
+      : '还没有行动线。轮到我时，建议会出现在右侧。'));
+    return;
+  }
+  const streets = ['preflop', 'flop', 'turn', 'river', 'showdown'];
+  const grouped = new Map();
+  for (const a of hand.actions) {
+    const key = a.street || hand.street || 'preflop';
+    if (!grouped.has(key)) grouped.set(key, []);
+    grouped.get(key).push(a);
+  }
+  const ordered = [...streets.filter((s) => grouped.has(s)),
+                   ...[...grouped.keys()].filter((s) => !streets.includes(s))];
+  for (const street of ordered) {
+    const block = el('div', 'street-block');
+    block.append(el('div', 'street-label', tblStreet(street)));
+    for (const a of grouped.get(street)) {
+      const row = el('div', `action-row${a.is_hero ? ' is-hero' : ''}`);
+      row.append(el('b', null, a.name || a.position || a.seat_id || '—'));
+      const label = el('span');
+      label.textContent = `${tblAction(a.action)}${a.amount ? ` ${tblFmt(a.amount)} BB` : ''}`;
+      if (a.inferred) label.append(el('span', 'inferred-tag', '推断'));
+      row.append(label);
+      row.append(el('span', 'amount', a.all_in ? 'ALL-IN' : ''));
+      block.append(row);
+    }
+    root.append(block);
+  }
+}
+
+function handAdvices(hand) {
+  if (!hand) return [];
+  return (liveState.advices || []).filter((a) => String(a.hand_id) === String(hand.hand_id));
+}
+
+function renderHandList() {
+  const root = document.getElementById('hand-list');
+  const count = document.getElementById('hand-count');
+  if (!root) return;
+  const hands = liveState.hands || [];
+  if (count) count.textContent = hands.length ? `${hands.length} 手` : '';
+  if (!hands.length) {
+    root.replaceChildren(el('div', 'empty', '还没有结束的手牌'));
+    return;
+  }
+  root.replaceChildren();
+  for (const hand of hands.slice(0, 8)) {
+    const q = hand.data_quality || {};
+    const status = hand.partial ? 'partial' : (q.status || 'exact');
+    const item = el('button', 'hand-item');
+    item.type = 'button';
+    item.append(el('span', `hand-dot ${status}`, ''));
+    const main = el('span');
+    main.append(el('div', 'hand-id-small', hand.hand_id || '—'));
+    main.append(el('div', 'hand-time',
+      `${(hand.hero_cards || []).join(' ') || '无手牌'} · ${(hand.board || []).join(' ') || '翻前'}${q.inferred_actions ? ` · 推断 ${q.inferred_actions}` : ''}`));
+    item.append(main);
+    item.append(el('span', 'hand-time', status === 'exact' ? '可靠' : status === 'approx' ? '近似' : '截断'));
+    item.addEventListener('click', () => openHandModal(hand));
+    root.append(item);
+  }
+}
+
+/* ───────────── 弹窗：手牌详情 / 提示词 ───────────── */
+
+function liveModalEl() { return document.getElementById('live-modal'); }
+
+function closeLiveModal() {
+  const node = liveModalEl();
+  if (!node) return;
+  node.hidden = true;
+  liveState.modal = null;
+}
+
+function modalTabsForHand(hand) {
+  const tabs = [
+    ['overview', '概览'], ['actions', '行动线'], ['quality', '数据质量'],
+  ];
+  if (handAdvices(hand).length) tabs.push(['advices', `建议 ${handAdvices(hand).length}`]);
+  tabs.push(['range', '范围推导']);
+  return tabs;
+}
+
+function openHandModal(hand) {
+  liveState.modal = { kind: 'hand', payload: hand, tab: 'overview' };
+  renderLiveModal();
+  const node = liveModalEl();
+  if (node) node.hidden = false;
+}
+
+function promptTabs(advice) {
+  const tabs = [];
+  if (advice.prompt_system) tabs.push(['system', 'System']);
+  if (advice.prompt_user) tabs.push(['user', 'User']);
+  tabs.push(['facts', '事实']);
+  if (advice.raw_response) tabs.push(['raw', '原始响应']);
+  tabs.push(['params', '参数']);
+  return tabs;
+}
+
+function openPromptModal(advice) {
+  if (!advice) return;
+  const tabs = promptTabs(advice);
+  liveState.modal = { kind: 'prompt', payload: advice, tab: tabs[0][0] };
+  renderLiveModal();
+  const node = liveModalEl();
+  if (node) node.hidden = false;
+}
+
+function modalCopy(text) {
+  if (!text) return;
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(() => toast('已复制'), () => toast('复制失败', 'error'));
+  } else {
+    toast('当前环境不支持复制', 'error');
+  }
+}
+
+function renderLiveModal() {
+  const node = liveModalEl();
+  if (!node || !liveState.modal) return;
+  const m = liveState.modal;
+  const hand = m.kind === 'hand' ? m.payload : null;
+  const advice = m.kind === 'prompt' ? m.payload : null;
+  const title = node.querySelector('#lm-title');
+  const sub = node.querySelector('#lm-sub');
+  const tabs = node.querySelector('#lm-tabs');
+  const body = node.querySelector('#lm-body');
+  const foot = node.querySelector('#lm-foot');
+
+  if (hand) {
+    const q = hand.data_quality || {};
+    title.textContent = `手牌 ${hand.hand_id || '—'}`;
+    sub.textContent = [hand.hero_position, tblStreet(hand.street), (hand.board || []).join(' ') || '翻前']
+      .filter(Boolean).join(' · ');
+    m.tabs = modalTabsForHand(hand);
+    foot.textContent = [q.status ? `数据质量 ${q.status}` : null,
+      q.inferred_actions ? `推断 ${q.inferred_actions}` : null,
+      hand.uid ? `uid ${hand.uid}` : null].filter(Boolean).join('　·　');
+  } else if (advice) {
+    const option = advice.option || {};
+    title.textContent = `建议 · ${option.label || option.id || '—'}`;
+    sub.textContent = [tblStreet(advice.street), advice.source, advice.hand_id].filter(Boolean).join(' · ');
+    m.tabs = promptTabs(advice);
+    foot.textContent = [advice.prompt_version ? `prompt ${advice.prompt_version}` : null,
+      advice.prompt_sha256 ? `sha ${String(advice.prompt_sha256).slice(0, 12)}` : null,
+      advice.duration_ms ? `${(advice.duration_ms / 1000).toFixed(1)}s` : null].filter(Boolean).join('　·　');
+  }
+
+  tabs.replaceChildren();
+  for (const [id, label] of m.tabs || []) {
+    const btn = el('button', `tab${id === m.tab ? ' is-active' : ''}`, label);
+    btn.type = 'button';
+    btn.addEventListener('click', () => {
+      if (!liveState.modal) return;
+      liveState.modal.tab = id;
+      renderLiveModal();
+    });
+    tabs.append(btn);
+  }
+
+  body.replaceChildren();
+  if (hand) renderHandBody(body, hand, m.tab);
+  else if (advice) renderPromptBody(body, advice, m.tab);
+}
+
+function preBlock(text) {
+  const pre = el('pre');
+  pre.textContent = text || '（空）';
+  return pre;
+}
+
+function renderPromptBody(body, a, tab) {
+  if (tab === 'system' || tab === 'user') {
+    body.append(preBlock(tab === 'system' ? a.prompt_system : a.prompt_user));
+    return;
+  }
+  if (tab === 'raw') {
+    let text = a.raw_response || '';
+    try { text = JSON.stringify(JSON.parse(text), null, 2); } catch (_) { /* 原样展示 */ }
+    body.append(preBlock(text));
+    return;
+  }
+  if (tab === 'params') {
+    body.append(preBlock(JSON.stringify(a.model_params || {}, null, 2)));
+    return;
+  }
+  body.append(preBlock(JSON.stringify(a.facts || {}, null, 2)));
+}
+
+function renderHandBody(body, hand, tab) {
+  if (tab === 'range') {
+    if (window.RangeTab) window.RangeTab.render(body, hand);
+    else body.append(preBlock('range_tab.js 没有加载，范围推导不可用。'));
+    return;
+  }
+  if (tab === 'overview') {
+    const q = hand.data_quality || {};
+    const dl = el('dl', 'kv');
+    const pairs = [
+      ['hand_id', hand.hand_id],
+      ['hero', (hand.hero_cards || []).join(' ') || '—'],
+      ['board', (hand.board || []).join(' ') || '翻前'],
+      ['位置', hand.hero_position],
+      ['底池', hand.pot !== undefined ? `${tblFmt(hand.pot)} BB` : '—'],
+      ['状态', q.status || (hand.partial ? 'partial' : '—')],
+      ['推断动作', q.inferred_actions ?? 0],
+      ['牌面不可靠', q.cards_unreliable ? '是' : '否'],
+      ['建议数', (hand.advices || []).length],
+    ];
+    for (const [key, value] of pairs) {
+      dl.append(el('dt', null, key));
+      dl.append(el('dd', null, value === null || value === undefined ? '—' : String(value)));
+    }
+    body.append(dl);
+    return;
+  }
+  if (tab === 'actions') {
+    const lines = [];
+    for (const street of hand.streets || []) {
+      lines.push(`【${tblStreet(street.street)}】 起始底池 ${tblFmt(street.pot_start)} BB`);
+      for (const a of street.actions || []) {
+        lines.push(`  ${a.position || ''} ${a.name || a.seat_id || '?'}  ${tblAction(a.action)}${a.amount ? ` ${tblFmt(a.amount)} BB` : ''}${a.all_in ? ' ALL-IN' : ''}${a.inferred ? ' [推断]' : ''}`);
+      }
+    }
+    body.append(preBlock(lines.join('\n') || '（没有行动）'));
+    return;
+  }
+  if (tab === 'quality') {
+    body.append(preBlock(JSON.stringify({
+      data_quality: hand.data_quality || {},
+      cards_warnings: hand.cards_warnings || [],
+      shows: hand.shows || [],
+      all_ins: hand.all_ins || [],
+    }, null, 2)));
+    return;
+  }
+  if (tab === 'advices') {
+    const root = el('div', 'advice-card');
+    for (const a of handAdvices(hand)) {
+      const item = el('button', 'history-item');
+      item.type = 'button';
+      item.append(el('span', `history-dot ${optionKind(a.option)}`, ''));
+      const main = el('span', 'history-main');
+      main.append(el('div', 'history-action', (a.option && (a.option.label || a.option.id)) || '—'));
+      main.append(el('div', 'history-sub', `${tblStreet(a.street)} · ${a.reason || ''}`));
+      item.append(main, el('span', 'history-time', a.duration_ms ? `${(a.duration_ms / 1000).toFixed(1)}s` : '—'));
+      item.addEventListener('click', () => openPromptModal(a));
+      root.append(item);
+    }
+    body.append(root);
+  }
+}
+
+function bindLiveModal() {
+  const node = liveModalEl();
+  if (!node || tblState.bound) return;
+  tblState.bound = true;
+  node.addEventListener('click', (ev) => {
+    if (ev.target === node) closeLiveModal();
+  });
+  document.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Escape' && liveState.modal) closeLiveModal();
+  });
+  const close = node.querySelector('#lm-close');
+  if (close) close.addEventListener('click', closeLiveModal);
+  const copy = node.querySelector('#lm-copy');
+  if (copy) copy.addEventListener('click', () => {
+    const m = liveState.modal;
+    if (!m) return;
+    modalCopy(m.kind === 'hand' ? JSON.stringify(m.payload, null, 2) : JSON.stringify(m.payload.facts || {}, null, 2));
+  });
+}
+
+function bindLeftTabs() {
+  const box = document.getElementById('left-tabs');
+  if (!box) return;
+  box.addEventListener('click', (ev) => {
+    const btn = ev.target.closest('[data-left]');
+    if (!btn) return;
+    const view = btn.dataset.left;
+    for (const b of box.querySelectorAll('[data-left]')) b.classList.toggle('active', b === btn);
+    const tableBox = document.getElementById('left-table');
+    const previewBox = document.getElementById('left-preview');
+    if (tableBox) tableBox.hidden = view !== 'table';
+    if (previewBox) previewBox.hidden = view !== 'preview';
+    if (view === 'preview') {
+      drawRunCanvas();
+      const img = document.getElementById('run-img');
+      if (img && img.src) setTimeout(() => drawRunCanvas(), 30);
+    }
+  });
 }
 
 function refreshRunImage() {
