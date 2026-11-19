@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import json
 import os
@@ -17,6 +18,7 @@ import sys
 import tempfile
 import threading
 import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -1002,6 +1004,208 @@ def test_http_routes_and_token() -> None:
     check(resp.status_code == 200, "删除工作区")
 
 
+# ─────────────────────── 运行页：live 反代 ───────────────────────
+
+class _FakeLiveServer:
+    """假 live：SSE 每次连接发一条事件后断开；记录 POST 与 token。"""
+
+    def __init__(self) -> None:
+        self.connections = 0
+        self.posts: list[tuple[str, dict, str]] = []
+        self.snapshot_hits = 0
+        outer = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *_args) -> None:  # noqa: D401
+                return
+
+            def _json(self, payload: dict) -> None:
+                data = json.dumps(payload).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def do_GET(self) -> None:  # noqa: N802
+                path, _, query = self.path.partition("?")
+                if path == "/api/events":
+                    outer.connections += 1
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/event-stream")
+                    self.send_header("Cache-Control", "no-store")
+                    self.end_headers()
+                    self.wfile.write(b'event: frame\ndata: {"seq": 1}\n\n')
+                    self.wfile.flush()
+                    time.sleep(0.05)
+                    self.close_connection = True
+                    return
+                if path == "/api/snapshot":
+                    outer.snapshot_hits += 1
+                    self._json({"ok": True, "seq": 9})
+                    return
+                if path == "/api/range":
+                    self._json({"ok": True, "query": query})
+                    return
+                self.send_response(404)
+                self.end_headers()
+
+            def do_POST(self) -> None:  # noqa: N802
+                length = int(self.headers.get("content-length") or 0)
+                raw = self.rfile.read(length) if length else b"{}"
+                outer.posts.append((
+                    self.path, json.loads(raw or b"{}"),
+                    self.headers.get("X-Workbench-Token", "")))
+                self._json({"ok": True, "folder": "fake"})
+
+        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.port = int(self.httpd.server_address[1])
+        self.thread = threading.Thread(target=self.httpd.serve_forever,
+                                       daemon=True)
+        self.thread.start()
+
+    def close(self) -> None:
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
+
+class _FakeSupervisor:
+    def __init__(self, run_dir: Path, port: int) -> None:
+        self.run = {"run_id": "r-live", "workspace_id": "ws-live",
+                    "dir": str(run_dir), "port": port, "alive": True,
+                    "status": "running"}
+        self.token = "live-token-123"
+
+    def refresh(self) -> dict:
+        return {"run": dict(self.run)}
+
+    def status(self) -> dict:
+        return {"run": dict(self.run)}
+
+    def current(self):
+        return self
+
+    def log_tail(self, limit: int = 30) -> str:
+        return ""
+
+    def shutdown(self) -> None:
+        pass
+
+
+def test_live_proxy_sse_passthrough_and_reconnect() -> None:
+    import asyncio
+
+    from poker_ocr.workbench.app import sse_proxy_stream
+
+    async def _connected() -> bool:
+        return False
+
+    async def _read_event(agen, timeout: float = 5.0) -> bytes:
+        buf = b""
+        deadline = time.time() + timeout
+        while b"\n\n" not in buf:
+            left = max(0.1, deadline - time.time())
+            buf += await asyncio.wait_for(agen.__anext__(), timeout=left)
+        return buf
+
+    live = _FakeLiveServer()
+    try:
+        async def collect():
+            agen = sse_proxy_stream(
+                f"http://127.0.0.1:{live.port}/api/events",
+                {"X-Workbench-Token": "live-token-123"},
+                is_disconnected=_connected)
+            try:
+                first = await _read_event(agen)
+                after_first = live.connections
+                second = await _read_event(agen)
+                return first, second, after_first, live.connections
+            finally:
+                await agen.aclose()
+
+        first, second, after_first, after_second = asyncio.run(collect())
+        check(b'"seq": 1' in first, f"SSE 首帧应立即透传：{first[:80]!r}")
+        check(b'"seq": 1' in second, f"断流重连后应再收到事件：{second[:80]!r}")
+        check(after_first == 1 and after_second >= 2,
+              f"上游断开后应重连（connections={after_first}→{after_second}）")
+    finally:
+        live.close()
+
+
+def test_live_proxy_and_anchor() -> None:
+    from fastapi.testclient import TestClient
+
+    from poker_ocr.workbench.app import create_app
+
+    tmp = _tmp()
+    live = _FakeLiveServer()
+    run_dir = tmp / "runs" / "r-live"
+    run_dir.mkdir(parents=True)
+    supervisor = _FakeSupervisor(run_dir, live.port)
+    svc = WorkbenchService(root=ROOT, workspaces_dir=tmp / "ws",
+                           runs_dir=tmp / "runs", supervisor=supervisor,
+                           preflight_context=_ctx(tmp))
+    client = TestClient(create_app(service=svc, token="wb-token"))
+    try:
+        snap = client.get("/api/live/snapshot")
+        check(snap.status_code == 200 and snap.json().get("seq") == 9,
+              f"snapshot 应透传：{snap.text[:200]}")
+        ran = client.get("/api/live/range", params={"hero": "AsKs"})
+        check(ran.status_code == 200
+              and "hero=AsKs" in ran.json().get("query", ""),
+              f"range 应透传查询串：{ran.text[:200]}")
+
+        no_token = client.post("/api/live/anchor", json={"seq": 5})
+        check(no_token.status_code == 403, "anchor 无工作台 token 应 403")
+        resp = client.post("/api/live/anchor", json={"seq": 5},
+                           headers={"X-Workbench-Token": "wb-token"})
+        check(resp.status_code == 200, f"anchor 应转发：{resp.text[:200]}")
+        check(live.posts and live.posts[-1][0] == "/api/anchor"
+              and live.posts[-1][1] == {"seq": 5}
+              and live.posts[-1][2] == "live-token-123",
+              f"anchor 应带 live token 转发：{live.posts[-1:]}")
+
+        folder = run_dir / "anchors" / "20261120_010101_000001_manual"
+        folder.mkdir(parents=True)
+        resp = client.post("/api/live/anchor/note",
+                           json={"folder": folder.name, "note": "这里误判"},
+                           headers={"X-Workbench-Token": "wb-token"})
+        check(resp.status_code == 200, f"note 写入：{resp.text[:200]}")
+        check((folder / "note.txt").read_text(encoding="utf-8") == "这里误判",
+              "note.txt 内容")
+        bad = client.post("/api/live/anchor/note",
+                          json={"folder": "../../etc", "note": "x"},
+                          headers={"X-Workbench-Token": "wb-token"})
+        check(bad.status_code == 400, "note 路径穿越应 400")
+
+        shot = run_dir / "errors" / "20261120_010101_000001_pot"
+        shot.mkdir(parents=True)
+        (shot / "frame.jpg").write_bytes(b"\xff\xd8fake")
+        resp = client.get(f"/api/live/errors/{shot.name}/frame.jpg")
+        check(resp.status_code == 200 and resp.content == b"\xff\xd8fake"
+              and resp.headers.get("content-type") == "image/jpeg",
+              f"错误截图应返回 jpg：{resp.status_code}")
+        miss = client.get(
+            "/api/live/errors/20261120_010101_000001_nope/frame.jpg")
+        check(miss.status_code == 404, "缺截图应 404")
+
+        resp = client.post("/api/live/reveal",
+                           json={"path": "../../etc/passwd"},
+                           headers={"X-Workbench-Token": "wb-token"})
+        check(resp.status_code == 400, "reveal 越界应 400")
+        resp = client.post("/api/live/reveal", json={"path": "no-such-file"},
+                           headers={"X-Workbench-Token": "wb-token"})
+        check(resp.status_code == 404, "reveal 缺文件应 404")
+
+        supervisor.run = {}
+        check(client.get("/api/live/snapshot").status_code == 409,
+              "没有运行时 live 反代应 409")
+        check(client.get("/api/live/events").status_code == 409,
+              "没有运行时 SSE 应 409")
+    finally:
+        live.close()
+
+
 def main() -> int:
     tests = [
         test_workspace_validation, test_workspace_crud, test_profile_discovery,
@@ -1022,6 +1226,8 @@ def main() -> int:
         test_configure_window_reports_position_mismatch,
         test_resize_script_sets_size_before_position,
         test_service_start_requires_force_on_warn, test_http_routes_and_token,
+        test_live_proxy_sse_passthrough_and_reconnect,
+        test_live_proxy_and_anchor,
     ]
     print("── 工作台 ────────────────────────────────────")
     for t in tests:

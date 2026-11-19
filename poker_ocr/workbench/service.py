@@ -15,9 +15,13 @@
 
 from __future__ import annotations
 
+import re
+import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
+from urllib.parse import urlencode
 
 from ..profile import Profile
 from . import calibration, geometry, live_client, preflight, sources
@@ -526,6 +530,7 @@ class WorkbenchService:
                 "workspace_id": workspace_id,
                 "state": "idle",
                 "run": None,
+                "run_dir": None,
                 "other_run": run_public,
                 "overlay": self.overlay.state(),
                 "preflight": self.cached_preflight(workspace_id),
@@ -549,6 +554,7 @@ class WorkbenchService:
             "workspace_id": workspace_id,
             "state": state_name,
             "run": run_public,
+            "run_dir": str(run["dir"]) if run and run.get("dir") else None,
             "meta": meta,
             "stats": (run.get("stats") or {}) if run else {},
             "click": control or (meta or {}).get("click") or {},
@@ -600,6 +606,112 @@ class WorkbenchService:
             raise WorkbenchError(
                 state.get("detail") or "预点弃牌切换失败", status=409)
         return state
+
+    # ─────────────────── 运行页：live 反代 ───────────────────
+    def _live_run(self) -> dict:
+        """当前正在运行的 live（运行页所有 /api/live/* 都以它为目标）。"""
+        run = self.supervisor.status().get("run") or {}
+        if not run:
+            raise WorkbenchError("没有正在运行的 live", status=409)
+        if not run.get("alive"):
+            raise WorkbenchError("live 进程已退出", status=409)
+        return run
+
+    def live_target(self) -> dict:
+        run = self._live_run()
+        return {"port": int(run["port"]),
+                "token": self.supervisor.current().token,
+                "run_dir": Path(run["dir"])}
+
+    def live_snapshot(self) -> dict:
+        run = self._live_run()
+        try:
+            return live_client.snapshot(run["port"])
+        except live_client.LiveClientError as exc:
+            raise WorkbenchError(str(exc), status=502) from exc
+
+    def live_range(self, query: dict) -> dict:
+        run = self._live_run()
+        qs = urlencode({k: v for k, v in (query or {}).items()
+                        if v is not None})
+        try:
+            return live_client.get_json(run["port"], f"/api/range?{qs}")
+        except live_client.LiveClientError as exc:
+            raise WorkbenchError(str(exc), status=502) from exc
+
+    def live_anchor(self, body: dict) -> dict:
+        run = self._live_run()
+        try:
+            return live_client.post_json(
+                run["port"], "/api/anchor", body or {},
+                token=self.supervisor.current().token)
+        except live_client.LiveClientError as exc:
+            text = str(exc)
+            status = 502
+            if "HTTP 409" in text:
+                status = 409
+            elif "HTTP 400" in text:
+                status = 400
+            elif "HTTP 404" in text:
+                status = 404
+            raise WorkbenchError(text, status=status) from exc
+
+    def anchor_note(self, folder: str, note: str) -> dict:
+        if not isinstance(note, str):
+            raise WorkbenchError("note 必须是字符串", status=400)
+        run_dir = Path(self._live_run()["dir"]).resolve()
+        base = (run_dir / "anchors").resolve()
+        target = Path(folder)
+        if not target.is_absolute():
+            target = base / target
+        target = target.resolve()
+        if target == base or target.parent != base:
+            raise WorkbenchError("锚点目录不在本次运行下", status=400)
+        if not target.is_dir():
+            raise WorkbenchError("锚点目录不存在", status=404)
+        (target / "note.txt").write_text(note, encoding="utf-8")
+        return {"ok": True, "folder": str(target), "note": note}
+
+    # 错误段截图目录名：20261120_001234_123456_pot-stack
+    _ERROR_STAMP = re.compile(r"^[0-9A-Za-z_.:-]{1,120}$")
+
+    def error_frame(self, stamp: str) -> tuple[bytes, dict]:
+        if (not self._ERROR_STAMP.fullmatch(stamp) or ".." in stamp):
+            raise WorkbenchError("非法的错误截图目录名", status=400)
+        run_dir = Path(self._live_run()["dir"]).resolve()
+        base = (run_dir / "errors").resolve()
+        path = (base / stamp / "frame.jpg").resolve()
+        if not path.is_relative_to(base):
+            raise WorkbenchError("路径越界", status=400)
+        try:
+            data = path.read_bytes()
+        except FileNotFoundError:
+            raise WorkbenchError("截图不存在", status=404) from None
+        except OSError as exc:
+            raise WorkbenchError(f"截图读取失败：{exc}", status=500) from exc
+        return data, {"stamp": stamp, "path": str(path)}
+
+    def reveal(self, path: str) -> dict:
+        if not isinstance(path, str) or not path:
+            raise WorkbenchError("需要 {\"path\": ...}", status=400)
+        run_dir = Path(self._live_run()["dir"]).resolve()
+        target = Path(path)
+        if not target.is_absolute():
+            target = run_dir / target
+        target = target.resolve()
+        if not target.is_relative_to(run_dir):
+            raise WorkbenchError("只能定位本次运行目录内的文件", status=400)
+        if not target.exists():
+            raise WorkbenchError("文件不存在", status=404)
+        if sys.platform != "darwin":
+            raise WorkbenchError("Finder 定位只支持 macOS", status=400)
+        try:
+            subprocess.run(["open", "-R", str(target)], check=False,
+                           timeout=5)
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise WorkbenchError(f"打开 Finder 失败：{exc}",
+                                 status=500) from exc
+        return {"ok": True, "path": str(target)}
 
     # ─────────────────────────── 预览 / 布局 ───────────────────────────
     def preview_jpeg(self, workspace_id: str, *, width: int,

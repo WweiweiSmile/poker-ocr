@@ -9,14 +9,17 @@
 
 from __future__ import annotations
 
+import asyncio
 import secrets
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import urlsplit
 
+import httpx
 from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import (FileResponse, JSONResponse, Response,
+                               StreamingResponse)
 from fastapi.staticfiles import StaticFiles
 
 from .service import WorkbenchError, WorkbenchService
@@ -31,6 +34,31 @@ TOKEN_MISMATCH = {"code": "token_mismatch",
 
 def _error_response(exc: WorkbenchError) -> JSONResponse:
     return JSONResponse(exc.to_dict(), status_code=exc.status)
+
+
+async def sse_proxy_stream(upstream: str, headers: dict[str, str], *,
+                           is_disconnected=None,
+                           backoff_max: float = 5.0):
+    """反代 SSE：首帧立即透传；上游断流指数退避重连；调用方取消即停止。"""
+    backoff = 0.25
+    while True:
+        try:
+            async with httpx.AsyncClient(timeout=None) as client:
+                async with client.stream(
+                        "GET", upstream, headers=headers) as resp:
+                    if resp.status_code != 200:
+                        raise RuntimeError(
+                            f"live 事件流 HTTP {resp.status_code}")
+                    backoff = 0.25
+                    async for chunk in resp.aiter_raw():
+                        yield chunk
+        except asyncio.CancelledError:
+            raise
+        except Exception:      # noqa: BLE001 — 上游断流，重连
+            if is_disconnected is not None and await is_disconnected():
+                return
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, backoff_max)
 
 
 def create_app(*, service: WorkbenchService | None = None,
@@ -200,6 +228,63 @@ def create_app(*, service: WorkbenchService | None = None,
     @app.get("/api/workspaces/{workspace_id}/status")
     def status(workspace_id: str) -> dict:
         return svc.status(workspace_id)
+
+    # ── 运行页：live 反代（当前运行，无 workspace_id） ────
+    @app.get("/api/live/snapshot")
+    def live_snapshot() -> dict:
+        return svc.live_snapshot()
+
+    @app.get("/api/live/range")
+    def live_range(request: Request) -> dict:
+        return svc.live_range(dict(request.query_params))
+
+    @app.get("/api/live/errors/{stamp}/frame.jpg")
+    def live_error_frame(stamp: str) -> Response:
+        data, meta = svc.error_frame(stamp)
+        return Response(data, media_type="image/jpeg",
+                        headers={"Cache-Control": "no-store",
+                                 "X-Error-Stamp": str(meta.get("stamp"))})
+
+    @app.post("/api/live/anchor", dependencies=[Depends(require_token)])
+    def live_anchor(body: dict = Body(...)) -> dict:
+        return svc.live_anchor(body)
+
+    @app.post("/api/live/anchor/note",
+              dependencies=[Depends(require_token)])
+    def live_anchor_note(body: dict = Body(...)) -> dict:
+        folder = body.get("folder")
+        if not isinstance(folder, str) or not folder:
+            raise HTTPException(
+                status_code=400,
+                detail="需要 {\"folder\": ..., \"note\": ...}")
+        return svc.anchor_note(folder, body.get("note"))
+
+    @app.post("/api/live/reveal", dependencies=[Depends(require_token)])
+    def live_reveal(body: dict = Body(...)) -> dict:
+        path = body.get("path")
+        if not isinstance(path, str) or not path:
+            raise HTTPException(status_code=400,
+                                detail="需要 {\"path\": ...}")
+        return svc.reveal(path)
+
+    @app.get("/api/live/events")
+    async def live_events(request: Request) -> StreamingResponse:
+        """SSE 反代 live `/api/events`：首帧立即透传，断流指数退避重连。"""
+        target = svc.live_target()          # 无运行 → WorkbenchError 409
+        upstream = (f"http://127.0.0.1:{target['port']}/api/events")
+        headers = {"X-Workbench-Token": target["token"]}
+
+        async def gen():
+            async for chunk in sse_proxy_stream(
+                    upstream, headers,
+                    is_disconnected=request.is_disconnected):
+                yield chunk
+
+        return StreamingResponse(
+            gen(), media_type="text/event-stream",
+            headers={"Cache-Control": "no-store",
+                     "Connection": "keep-alive",
+                     "X-Accel-Buffering": "no"})
 
     @app.post("/api/workspaces/{workspace_id}/click",
               dependencies=[Depends(require_token)])
