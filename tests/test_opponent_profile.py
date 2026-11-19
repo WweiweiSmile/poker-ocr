@@ -1055,7 +1055,7 @@ def test_prompt_renders_opponent_reads() -> None:
               source="unknown", gate="unknown")))
     facts = render_facts_zh(sit)
     # 标题要写明排序口径：按 Hero 下注后的行动顺序，不是静态翻前位置。
-    check("## 对手画像（逐座位；Hero 下注后行动顺序；优先于池子先验/全场先验）" in facts,
+    check("## 对手画像（逐座位；Hero 下注后行动顺序）" in facts,
           f"事实块应含对手画像：\n{facts}")
     check("BTN 芒果与西米：MANIAC" in facts,
           f"画像应带位置和类型：\n{facts}")

@@ -9,8 +9,12 @@ from __future__ import annotations
 from ...opponent_profile import render_reads_zh
 
 
-def render_profiles_zh(sit, *, suppress_action_hints: bool = False) -> list[str]:
-    """「## 对手画像」整段；没有可信画像时返回空列表。"""
+def render_profiles_zh(sit) -> list[str]:
+    """「## 对手画像」整段；没有可信画像时返回空列表。
+
+    #81 起提示词里只放描述性事实：`include_exploit=False` 让
+    `opponent_profile` 不渲染「剥削/动作提示」行，画像段不再给建议。
+    """
     snap = sit.snap
     active = {o.seat_id: (o.position or o.seat_id)
               for o in snap.opponents if not o.folded}
@@ -31,11 +35,11 @@ def render_profiles_zh(sit, *, suppress_action_hints: bool = False) -> list[str]
         in_hand_reads,
         key=lambda read: (order_rank.get(active.get(read.seat_id, ""), len(order_rank)),
                           active.get(read.seat_id, "")))
-    header = "## 对手画像（逐座位；Hero 下注后行动顺序；优先于池子先验/全场先验）"
+    header = "## 对手画像（逐座位；Hero 下注后行动顺序）"
     lines = render_reads_zh(
         ordered_reads, active,
         header=header,
-        include_exploit=not suppress_action_hints,
+        include_exploit=False,
         preserve_input_order=True,
         witness_by_seat=sit.witness_by_seat)
     # 桌况段删除后，「本手还有谁没有画像」只能在这里说。不列出来，模型会

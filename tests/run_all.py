@@ -121,7 +121,11 @@ SUITES = ["test_positions.py", "test_env.py", "test_profile_8p.py", "test_coach.
           # 票 #80（书计划接进 live 提示词，只加不删）新增套件
           "test_playbook_schema.py", "test_playbook_cards.py",
           "test_playbook_cards_multiway.py", "test_playbook_prompt.py",
-          "test_prompt_rules.py", "test_prompt_book_plan.py"]
+          "test_prompt_book_plan.py",
+          # 票 #81（推倒旧提示词，切到事实+书计划+options 契约）：旧规则
+          # 台账渲染器删除，test_prompt_rules 随之下线；新增契约验收在
+          # replay-console/tests/test_prompt_golden.py 与本文件的历史套件里。
+          ]
 
 
 def main() -> int:

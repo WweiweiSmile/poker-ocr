@@ -293,12 +293,12 @@ def test_priority_table_puts_hero_strength_above_witness() -> None:
     i2 = P.index("2. 确定性计算")
     i3a = P.index("3a. 逐座位摊牌证据")
     i3b = P.index("3b. ")
-    i3c = P.index("3c. 池子先验")
     i4 = P.index("4. 现场观察")
-    check(i1 < i2 < i3a < i3b < i3c < i4, f"优先级序号应递增：{P}")
+    check(i1 < i2 < i3a < i3b < i4, f"优先级序号应递增：{P}")
+    check("池子先验" not in P, "池子先验段已随 #81 删除，不该再排在优先级里")
     check("3a 不压 Hero 牌力事实（第 2 层）" in P,
           "必须写明摊牌证据不压 Hero 牌力事实")
-    check("摊牌证据 > 逐座位画像 > 本桌 > 全场先验" in P,
+    check("摊牌证据 > 逐座位画像 > 本桌 > 全场统计" in P,
           "同层「更具体」口径要含摊牌证据")
 
 

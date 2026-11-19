@@ -345,13 +345,14 @@ states 的 advice 行 join）。**这是另一份契约**：改它不动 `states
 
 ## 7. 提示词系统
 
-- 当前版本：`PROMPT_VERSION = "lean-zh-2026-11-19.3"`（[poker_ocr/prompt/version.py](poker_ocr/prompt/version.py)）。
+- 当前版本：`PROMPT_VERSION = "lean-zh-2026-11-19.4"`（[poker_ocr/prompt/version.py](poker_ocr/prompt/version.py)）。
 - 只有**一套中文 lean**：不注入 Math gate、不做弃牌重问、不加载技能库。
 - 只有一套中文 lean：旧的价值指令 / 赔率闸门 / 英文事实块已于 2026-11-18 删除，`poker_ocr/prompt/offline/` 只剩复盘审计用的 `audit_advice_tags`。
 - 版本号写进 `session_start` / advice JSONL；`replay/versioning.py` 的 `CURRENT_ADVICE_VERSION` 由它派生，**不要手工同步**。
 - 改动 system、事实块或模块顺序 ⇒ 必须 bump，并在 `version.py` 顶部写清「为什么改、依据哪次复盘」。
 - `advise()` 会把 `system/user/raw/reason_full` 与 `prompt_sha256` 一起带进 `Advice`；没调模型时显式标 `prompt_missing`。
-- 事实优先级：**画像/本桌统计 > 现场观察**；未行动座位不得推测。
+- 结构（#81 起）：system 四段恒定（角色/决策依据/事实优先级/最小 JSON 契约）；user 只渲染事实与书计划，按 `current_state → … → book_plan → offsets → profiles → notes → quality → options` 顺序。**策略不进提示词**：行动与尺寸来自 `poker_ocr/playbook/` 的书页（基线）与偏移层（只改尺寸/频率），模型只能从 `options` 里选 id。旧 LGB 台账 `poker_ocr/rules/ledger/*.json` 只归档，运行时不读不渲染。
+- 事实优先级：**硬事实 > 确定性计算 > 摊牌证据 > 画像/本桌 > 现场观察 > 经验**；未行动座位不得推测。
 - 有 **golden test 锁死提示词哈希**：[replay-console/tests/test_prompt_golden.py](replay-console/tests/test_prompt_golden.py)。
   改了 system/user/事实块/选项规则却没同步版本号会直接失败。正确做法：
   1. bump `poker_ocr/prompt/version.py` 的 `PROMPT_VERSION`；

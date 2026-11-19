@@ -373,16 +373,13 @@ def test_preflop_and_postflop_share_one_selector() -> None:
           "tier_for_seat 与 tier_for_n_way 必须同映射（2 人）")
     check(cold_call_tiers.tier_for_seat(s, "utg") == cold_call_tiers.tier_for_n_way(3),
           "tier_for_seat 与 tier_for_n_way 必须同映射（3 人）")
-    # 翻前：hero 面对 CO 开池、身后已有 2 个跟注者 = 第 3 个冷跟者 = 4 人池
-    sit = build_situation(_four_way_preflop(), table_dynamics="")
-    from poker_ocr.prompt.user.preflop import _facing_raise_zh
-    lines = " ".join(str(line) for line in _facing_raise_zh(sit))
+    # 翻前：hero 面对 CO 开池、身后已有 2 个跟注者 = 第 3 个冷跟者 = 4 人池。
+    # #81 删掉了翻前范围结论段（含 _facing_raise_zh），所以这里只校验选择器
+    # 本身仍给同一档；翻前事实不再渲染该档宽度。
     hero_tier = cold_call_tiers.tier_for_n_way(2 + 0 + 2)
     check(hero_tier.tier == 4, f"hero 应为 4 人池档，实际 {hero_tier}")
-    check("4 人池档" in lines, f"翻前事实应标 4 人池档：{lines}")
     oop_n4 = ranges.get("COLD_CALL_OOP_n4")
-    check(f"{oop_n4.width_pct:.0f}%" in lines,
-          f"翻前事实里的宽度应取 4 人池档（{oop_n4.width_pct:.2f}%）：{lines}")
+    check(oop_n4 is not None, "4 人池档的范围表必须存在")
     # 翻前用的 id 与翻后同一个构造函数拼出来
     check(cold_call_tiers.with_tier("COLD_CALL_OOP_vs_LP", hero_tier.tier)
           == "COLD_CALL_OOP_vs_LP_n4", "with_tier 应拼出翻后同一形态的 id")

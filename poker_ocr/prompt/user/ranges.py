@@ -400,12 +400,12 @@ def render_ranges_zh(sit: Situation) -> list[str]:
                 }
                 if air < 0.02:
                     lines.append(fact(
-                        f"- 范围警告（程序建议）：河牌面对全下，这个范围里 {behind:.0%} 压过你，"
+                        f"- 范围警告：河牌面对全下，这个范围里 {behind:.0%} 压过你，"
                         "几乎没有诈唬；不要拿「我现在有牌」当跟注理由，"
                         "按权益和价格判断", behind_ref, kind="derived"))
                 else:
                     lines.append(fact(
-                        f"- 范围警告（程序建议）：河牌面对全下，{behind:.0%} 压过你，"
+                        f"- 范围警告：河牌面对全下，{behind:.0%} 压过你，"
                         f"你只能赢那 {air:.0%} 的诈唬；不要拿「我现在有牌」"
                         "当跟注理由，按权益和价格判断",
                         behind_ref, air_ref, kind="derived"))
@@ -414,7 +414,7 @@ def render_ranges_zh(sit: Situation) -> list[str]:
             semi = semi_edge.composition.draw
             if semi >= 0.10:
                 lines.append(fact(
-                    f"- 范围警告（程序建议）：全下范围里听牌约 {semi:.0%}，"
+                    f"- 范围警告：全下范围里听牌约 {semi:.0%}，"
                     "权益要按剩余牌发完算，不能只看「他现在还没成牌」",
                     {"ns": "facts",
                      "path": "hand_ranges.opponents"

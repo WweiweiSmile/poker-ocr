@@ -74,7 +74,6 @@ from .prompt import (  # noqa: F401
     build_system, render_facts_zh,
 )
 from .prompt.user.action_line import _fmt_actions_zh  # noqa: F401
-from .prompt.user.attack import render_attack_zh  # noqa: F401
 from .prompt.user.board import unmapped_gt_warnings  # noqa: F401
 from .prompt.user.explosive import render_explosive_zh  # noqa: F401
 from .prompt.user.notes import _notes_ace_weakness  # noqa: F401

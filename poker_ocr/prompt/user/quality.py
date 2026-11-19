@@ -120,9 +120,7 @@ def render_data_quality_zh(sit) -> list[str]:
     if hard:
         lines.append("- 硬缺口（走保守线）：" + "；".join(hard))
     if soft:
-        lines.append("- 范围/信息缺口（范围/画像缺口只降低诈唬的尺寸与频率，"
-                     "不禁止有 EV 依据的小注；"
-                     "动作线缺失按决策顺序判断：未开池/面对加注/未行动）："
+        lines.append("- 范围/信息缺口（只降低可信度，不是禁止行动的事实）："
                      + "；".join(soft))
     conflicts = tuple(getattr(sit, "conflicts", ()) or ())
     if conflicts:

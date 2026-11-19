@@ -182,10 +182,9 @@ def test_observed_fold_normalises_percent() -> None:
         return
     check(rep.observed is not None and close(rep.observed, 0.45, 1e-6),
           f"历史弃牌率应为 0.45，实际 {rep.observed}")
-    from dataclasses import replace as _replace
-    from poker_ocr.prompt.user.exploit import render_exploit_zh
-    text = "\n".join(render_exploit_zh(_replace(sit, fold_eq=rep)))
-    check("历史平均 45%" in text, f"应把历史值渲染进事实：\n{text}")
+    # #81：渲染器（exploit 段）已删除；这里只校验计算本身仍按百分数归一。
+    check(round(rep.observed * 100) == 45,
+          f"历史值应以百分数可回写：{rep.observed}")
 
 
 def test_folded_opponent_not_counted() -> None:

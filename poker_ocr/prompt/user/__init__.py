@@ -2,8 +2,11 @@
 
 这个文件只负责**顺序与空行**，不写事实本身：每一段是 `user/` 下的一个模块，
 返回 `list[str]`，空列表表示该场景不出现。事实块的分段顺序就是模型读到的
-顺序——先硬事实（局面/几何/位置/价格），再行动线与牌力，然后画像/现场观察，最后是
-建议块、数据质量与可选动作。
+顺序——先硬事实（局面/几何/位置/价格），再行动线与牌力，然后是书计划与偏移，
+最后是逐座位画像、现场观察、数据质量与可选动作。
+
+#81 起这里不再组装旧策略段：攻击/剥削/池子先验/规则台账都在同一次原子切换里
+移除（`poker_ocr/rules/ledger/*.json` 仍留在仓库，但运行时不读、不渲染）。
 
 加新段：在 `user/` 新建模块 -> 在 `render_facts_zh()` 里按顺序 append。
 不要在组装函数里写具体文案。
@@ -14,21 +17,18 @@ from __future__ import annotations
 from ..refs import collecting, section
 from ..system import build_system
 from .action_line import render_action_line_zh
-from .attack import attack_signals, render_attack_zh
 from .book import render_book_plan_zh
-from .exploit import render_exploit_zh
 from .explosive import render_explosive_pot_zh
 from .geometry import render_geometry_zh, render_side_pot_zh
 from .history import render_previous_advice_zh
 from .notes import render_notes_zh
+from .offsets import plan_offsets, render_offsets_zh
 from .options import render_options_zh
 from .position import render_position_zh
-from .pool import render_pool_prior_zh
 from .preflop import render_preflop_zh
 from .price import render_price_zh
 from .profiles import render_profiles_zh
 from .quality import render_data_quality_zh
-from .rules import render_rules_zh
 from .situation import render_current_state_zh
 from .strength import render_hand_strength_zh
 
@@ -54,7 +54,7 @@ def render_facts_zh(sit) -> str:
         lines.append("")
         lines.extend(history)
 
-    # ── 翻前信息 / 实时牌力 ──
+    # ── 翻前事实 / 实时牌力 ──
     # 段包在 section() 里：收集器激活时行号才与段文本对得上（未激活是空操作）。
     with section("preflop") as sec:
         sec.extend(render_preflop_zh(sit))
@@ -68,66 +68,32 @@ def render_facts_zh(sit) -> str:
         lines.append("")
         lines.extend(sec.lines)
 
-    # ── 规则台账（spec #63）：书为准的 intent/size，最多两行 ──
-    # 空台账返回空列表 -> 一个字节都不加（空行、标题都不留）。
-    with section("rules") as sec:
-        sec.extend(render_rules_zh(sit))
-    if sec.lines:
-        lines.append("")
-        lines.extend(sec.lines)
-
-    # ── 书中计划（Harrington 场景卡；#80 只加不删）──
-    # 旧规则段暂时保留，两段相邻便于对照；解析失败时整段不出现（fail open），
-    # 零匹配仍由渲染器写「书中无此局面」，不伪造书页。
+    # ── 书中计划（Harrington 场景卡）：基线 ──
+    # 解析失败时整段不出现（fail open），零匹配仍由渲染器写「书中无此局面」。
     with section("book_plan") as sec:
         sec.extend(render_book_plan_zh(sit))
     if sec.lines:
         lines.append("")
         lines.extend(sec.lines)
 
-    # 攻击块会给出本街弃牌率的单一裁决；有攻击块、或某个座位已经有
-    # 「别开火」的反向证据时，逐座位的「可剥削」不再给第二个动作方向，
-    # 避免同一份 prompt 里两个「能不能开火」的来源。
-    attack = render_attack_zh(sit)
-    trap_callers, trap_raisers = attack_signals(sit)
-    suppress_action_hints = bool(attack) or bool(trap_callers or trap_raisers)
+    # ── 偏移占位：书 -> 最终（#82 之前恒为空，整段不出现） ──
+    with section("offsets") as sec:
+        sec.extend(render_offsets_zh(plan_offsets(sit)))
+    if sec.lines:
+        lines.append("")
+        lines.extend(sec.lines)
 
-    # ── 条件弃牌率（按本手线路）：攻击块已给裁决的节点不重复渲染 ──
-    if not attack:
-        with section("exploit") as sec:
-            sec.extend(render_exploit_zh(sit))
-        if sec.lines:
-            lines.append("")
-            lines.extend(sec.lines)
-
-    # ── 逐座位画像：优先于全场统计；攻击块在场时只留描述性数据 ──
-    profiles = render_profiles_zh(
-        sit, suppress_action_hints=suppress_action_hints)
+    # ── 逐座位画像：只留描述性数据，不给动作提示 ──
+    profiles = render_profiles_zh(sit)
     if profiles:
         lines.append("")
         lines.extend(profiles)
-
-    # ── 池子先验：逐座位数据缺失时的兜底 ──
-    # 攻击块在场、或已经有**条件弃牌率报告**（fold_eq）时不渲染：后者已经
-    # 按本手线路给了「全部弃牌」概率，再补一条历史均值会让同一节点出现
-    # 两个不同口径的弃牌率（例：条件 22% vs 池子 73%），模型只能二选一。
-    # 多人池的 fold_eq 没有逐尺寸 EV 行，但「全部弃牌」本身就是结论来源。
-    if not attack and getattr(sit, "fold_eq", None) is None:
-        pool = render_pool_prior_zh(sit)
-        if pool:
-            lines.append("")
-            lines.extend(pool)
 
     # ── 人工观察（.table_dy）：只覆盖它明确描述的范围 ──
     notes = render_notes_zh(sit)
     if notes:
         lines.append("")
         lines.extend(notes)
-
-    # ── 攻击/剥削结论：带「程序建议」标记，不是事实；与画像冲突时按画像 ──
-    if attack:
-        lines.append("")
-        lines.extend(attack)
 
     # ── 数据质量 + 可选动作 ──
     with section("quality") as sec:
@@ -142,7 +108,7 @@ def render_facts_zh(sit) -> str:
 
 
 def build_messages(sit) -> tuple[str, str]:
-    """返回中文 lean `(system, user facts)`；system 按局面场景拼装。"""
+    """返回中文 lean `(system, user facts)`。"""
     return build_system(sit), render_facts_zh(sit)
 
 

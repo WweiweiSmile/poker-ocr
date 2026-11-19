@@ -147,5 +147,14 @@ from __future__ import annotations
 # 只加不删：旧规则段原样保留，供 #81 原子切换前对照。零匹配写「书中无此局面」、
 # 不印书页；整段硬上限 800 字，超限先丢「后续/混合」行，不挤占事实与 options；
 # 书层解析失败时 fail open（该段不出现），不阻塞主循环。
-PROMPT_VERSION = "lean-zh-2026-11-19.3"
+# 2026-11-19.4：推倒旧提示词，切到「事实 + 书计划 + 偏移 + options」契约
+# （#81，父设计 docs/harrington-决策层-设计-2026-11-19.md §2.4）。这是删除与
+# 替换，不是并行影子：system 只剩角色/决策依据/事实优先级/输出契约，删掉
+# aggression/hand_type/scenario/ante/metrics/arbitration/decision/stack 八段；
+# user 删掉攻击/剥削/池子先验/规则台账四段与翻前范围结论/limp 例外/面对加注/
+# 隔离尺寸，新增「## 偏移」占位（#82 才填内容，空时不出现）。旧 LGB 台账文件
+# 留在 poker_ocr/rules/ledger/ 归档，运行时不读、不渲染。三个 golden fixture
+# 的 system+user 从约 7.8k 字降到约 2.4k 字，书中计划段照常渲染（零匹配仍写
+# 「书中无此局面」）。回滚手段是 git revert 这一个提交。
+PROMPT_VERSION = "lean-zh-2026-11-19.4"
 PROMPT_LANGUAGE = "zh"

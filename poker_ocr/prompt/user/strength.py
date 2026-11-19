@@ -170,8 +170,7 @@ def render_hand_strength_zh(sit: Situation) -> list[str]:
         lines.append(fact(behind + "）", "ground_truth.beat_at_least_pct",
                           values=[f"{gt.rank.beat_at_least_pct:.1%}"]))
         if snap.to_call and snap.to_call > 0:
-            lines.append("范围：不可用（只有随机牌下界，不能当对手范围；"
-                         "按价格/线路/保守先验判断）")
+            lines.append("范围：不可用（只有随机牌下界，不能当对手范围）")
     if hr is not None:
         modeled_players = len(hr.opponents) + 1
         random_fill = getattr(hr, "random_opponents", 0)
