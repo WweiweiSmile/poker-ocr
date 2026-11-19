@@ -166,7 +166,7 @@ def test_turn_top_pair_weak_renders_check():
     text = render_book_plan_text(_turn_sit(
         hand_tier="顶对弱踢", has_draw=False, ground_truth=_no_draw()))
     assert "转牌 / 4+ 人 / 顶对弱踢 / 无人下注" in text
-    assert "计划: 过牌（第 2 卷 p47，编译归纳）" in text
+    assert "计划: 过牌（第 2 卷 p46 / p47，编译归纳）" in text
 
 
 def test_turn_strong_made_facing_bet_renders_raise():

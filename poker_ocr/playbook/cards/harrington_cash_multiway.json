@@ -8,10 +8,10 @@
       "volume": 1,
       "chapter": "ch5",
       "pages": [
-        285
+        294
       ],
       "pdf_pages": [
-        295
+        304
       ],
       "street": "flop",
       "spot": {
@@ -28,7 +28,7 @@
           "turn": "无人下注可考虑转牌偷池，有人下注则弃牌"
         }
       },
-      "why": "多人局空气不诈唬，过牌看免费牌",
+      "why": "面对四个玩家，什么都没有时做不了动作，过牌（p294）。",
       "confidence": "explicit",
       "priority": 100,
       "offset_policy": "size_only"
@@ -39,10 +39,10 @@
       "volume": 1,
       "chapter": "ch5",
       "pages": [
-        302
+        294
       ],
       "pdf_pages": [
-        312
+        304
       ],
       "street": "flop",
       "spot": {
@@ -56,8 +56,8 @@
         "action": "fold",
         "freq": 1.0
       },
-      "why": "多人局有人下注，空气直接弃牌",
-      "confidence": "explicit",
+      "why": "马图索什么都没拿，面对四个玩家过牌；内格里诺随后弃牌（p294）；翻后没牌力就弃为编译归纳。",
+      "confidence": "interpreted",
       "priority": 100,
       "offset_policy": "size_only"
     },
@@ -87,7 +87,7 @@
           "turn": "无人下注可在转牌再评估，有人下注则弃牌"
         }
       },
-      "why": "多人局中对只在干燥弱桌偷池，默认过牌控损",
+      "why": "多人局中对只在干燥弱桌偷池（p289），默认过牌控损。",
       "confidence": "interpreted",
       "priority": 100,
       "offset_policy": "size_only"
@@ -115,7 +115,7 @@
         "action": "fold",
         "freq": 1.0
       },
-      "why": "多人局中对面对下注不追，尽早弃牌",
+      "why": "多人局中对面对下注不追，尽早弃牌（p292）。",
       "confidence": "explicit",
       "priority": 100,
       "offset_policy": "size_only"
@@ -145,8 +145,8 @@
           "turn": "成牌则争取最大价值，未成牌按赔率再评估"
         }
       },
-      "why": "多人局听牌可接受稍差赔率，成牌回报更大",
-      "confidence": "explicit",
+      "why": "多人池听牌隐含赔率高，愿意继续（p296）；书未给面对下注的跟注线，本卡按跟注为编译归纳。",
+      "confidence": "interpreted",
       "priority": 100,
       "offset_policy": "size_only"
     },
@@ -156,10 +156,10 @@
       "volume": 1,
       "chapter": "ch5",
       "pages": [
-        288
+        301
       ],
       "pdf_pages": [
-        298
+        311
       ],
       "street": "flop",
       "spot": {
@@ -180,7 +180,7 @@
           "turn": "转牌继续下注约 2/3 池，河牌按牌力收价值"
         }
       },
-      "why": "多人局第二类强牌（暗三/两对/顺）直接下注约 2/3 池",
+      "why": "强牌要下注，不能只在坚果牌时才下注（p301）；多人池尺度取 2/3 为编译。",
       "confidence": "interpreted",
       "priority": 100,
       "offset_policy": "size_only"
@@ -191,10 +191,12 @@
       "volume": 1,
       "chapter": "ch5",
       "pages": [
-        287
+        287,
+        288
       ],
       "pdf_pages": [
-        297
+        297,
+        298
       ],
       "street": "flop",
       "spot": {
@@ -215,7 +217,7 @@
           "turn": "空白牌再下约半池；两个跟注则转牌过牌"
         }
       },
-      "why": "多人局超对要下注保护，约 2/3 池；被两人跟注转牌控池",
+      "why": "超对下注正常筹码量 70-100（p287）；两个跟注则转牌过牌（p288）；2/3 池为编译。",
       "confidence": "interpreted",
       "priority": 100,
       "offset_policy": "size_only"
@@ -254,10 +256,10 @@
       "volume": 2,
       "chapter": "ch6",
       "pages": [
-        47
+        5
       ],
       "pdf_pages": [
-        53
+        11
       ],
       "street": "turn",
       "spot": {
@@ -278,7 +280,7 @@
           "river": "河牌继续收价值，牌面完成听牌则过牌"
         }
       },
-      "why": "转牌牌力增强时价值更高，继续下注约 2/3 池",
+      "why": "转牌的价值下注比翻牌更大（p5）；本卡按 2/3 池下注为编译尺度。",
       "confidence": "interpreted",
       "priority": 100,
       "offset_policy": "size_only"
@@ -289,10 +291,12 @@
       "volume": 2,
       "chapter": "ch6",
       "pages": [
-        58
+        58,
+        59
       ],
       "pdf_pages": [
-        64
+        64,
+        65
       ],
       "street": "turn",
       "spot": {
@@ -306,7 +310,7 @@
         "action": "fold",
         "freq": 1.0
       },
-      "why": "转牌空气面对下注直接弃牌，不追",
+      "why": "转牌没击中，面对下注稳妥做法是弃牌（p58-59）。",
       "confidence": "interpreted",
       "priority": 100,
       "offset_policy": "size_only"
@@ -347,10 +351,10 @@
       "volume": 1,
       "chapter": "ch5",
       "pages": [
-        285
+        293
       ],
       "pdf_pages": [
-        295
+        303
       ],
       "street": "flop",
       "spot": {
@@ -366,7 +370,7 @@
           "turn": "无人下注可再评估，有人下注则弃牌"
         }
       },
-      "why": "多人局打牌面属中等牌力，默认过牌不造池",
+      "why": "打牌面人人都有，只能分池或输；弱成牌在多人池不应走太远（p293），过牌。",
       "confidence": "interpreted",
       "priority": 100,
       "offset_policy": "size_only"
@@ -377,10 +381,10 @@
       "volume": 1,
       "chapter": "ch5",
       "pages": [
-        302
+        293
       ],
       "pdf_pages": [
-        312
+        303
       ],
       "street": "flop",
       "spot": {
@@ -393,7 +397,7 @@
         "action": "fold",
         "freq": 1.0
       },
-      "why": "多人局打牌面面对下注不追",
+      "why": "打牌面只能分池或输；弱成牌面对下注不继续（p293），弃。",
       "confidence": "interpreted",
       "priority": 100,
       "offset_policy": "size_only"
@@ -404,10 +408,12 @@
       "volume": 1,
       "chapter": "ch5",
       "pages": [
-        287
+        284,
+        286
       ],
       "pdf_pages": [
-        297
+        294,
+        296
       ],
       "street": "flop",
       "spot": {
@@ -427,7 +433,7 @@
           "turn": "空白牌再下半池，危险牌过牌"
         }
       },
-      "why": "多人局顶对弱踢仍要下注保护，约 2/3 池；被加注要谨慎",
+      "why": "p286 顶对通常下注；p284 弱踢顶对在三人未行动时过牌受赞赏——本卡取 p286 一般线，2/3 池编译。",
       "confidence": "interpreted",
       "priority": 100,
       "offset_policy": "size_only"
@@ -438,10 +444,10 @@
       "volume": 1,
       "chapter": "ch5",
       "pages": [
-        287
+        286
       ],
       "pdf_pages": [
-        297
+        296
       ],
       "street": "flop",
       "spot": {
@@ -461,7 +467,7 @@
           "turn": "空白牌再下半池，危险牌过牌"
         }
       },
-      "why": "多人局顶对强踢下注约 2/3 池拿价值/保护，被加注再评估",
+      "why": "拿着超对或顶对，通常都愿意在翻牌下注（p286）；2/3 池为编译尺度。",
       "confidence": "interpreted",
       "priority": 100,
       "offset_policy": "size_only"
@@ -652,9 +658,11 @@
       "volume": 2,
       "chapter": "ch6",
       "pages": [
+        46,
         47
       ],
       "pdf_pages": [
+        52,
         53
       ],
       "street": "turn",
@@ -672,7 +680,7 @@
           "river": "无人下注可比牌，有人下注再评估"
         }
       },
-      "why": "顶对中等踢脚转牌无人下注时过牌控池：底池已经套入，过牌比下注风险小",
+      "why": "书例顶对中踢（A8，AJ4-3）翻牌下注被跟后转牌过牌，但那是双人底池（p46-47）；多人局顶对弱踢过牌为编译。",
       "confidence": "interpreted",
       "priority": 100,
       "offset_policy": "size_only"

@@ -143,44 +143,7 @@
       "mix": [
         {"action": "check", "freq": 0.4}
       ],
-      "why": "空气在连张面约六成持续下注半池，四成过牌",
-      "confidence": "interpreted",
-      "priority": 100,
-      "offset_policy": "size_only"
-    },
-    {
-      "id": "flop.draw.oop.flush",
-      "book": "harrington_cash",
-      "volume": 2,
-      "chapter": "ch6",
-      "pages": [25],
-      "pdf_pages": [31],
-      "street": "flop",
-      "spot": {
-        "street": "flop",
-        "preflop_node": "raised",
-        "pot_type": "single_raised",
-        "players": "2",
-        "hero_position": "BB",
-        "in_position": false,
-        "made_hand": "draw",
-        "draw": "flush",
-        "board": "flush",
-        "spr": "3to6",
-        "facing": "none",
-        "commitment": "uncommitted",
-        "opponent": "unknown"
-      },
-      "plan": {
-        "action": "bet",
-        "size": {"kind": "pct_pot", "value": 0.6},
-        "freq": 0.65,
-        "future": {"turn": "成花则过牌诱导，河牌过牌则下注"}
-      },
-      "mix": [
-        {"action": "check", "freq": 0.35}
-      ],
-      "why": "同花听牌在翻牌约六成半下注六成池，保留半诈唬",
+      "why": "空气在连张面约六成持续下注半池，四成过牌（p221）；书只给 60/40，未给尺寸，半池为编译基线。",
       "confidence": "interpreted",
       "priority": 100,
       "offset_policy": "size_only"
@@ -190,8 +153,8 @@
       "book": "harrington_cash",
       "volume": 1,
       "chapter": "ch4",
-      "pages": [209],
-      "pdf_pages": [219],
+      "pages": [209, 210],
+      "pdf_pages": [219, 220],
       "street": "flop",
       "spot": {
         "street": "flop",
@@ -217,7 +180,7 @@
       "mix": [
         {"action": "check", "freq": 0.3}
       ],
-      "why": "连张面中暗三约七成下注半池，三成过牌保护范围",
+      "why": "AT9 翻牌下注 70%、过牌 30%（p209）；765 翻牌下注 80%（p210）。转牌成顺 90% 下注一池、空白牌 50/50 半池（p210）。",
       "confidence": "interpreted",
       "priority": 100,
       "offset_policy": "size_only"
@@ -227,8 +190,8 @@
       "book": "harrington_cash",
       "volume": 2,
       "chapter": "ch6",
-      "pages": [46],
-      "pdf_pages": [52],
+      "pages": [46, 47],
+      "pdf_pages": [52, 53],
       "street": "turn",
       "spot": {
         "street": "turn",
@@ -250,7 +213,7 @@
         "freq": 1.0,
         "future": {"river": "对手下注则按赔率跟注，对手过牌则过牌"}
       },
-      "why": "翻牌下注被跟，转牌空白牌过牌控池，不扩大底池",
+      "why": "翻牌下注被跟，转牌空白牌过牌控池（p46-47）；书例英雄有位置，无位置 BB 为编译口径。",
       "confidence": "explicit",
       "priority": 100,
       "offset_policy": "size_only"
@@ -283,8 +246,8 @@
         "freq": 1.0,
         "future": {"river": "河牌 K 过牌，按对手下注大小决定跟弃"}
       },
-      "why": "转牌成顶对但牌面危险，过牌抓诈唬，不做加注",
-      "confidence": "explicit",
+      "why": "书：这手顶对只能抓诈唬，应该过牌（p55）；面对下注跟注为编译延伸（书未给跟注线）。",
+      "confidence": "interpreted",
       "priority": 100,
       "offset_policy": "size_only"
     },
@@ -293,8 +256,8 @@
       "book": "harrington_cash",
       "volume": 2,
       "chapter": "ch6",
-      "pages": [52],
-      "pdf_pages": [58],
+      "pages": [52, 53],
+      "pdf_pages": [58, 59],
       "street": "turn",
       "spot": {
         "street": "turn",
@@ -316,7 +279,7 @@
         "freq": 1.0,
         "future": {"river": "河牌 K 下注约 30% 池"}
       },
-      "why": "暗三转牌过牌去杠杆，河牌再下小注拿价值",
+      "why": "转牌运用去杠杆原理过牌，河牌再下注（p52-53）。",
       "confidence": "explicit",
       "priority": 100,
       "offset_policy": "size_only"

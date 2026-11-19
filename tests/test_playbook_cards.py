@@ -1,4 +1,4 @@
-"""10 张 Harrington 试点卡的静态校验与解析。"""
+"""9 张 Harrington 单挑试点卡的静态校验与解析（#85 移出无法核实的同花听牌卡）。"""
 
 import sys
 from pathlib import Path
@@ -14,7 +14,7 @@ CARDS = Path(__file__).resolve().parents[1] / "poker_ocr/playbook/cards/harringt
 
 def test_pilot_cards_validate():
     cards = load_cards(CARDS)
-    assert len(cards) == 10
+    assert len(cards) == 9
     assert validate_cards(cards) == []
 
 

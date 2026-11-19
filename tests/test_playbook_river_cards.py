@@ -175,7 +175,7 @@ def _river_sit(**overrides):
 def test_river_value_bet_renders_plan_and_pages():
     text = render_book_plan_text(_river_sit(hand_tier="强成牌"))
     assert "河牌 / 4+ 人 / 强成牌 / 无人下注" in text
-    assert "计划: 下注 0.67 池（第 2 卷 p71 / p82，编译归纳）" in text
+    assert "计划: 下注 0.67 池（第 2 卷 p71 / p82，书中明确）" in text
     assert "书中无此局面" not in text
 
 

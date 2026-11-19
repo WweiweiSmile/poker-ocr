@@ -1,0 +1,2423 @@
+{
+  "book": "harrington_cash",
+  "title": "哈林顿在现金桌 书页逐条回查台账",
+  "audited_at": "2026-11-19",
+  "offsets": {
+    "1": 10,
+    "2": 6
+  },
+  "method": "逐张对照扫描页 OCR（RapidOCR），关键页另做目视复核；页码为印刷页，pdf_pages 为 PDF 页；原文只摘短句，不把整页 OCR 入库。",
+  "cards": [
+    {
+      "id": "flop.air.oop.straight",
+      "file": "poker_ocr/playbook/cards/harrington_cash.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch4",
+      "pages": [
+        221
+      ],
+      "pdf_pages": [
+        231
+      ],
+      "confidence": "interpreted",
+      "verdict": "fixed",
+      "quote": "策略：60%下注，40%过牌。",
+      "note": "书只给 60/40，未给尺寸；why 补「半池为编译」。",
+      "source": "《哈林顿在现金桌》第1卷 p221（PDF p231）"
+    },
+    {
+      "id": "flop.overpair.oop.dry",
+      "file": "poker_ocr/playbook/cards/harrington_cash.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch4",
+      "pages": [
+        204
+      ],
+      "pdf_pages": [
+        214
+      ],
+      "confidence": "interpreted",
+      "verdict": "ok",
+      "quote": "策略：70%下注，30%过牌。",
+      "note": "页码、转述与 confidence 一致。",
+      "source": "《哈林顿在现金桌》第1卷 p204（PDF p214）"
+    },
+    {
+      "id": "flop.set.oop.dry",
+      "file": "poker_ocr/playbook/cards/harrington_cash.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch4",
+      "pages": [
+        201
+      ],
+      "pdf_pages": [
+        211
+      ],
+      "confidence": "interpreted",
+      "verdict": "ok",
+      "quote": "策略：30%下注，70%过牌。",
+      "note": "页码、转述与 confidence 一致。",
+      "source": "《哈林顿在现金桌》第1卷 p201（PDF p211）"
+    },
+    {
+      "id": "flop.set.oop.straight",
+      "file": "poker_ocr/playbook/cards/harrington_cash.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch4",
+      "pages": [
+        209,
+        210
+      ],
+      "pdf_pages": [
+        219,
+        220
+      ],
+      "confidence": "interpreted",
+      "verdict": "fixed",
+      "quote": "翻牌3：AT9 策略：下注70%，过牌30%；翻牌4：765 策略：80%下注，20%过牌。",
+      "note": "原引 p209；转牌 90/50 与 765 80% 在 p210，补页并改写 why。",
+      "source": "《哈林顿在现金桌》第1卷 p209、p210（PDF p219、p220）"
+    },
+    {
+      "id": "flop.tptk.oop.dry",
+      "file": "poker_ocr/playbook/cards/harrington_cash.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch4",
+      "pages": [
+        204
+      ],
+      "pdf_pages": [
+        214
+      ],
+      "confidence": "interpreted",
+      "verdict": "ok",
+      "quote": "策略：70%下注，30%过牌……建议下注一半底池。",
+      "note": "页码、转述与 confidence 一致。",
+      "source": "《哈林顿在现金桌》第1卷 p204（PDF p214）"
+    },
+    {
+      "id": "turn.air.oop.second_barrel",
+      "file": "poker_ocr/playbook/cards/harrington_cash.json",
+      "book": "harrington_cash",
+      "volume": 2,
+      "chapter": "ch6",
+      "pages": [
+        48
+      ],
+      "pdf_pages": [
+        54
+      ],
+      "confidence": "interpreted",
+      "verdict": "ok",
+      "quote": "继续下注是在显示你真正有强牌。",
+      "note": "页码、转述与 confidence 一致。",
+      "source": "《哈林顿在现金桌》第2卷 p48（PDF p54）"
+    },
+    {
+      "id": "turn.set.oop.deleverage",
+      "file": "poker_ocr/playbook/cards/harrington_cash.json",
+      "book": "harrington_cash",
+      "volume": 2,
+      "chapter": "ch6",
+      "pages": [
+        52,
+        53
+      ],
+      "pdf_pages": [
+        58,
+        59
+      ],
+      "confidence": "explicit",
+      "verdict": "fixed",
+      "quote": "应该运用去杠杆原理，在转牌过牌，然后到河牌下注。",
+      "note": "去杠杆结论在 p53，原只引 p52，已补页。",
+      "source": "《哈林顿在现金桌》第2卷 p52、p53（PDF p58、p59）"
+    },
+    {
+      "id": "turn.tptk.bluff_catch",
+      "file": "poker_ocr/playbook/cards/harrington_cash.json",
+      "book": "harrington_cash",
+      "volume": 2,
+      "chapter": "ch6",
+      "pages": [
+        55
+      ],
+      "pdf_pages": [
+        61
+      ],
+      "confidence": "interpreted",
+      "verdict": "fixed",
+      "quote": "我们的牌只能抓诈唬，应该过牌。",
+      "note": "书说应过牌抓诈唬；面对下注跟注是编译延伸，降为 interpreted。",
+      "source": "《哈林顿在现金桌》第2卷 p55（PDF p61）"
+    },
+    {
+      "id": "turn.tptk.oop.check",
+      "file": "poker_ocr/playbook/cards/harrington_cash.json",
+      "book": "harrington_cash",
+      "volume": 2,
+      "chapter": "ch6",
+      "pages": [
+        46,
+        47
+      ],
+      "pdf_pages": [
+        52,
+        53
+      ],
+      "confidence": "explicit",
+      "verdict": "fixed",
+      "quote": "对于顶对、中等踢脚的牌来说已经够大，所以应该过牌。",
+      "note": "过牌结论在 p47，原只引 p46，已补页。",
+      "source": "《哈林顿在现金桌》第2卷 p46、p47（PDF p52、p53）"
+    },
+    {
+      "id": "flop.mw.air.check",
+      "file": "poker_ocr/playbook/cards/harrington_cash_multiway.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch5",
+      "pages": [
+        294
+      ],
+      "pdf_pages": [
+        304
+      ],
+      "confidence": "explicit",
+      "verdict": "fixed",
+      "quote": "他不能在面对四个玩家时去做什么动作，他也选择过牌。",
+      "note": "原引 p285（挤压牌例）；「什么都没有面对四个玩家过牌」在 p294。",
+      "source": "《哈林顿在现金桌》第1卷 p294（PDF p304）"
+    },
+    {
+      "id": "flop.mw.air.facing_bet",
+      "file": "poker_ocr/playbook/cards/harrington_cash_multiway.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch5",
+      "pages": [
+        294
+      ],
+      "pdf_pages": [
+        304
+      ],
+      "confidence": "interpreted",
+      "verdict": "fixed",
+      "quote": "内格里诺：弃牌。布朗森也许是在诈唬，但还有三个人尚未行动，丹尼尔的这手牌太弱，位置也差。",
+      "note": "原引 p302（76s 牌例）；改 p294 马图索过牌、内格里诺弃牌，降为 interpreted。",
+      "source": "《哈林顿在现金桌》第1卷 p294（PDF p304）"
+    },
+    {
+      "id": "flop.mw.board_play.check",
+      "file": "poker_ocr/playbook/cards/harrington_cash_multiway.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch5",
+      "pages": [
+        293
+      ],
+      "pdf_pages": [
+        303
+      ],
+      "confidence": "interpreted",
+      "verdict": "fixed",
+      "quote": "中对和小于顶对的口袋对子，都不应该在多人底池中走太远。",
+      "note": "原引 p285 无依据；改 p293 弱成牌不在多人池走远，并改写 why（打牌面人人有份，不是中等牌力）。",
+      "source": "《哈林顿在现金桌》第1卷 p293（PDF p303）"
+    },
+    {
+      "id": "flop.mw.board_play.facing_bet",
+      "file": "poker_ocr/playbook/cards/harrington_cash_multiway.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch5",
+      "pages": [
+        293
+      ],
+      "pdf_pages": [
+        303
+      ],
+      "confidence": "interpreted",
+      "verdict": "fixed",
+      "quote": "中对和小于顶对的口袋对子，都不应该在多人底池中走太远。",
+      "note": "原引 p302 无依据；改 p293，并改写 why。",
+      "source": "《哈林顿在现金桌》第1卷 p293（PDF p303）"
+    },
+    {
+      "id": "flop.mw.draw.check",
+      "file": "poker_ocr/playbook/cards/harrington_cash_multiway.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch5",
+      "pages": [
+        296
+      ],
+      "pdf_pages": [
+        306
+      ],
+      "confidence": "interpreted",
+      "verdict": "ok",
+      "quote": "你经常可以不用投入而免费听牌。",
+      "note": "页码、转述与 confidence 一致。",
+      "source": "《哈林顿在现金桌》第1卷 p296（PDF p306）"
+    },
+    {
+      "id": "flop.mw.draw.facing_bet",
+      "file": "poker_ocr/playbook/cards/harrington_cash_multiway.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch5",
+      "pages": [
+        296
+      ],
+      "pdf_pages": [
+        306
+      ],
+      "confidence": "interpreted",
+      "verdict": "fixed",
+      "quote": "综合权衡，利多于弊。有一手听牌的话，与只有一两个对手相比，我更愿意在多人局中玩。",
+      "note": "书只说多人池听牌隐含赔率高，未给跟注线；降为 interpreted。",
+      "source": "《哈林顿在现金桌》第1卷 p296（PDF p306）"
+    },
+    {
+      "id": "flop.mw.middle_pair.check",
+      "file": "poker_ocr/playbook/cards/harrington_cash_multiway.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch5",
+      "pages": [
+        289
+      ],
+      "pdf_pages": [
+        299
+      ],
+      "confidence": "interpreted",
+      "verdict": "ok",
+      "quote": "要用中对子干点什么的话，必须满足以下两个条件：一个没有很多听牌的翻牌面；桌上的玩家打得很弱。",
+      "note": "页码、转述与 confidence 一致。",
+      "source": "《哈林顿在现金桌》第1卷 p289（PDF p299）"
+    },
+    {
+      "id": "flop.mw.middle_pair.facing_bet",
+      "file": "poker_ocr/playbook/cards/harrington_cash_multiway.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch5",
+      "pages": [
+        292
+      ],
+      "pdf_pages": [
+        302
+      ],
+      "confidence": "explicit",
+      "verdict": "ok",
+      "quote": "你应该弃牌。玩家C在还有三个人未行动的情况下下注，表明他一定有些什么。",
+      "note": "页码、转述与 confidence 一致。",
+      "source": "《哈林顿在现金桌》第1卷 p292（PDF p302）"
+    },
+    {
+      "id": "flop.mw.overpair.bet",
+      "file": "poker_ocr/playbook/cards/harrington_cash_multiway.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch5",
+      "pages": [
+        287,
+        288
+      ],
+      "pdf_pages": [
+        297,
+        298
+      ],
+      "confidence": "interpreted",
+      "verdict": "fixed",
+      "quote": "你应该下注一个正常的筹码量，比如70-100；两个跟注则转牌过牌（p288）。",
+      "note": "补 p288「两个跟注转牌过牌」。",
+      "source": "《哈林顿在现金桌》第1卷 p287、p288（PDF p297、p298）"
+    },
+    {
+      "id": "flop.mw.strong_made.bet",
+      "file": "poker_ocr/playbook/cards/harrington_cash_multiway.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch5",
+      "pages": [
+        301
+      ],
+      "pdf_pages": [
+        311
+      ],
+      "confidence": "interpreted",
+      "verdict": "fixed",
+      "quote": "你不能只在你形成坚果牌或者接近坚果牌时才去下注。",
+      "note": "原引 p288（超对续注）；强牌下注原则在 p301。",
+      "source": "《哈林顿在现金桌》第1卷 p301（PDF p311）"
+    },
+    {
+      "id": "flop.mw.top_pair_top.bet",
+      "file": "poker_ocr/playbook/cards/harrington_cash_multiway.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch5",
+      "pages": [
+        286
+      ],
+      "pdf_pages": [
+        296
+      ],
+      "confidence": "interpreted",
+      "verdict": "fixed",
+      "quote": "拿着超对或顶对，通常都愿意在翻牌下注。",
+      "note": "原引 p287（AA 超对）；顶对通常下注在 p286。",
+      "source": "《哈林顿在现金桌》第1卷 p286（PDF p296）"
+    },
+    {
+      "id": "flop.mw.top_pair_weak.bet",
+      "file": "poker_ocr/playbook/cards/harrington_cash_multiway.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch5",
+      "pages": [
+        284,
+        286
+      ],
+      "pdf_pages": [
+        294,
+        296
+      ],
+      "confidence": "interpreted",
+      "verdict": "fixed",
+      "quote": "拿着超对或顶对，通常都愿意在翻牌下注；但弱踢顶对在三人未行动时过牌也受赞赏（p284）。",
+      "note": "原引 p287（AA 超对）；p284 弱踢顶对过牌受赞赏，已补对照页。",
+      "source": "《哈林顿在现金桌》第1卷 p284、p286（PDF p294、p296）"
+    },
+    {
+      "id": "turn.mw.air.check",
+      "file": "poker_ocr/playbook/cards/harrington_cash_multiway.json",
+      "book": "harrington_cash",
+      "volume": 2,
+      "chapter": "ch6",
+      "pages": [
+        20
+      ],
+      "pdf_pages": [
+        26
+      ],
+      "confidence": "interpreted",
+      "verdict": "ok",
+      "quote": "也可以简单地选择过牌，如果有人下注就弃牌。",
+      "note": "页码、转述与 confidence 一致。",
+      "source": "《哈林顿在现金桌》第2卷 p20（PDF p26）"
+    },
+    {
+      "id": "turn.mw.air.facing_bet",
+      "file": "poker_ocr/playbook/cards/harrington_cash_multiway.json",
+      "book": "harrington_cash",
+      "volume": 2,
+      "chapter": "ch6",
+      "pages": [
+        58,
+        59
+      ],
+      "pdf_pages": [
+        64,
+        65
+      ],
+      "confidence": "interpreted",
+      "verdict": "fixed",
+      "quote": "稳妥的做法是弃牌……弃牌吧。",
+      "note": "弃牌结论在 p59，原只引 p58，已补页。",
+      "source": "《哈林顿在现金桌》第2卷 p58、p59（PDF p64、p65）"
+    },
+    {
+      "id": "turn.mw.board_play.check",
+      "file": "poker_ocr/playbook/cards/harrington_cash_multiway.json",
+      "book": "harrington_cash",
+      "volume": 2,
+      "chapter": "ch6",
+      "pages": [
+        21
+      ],
+      "pdf_pages": [
+        27
+      ],
+      "confidence": "interpreted",
+      "verdict": "ok",
+      "quote": "你的牌有点牌力，对手没有听牌……通常你不得不在转牌过牌。",
+      "note": "页码、转述与 confidence 一致。",
+      "source": "《哈林顿在现金桌》第2卷 p21（PDF p27）"
+    },
+    {
+      "id": "turn.mw.board_play.facing_bet",
+      "file": "poker_ocr/playbook/cards/harrington_cash_multiway.json",
+      "book": "harrington_cash",
+      "volume": 2,
+      "chapter": "ch6",
+      "pages": [
+        24
+      ],
+      "pdf_pages": [
+        30
+      ],
+      "confidence": "interpreted",
+      "verdict": "compiled",
+      "quote": "你的顶对很可能已经落后。弃牌吧。",
+      "note": "p24 只讲顶对落后；打牌面弃为编译。",
+      "source": "《哈林顿在现金桌》第2卷 p24（PDF p30）"
+    },
+    {
+      "id": "turn.mw.draw.bet",
+      "file": "poker_ocr/playbook/cards/harrington_cash_multiway.json",
+      "book": "harrington_cash",
+      "volume": 2,
+      "chapter": "ch6",
+      "pages": [
+        60
+      ],
+      "pdf_pages": [
+        66
+      ],
+      "confidence": "interpreted",
+      "verdict": "compiled",
+      "quote": "现在你肯定想下注……差不多是一个底池左右，比如15。",
+      "note": "书例下注约一池（15）；卡取 2/3 为编译。",
+      "source": "《哈林顿在现金桌》第2卷 p60（PDF p66）"
+    },
+    {
+      "id": "turn.mw.draw.call",
+      "file": "poker_ocr/playbook/cards/harrington_cash_multiway.json",
+      "book": "harrington_cash",
+      "volume": 2,
+      "chapter": "ch6",
+      "pages": [
+        5
+      ],
+      "pdf_pages": [
+        11
+      ],
+      "confidence": "interpreted",
+      "verdict": "compiled",
+      "quote": "转牌的价值下注比翻牌的价值下注更大；听牌隐含赔率更高。",
+      "note": "p5 讲转牌价值下注与听牌隐含赔率；跟注线为编译。",
+      "source": "《哈林顿在现金桌》第2卷 p5（PDF p11）"
+    },
+    {
+      "id": "turn.mw.middle_pair.check",
+      "file": "poker_ocr/playbook/cards/harrington_cash_multiway.json",
+      "book": "harrington_cash",
+      "volume": 2,
+      "chapter": "ch6",
+      "pages": [
+        22
+      ],
+      "pdf_pages": [
+        28
+      ],
+      "confidence": "interpreted",
+      "verdict": "ok",
+      "quote": "你应该在转牌过牌，在河牌抓诈唬。",
+      "note": "页码、转述与 confidence 一致。",
+      "source": "《哈林顿在现金桌》第2卷 p22（PDF p28）"
+    },
+    {
+      "id": "turn.mw.middle_pair.facing_bet",
+      "file": "poker_ocr/playbook/cards/harrington_cash_multiway.json",
+      "book": "harrington_cash",
+      "volume": 2,
+      "chapter": "ch6",
+      "pages": [
+        45
+      ],
+      "pdf_pages": [
+        51
+      ],
+      "confidence": "interpreted",
+      "verdict": "ok",
+      "quote": "你不能用中对来全压……弃牌吧。",
+      "note": "页码、转述与 confidence 一致。",
+      "source": "《哈林顿在现金桌》第2卷 p45（PDF p51）"
+    },
+    {
+      "id": "turn.mw.strong_made.bet",
+      "file": "poker_ocr/playbook/cards/harrington_cash_multiway.json",
+      "book": "harrington_cash",
+      "volume": 2,
+      "chapter": "ch6",
+      "pages": [
+        5
+      ],
+      "pdf_pages": [
+        11
+      ],
+      "confidence": "interpreted",
+      "verdict": "fixed",
+      "quote": "转牌的价值下注比翻牌的价值下注更大。",
+      "note": "原引 p47（A8 顶对牌例）；转牌价值下注更大在 p5。",
+      "source": "《哈林顿在现金桌》第2卷 p5（PDF p11）"
+    },
+    {
+      "id": "turn.mw.strong_made.facing_bet",
+      "file": "poker_ocr/playbook/cards/harrington_cash_multiway.json",
+      "book": "harrington_cash",
+      "volume": 2,
+      "chapter": "ch6",
+      "pages": [
+        12
+      ],
+      "pdf_pages": [
+        18
+      ],
+      "confidence": "interpreted",
+      "verdict": "compiled",
+      "quote": "为了河牌的全压而在转牌下注……在转牌下注来做大底池。",
+      "note": "p12 讲转牌下注做大底池；加注为编译。",
+      "source": "《哈林顿在现金桌》第2卷 p12（PDF p18）"
+    },
+    {
+      "id": "turn.mw.strong_made.facing_raise",
+      "file": "poker_ocr/playbook/cards/harrington_cash_multiway.json",
+      "book": "harrington_cash",
+      "volume": 2,
+      "chapter": "ch6",
+      "pages": [
+        35
+      ],
+      "pdf_pages": [
+        41
+      ],
+      "confidence": "interpreted",
+      "verdict": "ok",
+      "quote": "完全不要考虑扔掉你的暗三条。",
+      "note": "页码、转述与 confidence 一致。",
+      "source": "《哈林顿在现金桌》第2卷 p35（PDF p41）"
+    },
+    {
+      "id": "turn.mw.top_pair.facing_bet",
+      "file": "poker_ocr/playbook/cards/harrington_cash_multiway.json",
+      "book": "harrington_cash",
+      "volume": 2,
+      "chapter": "ch6",
+      "pages": [
+        24
+      ],
+      "pdf_pages": [
+        30
+      ],
+      "confidence": "explicit",
+      "verdict": "ok",
+      "quote": "你的顶对很可能已经落后。弃牌吧。",
+      "note": "页码、转述与 confidence 一致。",
+      "source": "《哈林顿在现金桌》第2卷 p24（PDF p30）"
+    },
+    {
+      "id": "turn.mw.top_pair_weak.check",
+      "file": "poker_ocr/playbook/cards/harrington_cash_multiway.json",
+      "book": "harrington_cash",
+      "volume": 2,
+      "chapter": "ch6",
+      "pages": [
+        46,
+        47
+      ],
+      "pdf_pages": [
+        52,
+        53
+      ],
+      "confidence": "interpreted",
+      "verdict": "fixed",
+      "quote": "对于顶对、中等踢脚的牌来说已经够大，所以应该过牌。",
+      "note": "书例是双人底池（A8 顶对中踢，p46-47）；多人局取同一过牌线为编译，降为 interpreted。",
+      "source": "《哈林顿在现金桌》第2卷 p46、p47（PDF p52、p53）"
+    },
+    {
+      "id": "preflop.bb.check.limped",
+      "file": "poker_ocr/playbook/cards/harrington_cash_preflop.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        124
+      ],
+      "pdf_pages": [
+        134
+      ],
+      "confidence": "interpreted",
+      "verdict": "fixed",
+      "quote": "由于已经放进底池一些筹码，比其他玩家有更好的底池赔率（甚至有时能免费看翻牌）。",
+      "note": "原引 p123/p129；大盲节在 p124，且过牌是规则兜底，降为 interpreted。",
+      "source": "《哈林顿在现金桌》第1卷 p124（PDF p134）"
+    },
+    {
+      "id": "preflop.bb.check.unopened",
+      "file": "poker_ocr/playbook/cards/harrington_cash_preflop.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        124
+      ],
+      "pdf_pages": [
+        134
+      ],
+      "confidence": "interpreted",
+      "verdict": "fixed",
+      "quote": "由于已经放进底池一些筹码，比其他玩家有更好的底池赔率（甚至有时能免费看翻牌）。",
+      "note": "原引 p123（小盲节）；大盲节在 p124，且过牌是规则兜底，降为 interpreted。",
+      "source": "《哈林顿在现金桌》第1卷 p124（PDF p134）"
+    },
+    {
+      "id": "preflop.limped.ace_broadway",
+      "file": "poker_ocr/playbook/cards/harrington_cash_preflop.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        119
+      ],
+      "pdf_pages": [
+        129
+      ],
+      "confidence": "explicit",
+      "verdict": "fixed",
+      "quote": "如果前面几个人平跟，拿着AJ、AT的话我会跟注，其他的都弃牌。",
+      "note": "原引 p128（大盲防偷）；AJ/AT 跟注平跟池在 p119，已改页。",
+      "source": "《哈林顿在现金桌》第1卷 p119（PDF p129）"
+    },
+    {
+      "id": "preflop.limped.ak",
+      "file": "poker_ocr/playbook/cards/harrington_cash_preflop.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        129
+      ],
+      "pdf_pages": [
+        139
+      ],
+      "confidence": "interpreted",
+      "verdict": "compiled",
+      "quote": "AA到TT的大口袋对，AKs和AQs；非同花 AK 按同名加注（编译）。",
+      "note": "书只列 AKs；非同花 AK 按同名加注为编译。",
+      "source": "《哈林顿在现金桌》第1卷 p129（PDF p139）"
+    },
+    {
+      "id": "preflop.limped.aq",
+      "file": "poker_ocr/playbook/cards/harrington_cash_preflop.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        129
+      ],
+      "pdf_pages": [
+        139
+      ],
+      "confidence": "interpreted",
+      "verdict": "compiled",
+      "quote": "AA到TT的大口袋对，AKs和AQs；非同花 AQ 按同名加注（编译）。",
+      "note": "书只列 AQs；非同花 AQ 按同名加注为编译。",
+      "source": "《哈林顿在现金桌》第1卷 p129（PDF p139）"
+    },
+    {
+      "id": "preflop.limped.big_pair_aa_kk",
+      "file": "poker_ocr/playbook/cards/harrington_cash_preflop.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        129
+      ],
+      "pdf_pages": [
+        139
+      ],
+      "confidence": "explicit",
+      "verdict": "ok",
+      "quote": "唯一能让我感觉可以舒舒服服加注来打击一群（三个或者更多）溜入者的牌包括：AA到TT的大口袋对，AKs和AQs。",
+      "note": "页码、转述与 confidence 一致。",
+      "source": "《哈林顿在现金桌》第1卷 p129（PDF p139）"
+    },
+    {
+      "id": "preflop.limped.big_pair_qq",
+      "file": "poker_ocr/playbook/cards/harrington_cash_preflop.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        129
+      ],
+      "pdf_pages": [
+        139
+      ],
+      "confidence": "explicit",
+      "verdict": "ok",
+      "quote": "唯一能让我感觉可以舒舒服服加注来打击一群（三个或者更多）溜入者的牌包括：AA到TT的大口袋对，AKs和AQs。",
+      "note": "页码、转述与 confidence 一致。",
+      "source": "《哈林顿在现金桌》第1卷 p129（PDF p139）"
+    },
+    {
+      "id": "preflop.limped.low_pair",
+      "file": "poker_ocr/playbook/cards/harrington_cash_preflop.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        129
+      ],
+      "pdf_pages": [
+        139
+      ],
+      "confidence": "interpreted",
+      "verdict": "compiled",
+      "quote": "AA到TT的大口袋对，AKs和AQs；不在名单里就平跟看翻牌（编译）。",
+      "note": "书只列 AA-TT/AKs/AQs；88-66 平跟为编译。",
+      "source": "《哈林顿在现金桌》第1卷 p129（PDF p139）"
+    },
+    {
+      "id": "preflop.limped.medium_pair",
+      "file": "poker_ocr/playbook/cards/harrington_cash_preflop.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        129
+      ],
+      "pdf_pages": [
+        139
+      ],
+      "confidence": "interpreted",
+      "verdict": "compiled",
+      "quote": "唯一能让我感觉可以舒舒服服加注来打击一群（三个或者更多）溜入者的牌包括：AA到TT的大口袋对，AKs和AQs。",
+      "note": "书只列 AA-TT；99 按 p110 中口袋对归入，编译。",
+      "source": "《哈林顿在现金桌》第1卷 p129（PDF p139）"
+    },
+    {
+      "id": "preflop.limped.other",
+      "file": "poker_ocr/playbook/cards/harrington_cash_preflop.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        105
+      ],
+      "pdf_pages": [
+        115
+      ],
+      "confidence": "explicit",
+      "verdict": "fixed",
+      "quote": "其他牌：从来不玩",
+      "note": "原引 p95-107；「其他牌从来不玩」在 p105，已改页。",
+      "source": "《哈林顿在现金桌》第1卷 p105（PDF p115）"
+    },
+    {
+      "id": "preflop.limped.small_pair",
+      "file": "poker_ocr/playbook/cards/harrington_cash_preflop.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        112,
+        113
+      ],
+      "pdf_pages": [
+        122,
+        123
+      ],
+      "confidence": "interpreted",
+      "verdict": "fixed",
+      "quote": "小口袋对本质上是个听牌，或者说投机牌。",
+      "note": "原引 p112、p129（p129 是攻击溜入者，不含小对子）；改 p112-113。",
+      "source": "《哈林顿在现金桌》第1卷 p112、p113（PDF p122、p123）"
+    },
+    {
+      "id": "preflop.limped.speculative",
+      "file": "poker_ocr/playbook/cards/harrington_cash_preflop.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        122
+      ],
+      "pdf_pages": [
+        132
+      ],
+      "confidence": "explicit",
+      "verdict": "fixed",
+      "quote": "如果前面有两个或者更多的平跟人局者，那也平跟人局。",
+      "note": "书 p122 明说两个以上平跟也平跟，升为 explicit。",
+      "source": "《哈林顿在现金桌》第1卷 p122（PDF p132）"
+    },
+    {
+      "id": "preflop.limped.suited_connector",
+      "file": "poker_ocr/playbook/cards/harrington_cash_preflop.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        121
+      ],
+      "pdf_pages": [
+        131
+      ],
+      "confidence": "explicit",
+      "verdict": "ok",
+      "quote": "前面有几个人平跟入局……理想环境是有好位置。",
+      "note": "页码、转述与 confidence 一致。",
+      "source": "《哈林顿在现金桌》第1卷 p121（PDF p131）"
+    },
+    {
+      "id": "preflop.limped.trouble",
+      "file": "poker_ocr/playbook/cards/harrington_cash_preflop.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        120
+      ],
+      "pdf_pages": [
+        130
+      ],
+      "confidence": "interpreted",
+      "verdict": "fixed",
+      "quote": "我可能会用KQ、KJ同花或非同花去跟注。",
+      "note": "why 页标写作 p129，实为 p120，已改。",
+      "source": "《哈林顿在现金桌》第1卷 p120（PDF p130）"
+    },
+    {
+      "id": "preflop.limped.weak_ace",
+      "file": "poker_ocr/playbook/cards/harrington_cash_preflop.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        119
+      ],
+      "pdf_pages": [
+        129
+      ],
+      "confidence": "explicit",
+      "verdict": "fixed",
+      "quote": "如果前面几个人平跟，拿着AJ、AT的话我会跟注，其他的都弃牌。",
+      "note": "原引 p128（大盲防偷）；弱 A 不在平跟池跟注名单，主句在 p119，已改页。",
+      "source": "《哈林顿在现金桌》第1卷 p119（PDF p129）"
+    },
+    {
+      "id": "preflop.limped.weak_trouble",
+      "file": "poker_ocr/playbook/cards/harrington_cash_preflop.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        120
+      ],
+      "pdf_pages": [
+        130
+      ],
+      "confidence": "explicit",
+      "verdict": "ok",
+      "quote": "如果前面已经有人加注，这些麻烦牌都弃了吧。",
+      "note": "页码、转述与 confidence 一致。",
+      "source": "《哈林顿在现金桌》第1卷 p120（PDF p130）"
+    },
+    {
+      "id": "preflop.rfi.ace_broadway.early.offsuit",
+      "file": "poker_ocr/playbook/cards/harrington_cash_preflop.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        118
+      ],
+      "pdf_pages": [
+        128
+      ],
+      "confidence": "explicit",
+      "verdict": "ok",
+      "quote": "其他的Ax都弃牌。",
+      "note": "页码、转述与 confidence 一致。",
+      "source": "《哈林顿在现金桌》第1卷 p118（PDF p128）"
+    },
+    {
+      "id": "preflop.rfi.ace_broadway.early.suited",
+      "file": "poker_ocr/playbook/cards/harrington_cash_preflop.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        118
+      ],
+      "pdf_pages": [
+        128
+      ],
+      "confidence": "interpreted",
+      "verdict": "fixed",
+      "quote": "在前位，我只玩AJ同花，加注和平跟混合着玩。",
+      "note": "书是加注/平跟混合；卡只取平跟一支，降为 interpreted。",
+      "source": "《哈林顿在现金桌》第1卷 p118（PDF p128）"
+    },
+    {
+      "id": "preflop.rfi.ace_broadway.late",
+      "file": "poker_ocr/playbook/cards/harrington_cash_preflop.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        118
+      ],
+      "pdf_pages": [
+        128
+      ],
+      "confidence": "explicit",
+      "verdict": "ok",
+      "quote": "在后位，所有的Ax牌都可以玩……80%-20%或90%-10%。",
+      "note": "页码、转述与 confidence 一致。",
+      "source": "《哈林顿在现金桌》第1卷 p118（PDF p128）"
+    },
+    {
+      "id": "preflop.rfi.ace_broadway.middle",
+      "file": "poker_ocr/playbook/cards/harrington_cash_preflop.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        118
+      ],
+      "pdf_pages": [
+        128
+      ],
+      "confidence": "explicit",
+      "verdict": "ok",
+      "quote": "中位。AJ-A7都可以玩。",
+      "note": "页码、转述与 confidence 一致。",
+      "source": "《哈林顿在现金桌》第1卷 p118（PDF p128）"
+    },
+    {
+      "id": "preflop.rfi.ak",
+      "file": "poker_ocr/playbook/cards/harrington_cash_preflop.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        115
+      ],
+      "pdf_pages": [
+        125
+      ],
+      "confidence": "explicit",
+      "verdict": "ok",
+      "quote": "前位……75%-25%的加注、平跟比例。",
+      "note": "页码、转述与 confidence 一致。",
+      "source": "《哈林顿在现金桌》第1卷 p115（PDF p125）"
+    },
+    {
+      "id": "preflop.rfi.aq",
+      "file": "poker_ocr/playbook/cards/harrington_cash_preflop.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        116,
+        118
+      ],
+      "pdf_pages": [
+        126,
+        128
+      ],
+      "confidence": "interpreted",
+      "verdict": "fixed",
+      "quote": "如果前面有人加注，又有人再加注，我会弃掉AK。",
+      "note": "原引 p116 讲的是面对加注；无人池加注按 p118 后位 Ax 多数加注编译，降为 interpreted。",
+      "source": "《哈林顿在现金桌》第1卷 p116、p118（PDF p126、p128）"
+    },
+    {
+      "id": "preflop.rfi.big_pair_aa_kk",
+      "file": "poker_ocr/playbook/cards/harrington_cash_preflop.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        108,
+        109
+      ],
+      "pdf_pages": [
+        118,
+        119
+      ],
+      "confidence": "explicit",
+      "verdict": "compiled",
+      "quote": "无论在前位、中位还是后位，都应该加注。",
+      "note": "书说永远加注、偶尔平跟；0.9 频率为编译。",
+      "source": "《哈林顿在现金桌》第1卷 p108、p109（PDF p118、p119）"
+    },
+    {
+      "id": "preflop.rfi.big_pair_qq",
+      "file": "poker_ocr/playbook/cards/harrington_cash_preflop.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        108,
+        109
+      ],
+      "pdf_pages": [
+        118,
+        119
+      ],
+      "confidence": "explicit",
+      "verdict": "compiled",
+      "quote": "无论在前位、中位还是后位，都应该加注。",
+      "note": "书说永远加注、偶尔平跟；0.9 频率为编译。",
+      "source": "《哈林顿在现金桌》第1卷 p108、p109（PDF p118、p119）"
+    },
+    {
+      "id": "preflop.rfi.low_pair.early",
+      "file": "poker_ocr/playbook/cards/harrington_cash_preflop.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        110
+      ],
+      "pdf_pages": [
+        120
+      ],
+      "confidence": "explicit",
+      "verdict": "ok",
+      "quote": "对较小的中口袋对，即88-66，可以将比例反过来，即30%加注，70%跟注。",
+      "note": "页码、转述与 confidence 一致。",
+      "source": "《哈林顿在现金桌》第1卷 p110（PDF p120）"
+    },
+    {
+      "id": "preflop.rfi.low_pair.late",
+      "file": "poker_ocr/playbook/cards/harrington_cash_preflop.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        110
+      ],
+      "pdf_pages": [
+        120
+      ],
+      "confidence": "explicit",
+      "verdict": "ok",
+      "quote": "继续采取进攻型的80%加注、20%跟注的打法。",
+      "note": "页码、转述与 confidence 一致。",
+      "source": "《哈林顿在现金桌》第1卷 p110（PDF p120）"
+    },
+    {
+      "id": "preflop.rfi.low_pair.middle",
+      "file": "poker_ocr/playbook/cards/harrington_cash_preflop.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        110
+      ],
+      "pdf_pages": [
+        120
+      ],
+      "confidence": "explicit",
+      "verdict": "ok",
+      "quote": "这些中口袋对大部分情况下都可以加注……可以80%加注，20%跟注。",
+      "note": "页码、转述与 confidence 一致。",
+      "source": "《哈林顿在现金桌》第1卷 p110（PDF p120）"
+    },
+    {
+      "id": "preflop.rfi.medium_pair.early",
+      "file": "poker_ocr/playbook/cards/harrington_cash_preflop.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        110
+      ],
+      "pdf_pages": [
+        120
+      ],
+      "confidence": "explicit",
+      "verdict": "ok",
+      "quote": "对较大的中口袋对，也就是JJ到99，采取大部分情况下加注、小部分情况下平跟的策略，可以70%加注，30%跟注。",
+      "note": "页码、转述与 confidence 一致。",
+      "source": "《哈林顿在现金桌》第1卷 p110（PDF p120）"
+    },
+    {
+      "id": "preflop.rfi.medium_pair.late",
+      "file": "poker_ocr/playbook/cards/harrington_cash_preflop.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        110
+      ],
+      "pdf_pages": [
+        120
+      ],
+      "confidence": "explicit",
+      "verdict": "ok",
+      "quote": "继续采取进攻型的80%加注、20%跟注的打法。",
+      "note": "页码、转述与 confidence 一致。",
+      "source": "《哈林顿在现金桌》第1卷 p110（PDF p120）"
+    },
+    {
+      "id": "preflop.rfi.medium_pair.middle",
+      "file": "poker_ocr/playbook/cards/harrington_cash_preflop.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        110
+      ],
+      "pdf_pages": [
+        120
+      ],
+      "confidence": "explicit",
+      "verdict": "ok",
+      "quote": "这些中口袋对大部分情况下都可以加注……可以80%加注，20%跟注。",
+      "note": "页码、转述与 confidence 一致。",
+      "source": "《哈林顿在现金桌》第1卷 p110（PDF p120）"
+    },
+    {
+      "id": "preflop.rfi.other",
+      "file": "poker_ocr/playbook/cards/harrington_cash_preflop.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        105
+      ],
+      "pdf_pages": [
+        115
+      ],
+      "confidence": "explicit",
+      "verdict": "fixed",
+      "quote": "其他牌：从来不玩",
+      "note": "原引 p95-107；「其他牌从来不玩」实为 p105 示例，已改页。",
+      "source": "《哈林顿在现金桌》第1卷 p105（PDF p115）"
+    },
+    {
+      "id": "preflop.rfi.small_pair.early",
+      "file": "poker_ocr/playbook/cards/harrington_cash_preflop.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        113
+      ],
+      "pdf_pages": [
+        123
+      ],
+      "confidence": "interpreted",
+      "verdict": "fixed",
+      "quote": "前位大部分时候平跟，偶尔加注；中间位置一样；后位多加注，偶尔平跟。",
+      "note": "原引 p111-112；弱局前/中/后位小对子打法在 p113，已改页并写清平跟分支。",
+      "source": "《哈林顿在现金桌》第1卷 p113（PDF p123）"
+    },
+    {
+      "id": "preflop.rfi.small_pair.late",
+      "file": "poker_ocr/playbook/cards/harrington_cash_preflop.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        113
+      ],
+      "pdf_pages": [
+        123
+      ],
+      "confidence": "explicit",
+      "verdict": "fixed",
+      "quote": "前位大部分时候平跟，偶尔加注；中间位置一样；后位多加注，偶尔平跟。",
+      "note": "原引 p112；后位多加注在 p113，已改页。",
+      "source": "《哈林顿在现金桌》第1卷 p113（PDF p123）"
+    },
+    {
+      "id": "preflop.rfi.small_pair.middle",
+      "file": "poker_ocr/playbook/cards/harrington_cash_preflop.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        113
+      ],
+      "pdf_pages": [
+        123
+      ],
+      "confidence": "interpreted",
+      "verdict": "fixed",
+      "quote": "前位大部分时候平跟，偶尔加注；中间位置一样；后位多加注，偶尔平跟。",
+      "note": "原引 p112；具体位置建议在 p113，已改页。",
+      "source": "《哈林顿在现金桌》第1卷 p113（PDF p123）"
+    },
+    {
+      "id": "preflop.rfi.speculative.early",
+      "file": "poker_ocr/playbook/cards/harrington_cash_preflop.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        122
+      ],
+      "pdf_pages": [
+        132
+      ],
+      "confidence": "explicit",
+      "verdict": "ok",
+      "quote": "通常，玩上面列出的牌型需要很多条件：有好位置；牌桌玩得很紧，前面很多人都弃牌到你；牌桌很少甚至没有再加注。",
+      "note": "页码、转述与 confidence 一致。",
+      "source": "《哈林顿在现金桌》第1卷 p122（PDF p132）"
+    },
+    {
+      "id": "preflop.rfi.speculative.late",
+      "file": "poker_ocr/playbook/cards/harrington_cash_preflop.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        122
+      ],
+      "pdf_pages": [
+        132
+      ],
+      "confidence": "interpreted",
+      "verdict": "fixed",
+      "quote": "如果前面有两个或者更多的平跟人局者，那也平跟人局。",
+      "note": "原引 p122-123（p123 是小盲节）；后位加注为编译，降为 interpreted。",
+      "source": "《哈林顿在现金桌》第1卷 p122（PDF p132）"
+    },
+    {
+      "id": "preflop.rfi.speculative.middle",
+      "file": "poker_ocr/playbook/cards/harrington_cash_preflop.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        122
+      ],
+      "pdf_pages": [
+        132
+      ],
+      "confidence": "explicit",
+      "verdict": "ok",
+      "quote": "通常，玩上面列出的牌型需要很多条件：有好位置；牌桌玩得很紧，前面很多人都弃牌到你；牌桌很少甚至没有再加注。",
+      "note": "页码、转述与 confidence 一致。",
+      "source": "《哈林顿在现金桌》第1卷 p122（PDF p132）"
+    },
+    {
+      "id": "preflop.rfi.suited_connector.early",
+      "file": "poker_ocr/playbook/cards/harrington_cash_preflop.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        121
+      ],
+      "pdf_pages": [
+        131
+      ],
+      "confidence": "interpreted",
+      "verdict": "ok",
+      "quote": "在前位，我用15%-25%的同花连牌加注，其他的弃掉。",
+      "note": "页码、转述与 confidence 一致。",
+      "source": "《哈林顿在现金桌》第1卷 p121（PDF p131）"
+    },
+    {
+      "id": "preflop.rfi.suited_connector.late",
+      "file": "poker_ocr/playbook/cards/harrington_cash_preflop.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        121
+      ],
+      "pdf_pages": [
+        131
+      ],
+      "confidence": "explicit",
+      "verdict": "ok",
+      "quote": "在后位，基本上玩所有的同花连牌，大部分情况下加注。",
+      "note": "页码、转述与 confidence 一致。",
+      "source": "《哈林顿在现金桌》第1卷 p121（PDF p131）"
+    },
+    {
+      "id": "preflop.rfi.suited_connector.middle",
+      "file": "poker_ocr/playbook/cards/harrington_cash_preflop.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        121
+      ],
+      "pdf_pages": [
+        131
+      ],
+      "confidence": "explicit",
+      "verdict": "ok",
+      "quote": "在中位，JTs到67s，一部分加注，一部分平跟。",
+      "note": "页码、转述与 confidence 一致。",
+      "source": "《哈林顿在现金桌》第1卷 p121（PDF p131）"
+    },
+    {
+      "id": "preflop.rfi.trouble.early.offsuit",
+      "file": "poker_ocr/playbook/cards/harrington_cash_preflop.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        120
+      ],
+      "pdf_pages": [
+        130
+      ],
+      "confidence": "explicit",
+      "verdict": "ok",
+      "quote": "在前位我唯一愿意玩的是KQs，可能加注，也可能平跟。",
+      "note": "页码、转述与 confidence 一致。",
+      "source": "《哈林顿在现金桌》第1卷 p120（PDF p130）"
+    },
+    {
+      "id": "preflop.rfi.trouble.early.suited",
+      "file": "poker_ocr/playbook/cards/harrington_cash_preflop.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        120
+      ],
+      "pdf_pages": [
+        130
+      ],
+      "confidence": "interpreted",
+      "verdict": "fixed",
+      "quote": "在前位我唯一愿意玩的是KQs，可能加注，也可能平跟。",
+      "note": "书是加注/平跟混合；卡只取平跟一支，降为 interpreted。",
+      "source": "《哈林顿在现金桌》第1卷 p120（PDF p130）"
+    },
+    {
+      "id": "preflop.rfi.trouble.late",
+      "file": "poker_ocr/playbook/cards/harrington_cash_preflop.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        120
+      ],
+      "pdf_pages": [
+        130
+      ],
+      "confidence": "explicit",
+      "verdict": "ok",
+      "quote": "在后位，这五种牌型都可以加注。",
+      "note": "页码、转述与 confidence 一致。",
+      "source": "《哈林顿在现金桌》第1卷 p120（PDF p130）"
+    },
+    {
+      "id": "preflop.rfi.trouble.middle",
+      "file": "poker_ocr/playbook/cards/harrington_cash_preflop.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        120
+      ],
+      "pdf_pages": [
+        130
+      ],
+      "confidence": "explicit",
+      "verdict": "ok",
+      "quote": "拿着KQ我喜欢玩得激进点，多数情况加注，偶尔平跟。",
+      "note": "页码、转述与 confidence 一致。",
+      "source": "《哈林顿在现金桌》第1卷 p120（PDF p130）"
+    },
+    {
+      "id": "preflop.rfi.weak_ace.early",
+      "file": "poker_ocr/playbook/cards/harrington_cash_preflop.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        118
+      ],
+      "pdf_pages": [
+        128
+      ],
+      "confidence": "explicit",
+      "verdict": "ok",
+      "quote": "在前位……其他的Ax都弃牌。",
+      "note": "页码、转述与 confidence 一致。",
+      "source": "《哈林顿在现金桌》第1卷 p118（PDF p128）"
+    },
+    {
+      "id": "preflop.rfi.weak_ace.late",
+      "file": "poker_ocr/playbook/cards/harrington_cash_preflop.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        118
+      ],
+      "pdf_pages": [
+        128
+      ],
+      "confidence": "explicit",
+      "verdict": "ok",
+      "quote": "在后位，所有的Ax牌都可以玩……80%-20%或90%-10%。",
+      "note": "页码、转述与 confidence 一致。",
+      "source": "《哈林顿在现金桌》第1卷 p118（PDF p128）"
+    },
+    {
+      "id": "preflop.rfi.weak_ace.middle.offsuit",
+      "file": "poker_ocr/playbook/cards/harrington_cash_preflop.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        118
+      ],
+      "pdf_pages": [
+        128
+      ],
+      "confidence": "interpreted",
+      "verdict": "ok",
+      "quote": "中位。AJ-A7都可以玩。",
+      "note": "页码、转述与 confidence 一致。",
+      "source": "《哈林顿在现金桌》第1卷 p118（PDF p128）"
+    },
+    {
+      "id": "preflop.rfi.weak_ace.middle.suited",
+      "file": "poker_ocr/playbook/cards/harrington_cash_preflop.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        118,
+        119
+      ],
+      "pdf_pages": [
+        128,
+        129
+      ],
+      "confidence": "interpreted",
+      "verdict": "ok",
+      "quote": "中位。AJ-A7都可以玩。",
+      "note": "页码、转述与 confidence 一致。",
+      "source": "《哈林顿在现金桌》第1卷 p118、p119（PDF p128、p129）"
+    },
+    {
+      "id": "preflop.rfi.weak_trouble.early",
+      "file": "poker_ocr/playbook/cards/harrington_cash_preflop.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        120
+      ],
+      "pdf_pages": [
+        130
+      ],
+      "confidence": "explicit",
+      "verdict": "ok",
+      "quote": "KT、QT无论同花还是非同花都直接弃掉。",
+      "note": "页码、转述与 confidence 一致。",
+      "source": "《哈林顿在现金桌》第1卷 p120（PDF p130）"
+    },
+    {
+      "id": "preflop.rfi.weak_trouble.late",
+      "file": "poker_ocr/playbook/cards/harrington_cash_preflop.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        120
+      ],
+      "pdf_pages": [
+        130
+      ],
+      "confidence": "explicit",
+      "verdict": "ok",
+      "quote": "KT、QT无论同花还是非同花都直接弃掉。",
+      "note": "页码、转述与 confidence 一致。",
+      "source": "《哈林顿在现金桌》第1卷 p120（PDF p130）"
+    },
+    {
+      "id": "preflop.rfi.weak_trouble.middle",
+      "file": "poker_ocr/playbook/cards/harrington_cash_preflop.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        120
+      ],
+      "pdf_pages": [
+        130
+      ],
+      "confidence": "explicit",
+      "verdict": "ok",
+      "quote": "KT、QT无论同花还是非同花都直接弃掉。",
+      "note": "页码、转述与 confidence 一致。",
+      "source": "《哈林顿在现金桌》第1卷 p120（PDF p130）"
+    },
+    {
+      "id": "preflop.vs_3bet.ace_broadway",
+      "file": "poker_ocr/playbook/cards/harrington_cash_preflop.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        118
+      ],
+      "pdf_pages": [
+        128
+      ],
+      "confidence": "interpreted",
+      "verdict": "ok",
+      "quote": "如果前面有人加注，一般要扔掉所有的Ax牌。",
+      "note": "页码、转述与 confidence 一致。",
+      "source": "《哈林顿在现金桌》第1卷 p118（PDF p128）"
+    },
+    {
+      "id": "preflop.vs_3bet.ak",
+      "file": "poker_ocr/playbook/cards/harrington_cash_preflop.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        115,
+        116
+      ],
+      "pdf_pages": [
+        125,
+        126
+      ],
+      "confidence": "explicit",
+      "verdict": "fixed",
+      "quote": "如果前面有人加注，又有人再加注，我会弃掉AK。",
+      "note": "书 p116 明确弃牌，原标 interpreted；升为 explicit。",
+      "source": "《哈林顿在现金桌》第1卷 p115、p116（PDF p125、p126）"
+    },
+    {
+      "id": "preflop.vs_3bet.aq",
+      "file": "poker_ocr/playbook/cards/harrington_cash_preflop.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        115,
+        116
+      ],
+      "pdf_pages": [
+        125,
+        126
+      ],
+      "confidence": "explicit",
+      "verdict": "fixed",
+      "quote": "如果有人加注，又有人再加注，毫无疑问我会扔掉AQ。",
+      "note": "书 p116 明确弃牌，原标 interpreted；升为 explicit。",
+      "source": "《哈林顿在现金桌》第1卷 p115、p116（PDF p125、p126）"
+    },
+    {
+      "id": "preflop.vs_3bet.big_pair_aa_kk",
+      "file": "poker_ocr/playbook/cards/harrington_cash_preflop.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        109
+      ],
+      "pdf_pages": [
+        119
+      ],
+      "confidence": "explicit",
+      "verdict": "ok",
+      "quote": "如果是AA或KK，我会继续再加注。",
+      "note": "页码、转述与 confidence 一致。",
+      "source": "《哈林顿在现金桌》第1卷 p109（PDF p119）"
+    },
+    {
+      "id": "preflop.vs_3bet.big_pair_qq",
+      "file": "poker_ocr/playbook/cards/harrington_cash_preflop.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        109
+      ],
+      "pdf_pages": [
+        119
+      ],
+      "confidence": "explicit",
+      "verdict": "ok",
+      "quote": "如果是QQ……这时候QQ最多只能跟注。",
+      "note": "页码、转述与 confidence 一致。",
+      "source": "《哈林顿在现金桌》第1卷 p109（PDF p119）"
+    },
+    {
+      "id": "preflop.vs_3bet.low_pair",
+      "file": "poker_ocr/playbook/cards/harrington_cash_preflop.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        111
+      ],
+      "pdf_pages": [
+        121
+      ],
+      "confidence": "explicit",
+      "verdict": "ok",
+      "quote": "如果前面有人加注，有人再加注，直接弃牌。",
+      "note": "页码、转述与 confidence 一致。",
+      "source": "《哈林顿在现金桌》第1卷 p111（PDF p121）"
+    },
+    {
+      "id": "preflop.vs_3bet.medium_pair",
+      "file": "poker_ocr/playbook/cards/harrington_cash_preflop.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        111
+      ],
+      "pdf_pages": [
+        121
+      ],
+      "confidence": "explicit",
+      "verdict": "ok",
+      "quote": "如果前面有人加注，有人再加注，直接弃牌。",
+      "note": "页码、转述与 confidence 一致。",
+      "source": "《哈林顿在现金桌》第1卷 p111（PDF p121）"
+    },
+    {
+      "id": "preflop.vs_3bet.other",
+      "file": "poker_ocr/playbook/cards/harrington_cash_preflop.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        105
+      ],
+      "pdf_pages": [
+        115
+      ],
+      "confidence": "interpreted",
+      "verdict": "ok",
+      "quote": "其他牌：从来不玩",
+      "note": "页码、转述与 confidence 一致。",
+      "source": "《哈林顿在现金桌》第1卷 p105（PDF p115）"
+    },
+    {
+      "id": "preflop.vs_3bet.small_pair",
+      "file": "poker_ocr/playbook/cards/harrington_cash_preflop.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        111,
+        113,
+        114
+      ],
+      "pdf_pages": [
+        121,
+        123,
+        124
+      ],
+      "confidence": "interpreted",
+      "verdict": "fixed",
+      "quote": "如果前面有人加注，有人再加注，直接弃牌；强局没位置也弃（p113）；筹码不足 25 倍加注额弃（p114）。",
+      "note": "书未单列 55-22 对 3-bet；p111 原则属中口袋对，降为 interpreted 并写明编译链 p111/p113/p114。",
+      "source": "《哈林顿在现金桌》第1卷 p111、p113、p114（PDF p121、p123、p124）"
+    },
+    {
+      "id": "preflop.vs_3bet.speculative",
+      "file": "poker_ocr/playbook/cards/harrington_cash_preflop.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        122
+      ],
+      "pdf_pages": [
+        132
+      ],
+      "confidence": "interpreted",
+      "verdict": "ok",
+      "quote": "如果再加注的可能性不小，还是直接弃掉为好。",
+      "note": "页码、转述与 confidence 一致。",
+      "source": "《哈林顿在现金桌》第1卷 p122（PDF p132）"
+    },
+    {
+      "id": "preflop.vs_3bet.suited_connector",
+      "file": "poker_ocr/playbook/cards/harrington_cash_preflop.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        122
+      ],
+      "pdf_pages": [
+        132
+      ],
+      "confidence": "interpreted",
+      "verdict": "fixed",
+      "quote": "如果再加注的可能性不小，还是直接弃掉为好。",
+      "note": "原引 p121（单次加注节）；改 p122「再加注可能性不小就弃」。",
+      "source": "《哈林顿在现金桌》第1卷 p122（PDF p132）"
+    },
+    {
+      "id": "preflop.vs_3bet.trouble",
+      "file": "poker_ocr/playbook/cards/harrington_cash_preflop.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        120
+      ],
+      "pdf_pages": [
+        130
+      ],
+      "confidence": "interpreted",
+      "verdict": "ok",
+      "quote": "如果前面已经有人加注，这些麻烦牌都弃了吧。",
+      "note": "页码、转述与 confidence 一致。",
+      "source": "《哈林顿在现金桌》第1卷 p120（PDF p130）"
+    },
+    {
+      "id": "preflop.vs_3bet.weak_ace",
+      "file": "poker_ocr/playbook/cards/harrington_cash_preflop.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        118
+      ],
+      "pdf_pages": [
+        128
+      ],
+      "confidence": "interpreted",
+      "verdict": "ok",
+      "quote": "如果前面有人加注，一般要扔掉所有的Ax牌。",
+      "note": "页码、转述与 confidence 一致。",
+      "source": "《哈林顿在现金桌》第1卷 p118（PDF p128）"
+    },
+    {
+      "id": "preflop.vs_3bet.weak_trouble",
+      "file": "poker_ocr/playbook/cards/harrington_cash_preflop.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        120
+      ],
+      "pdf_pages": [
+        130
+      ],
+      "confidence": "interpreted",
+      "verdict": "ok",
+      "quote": "如果前面已经有人加注，这些麻烦牌都弃了吧。",
+      "note": "页码、转述与 confidence 一致。",
+      "source": "《哈林顿在现金桌》第1卷 p120（PDF p130）"
+    },
+    {
+      "id": "preflop.vs_raise.ace_broadway",
+      "file": "poker_ocr/playbook/cards/harrington_cash_preflop.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        118,
+        119
+      ],
+      "pdf_pages": [
+        128,
+        129
+      ],
+      "confidence": "explicit",
+      "verdict": "fixed",
+      "quote": "如果前面有人加注，一般要扔掉所有的Ax牌。",
+      "note": "原引 p119；Ax 面对加注的主句在 p118-119，已合并。",
+      "source": "《哈林顿在现金桌》第1卷 p118、p119（PDF p128、p129）"
+    },
+    {
+      "id": "preflop.vs_raise.ak",
+      "file": "poker_ocr/playbook/cards/harrington_cash_preflop.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        115,
+        116
+      ],
+      "pdf_pages": [
+        125,
+        126
+      ],
+      "confidence": "explicit",
+      "verdict": "ok",
+      "quote": "如果前面已经加注，我会跟注。",
+      "note": "页码、转述与 confidence 一致。",
+      "source": "《哈林顿在现金桌》第1卷 p115、p116（PDF p125、p126）"
+    },
+    {
+      "id": "preflop.vs_raise.aq",
+      "file": "poker_ocr/playbook/cards/harrington_cash_preflop.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        116
+      ],
+      "pdf_pages": [
+        126
+      ],
+      "confidence": "interpreted",
+      "verdict": "fixed",
+      "quote": "如果前面只有一个加注者，我拿AQ会跟注。",
+      "note": "书对 AQo/前位加注者有例外；降为 interpreted 并写明。",
+      "source": "《哈林顿在现金桌》第1卷 p116（PDF p126）"
+    },
+    {
+      "id": "preflop.vs_raise.big_pair_aa_kk",
+      "file": "poker_ocr/playbook/cards/harrington_cash_preflop.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        108,
+        109
+      ],
+      "pdf_pages": [
+        118,
+        119
+      ],
+      "confidence": "explicit",
+      "verdict": "ok",
+      "quote": "如果有人已经加注，那你就再加注。",
+      "note": "页码、转述与 confidence 一致。",
+      "source": "《哈林顿在现金桌》第1卷 p108、p109（PDF p118、p119）"
+    },
+    {
+      "id": "preflop.vs_raise.big_pair_qq",
+      "file": "poker_ocr/playbook/cards/harrington_cash_preflop.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        108,
+        109
+      ],
+      "pdf_pages": [
+        118,
+        119
+      ],
+      "confidence": "explicit",
+      "verdict": "ok",
+      "quote": "如果有人已经加注，那你就再加注。",
+      "note": "页码、转述与 confidence 一致。",
+      "source": "《哈林顿在现金桌》第1卷 p108、p109（PDF p118、p119）"
+    },
+    {
+      "id": "preflop.vs_raise.low_pair.ip",
+      "file": "poker_ocr/playbook/cards/harrington_cash_preflop.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        110
+      ],
+      "pdf_pages": [
+        120
+      ],
+      "confidence": "interpreted",
+      "verdict": "fixed",
+      "quote": "如果前面已经有人加注入局，翻牌后你对于加注者有位置优势的话，可以用所有的中口袋对跟注。",
+      "note": "原引 p110、p114；88-66 属中口袋对（p110），p114 是小对子节，已改页。",
+      "source": "《哈林顿在现金桌》第1卷 p110（PDF p120）"
+    },
+    {
+      "id": "preflop.vs_raise.low_pair.oop",
+      "file": "poker_ocr/playbook/cards/harrington_cash_preflop.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        110
+      ],
+      "pdf_pages": [
+        120
+      ],
+      "confidence": "interpreted",
+      "verdict": "fixed",
+      "quote": "如果前面已经有人加注入局，翻牌后你对于加注者有位置优势的话，可以用所有的中口袋对跟注。",
+      "note": "原引 p112/114；88-66 属中口袋对（p110），已改页。",
+      "source": "《哈林顿在现金桌》第1卷 p110（PDF p120）"
+    },
+    {
+      "id": "preflop.vs_raise.low_pair.unknown",
+      "file": "poker_ocr/playbook/cards/harrington_cash_preflop.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        110
+      ],
+      "pdf_pages": [
+        120
+      ],
+      "confidence": "interpreted",
+      "verdict": "fixed",
+      "quote": "如果前面已经有人加注入局，翻牌后你对于加注者有位置优势的话，可以用所有的中口袋对跟注。",
+      "note": "原引 p112/114；88-66 属中口袋对（p110），已改页。",
+      "source": "《哈林顿在现金桌》第1卷 p110（PDF p120）"
+    },
+    {
+      "id": "preflop.vs_raise.medium_pair.ip",
+      "file": "poker_ocr/playbook/cards/harrington_cash_preflop.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        110
+      ],
+      "pdf_pages": [
+        120
+      ],
+      "confidence": "interpreted",
+      "verdict": "fixed",
+      "quote": "如果前面已经有人加注入局，翻牌后你对于加注者有位置优势的话，可以用所有的中口袋对跟注。",
+      "note": "原引 p114（小对子节）；中口袋对有位置跟注在 p110。why 原说「别打成再加注」过度归纳，改为默认跟注+书允许的 4x 例外。",
+      "source": "《哈林顿在现金桌》第1卷 p110（PDF p120）"
+    },
+    {
+      "id": "preflop.vs_raise.medium_pair.oop",
+      "file": "poker_ocr/playbook/cards/harrington_cash_preflop.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        110
+      ],
+      "pdf_pages": [
+        120
+      ],
+      "confidence": "interpreted",
+      "verdict": "fixed",
+      "quote": "如果前面已经有人加注入局，翻牌后你对于加注者有位置优势的话，可以用所有的中口袋对跟注。",
+      "note": "原引 p112/114；书只给有位置跟注（p110），无位置按保守口径弃。",
+      "source": "《哈林顿在现金桌》第1卷 p110（PDF p120）"
+    },
+    {
+      "id": "preflop.vs_raise.medium_pair.unknown",
+      "file": "poker_ocr/playbook/cards/harrington_cash_preflop.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        110
+      ],
+      "pdf_pages": [
+        120
+      ],
+      "confidence": "interpreted",
+      "verdict": "fixed",
+      "quote": "如果前面已经有人加注入局，翻牌后你对于加注者有位置优势的话，可以用所有的中口袋对跟注。",
+      "note": "原引 p112/114；书只给有位置跟注（p110），位置未知按无位置处理。",
+      "source": "《哈林顿在现金桌》第1卷 p110（PDF p120）"
+    },
+    {
+      "id": "preflop.vs_raise.other",
+      "file": "poker_ocr/playbook/cards/harrington_cash_preflop.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        105
+      ],
+      "pdf_pages": [
+        115
+      ],
+      "confidence": "explicit",
+      "verdict": "fixed",
+      "quote": "其他牌：从来不玩",
+      "note": "原引 p122；「其他牌从来不玩」在 p105，已改页。",
+      "source": "《哈林顿在现金桌》第1卷 p105（PDF p115）"
+    },
+    {
+      "id": "preflop.vs_raise.small_pair.ip",
+      "file": "poker_ocr/playbook/cards/harrington_cash_preflop.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        113,
+        114
+      ],
+      "pdf_pages": [
+        123,
+        124
+      ],
+      "confidence": "interpreted",
+      "verdict": "fixed",
+      "quote": "在弱的游戏牌局中，拿小口袋对跟注。",
+      "note": "原引 p110/114；小对子有位置跟注在 p113，p110 是中口袋对，已改页。",
+      "source": "《哈林顿在现金桌》第1卷 p113、p114（PDF p123、p124）"
+    },
+    {
+      "id": "preflop.vs_raise.small_pair.oop",
+      "file": "poker_ocr/playbook/cards/harrington_cash_preflop.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        112,
+        113
+      ],
+      "pdf_pages": [
+        122,
+        123
+      ],
+      "confidence": "interpreted",
+      "verdict": "fixed",
+      "quote": "在弱的游戏牌局中……我即使位置不好，也会用小对子跟一个加注。",
+      "note": "原引 p110/114；改 p112-113，why 补弱局允许无位置跟注的例外。",
+      "source": "《哈林顿在现金桌》第1卷 p112、p113（PDF p122、p123）"
+    },
+    {
+      "id": "preflop.vs_raise.small_pair.unknown",
+      "file": "poker_ocr/playbook/cards/harrington_cash_preflop.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        112,
+        113
+      ],
+      "pdf_pages": [
+        122,
+        123
+      ],
+      "confidence": "interpreted",
+      "verdict": "fixed",
+      "quote": "在弱的游戏牌局中……我即使位置不好，也会用小对子跟一个加注。",
+      "note": "原引 p110/114；改 p112-113，why 补弱局例外。",
+      "source": "《哈林顿在现金桌》第1卷 p112、p113（PDF p122、p123）"
+    },
+    {
+      "id": "preflop.vs_raise.speculative",
+      "file": "poker_ocr/playbook/cards/harrington_cash_preflop.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        122
+      ],
+      "pdf_pages": [
+        132
+      ],
+      "confidence": "interpreted",
+      "verdict": "ok",
+      "quote": "如果再加注的可能性不小，还是直接弃掉为好。",
+      "note": "页码、转述与 confidence 一致。",
+      "source": "《哈林顿在现金桌》第1卷 p122（PDF p132）"
+    },
+    {
+      "id": "preflop.vs_raise.suited_connector.ip",
+      "file": "poker_ocr/playbook/cards/harrington_cash_preflop.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        121
+      ],
+      "pdf_pages": [
+        131
+      ],
+      "confidence": "interpreted",
+      "verdict": "fixed",
+      "quote": "跟注加注时要有好位置，至少一个玩家已经跟了加注。",
+      "note": "why 原称「至少已有一个跟注者」，但 Spot 无此维度；补编译说明。",
+      "source": "《哈林顿在现金桌》第1卷 p121（PDF p131）"
+    },
+    {
+      "id": "preflop.vs_raise.suited_connector.oop",
+      "file": "poker_ocr/playbook/cards/harrington_cash_preflop.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        121
+      ],
+      "pdf_pages": [
+        131
+      ],
+      "confidence": "interpreted",
+      "verdict": "ok",
+      "quote": "跟注加注时要有好位置，至少一个玩家已经跟了加注。",
+      "note": "页码、转述与 confidence 一致。",
+      "source": "《哈林顿在现金桌》第1卷 p121（PDF p131）"
+    },
+    {
+      "id": "preflop.vs_raise.suited_connector.unknown",
+      "file": "poker_ocr/playbook/cards/harrington_cash_preflop.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        121
+      ],
+      "pdf_pages": [
+        131
+      ],
+      "confidence": "interpreted",
+      "verdict": "ok",
+      "quote": "跟注加注时要有好位置，至少一个玩家已经跟了加注。",
+      "note": "页码、转述与 confidence 一致。",
+      "source": "《哈林顿在现金桌》第1卷 p121（PDF p131）"
+    },
+    {
+      "id": "preflop.vs_raise.trouble",
+      "file": "poker_ocr/playbook/cards/harrington_cash_preflop.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        120
+      ],
+      "pdf_pages": [
+        130
+      ],
+      "confidence": "explicit",
+      "verdict": "ok",
+      "quote": "如果前面已经有人加注，这些麻烦牌都弃了吧。",
+      "note": "页码、转述与 confidence 一致。",
+      "source": "《哈林顿在现金桌》第1卷 p120（PDF p130）"
+    },
+    {
+      "id": "preflop.vs_raise.weak_ace",
+      "file": "poker_ocr/playbook/cards/harrington_cash_preflop.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        118,
+        119
+      ],
+      "pdf_pages": [
+        128,
+        129
+      ],
+      "confidence": "explicit",
+      "verdict": "fixed",
+      "quote": "如果前面有人加注，一般要扔掉所有的Ax牌。",
+      "note": "原引 p122；Ax 面对加注的主句在 p118-119，已改页。",
+      "source": "《哈林顿在现金桌》第1卷 p118、p119（PDF p128、p129）"
+    },
+    {
+      "id": "preflop.vs_raise.weak_trouble",
+      "file": "poker_ocr/playbook/cards/harrington_cash_preflop.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch3",
+      "pages": [
+        120
+      ],
+      "pdf_pages": [
+        130
+      ],
+      "confidence": "explicit",
+      "verdict": "ok",
+      "quote": "如果前面已经有人加注，这些麻烦牌都弃了吧。",
+      "note": "页码、转述与 confidence 一致。",
+      "source": "《哈林顿在现金桌》第1卷 p120（PDF p130）"
+    },
+    {
+      "id": "river.bluff.air.bet",
+      "file": "poker_ocr/playbook/cards/harrington_cash_river.json",
+      "book": "harrington_cash",
+      "volume": 2,
+      "chapter": "ch7",
+      "pages": [
+        78,
+        82
+      ],
+      "pdf_pages": [
+        84,
+        88
+      ],
+      "confidence": "interpreted",
+      "verdict": "compiled",
+      "quote": "在河牌诈唬时……用最弱的牌去诈唬。",
+      "note": "p78 给诈唬原则；0.5 频率/0.67 尺寸为编译。",
+      "source": "《哈林顿在现金桌》第2卷 p78、p82（PDF p84、p88）"
+    },
+    {
+      "id": "river.bluff.air.facing_bet",
+      "file": "poker_ocr/playbook/cards/harrington_cash_river.json",
+      "book": "harrington_cash",
+      "volume": 2,
+      "chapter": "ch7",
+      "pages": [
+        78
+      ],
+      "pdf_pages": [
+        84
+      ],
+      "confidence": "explicit",
+      "verdict": "ok",
+      "quote": "如果到了河牌，你的牌仍没有任何价值，标准的打法当然是过牌，如果别人下注，你就弃牌。",
+      "note": "页码、转述与 confidence 一致。",
+      "source": "《哈林顿在现金桌》第2卷 p78（PDF p84）"
+    },
+    {
+      "id": "river.bluff_catch.middle_pair.facing_bet",
+      "file": "poker_ocr/playbook/cards/harrington_cash_river.json",
+      "book": "harrington_cash",
+      "volume": 2,
+      "chapter": "ch7",
+      "pages": [
+        75,
+        85
+      ],
+      "pdf_pages": [
+        81,
+        91
+      ],
+      "confidence": "interpreted",
+      "verdict": "fixed",
+      "quote": "如果对手的下注很小……通常你会跟注；如果对手下了大注，你需要判断对方是否在诈唬。",
+      "note": "书是混合策略（小注跟、大注看故事）；why 写明 freq 1.0 为编译。",
+      "source": "《哈林顿在现金桌》第2卷 p75、p85（PDF p81、p91）"
+    },
+    {
+      "id": "river.bluff_catch.top_pair_weak.facing_bet",
+      "file": "poker_ocr/playbook/cards/harrington_cash_river.json",
+      "book": "harrington_cash",
+      "volume": 2,
+      "chapter": "ch7",
+      "pages": [
+        75
+      ],
+      "pdf_pages": [
+        81
+      ],
+      "confidence": "interpreted",
+      "verdict": "fixed",
+      "quote": "如果对手的下注很小……通常你会跟注；如果对手下了大注，你需要判断对方是否在诈唬。",
+      "note": "why 写明取跟注一支。",
+      "source": "《哈林顿在现金桌》第2卷 p75（PDF p81）"
+    },
+    {
+      "id": "river.check.board_play",
+      "file": "poker_ocr/playbook/cards/harrington_cash_river.json",
+      "book": "harrington_cash",
+      "volume": 2,
+      "chapter": "ch7",
+      "pages": [
+        74
+      ],
+      "pdf_pages": [
+        80
+      ],
+      "confidence": "interpreted",
+      "verdict": "fixed",
+      "quote": "当你的牌有一点价值时，你希望以最小的代价熬到亮牌。",
+      "note": "why 改为「只能分池或输」的保守一支。",
+      "source": "《哈林顿在现金桌》第2卷 p74（PDF p80）"
+    },
+    {
+      "id": "river.check.middle_pair",
+      "file": "poker_ocr/playbook/cards/harrington_cash_river.json",
+      "book": "harrington_cash",
+      "volume": 2,
+      "chapter": "ch7",
+      "pages": [
+        74,
+        75
+      ],
+      "pdf_pages": [
+        80,
+        81
+      ],
+      "confidence": "interpreted",
+      "verdict": "ok",
+      "quote": "当你的牌有一点价值时，你希望以最小的代价熬到亮牌。",
+      "note": "页码、转述与 confidence 一致。",
+      "source": "《哈林顿在现金桌》第2卷 p74、p75（PDF p80、p81）"
+    },
+    {
+      "id": "river.check.top_pair_weak",
+      "file": "poker_ocr/playbook/cards/harrington_cash_river.json",
+      "book": "harrington_cash",
+      "volume": 2,
+      "chapter": "ch7",
+      "pages": [
+        74
+      ],
+      "pdf_pages": [
+        80
+      ],
+      "confidence": "interpreted",
+      "verdict": "ok",
+      "quote": "当你的牌有一点价值时，你希望以最小的代价熬到亮牌。",
+      "note": "页码、转述与 confidence 一致。",
+      "source": "《哈林顿在现金桌》第2卷 p74（PDF p80）"
+    },
+    {
+      "id": "river.fold.board_play.facing_bet",
+      "file": "poker_ocr/playbook/cards/harrington_cash_river.json",
+      "book": "harrington_cash",
+      "volume": 2,
+      "chapter": "ch7",
+      "pages": [
+        78
+      ],
+      "pdf_pages": [
+        84
+      ],
+      "confidence": "interpreted",
+      "verdict": "fixed",
+      "quote": "如果到了河牌，你的牌仍没有任何价值……如果别人下注，你就弃牌。",
+      "note": "why 改为「只能分池或输」的保守一支。",
+      "source": "《哈林顿在现金桌》第2卷 p78（PDF p84）"
+    },
+    {
+      "id": "river.value.strong_made.bet",
+      "file": "poker_ocr/playbook/cards/harrington_cash_river.json",
+      "book": "harrington_cash",
+      "volume": 2,
+      "chapter": "ch7",
+      "pages": [
+        71,
+        82
+      ],
+      "pdf_pages": [
+        77,
+        88
+      ],
+      "confidence": "explicit",
+      "verdict": "fixed",
+      "quote": "你只要认为可能已拿着最好的牌，就应该考虑下注；越接近坚果下注越大（p82）。",
+      "note": "p71 明说「认为可能最好就下注」，升为 explicit；尺寸按 p82。",
+      "source": "《哈林顿在现金桌》第2卷 p71、p82（PDF p77、p88）"
+    }
+  ],
+  "removed": [
+    {
+      "id": "flop.draw.oop.flush",
+      "file": "poker_ocr/playbook/cards/harrington_cash.json",
+      "volume": 2,
+      "chapter": "ch6",
+      "pages": [
+        25
+      ],
+      "pdf_pages": [
+        31
+      ],
+      "reason": "v2 p25 是牌例一（A9/JT3）开场，不是同花听牌例；全库 OCR 未找到「65% 下注 60% 池」的原文，无法核实，移出 live。"
+    }
+  ]
+}

@@ -349,12 +349,10 @@
       "volume": 1,
       "chapter": "ch3",
       "pages": [
-        111,
-        112
+        113
       ],
       "pdf_pages": [
-        121,
-        122
+        123
       ],
       "street": "preflop",
       "spot": {
@@ -371,7 +369,7 @@
           "value": 1.0
         }
       },
-      "why": "小口袋对本质是抽三条的听牌；书说前位大部分平跟、偶尔加注（p111-112），本卡取平跟这一支。",
+      "why": "小口袋对本质是抽三条的听牌；弱局前位大部分平跟、偶尔加注（p113），本卡取平跟这一支。",
       "confidence": "interpreted",
       "priority": 100,
       "offset_policy": "size_only"
@@ -382,10 +380,10 @@
       "volume": 1,
       "chapter": "ch3",
       "pages": [
-        112
+        113
       ],
       "pdf_pages": [
-        122
+        123
       ],
       "street": "preflop",
       "spot": {
@@ -402,7 +400,7 @@
           "value": 1.0
         }
       },
-      "why": "中位小口袋对同样以平跟看翻牌为主（p112）。",
+      "why": "弱局中位同样以平跟看翻牌为主、偶尔加注（p113）。",
       "confidence": "interpreted",
       "priority": 100,
       "offset_policy": "size_only"
@@ -413,10 +411,10 @@
       "volume": 1,
       "chapter": "ch3",
       "pages": [
-        112
+        113
       ],
       "pdf_pages": [
-        122
+        123
       ],
       "street": "preflop",
       "spot": {
@@ -434,7 +432,7 @@
         },
         "freq": 0.8
       },
-      "why": "后位小口袋对多数加注，混少量平跟（p112）。",
+      "why": "弱局后位多加注、偶尔平跟（p113）；强局后位也用所有小对子加注。",
       "confidence": "explicit",
       "priority": 100,
       "offset_policy": "size_only",
@@ -496,10 +494,12 @@
       "volume": 1,
       "chapter": "ch3",
       "pages": [
-        116
+        116,
+        118
       ],
       "pdf_pages": [
-        126
+        126,
+        128
       ],
       "street": "preflop",
       "spot": {
@@ -516,8 +516,8 @@
         },
         "freq": 0.7
       },
-      "why": "AQ 第一个入局大部分加注、少数平跟（p116）。",
-      "confidence": "explicit",
+      "why": "书未单说 AQ 无人池加注；后位所有 Ax 多数加注（p118），面对加注 AQ 跟注、前位 AQo 还要弃（p116）——本卡按全位置编译为多数加注。",
+      "confidence": "interpreted",
       "priority": 100,
       "offset_policy": "size_only",
       "mix": [
@@ -558,8 +558,8 @@
           "value": 1.0
         }
       },
-      "why": "前位只玩 AJs（偶尔 ATs），加注与平跟混合（p118）。",
-      "confidence": "explicit",
+      "why": "前位只玩 AJs（偶尔 ATs），书说加注与平跟混合（p118）；本卡取平跟这一支。",
+      "confidence": "interpreted",
       "priority": 100,
       "offset_policy": "size_only"
     },
@@ -833,8 +833,8 @@
           "value": 1.0
         }
       },
-      "why": "前位只玩 KQs，加注或平跟混合（p120）。",
-      "confidence": "explicit",
+      "why": "前位只玩 KQs，书说加注或平跟混合（p120）；本卡取平跟这一支。",
+      "confidence": "interpreted",
       "priority": 100,
       "offset_policy": "size_only"
     },
@@ -1217,12 +1217,10 @@
       "volume": 1,
       "chapter": "ch3",
       "pages": [
-        122,
-        123
+        122
       ],
       "pdf_pages": [
-        132,
-        133
+        132
       ],
       "street": "preflop",
       "spot": {
@@ -1240,8 +1238,8 @@
         },
         "freq": 0.8
       },
-      "why": "后位可低成本偷盲或看翻牌，多数加注（p122-123）。",
-      "confidence": "explicit",
+      "why": "书把其他可玩牌放在有位置、紧桌、少 3-bet 的条件下玩（p122）；后位多数加注为编译。",
+      "confidence": "interpreted",
       "priority": 100,
       "offset_policy": "size_only",
       "mix": [
@@ -1261,12 +1259,10 @@
       "volume": 1,
       "chapter": "ch3",
       "pages": [
-        95,
-        107
+        105
       ],
       "pdf_pages": [
-        105,
-        117
+        115
       ],
       "street": "preflop",
       "spot": {
@@ -1278,7 +1274,7 @@
       "plan": {
         "action": "fold"
       },
-      "why": "书未列入起手牌，翻前直接弃（p095-107）。",
+      "why": "书未列入起手牌：其他牌从来不玩（p105）。",
       "confidence": "explicit",
       "priority": 100,
       "offset_policy": "size_only"
@@ -1353,12 +1349,10 @@
       "volume": 1,
       "chapter": "ch3",
       "pages": [
-        110,
-        114
+        110
       ],
       "pdf_pages": [
-        120,
-        124
+        120
       ],
       "street": "preflop",
       "spot": {
@@ -1371,7 +1365,7 @@
       "plan": {
         "action": "call"
       },
-      "why": "有位置时所有中口袋对可跟注，别把 JJ-99 打成再加注（p110）。",
+      "why": "书只给有位置跟注（p110）；短筹码或初始加注者在中后位时 JJ-99 可 4x 再加注（p110-111），不是一律不打再加注。",
       "confidence": "interpreted",
       "priority": 100,
       "offset_policy": "size_only"
@@ -1382,12 +1376,10 @@
       "volume": 1,
       "chapter": "ch3",
       "pages": [
-        112,
-        114
+        110
       ],
       "pdf_pages": [
-        122,
-        124
+        120
       ],
       "street": "preflop",
       "spot": {
@@ -1400,7 +1392,7 @@
       "plan": {
         "action": "fold"
       },
-      "why": "没位置时中小口袋对追三条的隐含赔率不够，弃（p112-114）。",
+      "why": "书只给有位置跟注（p110）；没位置按保守口径弃。",
       "confidence": "interpreted",
       "priority": 100,
       "offset_policy": "size_only"
@@ -1411,12 +1403,10 @@
       "volume": 1,
       "chapter": "ch3",
       "pages": [
-        112,
-        114
+        110
       ],
       "pdf_pages": [
-        122,
-        124
+        120
       ],
       "street": "preflop",
       "spot": {
@@ -1439,12 +1429,10 @@
       "volume": 1,
       "chapter": "ch3",
       "pages": [
-        110,
-        114
+        110
       ],
       "pdf_pages": [
-        120,
-        124
+        120
       ],
       "street": "preflop",
       "spot": {
@@ -1457,7 +1445,7 @@
       "plan": {
         "action": "call"
       },
-      "why": "88-66 有位置时跟注当抽三条听牌（p110、p114）。",
+      "why": "88-66 属中口袋对，有位置时跟注当抽三条听牌（p110）。",
       "confidence": "interpreted",
       "priority": 100,
       "offset_policy": "size_only"
@@ -1468,12 +1456,10 @@
       "volume": 1,
       "chapter": "ch3",
       "pages": [
-        112,
-        114
+        110
       ],
       "pdf_pages": [
-        122,
-        124
+        120
       ],
       "street": "preflop",
       "spot": {
@@ -1486,7 +1472,7 @@
       "plan": {
         "action": "fold"
       },
-      "why": "没位置时中小口袋对追三条的隐含赔率不够，弃（p112-114）。",
+      "why": "书只给有位置跟注（p110）；没位置按保守口径弃。",
       "confidence": "interpreted",
       "priority": 100,
       "offset_policy": "size_only"
@@ -1497,12 +1483,10 @@
       "volume": 1,
       "chapter": "ch3",
       "pages": [
-        112,
-        114
+        110
       ],
       "pdf_pages": [
-        122,
-        124
+        120
       ],
       "street": "preflop",
       "spot": {
@@ -1525,11 +1509,11 @@
       "volume": 1,
       "chapter": "ch3",
       "pages": [
-        110,
+        113,
         114
       ],
       "pdf_pages": [
-        120,
+        123,
         124
       ],
       "street": "preflop",
@@ -1543,7 +1527,7 @@
       "plan": {
         "action": "call"
       },
-      "why": "小口袋对只在有位置时跟注抽三条；对手筹码不足 25 倍加注额就弃（p112-114）。",
+      "why": "小口袋对只在有位置时跟注抽三条（p113）；对手筹码不足 25 倍加注额就弃（p114）。",
       "confidence": "interpreted",
       "priority": 100,
       "offset_policy": "size_only"
@@ -1555,11 +1539,11 @@
       "chapter": "ch3",
       "pages": [
         112,
-        114
+        113
       ],
       "pdf_pages": [
         122,
-        124
+        123
       ],
       "street": "preflop",
       "spot": {
@@ -1572,7 +1556,7 @@
       "plan": {
         "action": "fold"
       },
-      "why": "没位置时中小口袋对追三条的隐含赔率不够，弃（p112-114）。",
+      "why": "书在弱小额局允许没位置跟注（p112），本卡按强局口径弃（p113）。",
       "confidence": "interpreted",
       "priority": 100,
       "offset_policy": "size_only"
@@ -1584,11 +1568,11 @@
       "chapter": "ch3",
       "pages": [
         112,
-        114
+        113
       ],
       "pdf_pages": [
         122,
-        124
+        123
       ],
       "street": "preflop",
       "spot": {
@@ -1654,8 +1638,8 @@
       "plan": {
         "action": "call"
       },
-      "why": "只有一个加注者时 AQ 跟注（p116）。",
-      "confidence": "explicit",
+      "why": "书：只有一个加注者时 AQ 跟注；但加注者在前位且后面多人未行动时弃 AQo（p116）——本卡取跟注一支。",
+      "confidence": "interpreted",
       "priority": 100,
       "offset_policy": "size_only"
     },
@@ -1665,9 +1649,11 @@
       "volume": 1,
       "chapter": "ch3",
       "pages": [
+        118,
         119
       ],
       "pdf_pages": [
+        128,
         129
       ],
       "street": "preflop",
@@ -1680,7 +1666,7 @@
       "plan": {
         "action": "fold"
       },
-      "why": "Ax 面对加注一般弃，除非加注者是公认差手（p119）。",
+      "why": "Ax 面对单次加注一般弃，除非加注者是公认差手（p118-119）。",
       "confidence": "explicit",
       "priority": 100,
       "offset_policy": "size_only"
@@ -1691,10 +1677,12 @@
       "volume": 1,
       "chapter": "ch3",
       "pages": [
-        122
+        118,
+        119
       ],
       "pdf_pages": [
-        132
+        128,
+        129
       ],
       "street": "preflop",
       "spot": {
@@ -1706,7 +1694,7 @@
       "plan": {
         "action": "fold"
       },
-      "why": "弱 A 面对加注赢小输大，弃（p119）。",
+      "why": "弱 A 面对加注赢小输大，弃（p118-119）。",
       "confidence": "explicit",
       "priority": 100,
       "offset_policy": "size_only"
@@ -1795,10 +1783,10 @@
       "volume": 1,
       "chapter": "ch3",
       "pages": [
-        122
+        105
       ],
       "pdf_pages": [
-        132
+        115
       ],
       "street": "preflop",
       "spot": {
@@ -1810,7 +1798,7 @@
       "plan": {
         "action": "fold"
       },
-      "why": "书未列入起手牌，面对加注弃（p095-107）。",
+      "why": "书未列入起手牌：其他牌从来不玩（p105）。",
       "confidence": "explicit",
       "priority": 100,
       "offset_policy": "size_only"
@@ -1837,7 +1825,7 @@
       "plan": {
         "action": "call"
       },
-      "why": "有位置且至少已有一个跟注者时才跟加注，不做第一个跟注的人（p121）。",
+      "why": "有位置时跟加注，不做第一个跟注的人（p121）；Spot 无跟注者维度，按有位置放开。",
       "confidence": "interpreted",
       "priority": 100,
       "offset_policy": "size_only"
@@ -2022,11 +2010,11 @@
       "chapter": "ch3",
       "pages": [
         112,
-        129
+        113
       ],
       "pdf_pages": [
         122,
-        139
+        123
       ],
       "street": "preflop",
       "spot": {
@@ -2042,7 +2030,7 @@
           "value": 1.0
         }
       },
-      "why": "小口袋对平跟进池抽三条（p112、p129）。",
+      "why": "小口袋对平跟进池抽三条（p112-113）。",
       "confidence": "interpreted",
       "priority": 100,
       "offset_policy": "size_only"
@@ -2113,10 +2101,10 @@
       "volume": 1,
       "chapter": "ch3",
       "pages": [
-        128
+        119
       ],
       "pdf_pages": [
-        138
+        129
       ],
       "street": "preflop",
       "spot": {
@@ -2132,7 +2120,7 @@
           "value": 1.0
         }
       },
-      "why": "前面多人平跟时 AJ/AT 跟注，不主动加注（p128）。",
+      "why": "前面多人平跟时 AJ/AT 跟注，其他弃（p119）。",
       "confidence": "explicit",
       "priority": 100,
       "offset_policy": "size_only"
@@ -2143,10 +2131,10 @@
       "volume": 1,
       "chapter": "ch3",
       "pages": [
-        128
+        119
       ],
       "pdf_pages": [
-        138
+        129
       ],
       "street": "preflop",
       "spot": {
@@ -2158,7 +2146,7 @@
       "plan": {
         "action": "fold"
       },
-      "why": "平跟池里弱 A 只输不赢，弃（p128）。",
+      "why": "平跟池里弱 A 不在 AJ/AT 之列，弃（p119）。",
       "confidence": "explicit",
       "priority": 100,
       "offset_policy": "size_only"
@@ -2188,7 +2176,7 @@
           "value": 1.0
         }
       },
-      "why": "前面几个人平跟时 KQ/KJ 可跟注（p129）；QJ 按同组跟注（编译归纳）。",
+      "why": "前面几个人平跟时 KQ/KJ 可跟注（p120）；QJ 按同组跟注（编译归纳）。",
       "confidence": "interpreted",
       "priority": 100,
       "offset_policy": "size_only"
@@ -2274,8 +2262,8 @@
           "value": 1.0
         }
       },
-      "why": "低成本看翻牌的场合可以平跟（p122）。",
-      "confidence": "interpreted",
+      "why": "前面有两个以上平跟时也平跟进池（p122）。",
+      "confidence": "explicit",
       "priority": 100,
       "offset_policy": "size_only"
     },
@@ -2285,12 +2273,10 @@
       "volume": 1,
       "chapter": "ch3",
       "pages": [
-        95,
-        107
+        105
       ],
       "pdf_pages": [
-        105,
-        117
+        115
       ],
       "street": "preflop",
       "spot": {
@@ -2302,7 +2288,7 @@
       "plan": {
         "action": "fold"
       },
-      "why": "书未列入起手牌，弃（p095-107）。",
+      "why": "书未列入起手牌：其他牌从来不玩（p105）。",
       "confidence": "explicit",
       "priority": 100,
       "offset_policy": "size_only"
@@ -2313,10 +2299,10 @@
       "volume": 1,
       "chapter": "ch3",
       "pages": [
-        123
+        124
       ],
       "pdf_pages": [
-        133
+        134
       ],
       "street": "preflop",
       "spot": {
@@ -2328,8 +2314,8 @@
       "plan": {
         "action": "check"
       },
-      "why": "大盲无人加注时免费看翻牌，过牌（p123）。",
-      "confidence": "explicit",
+      "why": "大盲已投入盲注，有更好的底池赔率，有时能免费看翻牌（p124）；无人加注时过牌为规则兜底。",
+      "confidence": "interpreted",
       "priority": 50,
       "offset_policy": "size_only"
     },
@@ -2339,12 +2325,10 @@
       "volume": 1,
       "chapter": "ch3",
       "pages": [
-        123,
-        129
+        124
       ],
       "pdf_pages": [
-        133,
-        139
+        134
       ],
       "street": "preflop",
       "spot": {
@@ -2356,8 +2340,8 @@
       "plan": {
         "action": "check"
       },
-      "why": "大盲面对溜入池免费看翻牌，过牌（p123、p129）。",
-      "confidence": "explicit",
+      "why": "大盲面对溜入池免费看翻牌，过牌（p124）。",
+      "confidence": "interpreted",
       "priority": 50,
       "offset_policy": "size_only"
     },
@@ -2475,10 +2459,12 @@
       "volume": 1,
       "chapter": "ch3",
       "pages": [
+        111,
         113,
         114
       ],
       "pdf_pages": [
+        121,
         123,
         124
       ],
@@ -2493,8 +2479,8 @@
       "plan": {
         "action": "fold"
       },
-      "why": "书 p113-114：小口袋对遇到再加注默认弃，没有跟注者时更没赔率。",
-      "confidence": "explicit",
+      "why": "书未单列小对子对 3-bet；p111 的加注+再加注弃牌原则、p113 强局无位置弃、p114 25x 规则，编译到小对子。",
+      "confidence": "interpreted",
       "priority": 100,
       "offset_policy": "size_only"
     },
@@ -2522,8 +2508,8 @@
       "plan": {
         "action": "fold"
       },
-      "why": "书 p115-116：AK 面对单次加注可以跟，面对「加注 + 再加注」弃；本卡只覆盖后一种局面。",
-      "confidence": "interpreted",
+      "why": "书 p116：加注后再被加注，直接弃掉 AK。",
+      "confidence": "explicit",
       "priority": 100,
       "offset_policy": "size_only"
     },
@@ -2551,8 +2537,8 @@
       "plan": {
         "action": "fold"
       },
-      "why": "书 p115-116：AQ 与 AK 同一条线——面对再被加注就弃。",
-      "confidence": "interpreted",
+      "why": "书 p116：加注后再被加注，毫无疑问扔掉 AQ。",
+      "confidence": "explicit",
       "priority": 100,
       "offset_policy": "size_only"
     },
@@ -2670,10 +2656,10 @@
       "volume": 1,
       "chapter": "ch3",
       "pages": [
-        121
+        122
       ],
       "pdf_pages": [
-        131
+        132
       ],
       "street": "preflop",
       "spot": {
@@ -2686,7 +2672,7 @@
       "plan": {
         "action": "fold"
       },
-      "why": "书 p121：同花连张跟 3-bet 要同时有位置、且已有跟注者；Spot 里没有「已有跟注者」这一维，凑不齐条件就按书的默认弃。",
+      "why": "同花连张面对 3-bet 条件凑不齐；书说再加注可能性不小就弃（p122）。",
       "confidence": "interpreted",
       "priority": 100,
       "offset_policy": "size_only"
@@ -2724,10 +2710,10 @@
       "volume": 1,
       "chapter": "ch3",
       "pages": [
-        122
+        105
       ],
       "pdf_pages": [
-        132
+        115
       ],
       "street": "preflop",
       "spot": {
@@ -2740,7 +2726,7 @@
       "plan": {
         "action": "fold"
       },
-      "why": "书 §3.9（p122）：没有牌力的牌面对再加注直接弃。",
+      "why": "书未列入起手牌：其他牌从来不玩（p105）；面对再加注更不玩。",
       "confidence": "interpreted",
       "priority": 100,
       "offset_policy": "size_only"

@@ -368,7 +368,7 @@ def test_prompt_renders_preflop_hand_class_and_source():
     assert "翻前" in text and "前位" in text and "小口袋对" in text
     assert "非同花" in text
     assert "计划: 跟注 1BB" in text
-    assert "p111" in text
+    assert "p113" in text
     assert "书中无此局面" not in text
 
 

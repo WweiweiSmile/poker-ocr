@@ -45,7 +45,7 @@ def test_multiway_beats_headsup_on_four_plus_players():
 
 def test_all_cards_validate_together():
     cards = _all_cards()
-    assert len(cards) == 131  # 10 单挑 + 25 多人 + 87 翻前 + 9 河牌（#83/#84/#91）
+    assert len(cards) == 130  # 9 单挑 + 25 多人 + 87 翻前 + 9 河牌（#83/#84/#85/#91）
     assert validate_cards(cards) == []
 
 if __name__ == "__main__":

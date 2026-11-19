@@ -211,13 +211,14 @@ Resolver 规则：
 
 - M0 本文档 + schema（完成）
 - M1 OCR Ch4/Ch6，产出章节文本 + 页码映射（完成）
-- M2 场景卡 + `validate_cards`（完成；28 张）
+- M2 场景卡 + `validate_cards`（完成；首批 28 张，后续扩到 130 张）
 - M3 Resolver + 20 个 replay 决策点（完成；444 点）
 - M4 提示词重建 + golden（进行中；#80 只加不删已接入，#81 待做）
 - M5 用户 A/B，决定是否扩到 Ch3/Ch5/Ch7
 - M6 翻前书卡（#87，完成；Ch3 的 RFI / 面对加注 / 溜入池三桶，70 张）
 - M7 转牌缺口卡（#83，完成；7 张，flop+turn 覆盖 520/591 = 88.0%）
 - M8 河牌书卡（#84，完成；9 张，river 覆盖 115/129 = 89.1%，14 点故意留空）
+- M10 书页逐条回查（#85，完成；130 张 live 卡逐张台账，移出 1 张无法核实卡）
 
 ### M2 结果（2026-11-19）
 
@@ -241,7 +242,8 @@ Resolver 规则：
   唯一卡 → 中文「局面/计划/理由/后续」行；零匹配置信地写「书中无此局面」，
   不伪造页码。已用 replay 决策点预览，长度 ≤800 字。
 - 结论：多人池优先是对的；HU 卡保留但不作为主链路。M3 的 20 点验收已超额；
-  按书页回查的抽样核对仍欠着，由 #85 专门补，不阻塞 #80 的只加不删接入。
+  按书页回查已在 #85 补成全量逐张台账（130 张），见
+  `docs/harrington-书页回查-2026-11-19.md` 与 `poker_ocr/playbook/book_audit.json`。
 
 ### M4 结果（2026-11-19，#80 只加不删）
 
@@ -253,7 +255,7 @@ Resolver 规则：
 - 版本 `lean-zh-2026-11-19.3` / `advice-2026-11-19.3`；3 个 golden fixture
   都是 3 人池，走零匹配「书中无此局面」，哈希同批更新。
 - 新增 `tests/test_prompt_book_plan.py`（5 项）：真实 `build_situation` 路径
-  命中（4+ 人池强成牌无人下注 → 下注 0.67 池 / 第 1 卷 p288）、零匹配不印
+  命中（4+ 人池强成牌无人下注 → 下注 0.67 池 / 第 1 卷 p301）、零匹配不印
   页码、800 字硬上限（超限先丢后续/混合行）、多页来源每页带 p、渲染异常
   fail open 不阻塞主循环。
 
@@ -482,3 +484,31 @@ Resolver 规则：
   面对 3-bet 的「已有跟注者」维度；4-bet/5-bet 层没有书页可依，等有第二
   来源或维护者拍板再谈。
 
+
+### M10 结果（2026-11-19，#85 书页逐条回查）
+
+- 产出 `poker_ocr/playbook/book_audit.json`：130 张 live 卡逐张一条，字段
+  `id / file / volume / chapter / pages / pdf_pages / confidence / verdict /
+  quote / note / source`。verdict 三值：`ok` 63、`fixed` 56、`compiled` 11；
+  `removed` 1 张（`flop.draw.oop.flush`）。
+- 人读报告 `docs/harrington-书页回查-2026-11-19.md`：结论统计、方法、修正
+  清单、移出说明、逐卡表；按卡 id 可直接查。
+- 页码口径复核：第 1 卷 `pdf = 印刷 + 10`、第 2 卷 `+6`；对每张卡引用页
+  ±2 页 OCR，关键页目视复核。159 组（卡页, PDF 页）页码口径全部对上。
+- 二轮逐条复核（code review 后）发现首轮有 8 张卡把 OCR 文件的 PDF 页号
+  当成印刷页、又加了一次偏移：`flop.mw.air.*` p304→p294、
+  `flop.mw.board_play.*` p303→p293、`flop.mw.strong_made.bet` p286→p301、
+  `preflop.vs_3bet.other` p122→p105；已按原文改回并同步台账与 why。
+- 主要在「转述/引用」层修：翻前小对子与中口袋对串页（p110-114）、
+  `bb.check.*` 误引小盲节 p123、平跟池 AJ/AT 误引大盲防偷 p128、多人池
+  空气/打牌面误引 p285/p302、转牌强成牌误引 p47、河牌价值下注该为
+  `explicit`。另有 2 张原 `explicit` 降级（`vs_raise.aq` 的 AQo/前位例外、
+  `turn.tptk.bluff_catch` 的跟注延伸）、2 张原 `interpreted` 升级
+  （`vs_3bet.ak/aq`，书 p116 明说弃）。
+- 移出 `flop.draw.oop.flush`：原引 v2 p25 是牌例一开场，全库找不到
+  「65% 下注 60% 池」的原文；按票面「无法核实不进 live」处理。
+- 测试 `tests/test_playbook_book_audit.py`（6 项）：台账覆盖每张 live 卡且
+  不重复、removed 不在 live 且有理由、每张卡有页码/来源/verdict、台账与卡
+  的 pages/pdf_pages/confidence/file 一致、`pdf = 印刷 + 偏移`、explicit 卡
+  必须有 ≥6 字的可定位原文。计数同步：单挑 9、全库 130。
+- 不调用模型、不跑 A/B；OCR 全文不入库，仓库只留短句与页码。

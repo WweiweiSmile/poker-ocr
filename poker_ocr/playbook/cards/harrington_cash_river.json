@@ -29,8 +29,8 @@
         },
         "freq": 1.0
       },
-      "why": "认为可能最好就下注；越接近坚果下越大，基线 2/3 池",
-      "confidence": "interpreted",
+      "why": "认为可能拿着最好的牌就下注（p71）；越接近坚果下注越大（p82），2/3 池为编译基线。",
+      "confidence": "explicit",
       "priority": 100,
       "offset_policy": "size_only"
     },
@@ -121,7 +121,7 @@
         "action": "call",
         "freq": 1.0
       },
-      "why": "有一点价值：小注按赔率哭泣跟注，大注只看故事抓诈唬",
+      "why": "小注跟注、大注看故事（p75）；没有强牌也要跟一部分（p85），freq 1.0 为编译。",
       "confidence": "interpreted",
       "priority": 100,
       "offset_policy": "size_only"
@@ -147,7 +147,7 @@
         "action": "call",
         "freq": 1.0
       },
-      "why": "顶对弱踢也是一点价值，按赔率跟中小注，故事连贯则弃",
+      "why": "小注跟注、大注看故事（p75）；卡取跟注一支。",
       "confidence": "interpreted",
       "priority": 100,
       "offset_policy": "size_only"
@@ -173,7 +173,7 @@
         "action": "fold",
         "freq": 1.0
       },
-      "why": "只打牌面只能分池，面对下注直接弃",
+      "why": "打牌面只能分池或输，面对下注弃（按 p78 无价值牌弃的保守一支）。",
       "confidence": "interpreted",
       "priority": 100,
       "offset_policy": "size_only"
@@ -227,7 +227,7 @@
         "action": "check",
         "freq": 1.0
       },
-      "why": "打牌面只有摊牌/分池价值，无人下注时过牌不造池",
+      "why": "打牌面人人都有，只能分池或输；书按一点价值牌过牌（p74），打牌面取其保守一支。",
       "confidence": "interpreted",
       "priority": 100,
       "offset_policy": "size_only"
