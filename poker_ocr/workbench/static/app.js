@@ -253,6 +253,7 @@ function parseRoute() {
 
 async function route() {
   clearTimers();
+  disconnectLive();
   clearTimeout(calState.trialTimer);
   const r = parseRoute();
   try {
@@ -1203,46 +1204,89 @@ async function pageRun(id) {
       </div>
     </div>
     <div class="run-metrics" id="run-metrics"></div>
-    <div class="run-layout">
-      <section class="panel">
-        <div class="panel-head">
-          <h2>实时预览</h2>
-          <div class="groups" id="run-groups"></div>
-        </div>
-        <div class="panel-body tight">
-          <div class="canvas-wrap" id="run-wrap">
-            <img id="run-img" alt="live 预览" style="display:none">
-            <canvas id="run-canvas"></canvas>
-            <div class="empty" id="run-placeholder" style="position:absolute">等待首帧…</div>
+    <div class="run-split">
+      <div class="run-left">
+        <section class="panel">
+          <div class="panel-head">
+            <h2>实时预览</h2>
+            <div class="groups" id="run-groups"></div>
           </div>
-          <div class="hint" id="frame-meta" style="margin-top:8px"></div>
-        </div>
-        <div class="panel-head" style="border-top:1px solid var(--line)">
-          <h2>选中槽位</h2><span class="faint" id="sel-hint">点预览里的框选中</span>
-        </div>
-        <div class="panel-body inspector" id="run-inspector">
-          <div class="empty">还没有选中槽位</div>
-        </div>
-      </section>
-      <div>
-        <section class="panel"><div class="panel-head"><h2>识别健康</h2></div>
-          <div class="panel-body" id="run-health"><div class="empty">等待状态…</div></div></section>
-        <section class="panel" style="margin-top:12px">
-          <div class="panel-head"><h2>最近事件</h2></div>
-          <div class="panel-body tight"><ul class="events" id="run-events"></ul></div></section>
+          <div class="panel-body tight">
+            <div class="canvas-wrap" id="run-wrap">
+              <img id="run-img" alt="live 预览" style="display:none">
+              <canvas id="run-canvas"></canvas>
+              <div class="empty" id="run-placeholder" style="position:absolute">等待首帧…</div>
+            </div>
+            <div class="hint" id="frame-meta" style="margin-top:8px"></div>
+          </div>
+          <div class="panel-head" style="border-top:1px solid var(--line)">
+            <h2>选中槽位</h2><span class="faint" id="sel-hint">点预览里的框选中</span>
+          </div>
+          <div class="panel-body inspector" id="run-inspector">
+            <div class="empty">还没有选中槽位</div>
+          </div>
+        </section>
       </div>
+      <aside class="run-right">
+        <section class="panel merged-panel">
+          <div class="panel-head">
+            <h2>当前建议</h2>
+            <div class="inline">
+              <span class="pill pill-idle" id="advice-source">等待</span>
+              <button class="btn btn-sm btn-primary" id="btn-anchor"
+                title="把此刻前后 20 帧、±10 秒事件与控制台日志存到 run 目录">⚓ 锚点</button>
+            </div>
+          </div>
+          <div class="panel-body" id="advice-body"><div class="empty">等待轮到我</div></div>
+        </section>
+        <section class="panel error-panel">
+          <div class="panel-head">
+            <h2>识别错误</h2>
+            <span class="lamp ok" id="err-lamp"></span>
+            <span class="faint" id="err-head">正常</span>
+          </div>
+          <div class="panel-body tight" id="error-strip"></div>
+        </section>
+        <section class="panel stream-panel">
+          <div class="panel-head">
+            <h2>事件流</h2>
+            <span class="faint" id="stream-state"></span>
+            <div class="inline">
+              <div class="chips" id="stream-view">
+                <button type="button" data-view="focus" class="active">重点</button>
+                <button type="button" data-view="all">全部</button>
+              </div>
+              <button type="button" class="btn btn-sm btn-ghost" id="btn-stream-pause">暂停</button>
+            </div>
+          </div>
+          <ul class="stream" id="stream-list"><li class="faint empty-row">等待事件…</li></ul>
+        </section>
+        <section class="panel anchor-panel">
+          <div class="panel-head">
+            <h2>锚点</h2><span class="faint" id="anchor-count"></span>
+            <button type="button" class="btn btn-sm btn-ghost" id="btn-anchor-dir">打开目录</button>
+          </div>
+          <div id="anchor-list" class="anchor-list"><div class="empty">还没有锚点</div></div>
+        </section>
+      </aside>
     </div>
-    <section class="panel" style="margin-top:14px">
-      <div class="panel-head"><h2>日志 / 识别帧流</h2>
-        <label class="checkbox"><input type="checkbox" id="run-log-auto" checked>
-          自动滚到底部</label>
+    <div class="console-drawer" id="console-drawer">
+      <button type="button" class="console-head" id="console-toggle">
+        <span>控制台日志</span><span class="faint">最近 30 行</span>
+        <span class="chev" id="console-chev">▸</span>
+      </button>
+      <div class="console-body" id="console-body" hidden>
+        <div class="console-tools">
+          <label class="checkbox"><input type="checkbox" id="run-log-auto" checked>自动滚到底部</label>
+        </div>
+        <pre class="log" id="run-log"></pre>
       </div>
-      <div class="panel-body tight"><div class="log" id="run-log"></div></div>
-    </section>`;
-
+    </div>`;
   renderRunGroups();
   updateRunPage(status);
   bindRunControls(ws);
+  bindMergePanel();
+  syncLiveConnection();
 
   timer(pollRunStatus, 1000);
   const fps = Math.max(1, Math.min(10, Number(ws.debug.preview_fps) || 3));
@@ -1309,14 +1353,6 @@ function bindRunControls(ws) {
   dash.addEventListener('click', (ev) => {
     if (!dash.href || dash.href.endsWith('#')) { ev.preventDefault(); toast('live 还没起来', 'err'); }
   });
-  const logAuto = document.getElementById('run-log-auto');
-  if (logAuto) {
-    logAuto.addEventListener('change', (ev) => {
-      runState.logAuto = ev.target.checked;
-      const log = document.getElementById('run-log');
-      if (runState.logAuto && log) log.scrollTop = log.scrollHeight;
-    });
-  }
   document.getElementById('btn-pause').addEventListener('click', async () => {
     const paused = runState.status && runState.status.click && runState.status.click.paused;
     try {
@@ -1422,31 +1458,11 @@ function updateRunPage(status) {
     if (status.live_url) dash.href = status.live_url;
     else dash.removeAttribute('href');
   }
-  const metaEl = document.getElementById('frame-meta');
-  if (metaEl) {
-    const src = meta.source || {};
-    metaEl.textContent = [
-      frame.seq ? `帧 #${frame.seq}` : '等待帧',
-      frame.width ? `${frame.width}×${frame.height}` : '',
-      src.kind ? `源 ${src.kind}` : '',
-      (src.window ? `窗口 ${Math.round(src.window.w)}×${Math.round(src.window.h)}` : ''),
-      status.live_url ? `看板 ${status.live_url}` : '',
-    ].filter(Boolean).join(' · ');
-  }
-  renderHealth(status);
-  renderEvents(status);
-  const log = document.getElementById('run-log');
-  if (log) {
-    const text = (status.log_tail || []).join('\n') || '（暂无日志）';
-    if (log.textContent !== text) {
-      log.textContent = text;
-      // 实时日志始终跟到底部；用户取消勾选才保留自己的滚动位置。
-      if (runState.logAuto) log.scrollTop = log.scrollHeight;
-    } else if (runState.logAuto) {
-      // 内容没变也保证停在底部（切页/重排后 scrollTop 可能丢）。
-      log.scrollTop = log.scrollHeight;
-    }
-  }
+  liveState.meta = status.meta || null;
+  renderFrameMeta(status);
+  renderErrorStrip();
+  renderConsoleLog(status);
+  syncLiveConnection();
   if (status.state === 'idle' || status.state === 'failed') {
     const ph = document.getElementById('run-placeholder');
     if (ph) {
@@ -1458,50 +1474,857 @@ function updateRunPage(status) {
   }
 }
 
-function renderHealth(status) {
-  const box = document.getElementById('run-health');
-  const snap = status.snapshot;
-  const frame = (snap && snap.frame) || {};
-  const state = (snap && snap.table && snap.table.state) || {};
-  const cards = (snap && snap.cards) || {};
-  const errors = frame.errors || [];
-  if (box) {
-    const kinds = { record: '有效记录', discard: '丢弃', idle: '间隙帧', no_change: '无变化', stale: '陈旧帧' };
-    const hasSnap = !!snap;
-    box.innerHTML = `
-      <dl class="kv">
-        <dt>本帧</dt><dd>${esc(kinds[frame.kind] || frame.kind || '-')}</dd>
-        <dt>错误</dt><dd>${!hasSnap ? '-' : errors.length
-          ? `<span class="red">${esc(errors.join(' · '))}</span>` : '<span class="green">无</span>'}</dd>
-        <dt>牌面</dt><dd>${!hasSnap ? '-' : cards.reliable ? '<span class="green">可靠</span>'
-          : `<span class="yellow">${esc((cards.warnings || ['不可靠']).join(' / '))}</span>`}</dd>
-        <dt>底池</dt><dd>${esc(state.pot ?? '-')}</dd>
-        <dt>轮到我</dt><dd>${state.hero_turn == null ? '-' : (state.hero_turn ? '是' : '否')}</dd>
-        <dt>建议</dt><dd>${snap && snap.advice
-          ? esc((snap.advice.option && snap.advice.option.label) || '-')
-            + ` <span class="faint">${esc(snap.advice.source || '')}</span>` : '-'}</dd>
-      </dl>
-      ${status.run && status.run.error
-        ? `<div class="error-box" style="margin-top:10px">${esc(status.run.error)}</div>` : ''}`;
+
+/* ───────────── 合并面板：建议 · 错误带 · 事件流 · 锚点 ───────────── */
+
+const ERR_ZH = {
+  blinds: '盲注', pot: '底池', dealer: '按钮位', players: '人数',
+  positions: '位置', pbs_gt_pot: '底池前额超过底池',
+  pbs_inconsistent: '底池前额不一致', stack: '筹码',
+  bet_gt_pot: '下注超过底池', bet: '下注', vanished: '座位消失',
+  unknown: '未知', cards: '牌面',
+};
+const SKIP_ZH = {
+  cards_unreliable: '牌面不可靠', bet_unreadable: '下注读不出',
+  pot_bill_mismatch: '底池账单不一致', no_settings: '未配置 AI',
+  abnormal_no_opponents: '状态异常（在局对手为 0）',
+};
+const KIND_ZH = {
+  record: '记录', discard: '丢弃', idle: '间隙', no_change: '无变化',
+  stale: '陈旧',
+};
+const STREET_ZH = {
+  preflop: '翻前', flop: '翻牌', turn: '转牌', river: '河牌',
+};
+
+const liveState = {
+  es: null, connected: false, seeded: false, counter: 0,
+  frame: null, stats: {}, table: null, cards: null, control: null,
+  advice: null, pending: null, pendingSince: 0,
+  view: 'focus', paused: false, unread: 0,
+  rows: [], nodes: new Map(), segTimer: null, pendingTimer: null,
+  activeSeg: null, segments: [],
+  anchors: [], adviceSkips: 0, lastErrorAt: null, lastCardsWarn: '',
+};
+
+function fmtNum(value, digits = 2) {
+  if (value == null || value === '' || Number.isNaN(Number(value))) return '-';
+  const n = Number(value);
+  return Number.isInteger(n) ? String(n) : String(Math.round(n * 10 ** digits) / 10 ** digits);
+}
+
+function streetZh(street) {
+  return STREET_ZH[street] || street || '';
+}
+
+function clockOf(ms) {
+  const d = new Date(ms || Date.now());
+  const p = (n) => String(n).padStart(2, '0');
+  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+
+function clock() { return clockOf(Date.now()); }
+
+function baseName(path) {
+  const parts = String(path || '').split('/');
+  return parts[parts.length - 1] || '';
+}
+
+function nextKey(prefix) {
+  liveState.counter += 1;
+  return `${prefix}-${liveState.counter}`;
+}
+
+function seatLabel(err) {
+  const [, arg] = String(err || '').split(':');
+  if (!arg) return '';
+  const table = liveState.table || {};
+  const state = table.state || {};
+  const player = (state.players || []).find((p) => String(p.seat_id) === String(arg));
+  if (!player) return `${arg} 号位`;
+  return `${player.name || `${arg} 号位`}${player.position ? ` · ${player.position}` : ''}`;
+}
+
+function catsText(cats) {
+  return [...cats].map((c) => ERR_ZH[c] || c).join(' / ') || '未知';
+}
+
+/* ── SSE ─────────────────────────────────────────────── */
+
+function connectLive() {
+  if (liveState.es || !('EventSource' in window)) return;
+  const es = new EventSource('/api/live/events');
+  liveState.es = es;
+  es.addEventListener('snapshot', (ev) => {
+    try { onLiveSnapshot(JSON.parse(ev.data)); } catch (e) { console.warn(e); }
+  });
+  es.addEventListener('message', (ev) => {
+    try { onLiveEvent(JSON.parse(ev.data)); } catch (e) { console.warn(e); }
+  });
+  es.onopen = () => { liveState.connected = true; setStreamStatus('已连接'); };
+  es.onerror = () => { liveState.connected = false; setStreamStatus('重连中'); };
+}
+
+function disconnectLive() {
+  if (liveState.es) { liveState.es.close(); liveState.es = null; }
+  liveState.connected = false;
+  if (liveState.segTimer) { clearInterval(liveState.segTimer); liveState.segTimer = null; }
+  if (liveState.pendingTimer) { clearInterval(liveState.pendingTimer); liveState.pendingTimer = null; }
+}
+
+function syncLiveConnection() {
+  const state = runState.status && runState.status.state;
+  const active = ['running', 'paused_click', 'starting'].includes(state);
+  if (active && !liveState.es) connectLive();
+  if (!active && liveState.es) disconnectLive();
+}
+
+function setStreamStatus(text) {
+  const el = document.getElementById('stream-state');
+  if (!el) return;
+  el.textContent = text;
+}
+
+/* ── 快照与事件 ──────────────────────────────────────── */
+
+function onLiveSnapshot(snap) {
+  if (!snap) return;
+  liveState.frame = snap.frame || null;
+  liveState.stats = snap.stats || {};
+  liveState.table = snap.table || null;
+  liveState.cards = snap.cards || null;
+  liveState.control = snap.control || null;
+  liveState.advice = snap.advice || null;
+  liveState.pending = snap.pending || null;
+  liveState.pendingSince = snap.pending ? Date.now() : 0;
+  if (!liveState.seeded) {
+    seedRows(snap.events || []);
+    liveState.seeded = true;
+  }
+  renderAdvicePanel();
+  renderErrorStrip();
+  renderAnchorList();
+  renderFrameMeta();
+}
+
+function seedRows(events) {
+  for (const ev of events.slice(-40)) {
+    const s = ev.summary || {};
+    if (ev.type === 'advice') {
+      pushRow({ key: nextKey('seed'), cls: 'advice-row', focus: true, ts: Date.now(),
+        html: streamLine('✅', `建议 ${s.action || '-'} · ${s.source || ''}`) });
+    } else if (ev.type === 'advice_skip') {
+      liveState.adviceSkips += 1;
+      pushRow({ key: nextKey('seed'), cls: 'skip-row', focus: true, ts: Date.now(),
+        html: streamLine('⏭', `建议跳过 · ${SKIP_ZH[s.reason] || s.reason || ''}`) });
+    } else if (ev.type === 'hand') {
+      pushRow({ key: nextKey('seed'), cls: 'hand-row', focus: true, ts: Date.now(),
+        html: streamLine('🂠', `手牌 ${s.hand_id || ''} 结束 · ${s.status || ''}`) });
+    } else if (ev.type === 'incident') {
+      pushRow({ key: nextKey('seed'), cls: 'incident-row', focus: true, ts: Date.now(),
+        html: streamLine('❗', `疑惑帧 · ${s.reason || ''}`) });
+    }
   }
 }
 
-function renderEvents(status) {
-  const box = document.getElementById('run-events');
+function onLiveEvent(ev) {
+  const d = ev.data || {};
+  switch (ev.type) {
+    case 'frame': onFrameEvent(d); break;
+    case 'advice': onAdviceEvent(d); break;
+    case 'decision': onDecisionEvent(d); break;
+    case 'advice_skip': onAdviceSkipEvent(d); break;
+    case 'cards': onCardsEvent(d); break;
+    case 'hand': onHandEvent(d); break;
+    case 'incident': onIncidentEvent(d); break;
+    case 'anchor': onAnchorEvent(d); break;
+    case 'status': Object.assign(liveState.stats, d); renderErrorStrip(); break;
+    case 'click': pushRow({ key: nextKey('click'), cls: 'click-row', focus: false, ts: Date.now(),
+      html: streamLine('🖱', `自动点击 · ${JSON.stringify(d.click || {}).slice(0, 80)}`) }); break;
+    case 'control': liveState.control = d; renderAdvicePanel(); break;
+    default: break;
+  }
+}
+
+function onFrameEvent(d) {
+  const previous = liveState.frame;
+  liveState.frame = d;
+  if (d.state) {
+    const frame = { ...d };
+    delete frame.state;
+    liveState.table = { state: d.state, frame };
+  }
+  if (d.cards) liveState.cards = d.cards;
+  for (const key of ['processed', 'sampled', 'accepted', 'records', 'avg_proc_ms',
+    'advice_count', 'advice_done', 'cards_unreliable_skips']) {
+    if (d[key] !== undefined) liveState.stats[key] = d[key];
+  }
+  const errors = Array.isArray(d.errors) ? d.errors : [];
+  const discard = d.kind === 'discard' && errors.length > 0;
+  if (discard) {
+    startOrExtendSegment(d, errors);
+    liveState.lastErrorAt = Date.now();
+  } else if (liveState.activeSeg) {
+    endActiveSegment(d);
+  }
+  if (d.evidence && liveState.activeSeg) {
+    liveState.activeSeg.evidence = d.evidence;
+    patchSegment(liveState.activeSeg);
+  }
+  const warnings = (d.cards && d.cards.warnings) || [];
+  const signature = warnings.join('|');
+  if (signature && signature !== liveState.lastCardsWarn) {
+    liveState.lastCardsWarn = signature;
+    pushRow({ key: nextKey('cards'), cls: 'cards-row', focus: true, ts: Date.now(),
+      html: streamLine('⚠', `牌面不可靠 · ${warnings.join(' / ')}`) });
+  } else if (!signature) {
+    liveState.lastCardsWarn = '';
+  }
+  if (liveState.view === 'all' && !discard) {
+    pushRow({ key: nextKey('frame'), cls: 'frame-row', focus: false, ts: Date.now(),
+      html: streamLine('·', `帧 #${d.seq} · ${KIND_ZH[d.kind] || d.kind || ''}`
+        + (errors.length ? ` · <span class="red">${esc(errors.join(' · '))}</span>` : '')) });
+  }
+  if (previous && previous.seq !== d.seq) drawRunCanvas();
+  renderErrorStrip();
+  renderFrameMeta();
+}
+
+function startOrExtendSegment(d, errors) {
+  const cats = [...new Set(errors.map((e) => String(e).split(':')[0]))];
+  let seg = liveState.activeSeg;
+  if (!seg || seg.done) {
+    seg = {
+      key: nextKey('seg'), startSeq: d.seq, lastSeq: d.seq, cats: new Set(),
+      errors: new Set(), count: 0, t0: Date.now(), t1: null, done: false,
+      handId: d.hand_id || null, street: d.street || null, evidence: null,
+    };
+    liveState.activeSeg = seg;
+    liveState.segments.unshift(seg);
+    if (liveState.segTimer) clearInterval(liveState.segTimer);
+    liveState.segTimer = setInterval(() => {
+      if (liveState.activeSeg) patchSegment(liveState.activeSeg);
+    }, 500);
+  }
+  seg.count += 1;
+  seg.lastSeq = d.seq;
+  seg.handId = d.hand_id || seg.handId;
+  seg.street = d.street || seg.street;
+  cats.forEach((c) => seg.cats.add(c));
+  errors.forEach((e) => seg.errors.add(e));
+  const existing = liveState.rows.find((r) => r.key === seg.key);
+  if (!existing) {
+    pushRow({ key: seg.key, cls: 'seg-row', focus: true, ts: Date.now(), html: segHtml(seg) });
+  } else {
+    patchSegment(seg);
+  }
+}
+
+function patchSegment(seg) {
+  seg.html = segHtml(seg);
+  const node = liveState.nodes.get(seg.key);
+  if (node) {
+    node.innerHTML = seg.html;
+    scrollStream();
+  }
+  const row = liveState.rows.find((r) => r.key === seg.key);
+  if (row) row.html = seg.html;
+}
+
+function endActiveSegment(d) {
+  const seg = liveState.activeSeg;
+  if (!seg) return;
+  seg.done = true;
+  seg.t1 = Date.now();
+  seg.endSeq = d.seq;
+  seg.lastKind = d.kind;
+  patchSegment(seg);
+  liveState.activeSeg = null;
+  if (liveState.segTimer) { clearInterval(liveState.segTimer); liveState.segTimer = null; }
+}
+
+function segDuration(seg) {
+  return ((seg.done ? seg.t1 : Date.now()) - seg.t0) / 1000;
+}
+
+function segSummary(seg) {
+  const seat = seg.errors.size ? seatLabel([...seg.errors][0]) : '';
+  return `${catsText(seg.cats)}${seat ? ` · ${seat}` : ''} · ${seg.count} 帧 · ${segDuration(seg).toFixed(1)}s`;
+}
+
+function segHtml(seg) {
+  const ev = seg.evidence;
+  const stamp = ev && ev.folder ? baseName(ev.folder) : '';
+  const thumb = stamp
+    ? `<img class="seg-thumb" loading="lazy" alt="错误帧现场"
+        onerror="this.style.display='none'"
+        src="/api/live/errors/${encodeURIComponent(stamp)}/frame.jpg">`
+    : '';
+  return `
+    <div class="seg-head">
+      <span class="seg-flag">⚑</span>
+      <b>丢弃段 #${seg.startSeq}–${seg.lastSeq}</b>
+      ${seg.done ? '<span class="faint">已结束</span>' : '<span class="live-dot" title="正在发生"></span>'}
+      <span class="faint">${clockOf(seg.t0)}</span>
+    </div>
+    <div class="seg-detail">${esc(catsText(seg.cats))}`
+    + `${seg.errors.size ? ` · ${esc(seatLabel([...seg.errors][0]))}` : ''}`
+    + ` · ${seg.count} 帧 · ${segDuration(seg).toFixed(1)}s</div>
+    <div class="seg-actions">${thumb}
+      <button type="button" class="btn btn-xs btn-ghost"
+        data-anchor-seq="${seg.lastSeq}">锚定此帧</button>
+      ${thumb ? '<span class="faint">段首帧现场</span>' : ''}
+    </div>`;
+}
+
+function onAdviceEvent(d) {
+  liveState.advice = d;
+  liveState.pending = null;
+  if (liveState.pendingTimer) { clearInterval(liveState.pendingTimer); liveState.pendingTimer = null; }
+  const option = d.option || {};
+  pushRow({ key: nextKey('advice'), cls: 'advice-row', focus: true, ts: Date.now(),
+    html: streamLine('✅', `建议 ${esc(option.label || option.id || '-')}`
+      + ` · ${esc(d.source || '')}`
+      + (d.duration_ms ? ` · ${(d.duration_ms / 1000).toFixed(1)}s` : '')) });
+  renderAdvicePanel();
+}
+
+function onDecisionEvent(d) {
+  liveState.pending = d;
+  liveState.pendingSince = Date.now();
+  pushRow({ key: nextKey('decision'), cls: 'decision-row', focus: false, ts: Date.now(),
+    html: streamLine('…', `AI 思考中 · 底池 ${fmtNum(d.pot)} BB · 需跟 ${fmtNum(d.to_call)} BB`) });
+  renderAdvicePanel();
+}
+
+function onAdviceSkipEvent(d) {
+  liveState.adviceSkips += 1;
+  pushRow({ key: nextKey('skip'), cls: 'skip-row', focus: true, ts: Date.now(),
+    html: streamLine('⏭', `建议跳过 · ${esc(SKIP_ZH[d.reason] || d.reason || '')}`
+      + (d.warnings && d.warnings.length ? ` · ${esc(d.warnings.join(' / '))}` : '')) });
+  renderErrorStrip();
+}
+
+function onCardsEvent(d) {
+  liveState.cards = d;
+  if (liveState.table && liveState.table.state) {
+    liveState.table = { ...liveState.table, state: {
+      ...liveState.table.state,
+      hero_cards: d.hero_cards || liveState.table.state.hero_cards,
+      board: d.board || liveState.table.state.board,
+    } };
+  }
+  const warnings = d.warnings || [];
+  if (warnings.length) {
+    liveState.lastCardsWarn = warnings.join('|');
+    pushRow({ key: nextKey('cards'), cls: 'cards-row', focus: true, ts: Date.now(),
+      html: streamLine('⚠', `牌面不可靠 · ${esc(warnings.join(' / '))}`) });
+  }
+  drawRunCanvas();
+}
+
+function onHandEvent(d) {
+  const quality = d.data_quality || {};
+  pushRow({ key: nextKey('hand'), cls: 'hand-row', focus: true, ts: Date.now(),
+    html: streamLine('🂠', `手牌 ${esc(d.hand_id || '')} ${d.partial ? '部分' : '结束'}`
+      + ` · ${esc(quality.status || '')}`
+      + (quality.warnings && quality.warnings.length ? ` · 警告 ${quality.warnings.length}` : '')) });
+}
+
+function onIncidentEvent(d) {
+  pushRow({ key: nextKey('incident'), cls: 'incident-row', focus: true, ts: Date.now(),
+    html: streamLine('❗', `疑惑帧 · ${esc(d.reason || '')}`
+      + (d.folder ? ` · <span class="faint">${esc(baseName(d.folder))}</span>` : '')) });
+}
+
+function onAnchorEvent(d) {
+  const list = liveState.anchors;
+  let item = list.find((a) => a.folder === d.folder);
+  if (!item) {
+    item = {
+      folder: d.folder, center: d.center_seq, frames: d.frames || 0,
+      degraded: !!d.degraded, ts: Date.now(), done: false, note: '',
+    };
+    list.unshift(item);
+  }
+  item.frames = d.frames ?? item.frames;
+  item.done = !!d.done;
+  if (d.done) {
+    pushRow({ key: nextKey('anchor'), cls: 'anchor-row', focus: true, ts: Date.now(),
+      html: streamLine('⚓', `锚点 #${d.center_seq ?? item.center ?? '-'} 整理完成 · ${d.frames || 0} 帧`) });
+  } else {
+    pushRow({ key: nextKey('anchor'), cls: 'anchor-row', focus: true, ts: Date.now(),
+      html: streamLine('⚓', `锚点 #${d.center_seq ?? '-'} · 已存前 ${d.frames || 0} 帧，继续收集 3s…`
+        + (d.degraded ? ' · 降级（最近的帧）' : '')) });
+  }
+  renderAnchorList();
+}
+
+/* ── 事件流渲染 ──────────────────────────────────────── */
+
+function streamLine(icon, text) {
+  return `<span class="stream-icon">${icon}</span>`
+    + `<span class="stream-text">${text}</span>`
+    + `<span class="ts">${clock()}</span>`;
+}
+
+function visibleRow(row) {
+  return liveState.view === 'all' || row.focus;
+}
+
+function pushRow(row) {
+  liveState.rows.push(row);
+  trimRows();
+  if (visibleRow(row)) {
+    appendNode(row);
+    scrollStream();
+  } else if (liveState.paused) {
+    liveState.unread += 1;
+    updateUnread();
+  }
+  return row;
+}
+
+function appendNode(row) {
+  const box = document.getElementById('stream-list');
   if (!box) return;
-  const events = (status.snapshot && status.snapshot.events) || [];
-  box.innerHTML = events.slice(-24).reverse().map((ev) => {
-    const t = new Date(ev.ts);
-    const hh = `${String(t.getHours()).padStart(2, '0')}:${String(t.getMinutes()).padStart(2, '0')}:${String(t.getSeconds()).padStart(2, '0')}`;
-    const s = ev.summary || {};
-    let text = ev.type;
-    if (ev.type === 'frame') text = `帧 ${s.seq} · ${s.kind}${(s.errors || []).length ? ' · ' + s.errors.join(',') : ''}`;
-    else if (ev.type === 'advice') text = `建议 ${s.action || ''} · ${s.duration_ms || '?'}ms`;
-    else if (ev.type === 'hand') text = `手牌 ${s.hand_id || ''} · ${s.status || ''}`;
-    else if (ev.type === 'click') text = `点击 ${JSON.stringify(s.click || {}).slice(0, 60)}`;
-    else if (ev.type === 'control') text = `控制：点击${s.paused ? '暂停' : '恢复'}`;
-    return `<li><span class="ts">${hh}</span><span>${esc(text)}</span></li>`;
-  }).join('') || '<li class="faint">还没有事件</li>';
+  const empty = box.querySelector('.empty-row');
+  if (empty) empty.remove();
+  const li = document.createElement('li');
+  li.className = `stream-row ${row.cls || ''}`;
+  li.dataset.key = row.key;
+  li.innerHTML = row.html;
+  box.appendChild(li);
+  liveState.nodes.set(row.key, li);
+}
+
+function trimRows() {
+  const box = document.getElementById('stream-list');
+  let overflow = liveState.rows.length - 500;
+  let exceededDom = box ? box.children.length - 500 : 0;
+  while (overflow > 0) {
+    const row = liveState.rows.shift();
+    if (row) {
+      liveState.nodes.delete(row.key);
+      if (box) {
+        const node = box.querySelector(`[data-key="${row.key}"]`);
+        if (node) node.remove();
+      }
+    }
+    overflow -= 1;
+  }
+  while (box && exceededDom > 0 && box.children.length > 500) {
+    const first = box.firstElementChild;
+    if (first && !first.classList.contains('empty-row')) first.remove();
+    exceededDom -= 1;
+  }
+}
+
+function rebuildStream() {
+  const box = document.getElementById('stream-list');
+  if (!box) return;
+  box.innerHTML = '';
+  liveState.nodes.clear();
+  const rows = liveState.rows.filter(visibleRow);
+  for (const row of rows) appendNode(row);
+  if (!rows.length) box.innerHTML = '<li class="faint empty-row">等待事件…</li>';
+  scrollStream(true);
+}
+
+function scrollStream(force = false) {
+  const box = document.getElementById('stream-list');
+  if (!box) return;
+  if (liveState.paused && !force) return;
+  box.scrollTop = box.scrollHeight;
+}
+
+function updateUnread() {
+  const btn = document.getElementById('btn-stream-pause');
+  if (btn && liveState.paused) btn.textContent = liveState.unread ? `继续 (${liveState.unread})` : '继续';
+}
+
+function setStreamView(view) {
+  if (view === liveState.view) return;
+  liveState.view = view;
+  document.querySelectorAll('#stream-view [data-view]').forEach((b) => {
+    b.classList.toggle('active', b.dataset.view === view);
+  });
+  rebuildStream();
+}
+
+function toggleStreamPause() {
+  liveState.paused = !liveState.paused;
+  const btn = document.getElementById('btn-stream-pause');
+  if (liveState.paused) {
+    liveState.unread = 0;
+    if (btn) btn.textContent = '继续';
+    toast('事件流已暂停（点继续回到最新）', 'info');
+  } else {
+    liveState.unread = 0;
+    if (btn) btn.textContent = '暂停';
+    rebuildStream();
+    scrollStream(true);
+  }
+}
+
+function onStreamClick(ev) {
+  const btn = ev.target.closest('[data-anchor-seq]');
+  if (!btn) return;
+  const seq = Number(btn.dataset.anchorSeq);
+  triggerAnchor(Number.isFinite(seq) ? seq : null);
+}
+
+/* ── 建议卡 ──────────────────────────────────────────── */
+
+function optionKind(option) {
+  const raw = String((option && (option.kind || option.id)) || '').toLowerCase();
+  // 注意 "call" 里也含 "all"，allin 必须按整词判断，不能先 includes('all')。
+  if (/all[-_ ]?in|allin|shove/.test(raw)) return 'allin';
+  if (raw.includes('fold')) return 'fold';
+  if (raw.includes('check')) return 'check';
+  if (raw.includes('call')) return 'call';
+  if (raw.includes('raise') || raw.includes('open')) return 'raise';
+  if (raw.includes('bet')) return 'bet';
+  return 'call';
+}
+
+function renderAdvicePanel() {
+  const body = document.getElementById('advice-body');
+  const source = document.getElementById('advice-source');
+  if (!body) return;
+  if (liveState.pending) {
+    body.innerHTML = pendingHtml(liveState.pending);
+    if (source) { source.textContent = '生成中'; source.className = 'pill pill-starting'; }
+    ensurePendingTimer();
+    return;
+  }
+  const a = liveState.advice;
+  if (!a) {
+    body.innerHTML = `<div class="advice-empty">
+      <div class="advice-empty-icon">♣</div>
+      <div>等待轮到我</div>
+      <p class="faint">触发决策点后，建议、原因、计划与事实会出现在这里。</p>
+    </div>`;
+    if (source) { source.textContent = '等待'; source.className = 'pill pill-idle'; }
+    return;
+  }
+  const fallback = a.source && a.source !== 'model';
+  if (source) {
+    source.textContent = fallback ? '兜底' : '模型';
+    source.className = `pill ${fallback ? 'pill-failed' : 'pill-running'}`;
+  }
+  body.innerHTML = adviceHtml(a);
+}
+
+function adviceHtml(a) {
+  const option = a.option || {};
+  const fallback = a.source && a.source !== 'model';
+  const kind = optionKind(option);
+  const chips = [];
+  const facts = a.facts || {};
+  if (facts.hand_label) chips.push(`牌力 ${facts.hand_label}`);
+  if (facts.pot_type) chips.push(`池型 ${facts.pot_type}`);
+  if (facts.spr != null) chips.push(`SPR ${fmtNum(facts.spr)}`);
+  const equityPct = facts.equity_pct != null
+    ? facts.equity_pct
+    : (facts.equity != null ? Number(facts.equity) * 100 : null);
+  if (equityPct != null && !Number.isNaN(equityPct)) chips.push(`成牌率 ${fmtNum(equityPct, 0)}%`);
+  const opponents = facts.opponents_in_hand != null ? facts.opponents_in_hand : facts.opponents;
+  if (opponents != null) chips.push(`在局 ${opponents} 人`);
+  if (facts.range_verdict) chips.push(String(facts.range_verdict));
+  const reads = (a.opponent_reads || []).filter((r) => r && r.archetype && r.archetype !== 'unknown');
+  const am = a.meta || {};
+  const pick = (key) => (a[key] != null ? a[key] : am[key]);
+  const meta = [
+    pick('model'),
+    pick('duration_ms') ? `${(pick('duration_ms') / 1000).toFixed(1)}s` : '',
+    pick('confidence') != null ? `置信 ${fmtNum(pick('confidence'))}` : '',
+    pick('prompt_version'),
+    pick('prompt_tokens') != null ? `${pick('prompt_tokens')}+${pick('completion_tokens') ?? '?'} tok` : '',
+    a.action_index != null ? `第 ${a.action_index} 个动作后` : '',
+  ].filter(Boolean);
+  return `<div class="advice-card kind-${kind}">
+    <div class="advice-headline">
+      <div>
+        <div class="advice-kicker">本次建议 · ${esc(streetZh(a.street))}</div>
+        <div class="advice-action">${esc(option.label || option.id || '-')}</div>
+        ${option.amount_bb != null ? `<div class="advice-amount">目标 ${fmtNum(option.amount_bb)} BB</div>` : ''}
+      </div>
+      <div class="advice-time">${a.duration_ms ? `${(a.duration_ms / 1000).toFixed(1)}s` : ''}</div>
+    </div>
+    ${fallback ? `<div class="alert warn"><b>模型不可用，已按保守动作兜底。</b>${a.error ? ` ${esc(a.error)}` : ''}</div>` : ''}
+    ${a.prompt_missing ? `<div class="alert warn">未调用模型：${esc(SKIP_ZH[a.prompt_missing_reason] || a.prompt_missing_reason || '未知')}</div>` : ''}
+    <div class="advice-reason">
+      <span class="advice-label">原因</span>
+      <div>${esc(a.reason || '（模型未给理由）')}</div>
+      ${a.reason_full && a.reason_full !== a.reason
+    ? `<details><summary>完整理由</summary><div>${esc(a.reason_full)}</div></details>` : ''}
+    </div>
+    ${a.plan ? `<div class="advice-plan"><b>下一街</b> ${esc(a.plan)}</div>` : ''}
+    ${chips.length ? `<div class="read-chips">${chips.map((c) => `<span class="read-chip">${esc(c)}</span>`).join('')}</div>` : ''}
+    ${reads.length ? `<div class="read-chips">${reads.map((r) => `<span class="read-chip">${esc(r.display_name || r.key || r.seat_id || '?')} ${esc(String(r.archetype).toUpperCase())}${r.confidence != null ? ` ${fmtNum(r.confidence)}` : ''}</span>`).join('')}</div>` : ''}
+    ${meta.length ? `<div class="advice-meta">${meta.map((m) => esc(m)).join(' · ')}</div>` : ''}
+    ${a.click ? `<div class="alert ${['clicked', 'dry_run'].includes(a.click.status) ? 'info' : 'warn'}">自动点击：${esc(a.click.status || '?')}${a.click.reason ? ` · ${esc(a.click.reason)}` : ''}</div>` : ''}
+  </div>`;
+}
+
+function pendingHtml(p) {
+  return `<div class="pending-box">
+    <div class="pending-head"><span class="spinner"></span><b>AI 正在思考…</b>
+      <span class="pending-elapsed" id="pending-elapsed">0s</span></div>
+    <div class="pending-facts">
+      <div><b>${p.pot != null ? `${fmtNum(p.pot)} BB` : '—'}</b><span>底池</span></div>
+      <div><b>${p.to_call != null ? `${fmtNum(p.to_call)} BB` : '—'}</b><span>需跟</span></div>
+      <div><b>${Array.isArray(p.options) ? p.options.length : '—'}</b><span>可选动作</span></div>
+    </div>
+  </div>`;
+}
+
+function ensurePendingTimer() {
+  if (liveState.pendingTimer) return;
+  liveState.pendingTimer = setInterval(() => {
+    const el = document.getElementById('pending-elapsed');
+    if (!el) {
+      clearInterval(liveState.pendingTimer);
+      liveState.pendingTimer = null;
+      return;
+    }
+    el.textContent = `${Math.max(0, (Date.now() - liveState.pendingSince) / 1000).toFixed(1)}s`;
+  }, 200);
+}
+
+/* ── 错误带 ──────────────────────────────────────────── */
+
+function renderErrorStrip() {
+  const box = document.getElementById('error-strip');
+  if (!box) return;
+  if (!box.querySelector('.err-now')) {
+    box.innerHTML = `
+      <div class="err-now"></div>
+      <div class="err-session faint"></div>
+      <details class="err-detail"><summary>分类与健康</summary>
+        <div class="err-cats read-chips"></div>
+        <div class="err-health faint"></div>
+      </details>`;
+  }
+  const seg = liveState.activeSeg;
+  const stats = liveState.stats || {};
+  const level = seg ? (seg.count >= 10 ? 'bad' : 'warn') : 'ok';
+  const lamp = document.getElementById('err-lamp');
+  const head = document.getElementById('err-head');
+  if (lamp) lamp.className = `lamp ${level}`;
+  if (head) head.textContent = seg ? (seg.count >= 10 ? '持续错误' : '有错误') : '正常';
+  const discMap = (liveState.meta && liveState.meta.discarded_reasons)
+    || stats.discarded_reasons || {};
+  const disc = Object.values(discMap).reduce((sum, n) => sum + (Number(n) || 0), 0);
+  const processed = Number(stats.processed) || 0;
+  const now = box.querySelector('.err-now');
+  if (now) {
+    now.classList.toggle('has', !!seg);
+    const html = seg
+      ? `<b>${esc(segSummary(seg))}</b>`
+      : (processed ? '当前没有正在发生的错误' : '还没有帧数据');
+    if (now.innerHTML !== html) now.innerHTML = html;
+  }
+  const signature = `${disc}|${processed}|${stats.cards_unreliable_skips}|${liveState.adviceSkips}`
+    + `|${stats.incidents}|${liveState.lastErrorAt}|${stats.fallbacks}|${stats.reconnects}`
+    + `|${stats.avg_proc_ms}|${JSON.stringify(discMap)}`;
+  if (signature === liveState.stripSig) return;
+  liveState.stripSig = signature;
+  const session = box.querySelector('.err-session');
+  if (session) {
+    session.textContent = `丢弃 ${pct(processed ? disc / processed : null)}（${disc}/${processed} 帧）`
+      + ` · 牌面不可靠 ${stats.cards_unreliable_skips || 0}`
+      + ` · 建议跳过 ${liveState.adviceSkips}`
+      + ` · 疑惑帧 ${stats.incidents || 0}`
+      + ` · 最近错误 ${liveState.lastErrorAt ? clockOf(liveState.lastErrorAt) : '-'}`;
+  }
+  const cats = box.querySelector('.err-cats');
+  if (cats) {
+    const entries = Object.entries(discMap)
+      .sort((a, b) => (Number(b[1]) || 0) - (Number(a[1]) || 0));
+    cats.innerHTML = entries.length
+      ? entries.map(([k, v]) => `<span class="read-chip">${esc(ERR_ZH[k] || k)} ${v}</span>`).join('')
+      : '<span class="faint">本场还没有丢弃</span>';
+  }
+  const health = box.querySelector('.err-health');
+  if (health) {
+    health.textContent = `接受率 ${pct(rate(stats))}`
+      + ` · 模型兜底 ${stats.fallbacks || 0}`
+      + ` · 重连 ${stats.reconnects || 0}`
+      + ` · 平均耗时 ${stats.avg_proc_ms || 0}ms`;
+  }
+}
+
+/* ── 帧信息 / 控制台 ─────────────────────────────────── */
+
+function renderFrameMeta(status) {
+  const el = document.getElementById('frame-meta');
+  if (!el) return;
+  const st = status || runState.status || {};
+  const meta = st.meta || {};
+  const src = meta.source || {};
+  const frame = liveState.frame || st.frame || {};
+  el.textContent = [
+    frame.seq ? `帧 #${frame.seq}` : '等待帧',
+    KIND_ZH[frame.kind] || '',
+    st.run_dir ? `目录 ${baseName(st.run_dir)}` : '',
+    src.kind ? `源 ${src.kind}` : '',
+    st.live_url ? `看板 ${st.live_url}` : '',
+  ].filter(Boolean).join(' · ');
+}
+
+function renderConsoleLog(status) {
+  const log = document.getElementById('run-log');
+  if (!log) return;
+  const text = (status.log_tail || []).join('\n') || '（暂无日志）';
+  if (log.textContent !== text) {
+    log.textContent = text;
+    if (runState.logAuto) log.scrollTop = log.scrollHeight;
+  } else if (runState.logAuto) {
+    log.scrollTop = log.scrollHeight;
+  }
+}
+
+/* ── 锚点 ────────────────────────────────────────────── */
+
+async function triggerAnchor(seqOverride) {
+  const seq = seqOverride == null
+    ? (liveState.frame && liveState.frame.seq != null ? liveState.frame.seq : null)
+    : seqOverride;
+  try {
+    const res = await api('/api/live/anchor', { method: 'POST', body: { seq } });
+    if (res && res.ok === false) {
+      toast(res.detail || '锚点失败', 'err');
+      return;
+    }
+    toast(`⚓ 已记录锚点 #${res && res.center_seq != null ? res.center_seq : seq ?? '-'}`
+      + (res && res.degraded ? '（中心帧已滑出环，取最近帧）' : ''), 'ok');
+  } catch (err) {
+    toast(err.message, 'err');
+  }
+}
+
+function renderAnchorList() {
+  const box = document.getElementById('anchor-list');
+  const count = document.getElementById('anchor-count');
+  if (!box) return;
+  const items = liveState.anchors.slice(0, 10);
+  if (count) count.textContent = liveState.anchors.length ? `${liveState.anchors.length} 条` : '';
+  if (!items.length) {
+    box.innerHTML = '<div class="empty">还没有锚点</div>';
+    return;
+  }
+  box.innerHTML = items.map((a) => `
+    <div class="anchor-item" data-folder="${esc(a.folder)}">
+      <div class="anchor-main">
+        <b>⚓ #${a.center ?? '-'}</b>
+        <span class="faint">${clockOf(a.ts)} · ${a.frames || 0} 帧`
+    + `${a.degraded ? ' · 降级' : ''}${a.done ? '' : ' · 收集中…'}</span>
+      </div>
+      <div class="anchor-note">${a.note ? esc(a.note) : '<span class="faint">无备注</span>'}</div>
+      <div class="anchor-actions">
+        <button type="button" class="btn btn-xs btn-ghost" data-act="note">备注</button>
+        <button type="button" class="btn btn-xs btn-ghost" data-act="reveal">Finder</button>
+      </div>
+    </div>`).join('');
+}
+
+function onAnchorListClick(ev) {
+  const btn = ev.target.closest('[data-act]');
+  const item = ev.target.closest('.anchor-item');
+  if (!btn || !item) return;
+  const folder = item.dataset.folder;
+  if (btn.dataset.act === 'reveal') {
+    revealPath(folder);
+  } else if (btn.dataset.act === 'note') {
+    editAnchorNote(folder);
+  } else if (btn.dataset.act === 'save') {
+    const input = item.querySelector('.anchor-note input');
+    saveAnchorNote(folder, input ? input.value.trim() : '');
+  } else if (btn.dataset.act === 'cancel') {
+    renderAnchorList();
+  }
+}
+
+function editAnchorNote(folder) {
+  const item = document.querySelector(`.anchor-item[data-folder="${folder.replace(/"/g, '\\"')}"]`);
+  if (!item) return;
+  const anchor = liveState.anchors.find((a) => a.folder === folder) || {};
+  const note = item.querySelector('.anchor-note');
+  if (!note) return;
+  note.innerHTML = `<input class="input" type="text" placeholder="写一句备注…"
+      value="${esc(anchor.note || '')}">
+    <button type="button" class="btn btn-xs btn-primary" data-act="save">保存</button>
+    <button type="button" class="btn btn-xs" data-act="cancel">取消</button>`;
+  const input = note.querySelector('input');
+  if (input) { input.focus(); input.select(); }
+}
+
+async function saveAnchorNote(folder, note) {
+  try {
+    await api('/api/live/anchor/note', { method: 'POST', body: { folder, note } });
+    const anchor = liveState.anchors.find((a) => a.folder === folder);
+    if (anchor) anchor.note = note;
+    renderAnchorList();
+    toast('备注已保存', 'ok');
+  } catch (err) {
+    toast(err.message, 'err');
+  }
+}
+
+async function revealAnchorsDir() {
+  const dir = runState.status && runState.status.run_dir;
+  if (!dir) { toast('还没有运行目录', 'err'); return; }
+  revealPath(`${dir}/anchors`);
+}
+
+async function revealPath(path) {
+  try {
+    await api('/api/live/reveal', { method: 'POST', body: { path } });
+  } catch (err) {
+    toast(err.message, 'err');
+  }
+}
+
+/* ── 绑定 ────────────────────────────────────────────── */
+
+function bindMergePanel() {
+  const anchorBtn = document.getElementById('btn-anchor');
+  if (anchorBtn) anchorBtn.addEventListener('click', () => triggerAnchor(null));
+  const dirBtn = document.getElementById('btn-anchor-dir');
+  if (dirBtn) dirBtn.addEventListener('click', revealAnchorsDir);
+  const pauseBtn = document.getElementById('btn-stream-pause');
+  if (pauseBtn) pauseBtn.addEventListener('click', toggleStreamPause);
+  const view = document.getElementById('stream-view');
+  if (view) {
+    view.querySelectorAll('[data-view]').forEach((btn) => {
+      btn.addEventListener('click', () => setStreamView(btn.dataset.view));
+    });
+  }
+  const list = document.getElementById('stream-list');
+  if (list) list.addEventListener('click', onStreamClick);
+  const anchors = document.getElementById('anchor-list');
+  if (anchors) anchors.addEventListener('click', onAnchorListClick);
+  const toggle = document.getElementById('console-toggle');
+  if (toggle) {
+    toggle.addEventListener('click', () => {
+      const body = document.getElementById('console-body');
+      const chev = document.getElementById('console-chev');
+      if (!body) return;
+      body.hidden = !body.hidden;
+      if (chev) chev.textContent = body.hidden ? '▸' : '▾';
+      if (!body.hidden) renderConsoleLog(runState.status || {});
+    });
+  }
+  const logAuto = document.getElementById('run-log-auto');
+  if (logAuto) {
+    logAuto.addEventListener('change', (ev) => {
+      runState.logAuto = ev.target.checked;
+      const log = document.getElementById('run-log');
+      if (runState.logAuto && log) log.scrollTop = log.scrollHeight;
+    });
+  }
 }
 
 function refreshRunImage() {
@@ -1560,8 +2383,9 @@ function drawRunCanvas() {
   canvas.height = img.naturalHeight;
   const ctx = canvas.getContext('2d');
   ctx.clearRect(0, 0, canvas.width, canvas.height);
-  const errors = ((runState.status && runState.status.snapshot
-    && runState.status.snapshot.frame && runState.status.snapshot.frame.errors) || []);
+  const errors = (liveState.frame && liveState.frame.errors)
+    || ((runState.status && runState.status.snapshot
+      && runState.status.snapshot.frame && runState.status.snapshot.frame.errors) || []);
   for (const slot of layout.slots || []) {
     if (!runState.groups[slot.group]) continue;
     const [x1, y1, x2, y2] = slotPx(slot.slot, geo).map((v) => v * scale);
