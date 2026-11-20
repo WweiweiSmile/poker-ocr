@@ -1195,9 +1195,14 @@ advice / hand / incident / session_end`。`frame` 每个处理过的帧都写（
 `--out` 派生）。`session_start` 追加 `session_id` / `events_out` /
 `web_url` / `log_file`，旧消费者忽略即可。
 
-### 6.9 Web 看板（`--web`，默认 `:8020`）
+### 6.9 Web API 与工作台界面（`--web`，默认 `:8020`）
 
-启动 live 后浏览器打开 `http://127.0.0.1:8020`：
+`--web` 现在只提供本机 API：SSE `/api/events`、快照 `/api/snapshot`、
+范围 `/api/range`、预览 `/api/preview.jpg`、锚点 `POST /api/anchor`；
+`/` 返回提示页。**看板已并入工作台运行页（`:8030`）**，那里有牌桌/行动线/
+最近手牌、常驻 AI 建议、帧错误带、事件流、锚点与控制台抽屉。
+
+- 每帧同步牌桌：座位/hero/公共牌/底池/盲注/庄位/动作/本街下注；
 
 - 每帧同步牌桌：座位/hero/公共牌/底池/盲注/庄位/动作/本街下注；
   hero 只在底部大面板出现一次，环上不重复；本街下注同时汇总到底池下方；
@@ -1315,10 +1320,10 @@ nv -m poker_ocr.live --test \
 | `--bet-slider-only` | 关 | 下注/加注只走长按滑杆，跳过 5% 判定/置灰检测/快捷档位（需 `--bet-slider`） |
 | `--bet-slider-config` | `config/bet_slider_mac.json` | 滑杆长按/拖动(control=drag)/滚动/容差参数 |
 | `--quiet` | 关 | 只打状态行和最终汇总 |
-| `--web` / `--no-web` | 开 | 本地 Web 看板（只读，默认 `127.0.0.1:8020`） |
-| `--web-host` | `127.0.0.1` | 看板监听地址；`0.0.0.0` 会暴露提示词/玩家名 |
-| `--web-port` | `8020` | 看板端口；被占用只告警，识别继续 |
-| `--web-open` | 关 | 启动后自动打开浏览器 |
+| `--web` / `--no-web` | 开 | 本地 Web API（只读，默认 `127.0.0.1:8020`；界面在工作台 :8030） |
+| `--web-host` | `127.0.0.1` | API 监听地址；`0.0.0.0` 会暴露提示词/玩家名 |
+| `--web-port` | `8020` | API 端口；被占用只告警，识别继续 |
+| `--web-open` | 关 | 启动后自动打开浏览器（提示页） |
 | `--events-out` | 派生 | 事件 JSONL；`live.states.jsonl → live.events.jsonl` |
 | `--no-events` | 关 | 不写事件日志（看板仍可用） |
 | `--log-file` | 派生 | 控制台文本；`live.states.jsonl → live.log` |
@@ -1383,7 +1388,7 @@ nv -m poker_ocr.live --dump-frames /tmp/liveframes --no-ai-advice
 - 断流重连会把下一帧当新基线；若断在牌局中段，可能把全下误判为离座。
 - 默认追加到同一个 JSONL（`--no-append` 覆盖）；同一时间只允许一个 worker 写同一个文件。
 - 严格质量闸意味着摊牌、弹窗、动画帧会被丢弃，输出比实际帧稀疏。
-- 看板是**本地只读**的（`:8020`），不做投稿/审核/多客户端同步；
+- Web API 是**本地只读**的（`:8020`），不做投稿/审核/多客户端同步；
   历史排查仍以 `live.states.jsonl` / `live.events.jsonl` 为准。
 - **AI 建议只在 roi 路线可用**：全图路线没有每座的本街下注，也没有 `hero_turn`，
   算不出跟注额和选项金额。

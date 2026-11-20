@@ -51,7 +51,7 @@ nv tests/run_all.py                              # 全量测试（分层，先�
 nv -m poker_ocr.workbench                        # 工作台 :8030（推荐入口）
 nv -m uvicorn api:app --port 8000                # 单图识别服务
 nv -m poker_ocr.live --profile config/table_wpk_live.json \
-    --initial-blinds 1/2 --out logs/live.states.jsonl          # 实时链路 + Web 看板 :8020
+    --initial-blinds 1/2 --out logs/live.states.jsonl          # 实时链路 + Web API :8020（界面在工作台 :8030）
 nv tools/hand_recognition_audit.py --top 20 --html logs/audit.html # 手牌识别倒查
 cd replay-console && ./start.sh                                # 复盘控制台 :8010（/runs = 评分运行 #56/#57，五维打分）
 nv tools/import_case_seed.py --no-migrate                      # 案例集 seed（幂等，先跑 --dry-run）

@@ -10,7 +10,7 @@
 const path = require("path");
 const assert = require("assert");
 
-const RTCells = require(path.join(__dirname, "..", "..", "poker_ocr", "web", "live", "range_cells.js"));
+const RTCells = require(path.join(__dirname, "..", "..", "poker_ocr", "workbench", "static", "range_cells.js"));
 
 const RANKS = ["A", "K", "Q", "J", "T", "9", "8", "7", "6", "5", "4", "3", "2"];
 

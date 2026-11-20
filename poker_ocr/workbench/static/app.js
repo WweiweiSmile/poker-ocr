@@ -636,7 +636,7 @@ function renderOverviewTab(body, ws, status) {
         <div class="sep"></div>
         <div class="inline">
           ${run ? `<span class="mono faint">${esc(run.run_id)} · :${run.port}</span>
-            <a class="btn btn-sm" href="${esc(status.live_url || '#')}" target="_blank" rel="noreferrer">打开完整看板</a>` : ''}
+            <a class="btn btn-sm" href="#/w/${esc(ws.id)}/run">打开运行页</a>` : ''}
         </div>
       </section>
       <section class="card">

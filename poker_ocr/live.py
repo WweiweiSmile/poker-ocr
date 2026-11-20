@@ -3663,18 +3663,18 @@ def build_parser() -> argparse.ArgumentParser:
                          "block=严重冲突（规则弃牌/模型加注全下）不自动点击"
                          "（默认 block；只影响点击，不影响落库/看板）")
     ap.add_argument("--quiet", action="store_true", help="只打状态行和最终汇总")
-    # ── 日志 / Web 看板 ──
+    # ── 日志 / Web API ──
     ap.add_argument("--web", action=argparse.BooleanOptionalAction, default=True,
-                    help="启动本地 Web 看板（默认开启，只绑定 127.0.0.1）。"
-                         "看板每帧同步牌桌、AI 建议/原因和完整提示词；"
-                         "--no-web 关闭")
+                    help="启动本地 Web API（默认开启，只绑定 127.0.0.1）。"
+                         "工作台运行页通过 SSE/快照读取牌桌、AI 建议与帧错误；"
+                         "界面不在本端口（看板已并入工作台 :8030）；--no-web 关闭")
     ap.add_argument("--web-host", default="127.0.0.1",
-                    help="Web 看板监听地址（默认 127.0.0.1；改成 0.0.0.0 "
-                         "会让同局域网的人也能看到提示词/玩家名，慎用）")
+                    help="Web API 监听地址（默认 127.0.0.1；改成 0.0.0.0 "
+                         "会让同局域网的人也能读到提示词/玩家名，慎用）")
     ap.add_argument("--web-port", type=int, default=8020,
-                    help="Web 看板端口（默认 8020；被占用时只告警，识别继续）")
+                    help="Web API 端口（默认 8020；被占用时只告警，识别继续）")
     ap.add_argument("--web-open", action="store_true",
-                    help="启动后自动用默认浏览器打开看板")
+                    help="启动后自动用默认浏览器打开 API 根地址（提示页，界面在工作台 :8030）")
     ap.add_argument("--events-out", type=Path, default=None,
                     help="结构化事件日志路径（默认由 --out 派生："
                          "logs/live.states.jsonl → logs/live.events.jsonl）")

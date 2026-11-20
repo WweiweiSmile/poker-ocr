@@ -22,7 +22,7 @@
 |---|---|---|
 | `api.py` | 单图识别 HTTP 服务 | `:8000`，`uvicorn api:app` |
 | `poker_ocr.live` | 实时推流 → 建议 → 自动点击 | CLI，`python -m poker_ocr.live` |
-| `poker_ocr.live --web` | 实时 Web 看板（只读：牌桌/建议/提示词/帧流） | `http://127.0.0.1:8020` |
+| `poker_ocr.live --web` | 本地 Web API（SSE/快照/范围/锚点；界面在工作台 :8030） | `http://127.0.0.1:8020` |
 | `replay-console/` | 手牌库 + 多版本 A/B 复盘 | `:8010`，独立 FastAPI + MySQL |
 | `poker_ocr/tables/` | 策略表（对手范围 / 弃牌率数字的单一来源） | `STRATEGY_TABLES_PROFILE` 切 v0 / v1 |
 | `tools/` | 离线分析（画像 / 漏损 / SFT / 回放 / 表格对比） | 单文件 CLI |
@@ -42,10 +42,9 @@ poker_ocr/              # 全部核心逻辑（64 个模块 + __init__，见 §4
   prompt/               # 提示词包：system / user / shared（offline 只剩审计）
   assets/               # 点数模板图集（工具生成，勿手改）
   tables/               # 策略表 JSON（26 张表：v0 手调 / v1 推导），改数字改这里
-  live_web.py           # 本地 Web 看板（stdlib HTTP + SSE，只读）
+  live_web.py           # 本地 Web API（stdlib HTTP + SSE，只读；界面在工作台）
                         # + 工作台控制面（meta/preview/control，token 校验）
   live_log.py           # 事件 JSONL + 控制台文本落盘
-  web/live/             # 看板前端（index/app/style，无构建）
   workbench/            # 工作台：Web :8030 + 工作区/体检/live 子进程/标定/浮层
 workspaces/             # 工作台工作区（一次启动的配方；引用 config/table_*.json）
 runs/                   # 工作台运行产物（日志/manifest/预览；本地，不入库）
@@ -101,7 +100,7 @@ Advice ──┬─ Clicker                 建议落到客户端按钮（macOS 
          ├─ JsonlWriter             logs/live.states.jsonl（即时 flush）
          ├─ LiveEventLog            logs/live.events.jsonl（帧级诊断索引）
          ├─ RangeTrace              logs/live.range.jsonl（范围推导，按天切分）
-         ├─ LiveWebServer           :8020 看板（SSE，只读）
+         ├─ LiveWebServer           :8020 API（SSE/快照，只读；界面在工作台）
          └─ HandOutbox              一手一文件 → 异步进手牌库
 ```
 
@@ -157,7 +156,7 @@ poker_ocr.workbench :8030
   └─ OverlayController ScreenOverlay + Pillow 渲染（fail-open）
         │ spawn（python -m poker_ocr.live --preview --control-token …）
         ▼
-   poker_ocr.live :8020（现有看板 + 只读/控制端点）
+   poker_ocr.live :8020（Web API：SSE/快照 + 只读/控制端点；界面在工作台 :8030）
 ```
 
 规则：**一次只跑一路**；工作台不改识别口径、不启动 OBS/MediaMTX/浏览器；
@@ -377,7 +376,7 @@ nv -m poker_ocr.workbench --port 8030 --open
 #   工作区默认 workspaces/，运行产物默认 runs/（可 --workspaces/--runs 指定）
 #   live 由工作台 spawn，端口默认 :8020 起；工作台只绑 127.0.0.1
 
-# 实时推流（默认 cam:auto，自动点击需确认；默认开 Web 看板 :8020）
+# 实时推流（默认 cam:auto，自动点击需确认；默认开 Web API :8020，界面在工作台 :8030）
 nv -m poker_ocr.live \
     --profile config/table_wpk_live.json --initial-blinds 1/2 \
     --out logs/live.states.jsonl

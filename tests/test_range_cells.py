@@ -22,7 +22,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 DRIVER = ROOT / "tests" / "js" / "range_cells_test.js"
-MODULE = ROOT / "poker_ocr" / "web" / "live" / "range_cells.js"
+MODULE = ROOT / "poker_ocr" / "workbench" / "static" / "range_cells.js"
 
 FAILS: list[str] = []
 

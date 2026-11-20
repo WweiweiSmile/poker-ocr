@@ -12,7 +12,8 @@
     / `prompt_user` / `facts` / `raw_response`，看板原样展示；不重新拼 prompt，
     避免「看到的提示词」和「模型实际收到的」不是同一份。
 
-页面资源在 `poker_ocr/web/live/`：`index.html` / `app.js` / `style.css`。
+看板已退役（2026-11-20）：工作台运行页是唯一界面（:8030）。本服务只提供
+API（SSE / snapshot / range / preview / anchor），`/` 返回一个提示页。
 """
 
 from __future__ import annotations
@@ -24,27 +25,35 @@ import time
 from collections import deque
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import parse_qs, urlsplit
 
 import cv2
 import numpy as np
 
-WEB_ROOT = Path(__file__).resolve().parent / "web" / "live"
 MAX_ADVICES = 30
 MAX_HANDS = 30
 MAX_FEED = 200
 MAX_ACTIVE_EVENTS = 240
-_STATIC = {
-    "/": ("index.html", "text/html; charset=utf-8"),
-    "/index.html": ("index.html", "text/html; charset=utf-8"),
-    "/app.js": ("app.js", "text/javascript; charset=utf-8"),
-    "/style.css": ("style.css", "text/css; charset=utf-8"),
-    "/range_tab.js": ("range_tab.js", "text/javascript; charset=utf-8"),
-    "/range_cells.js": ("range_cells.js", "text/javascript; charset=utf-8"),
-    "/range_tab.css": ("range_tab.css", "text/css; charset=utf-8"),
-}
+_NOTICE = """<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<title>Poker OCR — 看板已并入工作台</title>
+<style>
+body{margin:0;min-height:100vh;display:grid;place-items:center;background:#0e1116;color:#e6e9ef;
+font:15px/1.6 -apple-system,"PingFang SC",sans-serif}
+.card{max-width:520px;padding:32px 36px;background:#1a2029;border:1px solid #2b3442;border-radius:14px}
+h1{margin:0 0 12px;font-size:19px}
+p{margin:8px 0;color:#8b97a8}
+a{color:#4c9aff;text-decoration:none}
+code{font-family:ui-monospace,Menlo,monospace;font-size:13px;color:#c9d4e3}
+</style></head><body><div class="card">
+<h1>看板已并入工作台</h1>
+<p>实时牌桌、AI 建议、帧错误与锚点现在都在工作台运行页里。</p>
+<p>打开 <a href="http://127.0.0.1:8030">http://127.0.0.1:8030</a>，进入工作区 → 运行。</p>
+<p>本端口只保留 API：<code>/api/events</code> · <code>/api/snapshot</code> ·
+<code>/api/range</code> · <code>/api/preview.jpg</code> · <code>POST /api/anchor</code>。</p>
+</div></body></html>
+"""
 
 
 def _now() -> str:
@@ -568,7 +577,10 @@ class _Handler(BaseHTTPRequestHandler):
         if path == "/api/preview.jpg":
             self._preview()
             return
-        self._static(path)
+        if path in ("/", "/index.html"):
+            self._notice()
+            return
+        self.send_error(404)
 
     def do_POST(self) -> None:  # noqa: N802
         path = urlsplit(self.path).path
@@ -738,21 +750,12 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _static(self, path: str) -> None:
-        item = _STATIC.get(path)
-        if item is None:
-            self.send_error(404)
-            return
-        name, ctype = item
-        try:
-            body = (WEB_ROOT / name).read_bytes()
-        except OSError:
-            self.send_error(404)
-            return
+    def _notice(self) -> None:
+        body = _NOTICE.encode("utf-8")
         self.send_response(200)
-        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Cache-Control", "no-store")
         self.end_headers()
         try:
             self.wfile.write(body)

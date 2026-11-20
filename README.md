@@ -48,7 +48,8 @@ nv -m poker_ocr.workbench --open     # 启动后打开浏览器
 
 - 只绑 `127.0.0.1`；写操作带 token + Origin 同源校验。
 - 工作区在 `workspaces/*.json`，运行产物在 `runs/<时间>-<工作区>/`（manifest 里有配置哈希、窗口 rect、退出码、统计）。
-- live 仍可用 CLI；工作台只是多了预览/控制端点（`--preview` / `--control-token`）。
+- **工作台运行页是唯一界面**：牌桌/行动线/最近手牌/实时预览 + 常驻 AI 建议 + 帧错误带 + 事件流 + 锚点 + 控制台抽屉。原 `:8020` 看板已退役，只保留 Web API（`--web`，默认开）。
+- live 仍可用 CLI；此时只有 API 与控制端点（`--preview` / `--control-token`），没有可视化界面。
 - 设计与实现：[docs/工作台-需求与设计-2026-11-12.md](docs/工作台-需求与设计-2026-11-12.md)、[docs/工作台-实现说明.md](docs/工作台-实现说明.md)。
 
 ## 实时推流识别

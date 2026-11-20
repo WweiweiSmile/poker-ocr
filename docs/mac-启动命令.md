@@ -140,7 +140,7 @@ nv -m poker_ocr.live \
 ```
 
 - 识别 / 建议照常跑，点击只打印计划（dry-run），不需要辅助功能权限；
-- 看板：`http://127.0.0.1:8020`。
+- Web API：`http://127.0.0.1:8020`（`/` 是提示页；界面在工作台 `:8030`）。
 
 ### 2.2 正式运行：档位优先，滑杆兜底
 
@@ -356,7 +356,7 @@ nv tools/click_marks.py --window "title:WePoker-H5" --url "title:WePoker-H5" --e
 | `--clicker-dry-run` | 关 | 只打印点击计划，不发真实事件 |
 | `--no-confirm` | 关 | 点击前不再问 y/n |
 | `--ai-advice` | 开 | 关掉它（`--no-ai-advice`）会自动关闭 auto-click |
-| `--web` / `--web-open` | 开 / 关 | 看板 `127.0.0.1:8020`，`--web-open` 启动后自动开浏览器 |
+| `--web` / `--web-open` | 开 / 关 | Web API `127.0.0.1:8020`（界面在工作台 `:8030`），`--web-open` 启动后打开提示页 |
 | `--out` | `logs/live.states.jsonl` | JSONL 输出；事件/控制台日志按同名派生 |
 | `--test` | 关 | 演练模式：独立日志、手牌不进手牌库 |
 | `--roi-threads` | 4 | 帧内 ROI 并行线程数 |

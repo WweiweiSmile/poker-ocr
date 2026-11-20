@@ -31,7 +31,7 @@ situation ──build_messages(sit)──► (system, user)  ← 唯一的文本
 | 摘要 | `poker_ocr/advice.py:810` `_prompt_digest` | sha256(system + "\n---\n" + user) |
 | 快照 | `poker_ocr/advice.py:816` `_facts_snapshot` | 扁平 dict；`hand_ranges`/`fold_eq`/`ground_truth` 三个子块，空值被剔除（:899-900） |
 | 落盘 | `poker_ocr/live.py:2054` `advice.to_dict()` → `poker_ocr/live.py:2072` 写 states | **prompt 原文 + facts 在同一条 advice 记录里**；`poker_ocr/live_log.py:49-50` 只是把它们从 events 日志里剔掉 |
-| 展示 | `poker_ocr/web/live/app.js:817-830`、`:906` | 纯文本原样输出 |
+| 展示 | `poker_ocr/workbench/static/app.js`（提示词弹窗「事实」tab） | 纯文本原样输出 |
 
 **关键事实**：prompt 原文从来不需要"为映射而额外落盘"——它和 facts 已经同帧同记录。缺的只是**位置索引**。
 

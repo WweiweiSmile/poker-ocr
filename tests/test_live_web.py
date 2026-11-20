@@ -132,7 +132,7 @@ def test_cards_event_updates_table_without_a_state_record() -> None:
     check(snap["events"][-1]["type"] == "cards", "事件流应追加 cards")
 
 
-def test_http_snapshot_static_and_sse() -> None:
+def test_http_snapshot_notice_and_sse() -> None:
     server = LiveWebServer(session={"session_id": "s-1", "profile": "p.json"},
                            layout=build_layout(fake_profile()), port=0)
     server.start()
@@ -144,24 +144,15 @@ def test_http_snapshot_static_and_sse() -> None:
         check(snap["layout"]["table_size"] == 3, "快照应带布局")
 
         page = urllib.request.urlopen(base + "/", timeout=3).read().decode()
-        check("POKER LIVE" in page, "首页应可访问")
-        check('id="bet-strip"' in page, "底池旁应有本街下注汇总")
-        check('class="dock-tab' in page, "右栏辅助信息应使用 tab 布局")
-        js = urllib.request.urlopen(base + "/app.js", timeout=3).read().decode()
-        check("EventSource" in js, "前端应通过 SSE 连接")
-        check("范围推导" in js and "RangeTab" in js,
-              "手牌详情应有第 5 个 tab「范围推导」")
-        tab_js = urllib.request.urlopen(base + "/range_tab.js",
-                                        timeout=3).read().decode()
-        check("window.RangeTab" in tab_js, "范围推导模块应可加载")
-        tab_css = urllib.request.urlopen(base + "/range_tab.css",
-                                         timeout=3).read().decode()
-        check(".rt-matrix" in tab_css, "范围推导样式应可加载")
-        cells_js = urllib.request.urlopen(base + "/range_cells.js",
-                                          timeout=3).read().decode()
-        check("RTCells" in cells_js and "先验未包含" in cells_js,
-              "热图三类格分类模块应可加载")
-        check("/range_cells.js" in page, "首页应在 range_tab.js 之前加载格分类模块")
+        check("看板已并入工作台" in page, "首页应是看板退役提示页")
+        check("8030" in page, "提示页应给工作台地址")
+        check("POKER LIVE" not in page, "旧看板页面应已移除")
+        try:
+            urllib.request.urlopen(base + "/app.js", timeout=3)
+        except urllib.error.HTTPError as exc:
+            check(exc.code == 404, "旧前端资源应 404")
+        else:
+            check(False, "旧前端资源不应再可访问")
 
         server.publish("frame", {"seq": 9, "kind": "record",
                                  "state": {"pot": 3}, "processed": 1})
@@ -492,7 +483,7 @@ def main() -> int:
     tests = [test_cli_defaults, test_layout_uses_name_slot_centers,
              test_store_tracks_frames_advice_hands,
         test_cards_event_updates_table_without_a_state_record,
-             test_http_snapshot_static_and_sse,
+             test_http_snapshot_notice_and_sse,
              test_prefold_control,
              test_meta_preview_and_click_control,
              test_range_api,
@@ -510,7 +501,7 @@ def main() -> int:
         for f in FAILS:
             print(f"  - {f}")
         return 1
-    print("\n✅ 实时 Web 看板全部通过")
+    print("\n✅ 实时 Web API 全部通过")
     return 0
 
 
