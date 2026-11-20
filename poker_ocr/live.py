@@ -1962,7 +1962,10 @@ class LiveProcessor:
         # All-in 头像徽章消失 = 这手结束。主动收手后等真正的新手信号再开新手，
         # 避免把摊牌后的同一帧当新手牌开头。
         if getattr(outcome, "hand_end", False):
-            self.hand_tracker.finish_current()
+            # 把触发收手的这一帧一起交出去：它多半 ok=False（底池横幅已经翻成
+            # 「总底池」），但只有它带着最后那批弃牌徽章 —— 收手动作本身就在这
+            # 一帧里，丢掉它这一手就会以「仍欠动作」收尾。
+            self.hand_tracker.finish_current(outcome.state)
             # 这一手已经结束：结果只落库，绝不点击，也不再确认上一次点击。
             self._pending_decision_key = None
             self._click_retry = None
@@ -2405,6 +2408,19 @@ class LiveProcessor:
                 continue
             self.log(f"  [对手] {format_read_line(read, obs.position)}")
 
+    def _confirm_needed(self) -> bool:
+        """要不要在终端问 y/n。
+
+        dry-run（`--clicker-dry-run`）不发送任何真实事件，问了也只是干等 ——
+        而这一等会**整块掐掉 OCR 采样**：终端 `_ask_confirm` 把主循环挂在
+        按键上最多 6s，期间一帧都不识别。2026-11-19 那一局问了 15 次，
+        每次约 6.5s 完全盲区，正好漏掉 hero 决策点前后的动作。所以 dry-run
+        一律不问，只留 `[点击] dry-run …` 日志。
+        """
+        if not self.confirm_click:
+            return False
+        return not bool(getattr(self.clicker, "dry_run", False))
+
     def _confirm_click(self, advice) -> bool:
         """在终端问一次是否执行：只认 y / n，其他按键忽略。
 
@@ -2527,7 +2543,7 @@ class LiveProcessor:
                 self._pending_decision_key = None
             return result
 
-        if self.confirm_click and not self._confirm_click(advice):
+        if self._confirm_needed() and not self._confirm_click(advice):
             result = ClickResult("skipped", action=advice.option.kind,
                                  reason="user_rejected")
             self._apply_click_result(advice, result, state=state, record=record)
@@ -3623,7 +3639,7 @@ def build_parser() -> argparse.ArgumentParser:
                          "用 --no-auto-click 关闭）")
     ap.add_argument("--no-confirm", action="store_true",
                     help="自动点击不再询问：模型建议返回后直接执行"
-                         "（默认会在终端问 y 确认 / n 拒绝）")
+                         "（默认会在终端问 y 确认 / n 拒绝；dry-run 一律不问）")
     ap.add_argument("--clicker-config", type=Path, default=None,
                     help="自动点击的按钮坐标 JSON（默认 config/clicker_local.json）")
     ap.add_argument("--bet-slider", action="store_true",
@@ -4334,8 +4350,14 @@ def _build_runtime(ap: argparse.ArgumentParser, args, env_load) -> _Runtime:
                           dry_run=args.clicker_dry_run, log=_log,
                           bet_slider=slider,
                           force_slider=args.bet_slider_only)
-        confirm_mode = ("直接执行（--no-confirm）" if args.no_confirm
-                        else "执行前在终端询问 y/n")
+        if args.no_confirm:
+            confirm_mode = "直接执行（--no-confirm）"
+        elif args.clicker_dry_run:
+            # dry-run 不发真实事件，询问没有意义：只会把 OCR 主循环挂在
+            # 终端等 6s（2026-11-19 一局问了 15 次 = 约 100s 盲区）。
+            confirm_mode = "dry-run 不询问（不发送真实事件）"
+        else:
+            confirm_mode = "执行前在终端询问 y/n"
         source_label = ("profile+window" if args.bet_slider else str(cfg_path))
         _log(f"[点击] 已启用自动点击：{source_label}"
              f"（{len(clicker_cfg.buttons)} 个按钮，"
@@ -4427,7 +4449,7 @@ def _build_runtime(ap: argparse.ArgumentParser, args, env_load) -> _Runtime:
         # 没启用自动点击时不需要线程（Inline 语义与改造前一致）。
         click_executor=(ThreadClickExecutor() if clicker is not None
                         else None),
-        confirm_click=not args.no_confirm,
+        confirm_click=not args.no_confirm and not args.clicker_dry_run,
         confirm_timeout=args.confirm_timeout,
         prefold_mode=args.prefold_mode,
         prefold_exclude=args.prefold_exclude_keys,

@@ -38,7 +38,7 @@ from dataclasses import dataclass, field as dc_field
 
 from .parse import (
     Amount, Blinds, NameTracker, is_all_in_badge, is_fold_badge,
-    looks_like_badge, names_similar,
+    looks_like_badge, looks_like_zero_no_unit, names_similar,
     parse_action, parse_amount, parse_blinds, parse_chip_loose, parse_equity,
     parse_percent, sticky_name, waiting_badge,
 )
@@ -498,6 +498,12 @@ def _build_players(ctx: BuildContext):
                   chip_equity if chip_equity is not None else slot_equity)
 
         chip: Amount = parse_amount(chip_raw)
+        # 筹码位读成「没有数字的裸零」：全下时客户端把胶囊画成一个裸 `0`
+        # （无 BB 单位），rec 实测读成 `d`(0.17) / `o` / 空。这不是「没读到」，
+        # 而是「这里显示 0」—— 但不能当金额用（真金额一定带数字），只作为
+        # all_in 的弱证据，见下面的 all_in 表达式。
+        chip_zero_no_unit = (looks_like_zero_no_unit(chip_raw)
+                             and chip_equity is None)
         chip_loose = False
         if lenient_chips and not chip.ok and chip_equity is None:
             loose = parse_chip_loose(chip_raw)
@@ -652,9 +658,14 @@ def _build_players(ctx: BuildContext):
         )
         # 头像黄色 All-in 徽章是最直接的证据；胜率显示也只在全下后出现。
         # 旧的结构化判据（筹码 0 + 有下注/曾经全下）保留给徽章读不到时兜底。
+        # 第三条是筹码「裸零」残读：这里 stack 是 None（金额解析不了），
+        # 所以下面的 `stack == 0.0` 永远不成立 —— 2026-11-19 22:51 DASHAYU
+        # 全下那一手就是被这条缺口漏掉的（徽章同时读成 `FAIT` 0.38）。
+        # 和 stack==0 同口径要求「有下注 / 曾经全下」，避免把空筹码格当全下。
         all_in = bool(in_hand and (
             all_in_badge is True or equity is not None
-            or (stack == 0.0 and ((bet or 0) > 0 or was_all_in))))
+            or (stack == 0.0 and ((bet or 0) > 0 or was_all_in))
+            or (chip_zero_no_unit and ((bet or 0) > 0 or was_all_in))))
         # 弃牌（手牌图标消失 **且** 头像「弃牌」）比全下更强：全下的三条判据
         # 里只有徽章是强证据，胜率/筹码 0 都可能是一次读数抖动，而弃牌要两个
         # 条件同时成立、还要连续两帧（见 hand_track 的 AVATAR_FOLD_CONFIRM_FRAMES）。

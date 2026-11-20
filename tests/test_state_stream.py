@@ -632,6 +632,38 @@ def test_bomb_banner_latches_across_frames() -> None:
         check(not nxt.state.bomb_pot, "换手后应清空爆炸标记")
 
 
+def test_all_in_suspect_seats_join_det_pass() -> None:
+    """筹码位裸零 + 本街有下注的**在局**座位，要进 det 复核名单。
+
+    2026-11-19 22:51 实盘（8a3aaafaab）：DASHAYU 全下后筹码胶囊是一个裸 `0`
+    （没有 BB 单位），rec 读成 `d`(0.166)；同一帧头像 All-in 徽章读成
+    `FAIT`(0.382)。det 复核名单原来只装「手牌图标消失」的座位和「非 hero
+    回合」的 hero —— 在局玩家永远进不去，det 一次都不跑，于是 all_in 判不
+    出来，整帧按 `stack:topL` 丢弃，他的全下动作永久丢失。
+    """
+    rows = {k: dict(v) for k, v in BASE.items()}
+    rows["topL"] = {"name": "DASHAYU", "chip": "d", "bet": "73.5BB"}
+    rows["lowL"] = {"name": "YKY", "chip": "d", "bet": ""}   # 裸零但没有下注
+    seen: dict = {}
+
+    def fake_read_avatars(img, profile, engine, cache=None, detect_fold=True,
+                          executor=None, det_seats=None):
+        seen["det_seats"] = set(det_seats or ())
+        return {}
+
+    with stub_env(), \
+            patch.object(ss, "read_card_icons",
+                         lambda _img, _p: {"topL": True, "lowL": True}), \
+            patch.object(ss, "read_avatars", fake_read_avatars):
+        s = new_stream(detect_fold=True)
+        feed(s, make_frame(rows), t=0.0)
+
+    check("topL" in seen["det_seats"],
+          f"筹码裸零 + 有下注的在局座位应进 det 复核：{seen['det_seats']}")
+    check("lowL" not in seen["det_seats"],
+          "没下注的裸零座位不该进 det（空筹码格/遮挡也会读出碎片）")
+
+
 def test_card_icon_fold_needs_two_absent_frames() -> None:
     """图标消失要连续 2 帧才判弃牌；亮牌座位没有图标也算在池。"""
     with stub_env():
@@ -949,6 +981,7 @@ def main() -> int:
         test_slow_fields_pinned_until_hand_switch,
         test_name_pin_expires_so_action_badges_can_be_read,
         test_bomb_banner_latches_across_frames,
+        test_all_in_suspect_seats_join_det_pass,
         test_card_icon_fold_needs_two_absent_frames,
         test_waiting_badge_needs_two_frames,
         test_roster_lock_waits_for_waiting_badge,

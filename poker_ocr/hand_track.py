@@ -885,13 +885,26 @@ class LiveHandTracker:
             target = prev
         return target
 
-    def finish_current(self) -> None:
-        """主动结束当前手牌（All-in 徽章消失），等真正的新手信号再开新手。"""
+    def finish_current(self, state: FrameState | None = None) -> None:
+        """主动结束当前手牌（All-in 徽章消失 / 底池横幅翻成「总底池」）。
+
+        `state` 是**触发收手的这一帧**。它通常过不了 `observe`（底池横幅已经是
+        「总底池」，pot 读不出来，整帧 `ok=False`），但正是这一帧带着最后那批
+        弃牌徽章 —— 收手动作本身（最后一个人弃牌）就发生在这里。只用
+        `_last_frame`（最后一帧被接受的画面）会把它们全丢掉：追踪仍当那几个人
+        在局，`_finalize_street` 的 ① 补弃牌循环网不到他们，于是这一手以
+        「未配平，以下座位仍欠动作」收尾（2026-11-19 的 2f192f5c42 / 26672dd14a
+        / fba0853748 / f82302bc49 四手）。
+
+        只采信**显式弃牌**，见 `_end_active_seats`。
+        """
         if self.hand is None:
             return
         # 手末再补一次：河牌打完/全下摊牌时没有「下一街」可以触发街末补全。
-        self._finalize_street(self.hand, self.hand.street, None,
-                              state=self._last_frame, at_hand_end=True)
+        current = self._end_active_seats(state)
+        self._finalize_street(self.hand, self.hand.street, current,
+                              state=state if state is not None else self._last_frame,
+                              at_hand_end=True)
         # 最后一街的底池账单（没有下一街 pbs 可用，这里自己核）
         self._audit_street_account(self.hand)
         hand = copy.deepcopy(self.hand)
@@ -902,6 +915,31 @@ class LiveHandTracker:
         self._await_frames = 0
         self._drop_frames = 0
         self._all_in_streak.clear()
+
+    def _end_active_seats(self, state: FrameState | None) -> set[str] | None:
+        """收手那一帧 → 街末的在局座位集合；拿不准就返回 None（调用方用旧口径）。
+
+        只把**显式弃牌**算出去（`fold is True` / `status == "folded"`）。
+        「这一帧没读到这个人」绝不能当弃牌证据 —— 那正是 vanished / 降级帧的
+        表现（收池动画、头像遮挡、窗口失焦），照它补会把整桌补成弃牌，比漏掉
+        一个人错得更多。两道否决都为此存在。
+        """
+        if state is None:
+            return None
+        base = self._active_seats(self._last_frame) \
+            if self._last_frame is not None else set()
+        if not base:
+            return None
+        folded = {p.seat_id for p in state.players
+                  if p.seat_id in base
+                  and (p.fold is True or p.status == "folded")}
+        if not folded:
+            return None
+        # 一帧里半个以上的在局者同时弃牌 = 降级帧，不信（正常牌局一帧最多
+        # 收掉一个人的最后动作，收手那一刻通常也就 1 个）。
+        if len(folded) > 1 and 2 * len(folded) >= len(base):
+            return None
+        return base - folded
 
     def _looks_like_new_hand(self, state: FrameState,
                              cards: tuple[str, ...], board: tuple[str, ...],

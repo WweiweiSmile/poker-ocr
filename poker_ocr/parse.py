@@ -310,11 +310,24 @@ def is_fold_badge(avatar_text: str | None, score: float = 0.0,
 # 「All in」徽章画在头像上，黄色字。实测 rec 会读成 `Alin`（score 0.60–0.74），
 # 所以按「去掉空格/连字符后与 allin 足够像」判，而不是要求逐字读对。
 _ALL_IN_RE = re.compile(r"^(?:全下|全押|all[\s_-]*in)", re.IGNORECASE)
+# 常见误读前缀：1↔l、0↔o、4↔a、11↔ll。det 路径还会把头像里的图标字样一起
+# 框进来（实测 `AllinPOPONER`、`All inPOKER`），所以只要求**前缀**命中。
+_ALL_IN_PREFIXES = ("allin", "alin", "aiin", "ailn", "a1in", "a11in",
+                    "4llin", "all1n", "a11n", "ailin")
+# 头像块走 det 时，检测框可能把徽章和别的字样框成一条：允许在短文本里**出现**
+# allin，而不是只在开头。
+_ALL_IN_CONTAIN_MAX = 14
 
 
 def is_all_in_badge(avatar_text: str | None, score: float = 0.0,
                     min_score: float = 0.4) -> bool | None:
-    """头像 ROI 的读数是不是黄色的「All in」徽章。三态：True / False / None。"""
+    """头像 ROI 的读数是不是黄色的「All in」徽章。三态：True / False / None。
+
+    三态而不是 bool：空读数 / 分数太低是「没看见」，不是「不在全下」。调用方
+    （`frame_state` 的 all_in 判定）只在 True 时才当全下证据 —— 所以这里**不能**
+    放宽到「像不像都算 True」：'FAIT'（实测纯 rec 读数，0.38）vs 'allin' 的
+    SequenceMatcher 只有 0.44，放宽到命中它就会把非全下玩家误判成全下。
+    """
     t = (avatar_text or "").strip()
     if not t:
         return None
@@ -323,11 +336,35 @@ def is_all_in_badge(avatar_text: str | None, score: float = 0.0,
     if _ALL_IN_RE.match(t):
         return True
     compact = re.sub(r"[\s_-]+", "", t).lower()
-    if compact.startswith(("allin", "alin", "aiin", "ailn", "a1in", "a11in")):
+    if compact.startswith(_ALL_IN_PREFIXES):
+        return True
+    # det 偶尔把左边的图标字样排在前面（`POPONERAllin`），放宽到「短文本里含」
+    if len(compact) <= _ALL_IN_CONTAIN_MAX and "allin" in compact:
         return True
     # 只对短文本做模糊匹配，避免把头像照片里读出的长句子误判成 All in
     return len(compact) <= 6 and difflib.SequenceMatcher(
         None, compact, "allin").ratio() >= 0.72
+
+
+def looks_like_zero_no_unit(text: str | None) -> bool:
+    """这段读数是不是「没有数字的裸零」——短、且一个数字都没有。
+
+    真机依据（2026-11-19 22:51 的 all-in 事故帧，logs/incidents/
+    20261119_225148_155199_gate_stack）：玩家全下后，这一款 app 把头像下方的
+    筹码胶囊画成**一个裸 0（没有 BB 单位）**，rec 把它读成 `d`(0.166) / `o` / `。`
+    —— 文本里一个数字都没有。`parse_amount` 只认 `0`/`o`/`。` 这几个字形，
+    `d` 不在其中，于是 stack=None，质量闸按 `stack:<座位>` 丢掉整帧。
+
+    这里**不**判 0：真实的筹码/下注一定带数字，所以「短且没有数字」只能说明
+    「这个格子里没有金额」，是可用的弱证据。真正的结论由调用方结合「本街有
+    下注 / 曾经全下」给出（见 `frame_state` 的 all_in 表达式）。
+    `parse_amount` 的全局语义不动 —— 它同时服务 bet/pot，把残读当 0 会静默
+    把下注清零。
+    """
+    t = (text or "").strip()
+    if not t or len(t) > 2:
+        return False
+    return not any(ch.isdigit() for ch in t)
 
 
 # 「人坐在桌边但这一手没被发牌」的头像文案有三种：正在带入 / 等待审核 / 等待中。

@@ -38,7 +38,8 @@ from .dealer import DealerResult, build_detector
 from .frame_state import FrameState, NameTracker, build_state, signature
 from .name_lexicon import NameLexicon
 from .parse import (
-    Blinds, is_all_in_badge, looks_like_badge, parse_blinds, waiting_badge,
+    Blinds, is_all_in_badge, looks_like_badge, looks_like_zero_no_unit,
+    parse_amount, parse_blinds, waiting_badge,
 )
 from .ocr import OcrEngine
 from .profile import Profile
@@ -85,6 +86,40 @@ BOMB_BANNER_GRACE_SAMPLES = 3
 # 底池横幅连续几帧显示「总底池」才认手牌间隙（= 已经收池）。和 All-in 徽章
 # 消失同一口径：单帧文字抖动不当真。
 POT_IDLE_CONFIRM_FRAMES = 2
+
+
+# 疑似全下的判据只挑**在局**座位（有手牌图标）：全下的人还在这一手里，
+# 筹码胶囊被客户端画成一个裸 0（无 BB 单位），rec 读成 `d` / `o` / 空。
+_ALL_IN_SUSPECT_MAX_BADGES = 3
+
+
+def _all_in_suspect_seats(frame, icons: dict[str, bool | None]) -> set[str]:
+    """挑出「筹码位读成裸零、本街却有下注」的在局座位，值得补一次头像 det。
+
+    真机依据（2026-11-19 22:51 帧，logs/incidents/20261119_225148_155199_gate_stack）：
+    DASHAYU 全下后筹码胶囊只有一个 `0`，纯 rec 读成 `d`(0.166) → stack=None；
+    头像上的黄色 `All in` 徽章纯 rec 读成 `FAIT`(0.382) → all_in 判不出来 →
+    `frame_state` 的 `stack:<座位>` 闸丢掉整帧 → 他的全下动作永久丢失。
+
+    det+rec 两个都能读对（`AllinPOPONER` 0.822），但 det 复核的名单
+    （`det_seats`）原来只装「图标已消失」的座位和「非 hero 回合」的 hero，
+    **在局玩家永远进不去**。这里只负责挑人，结论仍由 `is_all_in_badge` 给：
+    挑错了也只是多跑一次 det（~85ms，且按 ROI 缓存摊薄）。
+    """
+    out: set[str] = set()
+    for seat in frame.seats:
+        sid = seat.seat_id
+        if icons.get(sid) is not True:      # 只看在局：空座/等待/已弃牌都不算
+            continue
+        if not looks_like_zero_no_unit(frame.text("chip", sid)):
+            continue
+        bet = parse_amount(frame.text("bet", sid))
+        if not bet.ok or not (bet.value or 0.0) > 0:
+            continue                        # 没下注 → 更可能是格子空着
+        out.add(sid)
+        if len(out) >= _ALL_IN_SUSPECT_MAX_BADGES:
+            break
+    return out
 
 
 def _equity_slot(chip: tuple[float, float, float, float]) -> tuple[float, float, float, float]:
@@ -336,6 +371,12 @@ class StateStream:
         det_seats = {sid for sid, flag in icons.items() if flag is False}
         if frame.hero_turn is False:
             det_seats.add(self.profile.hero_seat_id)
+        # 全下的人**有**手牌图标，上面两条都覆盖不到他 —— 而他的头像正好被
+        # 黄色 All in 徽章盖住、筹码胶囊读成裸零。不补这一次 det，all_in 判不
+        # 出来，整帧按 `stack:<座位>` 丢弃，全下动作永久丢失。
+        suspect = _all_in_suspect_seats(frame, icons)
+        if suspect:
+            det_seats |= suspect
         avatars = read_avatars(img, self.profile, self.engine,
                                self.stream.cache, self.detect_fold,
                                executor=self._roi_pool, det_seats=det_seats)

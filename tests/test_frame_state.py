@@ -765,6 +765,29 @@ def test_pot_label_is_idle_gap_not_ocr_failure() -> None:
     check(not normal.pot_idle, "正常帧不该标间隙")
 
 
+def test_chip_zero_garbage_still_reads_all_in() -> None:
+    """筹码胶囊读成「没有数字的裸零」时，仍要认出全下 —— 否则整帧被丢掉。
+
+    2026-11-19 22:51 实盘（8a3aaafaab）：DASHAYU 全下，客户端把筹码胶囊画成
+    一个裸 `0`（没有 BB 单位），rec 读成 `d`(0.166)；同一帧头像上的黄色
+    `All in` 徽章读成 `FAIT`(0.382)。两条证据一起失效 → `stack:topL` 连丢
+    9 帧 → 他的全下动作永远进不了追踪 → 那一手「flop 未配平，仍欠动作」。
+    """
+    rows = {k: dict(v) for k, v in BASE.items()}
+    rows["lowR"] = {"name": "Dragon333", "chip": "d", "bet": "20BB"}
+    s = state(rows)
+    lowr = s.player("lowR")
+    check(lowr.all_in, f"裸零残读 + 本街有下注应判全下：{lowr.to_debug()}")
+    check(lowr.stack is None, "读不出的筹码保持 None，不能编成 0")
+    check(not any(e.startswith("stack:lowR") for e in s.errors),
+          f"认了全下就不该再报 stack:lowR：{s.errors}")
+
+    # 没有下注、也没曾全下 → 裸零不能当全下证据（格子空着也会读出碎片）
+    rows["lowR"] = {"name": "Dragon333", "chip": "d", "bet": ""}
+    check(not state(rows).player("lowR").all_in,
+          "只有裸零、本街没下注时判全下等于把空筹码格当全下")
+
+
 def test_showdown_seat_exempt_from_stack_and_bet_checks() -> None:
     """摊牌座位：头像被亮牌盖住、筹码读不到、All-in 徽章也没了。
 
@@ -1166,6 +1189,7 @@ def main() -> int:
         test_ante_inherited_when_parenthesis_lost,
         test_pbs_gt_pot_is_an_error,
         test_pot_label_is_idle_gap_not_ocr_failure,
+        test_chip_zero_garbage_still_reads_all_in,
         test_showdown_seat_exempt_from_stack_and_bet_checks,
         test_bet_pill_garbage_carries_previous_reading,
         test_pbs_banner_lag_uses_previous_when_pot_unchanged,

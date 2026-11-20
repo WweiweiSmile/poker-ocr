@@ -18,8 +18,9 @@ sys.path.insert(0, str(ROOT))
 
 from poker_ocr.parse import (  # noqa: E402
     NameTracker, is_all_in_badge, is_fold_badge, looks_like_badge,
-    names_similar, parse_action, parse_amount, parse_blinds, parse_chip_loose,
-    parse_equity, parse_percent, sticky_name, waiting_badge,
+    looks_like_zero_no_unit, names_similar, parse_action, parse_amount,
+    parse_blinds, parse_chip_loose, parse_equity, parse_percent, sticky_name,
+    waiting_badge,
 )
 
 FAILS: list[str] = []
@@ -246,6 +247,28 @@ def test_all_in_badge_and_equity() -> None:
     check(is_all_in_badge("奔牌", 0.92) is False, "弃牌徽章不是 All in")
     check(is_all_in_badge("", 0.9) is None, "空读数应报 None")
     check(is_all_in_badge("Alin", 0.2) is None, "分数太低应报 None")
+    # det 复核把徽章和头像里的图标字样框成一条（2026-11-19 真机读数）
+    check(is_all_in_badge("AllinPOPONER", 0.82) is True,
+          "det 把图标字样串在徽章后面，应仍判 All in")
+    check(is_all_in_badge("AllIn", 0.86) is True, "det 的 AllIn 应判 All in")
+    check(is_all_in_badge("4llin", 0.7) is True, "4↔a 的误读应判 All in")
+    # 反过来：纯 rec 读成 `FAIT`(0.382) 的**不是**证据，放宽不能放到命中它
+    check(is_all_in_badge("FAIT", 0.38) is None,
+          "分数低于阈值应报 None，而不是猜一个")
+    check(is_all_in_badge("FAIT", 0.9) is False,
+          "FAIT 与 allin 不像，不能被放宽成 True（会把没全下的人判成全下）")
+
+
+def test_zero_no_unit_chip_reading() -> None:
+    """筹码位「短且没有数字」= 格子里没有金额（All-in 时是一个裸 0）。"""
+    check(looks_like_zero_no_unit("d"), "d（0.166 的裸零误读）应判裸零")
+    check(looks_like_zero_no_unit("o"), "o 应判裸零")
+    # 空读数**不算**：格子被整个盖住/裁到图外也会是空，那不是「显示 0」的证据。
+    # 认它等于把每一帧筹码没读到的座位都判成全下，爆炸半径太大。
+    check(not looks_like_zero_no_unit(""), "空读数不算裸零")
+    check(not looks_like_zero_no_unit("0"), "带数字的 0 不算裸零，parse_amount 能读")
+    check(not looks_like_zero_no_unit("89BB"), "真金额不是裸零")
+    check(not looks_like_zero_no_unit("- -"), "长文本不是裸零")
 
     check(parse_percent("30%") == 30.0, "30% 应解析成 30")
     check(parse_percent("胜率 69%") == 69.0, "胜率 69% 应解析成 69")
@@ -433,6 +456,7 @@ def main() -> int:
         test_actions,
         test_fold_badge_is_best_effort,
         test_all_in_badge_and_equity,
+        test_zero_no_unit_chip_reading,
         test_waiting_badge_three_phrases,
         test_names_similar,
         test_sticky_name,

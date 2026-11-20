@@ -2764,6 +2764,26 @@ def test_click_poll_clears_inflight_without_state() -> None:
           "按钮点击应挂上「动作是否生效」确认（指纹取点击那一刻的状态）")
 
 
+def test_dry_run_never_asks_for_confirmation() -> None:
+    """dry-run 不发送真实事件，就不该在终端等 y/n —— 那一等会掐掉 OCR 采样。
+
+    2026-11-19 22:50 那一局：`--clicker-dry-run` + 默认确认，终端问了 15 次，
+    每次最长 6s，期间一帧都不识别（帧 t=8.13→14.66、53.05→59.56、88.9→95.4
+    就是 6.5s 的洞），正好漏掉 hero 决策点前后的动作与弃牌徽章。
+    """
+    from types import SimpleNamespace
+    ask = lambda **kw: LiveProcessor._confirm_needed(             # noqa: E731
+        SimpleNamespace(**kw))
+    check(ask(confirm_click=True, clicker=SimpleNamespace(dry_run=True)) is False,
+          "dry-run 下不该询问")
+    check(ask(confirm_click=True, clicker=SimpleNamespace(dry_run=False)) is True,
+          "真实点击 + 没加 --no-confirm 时仍要询问（安全闸）")
+    check(ask(confirm_click=False, clicker=SimpleNamespace(dry_run=False)) is False,
+          "--no-confirm 直接执行")
+    check(ask(confirm_click=True, clicker=None) is True,
+          "没有 clicker 时按配置走，不能因为拿不到 dry_run 就静默跳过确认")
+
+
 def main() -> int:
     tests = [
         test_defaults_are_no_throttle_and_instant_turn,
@@ -2860,6 +2880,7 @@ def main() -> int:
         test_complete_hand_logs_yellow_banner,
         test_rotate_frame_clockwise,
         test_open_capture_supports_virtual_camera_index,
+        test_dry_run_never_asks_for_confirmation,
     ]
     for t in tests:
         before = len(FAILS)

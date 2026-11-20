@@ -50,7 +50,7 @@ import numpy as np
 
 from .dealer import DealerDetector, DealerResult
 from .ocr import OcrEngine, preprocess_variant
-from .parse import is_fold_badge, waiting_badge
+from .parse import is_all_in_badge, is_fold_badge, waiting_badge
 from .profile import Profile, Size, Slot
 
 # 每个座位读哪几块。这份顺序就是最终输出顺序，改它等于改接口。
@@ -723,6 +723,11 @@ def read_avatars(img: np.ndarray, profile: Profile, engine: OcrEngine,
     `det_seats=None` 不做复核（保持纯 rec 的旧口径，测试和速度敏感路径用）。
     「是不是弃牌」仍由 `frame_state.is_fold_badge` 判。
 
+    **All-in 徽章也走这条复核**：全下时头像被黄色 `All in` 盖住，rec-only 读成
+    `FAIT`(0.38) 这种既不像弃牌也不像全下的碎片，det+rec 才有 `Allin…`(0.82)。
+    写回条件因此是「弃牌 / 等待文案 / All-in」三者之一 —— 少了 All-in，全下玩家
+    的 stack 又会因为筹码位是裸 0 而读不出来，整帧被质量闸丢掉。
+
     det 复核也用来读「在座未入局」文案（正在带入 / 等待审核 / 等待中）：
     纯 rec 只能读出 `#中` / `#德中` 这种碎片（实测 0.52–0.68），det+rec 是
     原文 `等待中`（1.00）。复核只对**没有手牌图标**的座位做，所以正好覆盖
@@ -742,19 +747,27 @@ def read_avatars(img: np.ndarray, profile: Profile, engine: OcrEngine,
            for seat, read in zip(seats, reads)}
     if not det_seats:
         return out
-    # 弃牌文字兜底：rec-only 没读出「弃牌」的疑似弃牌座位，再用 det+rec 复核。
+    # 弃牌/等待/All-in 徽章兜底：rec-only 没读出徽章的疑似座位，再用 det+rec 复核。
+    #
+    # All-in 必须在写回条件里：全下时头像被黄色徽章覆盖，纯 rec 读成 `FAIT`
+    # (0.38)、空、或头像照片碎片；det+rec 才读成 `Allin…`(0.82) / `AllIn`(0.86)。
+    # 而 all_in 判对当且仅当帧能被接受（`frame_state` 的质量闸只对
+    # `stack is None and not all_in` 报错），所以这里漏一次 = 该座位这一手
+    # 的全下动作永久丢失（2026-11-19 8a3aaafaab / 32fc5dbc0e 就是这么丢的）。
     for seat in seats:
         sid = seat.seat_id
         if sid not in det_seats:
             continue
         text, score = out[sid]
-        if is_fold_badge(text, score) is True:
+        if (is_fold_badge(text, score) is True
+                or is_all_in_badge(text, score) is True):
             continue
         read = read_slot(
             img, profile, engine, seat.avatar_slot, "avatar", size,
             pad=0.0, cache=cache, cache_key=f"{sid}.@avatar.det", use_det=True)
         if (is_fold_badge(read.text, read.score) is True
-                or waiting_badge(read.text, read.score) is not None):
+                or waiting_badge(read.text, read.score) is not None
+                or is_all_in_badge(read.text, read.score) is True):
             out[sid] = (read.text, read.score)
     return out
 

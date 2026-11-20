@@ -134,6 +134,72 @@ def test_read_avatars_reads_all_nine_seats() -> None:
           "detect_fold=False 时不该读头像")
 
 
+class _Box:
+    """det 检测框的最小替身：只带 text/score 两个属性。"""
+
+    def __init__(self, text: str, score: float):
+        self.text = text
+        self.score = score
+
+
+class DetStubEngine(StubEngine):
+    """rec 与 det 给**不同**读数的假引擎。
+
+    真机依据（2026-11-19 22:51 事故帧）：头像被黄色 All-in 徽章盖住时，
+    纯 rec 读成 `FAIT`(0.382)，det+rec 读成 `AllinPOPONER`(0.822)。
+    """
+
+    def __init__(self, table, det_table):
+        super().__init__(table)
+        self.det_table = det_table
+        self.det_crops: list[tuple[int, int, int, int]] = []
+
+    def read_boxes(self, img):
+        b, g, r = (int(v) for v in img[0, 0])
+        h, w = img.shape[:2]
+        rect = (b + 256 * g, r, b + 256 * g + w, r + h)
+        self.det_crops.append(rect)
+        return [_Box(t, s) for t, s in self.det_table.get(rect, [])]
+
+
+def test_det_pass_writes_back_all_in_badge() -> None:
+    """det 复核读到的 All-in 徽章必须写回 —— 这是全下动作唯一的活路。
+
+    写回条件原来只认「弃牌 / 等待文案」，于是 det 明明把 `Allin…` 读对了
+    （0.82）也不采纳；而 all_in 判不出来时，筹码胶囊又是裸零，`stack:<座位>`
+    质量闸会把整帧丢掉，这个座位的全下动作就永久丢失（2026-11-19
+    8a3aaafaab / 32fc5dbc0e 两手就是这么丢的）。
+    """
+    profile = Profile.load(WPK)
+    img = make_marked()
+    rec: dict = {}
+    det: dict = {}
+    for seat in profile.seats:
+        rect = profile.slot_to_px(seat.avatar_slot, SIZE, pad=0.0)
+        rec[rect] = [("FAIT", 0.382)]
+        det[rect] = [("AllinPOPONER", 0.822)]
+    engine = DetStubEngine(rec, det)
+
+    target = profile.seats[0].seat_id
+    got = read_avatars(img, profile, engine, detect_fold=True,
+                       det_seats={target})
+    check(got.get(target) == ("AllinPOPONER", 0.822),
+          f"det 读到的 All-in 徽章应写回，实际 {got.get(target)}")
+    check(len(engine.det_crops) == 1,
+          f"只该对 det_seats 里的座位跑 det，实际跑了 {len(engine.det_crops)} 次")
+    others = [sid for sid in got if sid != target]
+    check(all(got[sid] == ("FAIT", 0.382) for sid in others),
+          "不在 det_seats 里的座位保持纯 rec 读数")
+
+    # 纯 rec 已经读对 All-in 的座位不必再跑 det（省一次 ~85ms）
+    rec[profile.slot_to_px(profile.seats[0].avatar_slot, SIZE, pad=0.0)] = \
+        [("AllIn", 0.86)]
+    engine2 = DetStubEngine(rec, det)
+    read_avatars(img, profile, engine2, detect_fold=True, det_seats={target})
+    check(engine2.det_crops == [],
+          f"rec 已读对 All-in 就不该再跑 det，实际 {len(engine2.det_crops)} 次")
+
+
 def test_only_rec_is_ever_called() -> None:
     """全图 det 一次都不许跑 —— read_boxes 抛异常，跑通即证明没调过。"""
     profile = Profile.load(WPK)
@@ -594,6 +660,7 @@ def test_parallel_reads_match_serial_and_use_multiple_threads() -> None:
 def main() -> int:
     tests = [
         test_read_avatars_reads_all_nine_seats,
+        test_det_pass_writes_back_all_in_badge,
         test_only_rec_is_ever_called,
         test_each_roi_is_cropped_at_the_configured_slot,
         test_hero_chip_alt_slot_only_when_primary_is_empty,
