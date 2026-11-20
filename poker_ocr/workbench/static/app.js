@@ -2116,8 +2116,11 @@ function adviceHtml(a) {
   const reads = (a.opponent_reads || []).filter((r) => r && r.archetype && r.archetype !== 'unknown');
   const am = a.meta || {};
   const pick = (key) => (a[key] != null ? a[key] : am[key]);
+  const rawModel = pick('model');
+  const modelName = rawModel && typeof rawModel === 'object'
+    ? (rawModel.name || rawModel.id || '') : rawModel;
   const meta = [
-    pick('model'),
+    modelName,
     pick('duration_ms') ? `${(pick('duration_ms') / 1000).toFixed(1)}s` : '',
     pick('confidence') != null ? `置信 ${fmtNum(pick('confidence'))}` : '',
     pick('prompt_version'),
