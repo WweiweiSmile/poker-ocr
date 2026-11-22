@@ -321,6 +321,26 @@
       "source": "《哈林顿在现金桌》第1卷 p292（PDF p302）"
     },
     {
+      "id": "flop.mw.middle_pair.facing_bet.with_draw",
+      "file": "poker_ocr/playbook/cards/harrington_cash_multiway.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch5",
+      "pages": [
+        292,
+        296
+      ],
+      "pdf_pages": [
+        302,
+        306
+      ],
+      "confidence": "interpreted",
+      "verdict": "compiled",
+      "quote": "你经常可以不用投入而免费听牌。",
+      "note": "p292 默认弃牌；带听牌时按 p296 编译为跟注，覆盖 9–14 个补牌与 20–29% 底池赔率。",
+      "source": "《哈林顿在现金桌》第1卷 p292/p296（PDF p302/p306）"
+    },
+    {
       "id": "flop.mw.overpair.bet",
       "file": "poker_ocr/playbook/cards/harrington_cash_multiway.json",
       "book": "harrington_cash",
@@ -543,6 +563,24 @@
       "source": "《哈林顿在现金桌》第2卷 p45（PDF p51）"
     },
     {
+      "id": "turn.mw.middle_pair.facing_raise",
+      "file": "poker_ocr/playbook/cards/harrington_cash_multiway.json",
+      "book": "harrington_cash",
+      "volume": 2,
+      "chapter": "ch6",
+      "pages": [
+        45
+      ],
+      "pdf_pages": [
+        51
+      ],
+      "confidence": "interpreted",
+      "verdict": "compiled",
+      "quote": "你不能用中对来全压……弃牌吧。",
+      "note": "p45 中对不追；面对加注按约 20% 补牌与 25% 赔率编译为弃牌。",
+      "source": "《哈林顿在现金桌》第2卷 p45（PDF p51）"
+    },
+    {
       "id": "turn.mw.strong_made.bet",
       "file": "poker_ocr/playbook/cards/harrington_cash_multiway.json",
       "book": "harrington_cash",
@@ -612,6 +650,24 @@
       "verdict": "ok",
       "quote": "你的顶对很可能已经落后。弃牌吧。",
       "note": "页码、转述与 confidence 一致。",
+      "source": "《哈林顿在现金桌》第2卷 p24（PDF p30）"
+    },
+    {
+      "id": "turn.mw.top_pair.facing_bet.gutshot",
+      "file": "poker_ocr/playbook/cards/harrington_cash_multiway.json",
+      "book": "harrington_cash",
+      "volume": 2,
+      "chapter": "ch6",
+      "pages": [
+        24
+      ],
+      "pdf_pages": [
+        30
+      ],
+      "confidence": "interpreted",
+      "verdict": "compiled",
+      "quote": "你的顶对很可能已经落后。弃牌吧。",
+      "note": "p24 顶对通常已落后；顶对弱踢+卡顺按约 20% 补牌与 28% 赔率编译为弃牌。",
       "source": "《哈林顿在现金桌》第2卷 p24（PDF p30）"
     },
     {

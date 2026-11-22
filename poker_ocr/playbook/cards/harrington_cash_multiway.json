@@ -77,7 +77,6 @@
         "street": "flop",
         "players": "3+",
         "made_hand": "middle_or_bottom_pair",
-        "draw": "none",
         "facing": "none"
       },
       "plan": {
@@ -118,6 +117,38 @@
       "why": "多人局中对面对下注不追，尽早弃牌（p292）。",
       "confidence": "explicit",
       "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "flop.mw.middle_pair.facing_bet.with_draw",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch5",
+      "pages": [
+        292,
+        296
+      ],
+      "pdf_pages": [
+        302,
+        306
+      ],
+      "street": "flop",
+      "spot": {
+        "street": "flop",
+        "players": "3+",
+        "made_hand": "middle_or_bottom_pair",
+        "facing": "bet"
+      },
+      "plan": {
+        "action": "call",
+        "freq": 1.0,
+        "future": {
+          "turn": "成牌则争取最大价值，未成牌按赔率再评估"
+        }
+      },
+      "why": "多人局中对面对下注默认不追（p292）；带听牌时 9–14 个补牌，20–29% 底池赔率下继续更合理（p296 多人池听牌更愿意玩）。编译基线：call。",
+      "confidence": "interpreted",
+      "priority": 95,
       "offset_policy": "size_only"
     },
     {
@@ -251,6 +282,34 @@
       "offset_policy": "size_only"
     },
     {
+      "id": "turn.mw.top_pair.facing_bet.gutshot",
+      "book": "harrington_cash",
+      "volume": 2,
+      "chapter": "ch6",
+      "pages": [
+        24
+      ],
+      "pdf_pages": [
+        30
+      ],
+      "street": "turn",
+      "spot": {
+        "street": "turn",
+        "players": "3+",
+        "made_hand": "top_pair_weak_kicker",
+        "draw": "gutshot",
+        "facing": "bet"
+      },
+      "plan": {
+        "action": "fold",
+        "freq": 1.0
+      },
+      "why": "顶对弱踢+卡顺约 9 个补牌（20%），28% 底池赔率不够；p24 顶对通常已落后。",
+      "confidence": "interpreted",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
       "id": "turn.mw.strong_made.bet",
       "book": "harrington_cash",
       "volume": 2,
@@ -266,7 +325,6 @@
         "street": "turn",
         "players": "3+",
         "made_hand": "strong_made",
-        "draw": "none",
         "facing": "none"
       },
       "plan": {
@@ -653,6 +711,34 @@
       "offset_policy": "size_only"
     },
     {
+      "id": "turn.mw.middle_pair.facing_raise",
+      "book": "harrington_cash",
+      "volume": 2,
+      "chapter": "ch6",
+      "pages": [
+        45
+      ],
+      "pdf_pages": [
+        51
+      ],
+      "street": "turn",
+      "spot": {
+        "street": "turn",
+        "players": "3+",
+        "made_hand": "middle_or_bottom_pair",
+        "draw": "gutshot",
+        "facing": "raise"
+      },
+      "plan": {
+        "action": "fold",
+        "freq": 1.0
+      },
+      "why": "转牌中对+卡顺约 9 个有效补牌（约 20%），25% 底池赔率不够；p45 中对不追。",
+      "confidence": "interpreted",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
       "id": "turn.mw.top_pair_weak.check",
       "book": "harrington_cash",
       "volume": 2,
@@ -670,7 +756,6 @@
         "street": "turn",
         "players": "3+",
         "made_hand": "top_pair_weak_kicker",
-        "draw": "none",
         "facing": "none"
       },
       "plan": {
@@ -897,7 +982,6 @@
         "street": "flop",
         "players": "3+",
         "made_hand": "top_pair_weak_kicker",
-        "draw": "none",
         "facing": "bet"
       },
       "plan": {
@@ -1167,7 +1251,6 @@
         "street": "turn",
         "players": "3+",
         "made_hand": "top_pair_top_kicker",
-        "draw": "none",
         "facing": "none"
       },
       "plan": {
@@ -1202,7 +1285,6 @@
         "street": "turn",
         "players": "3+",
         "made_hand": "top_pair_top_kicker",
-        "draw": "none",
         "facing": "bet"
       },
       "plan": {
@@ -1233,7 +1315,6 @@
         "street": "turn",
         "players": "3+",
         "made_hand": "top_pair_top_kicker",
-        "draw": "none",
         "facing": "raise"
       },
       "plan": {
@@ -1381,7 +1462,6 @@
         "street": "turn",
         "players": "3+",
         "made_hand": "overpair",
-        "draw": "none",
         "facing": "none"
       },
       "plan": {
