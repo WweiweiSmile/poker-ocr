@@ -47,7 +47,7 @@ class SpotDescriptor:
     street: str                  # preflop|flop|turn|river
     preflop_node: str            # unopened|limped|raised|three_bet|four_bet
     pot_type: str                # 现有 pot_type
-    players: str                 # "2"|"3"|"4+"
+    players: str                 # "2"|"3+"（单挑 / 多人；2026-11-22 起）
     hero_position: str           # 现有位置
     in_position: bool | None
     made_hand: str               # overpair|top_pair|second_pair|third_pair|
@@ -512,3 +512,20 @@ Resolver 规则：
   的 pages/pdf_pages/confidence/file 一致、`pdf = 印刷 + 偏移`、explicit 卡
   必须有 ≥6 字的可定位原文。计数同步：单挑 9、全库 130。
 - 不调用模型、不跑 A/B；OCR 全文不入库，仓库只留短句与页码。
+
+### M11 结果（2026-11-22，#101–#104 补卡）
+
+- `players` 桶从「单挑 / 3 人 / 4+」收成「单挑 / 3+」：书 Ch5 的多路池建议对
+  3 人池与 4+ 是同一条线，再分只会让 3 人池翻后无卡（replay 里 3 人池 flop
+  0/9 命中）。24 张多人卡由 `"4+"` 改挂 `"3+"`。
+- 翻后 `facing` 改为只看本街：本街一次加注 = 「面对下注」，两次及以上激进
+  动作 = 「面对加注」。此前 `facing=raise` 来自翻前 3-bet 池，本街真被加注
+  反而记成 `bet`（#102）；拿不到动作线时兜底 `bet`，绝不猜 `raise`。
+- 新增 21 张缺口卡（多人池）：翻牌成牌面对下注 4 张、翻牌被加注 8 张、
+  转牌顶对强踢/超对 9 张；全部 `interpreted` + `compiled` 台账。全库 151 张。
+- 覆盖（1548 个去重决策点）：1438 → **1483（95.8%）**；flop 88.9%→**97.2%**、
+  turn 86.1%→**92.3%**、preflop 97.0%、river 89.1%。3 人池 25 点 13→**25/25**。
+  余下 65 点：翻前 4-bet/5-bet 与认不出层级 25（故意）、河牌强成牌面对下注
+  12（等 `hand_tier` 拆分，见 #106）、成牌+听牌交叉 11+15（#105）、零散 2。
+- 版本 `lean-zh-2026-11-22.10` / `advice-2026-11-22.10`；3 人池 golden
+  fixture 现在命中书卡，三个 prompt hash 同批更新。

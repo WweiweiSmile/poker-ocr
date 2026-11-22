@@ -35,7 +35,7 @@ def _card(cid="c1", *, street="flop", priority=100, **spot):
 def test_spot_matches_ignores_none_fields():
     card = Spot(street="flop", made_hand="top_pair_top_kicker")
     actual = Spot(street="flop", made_hand="top_pair_top_kicker", board="flush",
-                  players="3")
+                  players="3+")
     assert card.matches(actual)
     assert not Spot(street="turn", made_hand="top_pair_top_kicker").matches(actual)
 
@@ -110,7 +110,7 @@ def test_from_situation_maps_existing_facts():
     spot = Spot.from_situation(sit)
     assert spot.street == "flop"
     assert spot.pot_type == "single_raised"
-    assert spot.players == "3"
+    assert spot.players == "3+"
     assert spot.made_hand == "top_pair_top_kicker"
     assert spot.draw == "flush"
     assert spot.board == "flush"
@@ -173,3 +173,53 @@ def test_frequency_sum_over_one_is_error():
 if __name__ == "__main__":
     import pytest
     raise SystemExit(pytest.main([__file__, "-q"]))
+
+
+def _facing_sit(actions=None, *, to_call=6.0, preflop_shapes=("3-bet",),
+                opponents=3):
+    """构造一个翻后局面；`actions` 为 None 时 snap 没有 actions_of（旧挂载点）。"""
+    snap = {"to_call": to_call, "hero_position": "BB",
+            "preflop_shapes": preflop_shapes}
+    if actions is not None:
+        snap["actions_of"] = lambda street: [
+            SimpleNamespace(action=a) for a in actions]
+    return SimpleNamespace(
+        street="flop", snap=SimpleNamespace(**snap),
+        pot_type="3-bet+ pot", opponents_in_hand=opponents, in_position=False,
+        hand_tier="强成牌", texture="公对面", spr=4.0, has_draw=False,
+        ground_truth=SimpleNamespace(draws=SimpleNamespace(
+            flush_draw=False, straight_draw=False, oesd=False, gutshot=False)),
+    )
+
+
+def test_facing_ignores_preflop_three_bet_pot_when_street_has_one_bet():
+    # #102：翻前 3-bet 池不等于本街被加注；本街一次下注就是 facing=bet
+    spot = Spot.from_situation(_facing_sit(["bet"]))
+    assert spot.pot_type == "three_bet_plus"
+    assert spot.facing == "bet"
+
+
+def test_facing_is_raise_when_street_has_two_aggressive_actions():
+    spot = Spot.from_situation(_facing_sit(["bet", "raise"]))
+    assert spot.facing == "raise"
+    assert Spot.from_situation(_facing_sit(["check", "bet", "all_in"])).facing == "raise"
+    # 落库拼法是 "allin"；两种写法都要算一次激进动作
+    assert Spot.from_situation(_facing_sit(["bet", "allin"])).facing == "raise"
+
+
+def test_facing_falls_back_to_bet_without_action_line():
+    # 拿不到动作线时兜底 bet，绝不猜 raise
+    assert Spot.from_situation(_facing_sit(None)).facing == "bet"
+    assert Spot.from_situation(_facing_sit([])).facing == "bet"
+
+
+def test_facing_none_when_nothing_to_call():
+    assert Spot.from_situation(_facing_sit(["bet"], to_call=0.0)).facing == "none"
+
+
+@pytest.mark.parametrize("opponents,players", [
+    (1, "2"), (2, "3+"), (5, "3+"), (0, "unknown")])
+def test_players_bucket_is_headsup_or_multiway(opponents, players):
+    # #101：书 Ch5 的多路池对 3 人池与 4+ 同线，只分「单挑 / 多人」
+    spot = Spot.from_situation(_facing_sit(["bet"], opponents=opponents))
+    assert spot.players == players

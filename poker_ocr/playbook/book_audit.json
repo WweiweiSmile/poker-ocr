@@ -2403,6 +2403,386 @@
       "quote": "你只要认为可能已拿着最好的牌，就应该考虑下注；越接近坚果下注越大（p82）。",
       "note": "p71 明说「认为可能最好就下注」，升为 explicit；尺寸按 p82。",
       "source": "《哈林顿在现金桌》第2卷 p71、p82（PDF p77、p88）"
+    },
+    {
+      "id": "flop.mw.strong_made.facing_bet",
+      "file": "poker_ocr/playbook/cards/harrington_cash_multiway.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch5",
+      "pages": [
+        301
+      ],
+      "pdf_pages": [
+        311
+      ],
+      "confidence": "interpreted",
+      "verdict": "compiled",
+      "quote": "你不能只在你形成坚果牌或者接近坚果牌时才去下注。",
+      "note": "被下注后加注为编译；p301 只写「成牌要下注」。",
+      "source": "《哈林顿在现金桌》第1卷 p301（PDF p311）"
+    },
+    {
+      "id": "flop.mw.overpair.facing_bet",
+      "file": "poker_ocr/playbook/cards/harrington_cash_multiway.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch5",
+      "pages": [
+        287
+      ],
+      "pdf_pages": [
+        297
+      ],
+      "confidence": "interpreted",
+      "verdict": "compiled",
+      "quote": "你应该下注一个正常的筹码量，比如70-100。",
+      "note": "加注线为编译；p287 只给下注尺寸。",
+      "source": "《哈林顿在现金桌》第1卷 p287（PDF p297）"
+    },
+    {
+      "id": "flop.mw.top_pair_top.facing_bet",
+      "file": "poker_ocr/playbook/cards/harrington_cash_multiway.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch5",
+      "pages": [
+        286
+      ],
+      "pdf_pages": [
+        296
+      ],
+      "confidence": "interpreted",
+      "verdict": "compiled",
+      "quote": "拿着超对或顶对，通常都愿意在翻牌下注。",
+      "note": "跟注为编译；p286 写的是「愿意下注」。",
+      "source": "《哈林顿在现金桌》第1卷 p286（PDF p296）"
+    },
+    {
+      "id": "flop.mw.top_pair_weak.facing_bet",
+      "file": "poker_ocr/playbook/cards/harrington_cash_multiway.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch5",
+      "pages": [
+        284
+      ],
+      "pdf_pages": [
+        294
+      ],
+      "confidence": "interpreted",
+      "verdict": "compiled",
+      "quote": "弱踢顶对在三人未行动时过牌也受赞赏。",
+      "note": "跟注为编译；p284 讲的是无人下注时过牌也受赞赏。",
+      "source": "《哈林顿在现金桌》第1卷 p284（PDF p294）"
+    },
+    {
+      "id": "flop.mw.air.facing_raise",
+      "file": "poker_ocr/playbook/cards/harrington_cash_multiway.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch5",
+      "pages": [
+        294
+      ],
+      "pdf_pages": [
+        304
+      ],
+      "confidence": "interpreted",
+      "verdict": "compiled",
+      "quote": "他不能在面对四个玩家时去做什么动作，他也选择过牌。",
+      "note": "「本街被加注」由两次以上激进动作判定（#102）；弃牌为 p294「做不了动作」的延伸。",
+      "source": "《哈林顿在现金桌》第1卷 p294（PDF p304）"
+    },
+    {
+      "id": "flop.mw.overpair.facing_raise",
+      "file": "poker_ocr/playbook/cards/harrington_cash_multiway.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch5",
+      "pages": [
+        287
+      ],
+      "pdf_pages": [
+        297
+      ],
+      "confidence": "interpreted",
+      "verdict": "compiled",
+      "quote": "你应该下注一个正常的筹码量，比如70-100。",
+      "note": "跟注为编译；p287 未写被加注。",
+      "source": "《哈林顿在现金桌》第1卷 p287（PDF p297）"
+    },
+    {
+      "id": "flop.mw.middle_pair.facing_raise",
+      "file": "poker_ocr/playbook/cards/harrington_cash_multiway.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch5",
+      "pages": [
+        292
+      ],
+      "pdf_pages": [
+        302
+      ],
+      "confidence": "interpreted",
+      "verdict": "compiled",
+      "quote": "你应该弃牌。玩家C在还有三个人未行动的情况下下注，表明他一定有些什么。",
+      "note": "被加注为编译延伸；书例面对一次下注。",
+      "source": "《哈林顿在现金桌》第1卷 p292（PDF p302）"
+    },
+    {
+      "id": "flop.mw.strong_made.facing_raise",
+      "file": "poker_ocr/playbook/cards/harrington_cash_multiway.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch5",
+      "pages": [
+        301
+      ],
+      "pdf_pages": [
+        311
+      ],
+      "confidence": "interpreted",
+      "verdict": "compiled",
+      "quote": "你不能只在你形成坚果牌或者接近坚果牌时才去下注。",
+      "note": "再加注为编译；p301 只讲成牌要下注。",
+      "source": "《哈林顿在现金桌》第1卷 p301（PDF p311）"
+    },
+    {
+      "id": "flop.mw.board_play.facing_raise",
+      "file": "poker_ocr/playbook/cards/harrington_cash_multiway.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch5",
+      "pages": [
+        293
+      ],
+      "pdf_pages": [
+        303
+      ],
+      "confidence": "interpreted",
+      "verdict": "compiled",
+      "quote": "中对和小于顶对的口袋对子，都不应该在多人底池中走太远。",
+      "note": "被加注为编译延伸；p293 讲弱成牌不追。",
+      "source": "《哈林顿在现金桌》第1卷 p293（PDF p303）"
+    },
+    {
+      "id": "flop.mw.top_pair_top.facing_raise",
+      "file": "poker_ocr/playbook/cards/harrington_cash_multiway.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch5",
+      "pages": [
+        286
+      ],
+      "pdf_pages": [
+        296
+      ],
+      "confidence": "interpreted",
+      "verdict": "compiled",
+      "quote": "拿着超对或顶对，通常都愿意在翻牌下注。",
+      "note": "跟注为编译。",
+      "source": "《哈林顿在现金桌》第1卷 p286（PDF p296）"
+    },
+    {
+      "id": "flop.mw.top_pair_weak.facing_raise",
+      "file": "poker_ocr/playbook/cards/harrington_cash_multiway.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch5",
+      "pages": [
+        292
+      ],
+      "pdf_pages": [
+        302
+      ],
+      "confidence": "interpreted",
+      "verdict": "compiled",
+      "quote": "你应该弃牌。玩家C在还有三个人未行动的情况下下注，表明他一定有些什么。",
+      "note": "被加注为编译延伸。",
+      "source": "《哈林顿在现金桌》第1卷 p292（PDF p302）"
+    },
+    {
+      "id": "flop.mw.draw.facing_raise",
+      "file": "poker_ocr/playbook/cards/harrington_cash_multiway.json",
+      "book": "harrington_cash",
+      "volume": 1,
+      "chapter": "ch5",
+      "pages": [
+        296
+      ],
+      "pdf_pages": [
+        306
+      ],
+      "confidence": "interpreted",
+      "verdict": "compiled",
+      "quote": "你经常可以不用投入而免费听牌。",
+      "note": "被加注仍跟为编译；p296 讲的是可以免费听牌。",
+      "source": "《哈林顿在现金桌》第1卷 p296（PDF p306）"
+    },
+    {
+      "id": "turn.mw.top_pair_top.bet",
+      "file": "poker_ocr/playbook/cards/harrington_cash_multiway.json",
+      "book": "harrington_cash",
+      "volume": 2,
+      "chapter": "ch6",
+      "pages": [
+        5
+      ],
+      "pdf_pages": [
+        11
+      ],
+      "confidence": "interpreted",
+      "verdict": "compiled",
+      "quote": "转牌的价值下注比翻牌的价值下注更大；听牌隐含赔率更高。",
+      "note": "2/3 池为编译尺度；p5 只讲转牌价值下注更大。",
+      "source": "《哈林顿在现金桌》第2卷 p5（PDF p11）"
+    },
+    {
+      "id": "turn.mw.top_pair_top.facing_bet",
+      "file": "poker_ocr/playbook/cards/harrington_cash_multiway.json",
+      "book": "harrington_cash",
+      "volume": 2,
+      "chapter": "ch6",
+      "pages": [
+        24
+      ],
+      "pdf_pages": [
+        30
+      ],
+      "confidence": "interpreted",
+      "verdict": "compiled",
+      "quote": "你的顶对很可能已经落后。弃牌吧。",
+      "note": "p24 讲弱踢弃牌；强踢跟注为编译。",
+      "source": "《哈林顿在现金桌》第2卷 p24（PDF p30）"
+    },
+    {
+      "id": "turn.mw.top_pair_top.facing_raise",
+      "file": "poker_ocr/playbook/cards/harrington_cash_multiway.json",
+      "book": "harrington_cash",
+      "volume": 2,
+      "chapter": "ch6",
+      "pages": [
+        24
+      ],
+      "pdf_pages": [
+        30
+      ],
+      "confidence": "interpreted",
+      "verdict": "compiled",
+      "quote": "你的顶对很可能已经落后。弃牌吧。",
+      "note": "跟注为编译。",
+      "source": "《哈林顿在现金桌》第2卷 p24（PDF p30）"
+    },
+    {
+      "id": "turn.mw.top_pair_weak.facing_raise",
+      "file": "poker_ocr/playbook/cards/harrington_cash_multiway.json",
+      "book": "harrington_cash",
+      "volume": 2,
+      "chapter": "ch6",
+      "pages": [
+        24
+      ],
+      "pdf_pages": [
+        30
+      ],
+      "confidence": "interpreted",
+      "verdict": "compiled",
+      "quote": "你的顶对很可能已经落后。弃牌吧。",
+      "note": "被加注为编译延伸。",
+      "source": "《哈林顿在现金桌》第2卷 p24（PDF p30）"
+    },
+    {
+      "id": "turn.mw.draw.facing_raise",
+      "file": "poker_ocr/playbook/cards/harrington_cash_multiway.json",
+      "book": "harrington_cash",
+      "volume": 2,
+      "chapter": "ch6",
+      "pages": [
+        5
+      ],
+      "pdf_pages": [
+        11
+      ],
+      "confidence": "interpreted",
+      "verdict": "compiled",
+      "quote": "转牌的价值下注比翻牌的价值下注更大；听牌隐含赔率更高。",
+      "note": "被加注仍跟为编译。",
+      "source": "《哈林顿在现金桌》第2卷 p5（PDF p11）"
+    },
+    {
+      "id": "turn.mw.board_play.facing_raise",
+      "file": "poker_ocr/playbook/cards/harrington_cash_multiway.json",
+      "book": "harrington_cash",
+      "volume": 2,
+      "chapter": "ch6",
+      "pages": [
+        24
+      ],
+      "pdf_pages": [
+        30
+      ],
+      "confidence": "interpreted",
+      "verdict": "compiled",
+      "quote": "你的顶对很可能已经落后。弃牌吧。",
+      "note": "被加注为编译延伸。",
+      "source": "《哈林顿在现金桌》第2卷 p24（PDF p30）"
+    },
+    {
+      "id": "turn.mw.overpair.facing_raise",
+      "file": "poker_ocr/playbook/cards/harrington_cash_multiway.json",
+      "book": "harrington_cash",
+      "volume": 2,
+      "chapter": "ch6",
+      "pages": [
+        24
+      ],
+      "pdf_pages": [
+        30
+      ],
+      "confidence": "interpreted",
+      "verdict": "compiled",
+      "quote": "你的顶对很可能已经落后。弃牌吧。",
+      "note": "跟注为编译。",
+      "source": "《哈林顿在现金桌》第2卷 p24（PDF p30）"
+    },
+    {
+      "id": "turn.mw.overpair.bet",
+      "file": "poker_ocr/playbook/cards/harrington_cash_multiway.json",
+      "book": "harrington_cash",
+      "volume": 2,
+      "chapter": "ch6",
+      "pages": [
+        5
+      ],
+      "pdf_pages": [
+        11
+      ],
+      "confidence": "interpreted",
+      "verdict": "compiled",
+      "quote": "转牌的价值下注比翻牌的价值下注更大；听牌隐含赔率更高。",
+      "note": "2/3 池为编译尺度。",
+      "source": "《哈林顿在现金桌》第2卷 p5（PDF p11）"
+    },
+    {
+      "id": "turn.mw.air.facing_raise",
+      "file": "poker_ocr/playbook/cards/harrington_cash_multiway.json",
+      "book": "harrington_cash",
+      "volume": 2,
+      "chapter": "ch6",
+      "pages": [
+        58,
+        59
+      ],
+      "pdf_pages": [
+        64,
+        65
+      ],
+      "confidence": "interpreted",
+      "verdict": "compiled",
+      "quote": "稳妥的做法是弃牌。 弃牌吧。",
+      "note": "被加注为编译延伸；p58-59 讲落后就弃。",
+      "source": "《哈林顿在现金桌》第2卷 p58 p59（PDF p64 p65）"
     }
   ],
   "removed": [

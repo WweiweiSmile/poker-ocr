@@ -67,23 +67,23 @@ def test_each_river_card_resolves_to_itself():
 
 
 @pytest.mark.parametrize("spot, expected", [
-    (Spot(street="river", players="4+", made_hand="strong_made", facing="none"),
+    (Spot(street="river", players="3+", made_hand="strong_made", facing="none"),
      "river.value.strong_made.bet"),
-    (Spot(street="river", players="4+", made_hand="air", facing="none"),
+    (Spot(street="river", players="3+", made_hand="air", facing="none"),
      "river.bluff.air.bet"),
-    (Spot(street="river", players="4+", made_hand="air", facing="bet"),
+    (Spot(street="river", players="3+", made_hand="air", facing="bet"),
      "river.bluff.air.facing_bet"),
-    (Spot(street="river", players="4+", made_hand="middle_or_bottom_pair",
+    (Spot(street="river", players="3+", made_hand="middle_or_bottom_pair",
           facing="bet"), "river.bluff_catch.middle_pair.facing_bet"),
-    (Spot(street="river", players="4+", made_hand="top_pair_weak_kicker",
+    (Spot(street="river", players="3+", made_hand="top_pair_weak_kicker",
           facing="bet"), "river.bluff_catch.top_pair_weak.facing_bet"),
-    (Spot(street="river", players="4+", made_hand="board_play", facing="bet"),
+    (Spot(street="river", players="3+", made_hand="board_play", facing="bet"),
      "river.fold.board_play.facing_bet"),
-    (Spot(street="river", players="4+", made_hand="middle_or_bottom_pair",
+    (Spot(street="river", players="3+", made_hand="middle_or_bottom_pair",
           facing="none"), "river.check.middle_pair"),
-    (Spot(street="river", players="4+", made_hand="board_play", facing="none"),
+    (Spot(street="river", players="3+", made_hand="board_play", facing="none"),
      "river.check.board_play"),
-    (Spot(street="river", players="4+", made_hand="top_pair_weak_kicker",
+    (Spot(street="river", players="3+", made_hand="top_pair_weak_kicker",
           facing="none"), "river.check.top_pair_weak"),
 ])
 def test_river_bucket_hits_its_card(spot, expected):
@@ -103,7 +103,7 @@ def test_river_cards_also_cover_three_handed():
 
 
 def test_river_cards_do_not_leak_to_turn():
-    got = resolve(_all_cards(), Spot(street="turn", players="4+",
+    got = resolve(_all_cards(), Spot(street="turn", players="3+",
                                      made_hand="air", draw="none",
                                      facing="none"))
     assert got.card is not None
@@ -174,7 +174,7 @@ def _river_sit(**overrides):
 
 def test_river_value_bet_renders_plan_and_pages():
     text = render_book_plan_text(_river_sit(hand_tier="强成牌"))
-    assert "河牌 / 4+ 人 / 强成牌 / 无人下注" in text
+    assert "河牌 / 3+ 人 / 强成牌 / 无人下注" in text
     assert "计划: 下注 0.67 池（第 2 卷 p71 / p82，书中明确）" in text
     assert "书中无此局面" not in text
 
@@ -182,7 +182,7 @@ def test_river_value_bet_renders_plan_and_pages():
 def test_river_bluff_renders_bet_with_check_mix():
     # 书里标准是过牌；诈唬只在特定条件下，卡里用 50% 混合表达，不落成无条件下注。
     text = render_book_plan_text(_river_sit(hand_tier="空气"))
-    assert "河牌 / 4+ 人 / 空气 / 无人下注" in text
+    assert "河牌 / 3+ 人 / 空气 / 无人下注" in text
     assert "计划: 下注 0.67 池（第 2 卷 p78 / p82，编译归纳）" in text
     assert "混合: 过牌，频率 50%" in text
 
@@ -193,7 +193,7 @@ def test_river_bluff_catch_renders_call():
         snap=SimpleNamespace(preflop_shapes=("single-raise",), to_call=7.5,
                              hero_position="BB"),
     ))
-    assert "河牌 / 4+ 人 / 中/底对 / 面对下注" in text
+    assert "河牌 / 3+ 人 / 中/底对 / 面对下注" in text
     assert "计划: 跟注（第 2 卷 p75 / p85，编译归纳）" in text
 
 
@@ -210,7 +210,7 @@ def test_strong_made_facing_bet_is_deliberately_unmatched():
 
 def test_river_board_play_without_bet_renders_check():
     text = render_book_plan_text(_river_sit(hand_tier="打牌面"))
-    assert "河牌 / 4+ 人 / 打牌面 / 无人下注" in text
+    assert "河牌 / 3+ 人 / 打牌面 / 无人下注" in text
     assert "计划: 过牌（第 2 卷 p74，编译归纳）" in text
 
 
@@ -220,7 +220,7 @@ def test_river_air_facing_bet_renders_fold():
         snap=SimpleNamespace(preflop_shapes=("single-raise",), to_call=7.5,
                              hero_position="BB"),
     ))
-    assert "河牌 / 4+ 人 / 空气 / 面对下注" in text
+    assert "河牌 / 3+ 人 / 空气 / 面对下注" in text
     assert "计划: 弃牌（第 2 卷 p78，书中明确）" in text
 
 

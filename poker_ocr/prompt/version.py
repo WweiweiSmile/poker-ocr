@@ -186,5 +186,12 @@ from __future__ import annotations
 # 会把 QQ 也说成 4-bet。新增库 87 张翻前卡（原 70 张 + 拆出的 3 张 + 面对
 # 3-bet 的 14 张），4-bet/5-bet 仍显式 unknown。golden fixture 全是 flop，
 # 三个 hash 不变。
-PROMPT_VERSION = "lean-zh-2026-11-19.9"
+# 2026-11-22.10：人数桶收成「单挑 / 3+」+ 翻后 facing 只看本街 + 补 21 张缺口卡
+# （#101/#102/#103/#104）。人数：书 Ch5 的多路池对 3 人池与 4+ 同线，再分只会让
+# 3 人池翻后无卡（replay 里 3 人池 flop 0/9 命中）；24 张多人卡改挂 "3+"。
+# facing：一次本街加注是「面对下注」，两次及以上才是「面对加注」；此前把翻前
+# 3-bet 池当成「本街被加注」，真被加注反而记成 facing=bet（#102）。新增卡：
+# 翻牌成牌面对下注 4 张、翻牌被加注 8 张、转牌顶对强踢/超对 9 张。system 未动，
+# 但 3 人池 golden fixture 现在会命中书卡，三个 hash 随之更新。
+PROMPT_VERSION = "lean-zh-2026-11-22.10"
 PROMPT_LANGUAGE = "zh"

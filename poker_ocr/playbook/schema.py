@@ -29,7 +29,9 @@ from .hand_class import (
 STREETS = ("preflop", "flop", "turn", "river")
 PREFLOP_NODES = ("unopened", "limped", "raised", "three_bet", "four_bet", "unknown")
 POT_TYPES = ("unopened", "limped", "single_raised", "three_bet_plus", "bomb", "unknown")
-PLAYERS = ("2", "3", "4+", "unknown")
+# 人数只分两档：单挑（1 个对手）与多人池（2 个以上对手）。书 Ch5 的
+# 多路池建议对 3 人池和 4+ 人池是同一条线，再细分只会让 3 人池无卡（#101）。
+PLAYERS = ("2", "3+", "unknown")
 IN_POSITION = (True, False)
 MADE_HANDS = (
     "strong_made", "overpair", "top_pair_top_kicker", "top_pair_weak_kicker",
@@ -68,9 +70,7 @@ def _bucket_players(opponents_in_hand: Any) -> str:
         return "unknown"
     if n == 1:
         return "2"
-    if n == 2:
-        return "3"
-    return "4+"
+    return "3+"
 
 
 def _bucket_spr(spr: Any) -> str:
@@ -143,8 +143,10 @@ def _norm_draw(sit: Any) -> str:
     return "other" if getattr(sit, "has_draw", False) else "none"
 
 
-# 翻前的加注动作；与 preflop_shapes 的口径一致（bet/raise 一定算加注）。
-_AGGRESSIVE_ACTIONS = ("bet", "raise", "all_in")
+# 会「把钱推进底池、逼后面的人跟或弃」的动作；与 preflop_shapes 的口径一致。
+# 落库的手牌里全下记作 "allin"（hand_track / coach.AGGRESSIVE），场景词表里
+# 写作 "all_in"，两种拼法都要认，否则全下会被当成没发生。
+_AGGRESSIVE_ACTIONS = ("bet", "raise", "allin", "all_in")
 
 # 加注次数 -> 面对层级：开池(1)+3-bet(2) 就是「面对 3-bet」，再往上同理。
 _FACING_LEVEL_BY_RAISES = {2: "three_bet", 3: "four_bet", 4: "five_bet"}
@@ -172,6 +174,23 @@ def _preflop_raises(snap: Any) -> tuple[Any, ...]:
 
 def _facing_level(raises: tuple[Any, ...]) -> str:
     return _FACING_LEVEL_BY_RAISES.get(len(raises), "unknown")
+
+
+def _street_aggressive_count(snap: Any, street: str) -> int | None:
+    """本街的加注次数（bet/raise/all_in）；拿不到动作线返回 None。
+
+    翻后的 `facing` 只看本街：一次加注是「面对下注」，两次及以上才是
+    「面对加注」。翻前 3-bet 池不算本街加注——那属于 `facing_level`（#102）。
+    """
+    getter = getattr(snap, "actions_of", None)
+    if not callable(getter):
+        return None
+    try:
+        actions = tuple(getter(street) or ())
+    except (KeyError, TypeError):
+        return None
+    return sum(1 for action in actions
+               if getattr(action, "action", "") in _AGGRESSIVE_ACTIONS)
 
 
 def _hero_role(raises: tuple[Any, ...]) -> str:
@@ -281,8 +300,18 @@ class Spot:
         facing = "unknown"
         to_call = getattr(snap, "to_call", None)
         if to_call is not None:
-            facing = "none" if float(to_call) <= 0 else (
-                "raise" if preflop_node in ("three_bet", "four_bet") else "bet")
+            if float(to_call) <= 0:
+                facing = "none"
+            elif street == "preflop":
+                # 翻前按底池层级记：3-bet 池里面对下注就是「面对加注」。
+                facing = ("raise" if preflop_node in ("three_bet", "four_bet")
+                          else "bet")
+            else:
+                # 翻后只看本街动作（#102）：拿不到动作线时按「面对下注」兜底，
+                # 因为 to_call>0 至少说明有人下过注；绝不猜成 raise。
+                raises = _street_aggressive_count(snap, street)
+                facing = ("raise" if raises is not None and raises >= 2
+                          else "bet")
         spr = getattr(sit, "spr", None)
         spr_bucket = _bucket_spr(spr)
         commitment = ("unknown" if spr_bucket == "unknown"

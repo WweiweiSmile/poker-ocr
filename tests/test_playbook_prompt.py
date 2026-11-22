@@ -27,7 +27,7 @@ def test_multiway_strong_made_renders_book_plan():
     lines = render_book_plan_zh(_sit())
     text = "\n".join(lines)
     assert lines[0] == "## 书中计划（Harrington 现金桌）"
-    assert "4+ 人" in text and "强成牌" in text
+    assert "3+ 人" in text and "强成牌" in text
     assert "计划: 下注 0.67 池" in text
     assert "p301" in text
     assert "书中无此局面" not in text

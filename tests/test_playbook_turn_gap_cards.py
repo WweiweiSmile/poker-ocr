@@ -45,7 +45,7 @@ def _card(card_id):
 
 @pytest.mark.parametrize("draw", ["gutshot", "oesd", "flush", "combo"])
 def test_turn_draw_without_bet_is_bet(draw):
-    got = resolve(_cards(), Spot(street="turn", players="4+", made_hand="draw",
+    got = resolve(_cards(), Spot(street="turn", players="3+", made_hand="draw",
                                  draw=draw, facing="none"))
     assert got.card is not None
     assert got.card.id == "turn.mw.draw.bet"
@@ -54,24 +54,24 @@ def test_turn_draw_without_bet_is_bet(draw):
 def test_turn_draw_without_bet_also_covers_three_handed():
     # replay 里还有两个 3 人池的听牌无人下注点；这张卡不按人数分流
     # （Ch6 的转牌建议本身没按人数切），否则它们仍落在「书中无此局面」。
-    got = resolve(_cards(), Spot(street="turn", players="3", made_hand="draw",
+    got = resolve(_cards(), Spot(street="turn", players="3+", made_hand="draw",
                                  draw="flush", facing="none"))
     assert got.card is not None
     assert got.card.id == "turn.mw.draw.bet"
 
 
 @pytest.mark.parametrize("spot, expected", [
-    (Spot(street="turn", players="4+", made_hand="board_play", facing="none"),
+    (Spot(street="turn", players="3+", made_hand="board_play", facing="none"),
      "turn.mw.board_play.check"),
-    (Spot(street="turn", players="4+", made_hand="middle_or_bottom_pair",
+    (Spot(street="turn", players="3+", made_hand="middle_or_bottom_pair",
           facing="bet"), "turn.mw.middle_pair.facing_bet"),
-    (Spot(street="turn", players="4+", made_hand="top_pair_weak_kicker",
+    (Spot(street="turn", players="3+", made_hand="top_pair_weak_kicker",
           draw="none", facing="none"), "turn.mw.top_pair_weak.check"),
-    (Spot(street="turn", players="4+", made_hand="strong_made", facing="bet"),
+    (Spot(street="turn", players="3+", made_hand="strong_made", facing="bet"),
      "turn.mw.strong_made.facing_bet"),
-    (Spot(street="turn", players="4+", made_hand="strong_made", facing="raise"),
+    (Spot(street="turn", players="3+", made_hand="strong_made", facing="raise"),
      "turn.mw.strong_made.facing_raise"),
-    (Spot(street="turn", players="4+", made_hand="board_play", facing="bet"),
+    (Spot(street="turn", players="3+", made_hand="board_play", facing="bet"),
      "turn.mw.board_play.facing_bet"),
 ])
 def test_turn_gap_spot_hits_its_card(spot, expected):
@@ -130,7 +130,7 @@ def _turn_sit(**overrides):
 
 def test_turn_draw_renders_plan_and_source_page():
     text = render_book_plan_text(_turn_sit())
-    assert "转牌 / 4+ 人 / 听牌 / 无人下注" in text
+    assert "转牌 / 3+ 人 / 听牌 / 无人下注" in text
     assert "计划: 下注 0.67 池（第 2 卷 p60，编译归纳）" in text
     assert "书中无此局面" not in text
 
@@ -143,7 +143,7 @@ def test_turn_middle_pair_facing_bet_renders_fold():
         snap=SimpleNamespace(preflop_shapes=("single-raise",), to_call=7.5,
                              hero_position="BB"),
     ))
-    assert "转牌 / 4+ 人 / 中/底对 / 面对下注" in text
+    assert "转牌 / 3+ 人 / 中/底对 / 面对下注" in text
     assert "计划: 弃牌（第 2 卷 p45，编译归纳）" in text
 
 
@@ -153,7 +153,7 @@ def test_turn_board_play_without_bet_renders_check():
         ground_truth=SimpleNamespace(draws=SimpleNamespace(
             flush_draw=False, straight_draw=False, oesd=False, gutshot=False)),
     ))
-    assert "转牌 / 4+ 人 / 打牌面 / 无人下注" in text
+    assert "转牌 / 3+ 人 / 打牌面 / 无人下注" in text
     assert "计划: 过牌（第 2 卷 p21，编译归纳）" in text
 
 
@@ -165,7 +165,7 @@ def _no_draw():
 def test_turn_top_pair_weak_renders_check():
     text = render_book_plan_text(_turn_sit(
         hand_tier="顶对弱踢", has_draw=False, ground_truth=_no_draw()))
-    assert "转牌 / 4+ 人 / 顶对弱踢 / 无人下注" in text
+    assert "转牌 / 3+ 人 / 顶对弱踢 / 无人下注" in text
     assert "计划: 过牌（第 2 卷 p46 / p47，编译归纳）" in text
 
 
@@ -175,19 +175,36 @@ def test_turn_strong_made_facing_bet_renders_raise():
         snap=SimpleNamespace(preflop_shapes=("single-raise",), to_call=5.0,
                              hero_position="BB"),
     ))
-    assert "转牌 / 4+ 人 / 强成牌 / 面对下注" in text
+    assert "转牌 / 3+ 人 / 强成牌 / 面对下注" in text
     assert "计划: 加注 1 池（第 2 卷 p12，编译归纳）" in text
 
 
-def test_turn_strong_made_in_three_bet_pot_renders_raise():
+def test_turn_strong_made_facing_raise_renders_raise():
+    # 本街被加注（两次及以上激进动作）才落 facing=raise 卡（#102）
+    actions = [
+        SimpleNamespace(action="bet", is_hero=True, amount=5.0),
+        SimpleNamespace(action="raise", is_hero=False, amount=15.0),
+    ]
+    text = render_book_plan_text(_turn_sit(
+        hand_tier="强成牌", has_draw=False, ground_truth=_no_draw(),
+        snap=SimpleNamespace(preflop_shapes=("single-raise",), to_call=10.0,
+                             hero_position="BB",
+                             actions_of=lambda street: actions),
+    ))
+    assert "转牌 / 3+ 人 / 强成牌 / 面对加注" in text
+    assert "计划: 加注 1 池（第 2 卷 p35，编译归纳）" in text
+
+
+def test_turn_three_bet_pot_single_bet_is_not_facing_raise():
+    # 翻前 3-bet 池不再冒充本街被加注：本街只有一次下注仍是 facing=bet（#102）
     text = render_book_plan_text(_turn_sit(
         pot_type="3-bet+ pot", hand_tier="强成牌", has_draw=False,
         ground_truth=_no_draw(),
         snap=SimpleNamespace(preflop_shapes=("3-bet",), to_call=10.0,
                              hero_position="BB"),
     ))
-    assert "转牌 / 4+ 人 / 强成牌 / 面对加注" in text
-    assert "计划: 加注 1 池（第 2 卷 p35，编译归纳）" in text
+    assert "转牌 / 3+ 人 / 强成牌 / 面对下注" in text
+    assert "计划: 加注 1 池（第 2 卷 p12，编译归纳）" in text
 
 
 def test_turn_board_play_facing_bet_renders_fold():
@@ -196,7 +213,7 @@ def test_turn_board_play_facing_bet_renders_fold():
         snap=SimpleNamespace(preflop_shapes=("single-raise",), to_call=7.5,
                              hero_position="BB"),
     ))
-    assert "转牌 / 4+ 人 / 打牌面 / 面对下注" in text
+    assert "转牌 / 3+ 人 / 打牌面 / 面对下注" in text
     assert "计划: 弃牌（第 2 卷 p24，编译归纳）" in text
 
 

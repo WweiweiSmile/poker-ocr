@@ -5,7 +5,7 @@
 
 覆盖四组：
   1. 与 replay 同一条生产路径（`build_situation` → `build_messages`）上，
-     4+ 人池翻牌强成牌的 `build_messages()` 真的出现
+     3+ 人池翻牌强成牌的 `build_messages()` 真的出现
      「## 书中计划」，局面/计划/理由/来源可读，且旧段与 options 契约不动；
      快照按 replay 导入格式手搓（本地无决策库），不是 mock 渲染器；
   2. 零匹配写「书中无此局面」，整段不出现任何书页数字；
@@ -51,7 +51,7 @@ def check(cond: bool, msg: str) -> None:
 
 
 def _multiway_snapshot(*, street: str = "flop", to_call: float = 0.0) -> HandSnapshot:
-    """4+ 人池、hero 拿 KK 击中暗三：replay 里最常见的强成牌节点。"""
+    """3+ 人池（3 名对手）、hero 拿 KK 击中暗三：replay 里最常见的强成牌节点。"""
     board = {"flop": ("Ks", "7d", "2c"), "turn": ("Ks", "7d", "2c", "9h"),
              "river": ("Ks", "7d", "2c", "9h", "3s")}[street]
     opponents = tuple(
@@ -108,7 +108,7 @@ def test_replay_decision_prompt_contains_readable_book_plan() -> None:
     section = _section(user)
     lines = section.split("\n")
     check(lines[0] == BOOK_HEADER, f"段首必须是标题：{lines[0]!r}")
-    check(any(line.startswith("局面: 翻牌 / 4+ 人 / 强成牌")
+    check(any(line.startswith("局面: 翻牌 / 3+ 人 / 强成牌")
               for line in lines), f"局面行不可读：{section}")
     plan_lines = [line for line in lines if line.startswith("计划: ")]
     check(len(plan_lines) == 1, f"计划行应恰好一行：{plan_lines}")

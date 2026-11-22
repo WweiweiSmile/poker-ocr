@@ -23,7 +23,7 @@ def _all_cards():
 
 def test_multiway_cards_validate():
     cards = load_cards(MULTIWAY)
-    assert len(cards) == 25
+    assert len(cards) == 46
     assert validate_cards(cards) == []
 
 
@@ -35,9 +35,9 @@ def test_each_multiway_card_resolves_to_itself():
         assert got.card.id == card.id, card.id
 
 
-def test_multiway_beats_headsup_on_four_plus_players():
+def test_multiway_beats_headsup_on_three_plus_players():
     cards = _all_cards()
-    spot = Spot(street="flop", players="4+", made_hand="air", draw="none", facing="none")
+    spot = Spot(street="flop", players="3+", made_hand="air", draw="none", facing="none")
     got = resolve(cards, spot)
     assert got.card is not None
     assert got.card.id == "flop.mw.air.check"
@@ -45,7 +45,7 @@ def test_multiway_beats_headsup_on_four_plus_players():
 
 def test_all_cards_validate_together():
     cards = _all_cards()
-    assert len(cards) == 130  # 9 单挑 + 25 多人 + 87 翻前 + 9 河牌（#83/#84/#85/#91）
+    assert len(cards) == 151  # 9 单挑 + 46 多人 + 87 翻前 + 9 河牌（#83/#84/#85/#91）
     assert validate_cards(cards) == []
 
 if __name__ == "__main__":
