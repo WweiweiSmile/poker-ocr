@@ -217,7 +217,7 @@ Resolver 规则：
 - M5 用户 A/B，决定是否扩到 Ch3/Ch5/Ch7
 - M6 翻前书卡（#87，完成；Ch3 的 RFI / 面对加注 / 溜入池三桶，70 张）
 - M7 转牌缺口卡（#83，完成；7 张，flop+turn 覆盖 520/591 = 88.0%）
-- M8 河牌书卡（#84，完成；9 张，river 覆盖 115/129 = 89.1%，14 点故意留空）
+- M8 河牌书卡（#84，完成；#106 后 12 张，river 覆盖 127/129 = 98.4%，2 点故意留空）
 - M10 书页逐条回查（#85，完成；130 张 live 卡逐张台账，移出 1 张无法核实卡）
 
 ### M2 结果（2026-11-19）
@@ -386,17 +386,22 @@ Resolver 规则：
   - 弃牌：`river.fold.board_play.facing_bet` → 弃牌（只打牌面只能分池，
     3.7 无价值弃牌 p78）。
 - 覆盖（`nv tools/book_coverage.py --streets river`，129 个去重河牌决策点）：
-  命中 115（89.1%），书中无此局面 14，坏行 0；选项缺动作档 0，`choose_option`
-  选档失败 0。逐卡命中：value.strong_made.bet 31、check.board_play 25、
-  bluff.air.bet 22、check.middle_pair 20、bluff_catch.middle_pair 6、
-  check.top_pair_weak 5、bluff.air.facing_bet 2、fold.board_play 2、
-  bluff_catch.top_pair_weak 2。
-- 故意留空的 14 点（不写卡，渲染回「书中无此局面」，不硬塞会错一半的基线）：
-  - **strong_made 面对下注 12 点**：书的河牌「中等牌力」明确含两对（p84），
-    「强牌」才加注（p85）；`hand_tier=强成牌` 把两对与三条/顺/葫芦并在一起，
-    这 12 点里 6 个是两对、6 个是三条以上。一张卡只能二选一：跟注会少收
-    三条以上的价值，加注会让两对被更强牌反噬。等 `Spot` 能拆「两对」与
-    「三条以上」时再补两张。
+  #106 后命中 127（98.4%），书中无此局面 2，坏行 0；选项缺动作档 0，
+  `choose_option` 选档失败 0。逐卡命中：value.strong_made.bet 31、
+  check.board_play 25、bluff.air.bet 22、check.middle_pair 20、
+  bluff_catch.middle_pair 6、two_pair.facing_bet 6、check.top_pair_weak 5、
+  trips_plus.facing_bet 4、bluff.air.facing_bet 2、trips_plus.facing_raise 2、
+  fold.board_play 2、bluff_catch.top_pair_weak 2。
+- 已补（#106，2026-11-22）：书在河牌把「两对」归中等（p84）、「三条以上」归
+  强牌（p85），面对下注一个跟注控池、一个加注收价值。`hand_tier` 是策略表/
+  弃牌率/buckets 共用的粗档，不动；`Spot` 增派生维 `made_hand_detail`，由
+  `Situation.category` 派生 `two_pair`（2）/`trips_plus`（3+），算不出 category
+  时为 None（fail open）。补 3 张卡：
+  `river.two_pair.facing_bet` → 跟注、
+  `river.trips_plus.facing_bet` → 加注 1 池、
+  `river.trips_plus.facing_raise` → 加注 1 池；尺寸与转牌强成牌加注口径一致。
+  两对面对加注（0 点）不落卡，留待有数据再议。
+- 仍故意留空 2 点（不写卡，渲染回「书中无此局面」，不硬塞会错一半的基线）：
   - **top_pair_top_kicker 无人下注 2 点**：p71 说「认为可能最好就下注」，
     p84 又说顶对好踢在河牌已降为中等牌力；书没有给出无位置/无下注时的
     明确分支，故不落卡。
@@ -526,7 +531,8 @@ Resolver 规则：
 - 覆盖（1548 个去重决策点）：1438 → **1483（95.8%）**；flop 88.9%→**97.2%**、
   turn 86.1%→**92.3%**、preflop 97.0%、river 89.1%。3 人池 25 点 13→**25/25**。
   余下 65 点：翻前 4-bet/5-bet 与认不出层级 25（故意）、河牌强成牌面对下注
-  12（等 `hand_tier` 拆分，见 #106）、成牌+听牌交叉 11+15（#105）、零散 2。
+  12（#106，2026-11-22 已补；总覆盖 1520/1548=98.2%，river 127/129）、
+  成牌+听牌交叉 11+15（#105）、零散 2。
 - 版本 `lean-zh-2026-11-22.10` / `advice-2026-11-22.10`；3 人池 golden
   fixture 现在命中书卡，三个 prompt hash 同批更新。
 
@@ -542,3 +548,26 @@ Resolver 规则：
   `tests/test_playbook_schema.py` 覆盖合计不足与容差。
 - 版本 `lean-zh-2026-11-22.11` / `advice-2026-11-22.11`；三个 golden fixture
   都不含混合卡，prompt hash 不变。
+
+### M13 结果（2026-11-22，#106 强成牌细档）
+
+- 拆分落点：只在 playbook 层加 `Spot.made_hand_detail`（`two_pair` / `trips_plus`），
+  由 `Situation.category` 派生（2 / ≥3），只对 `made_hand=strong_made` 生效；
+  `hand_tier`、策略表、fold_equity、buckets 全不动。category 缺失时返回 None，
+  渲染回「书中无此局面」，不猜。
+- `validate_cards`：`made_hand_detail` 只允许翻后、必须与
+  `made_hand=strong_made` 同用、值必须在词表内；否则编译期报错，防止写下
+  永不匹配的死卡。
+- 补 3 张河牌卡（均 `interpreted` + `compiled`，pages 见台账）：
+  `river.two_pair.facing_bet`（跟注，p84/85）、
+  `river.trips_plus.facing_bet`（加注 1 池，p85）、
+  `river.trips_plus.facing_raise`（加注 1 池，p85 的编译延伸）。
+  卡 id 不带 `.mw.`：河牌卡本身不按人数分流，单挑与多人池同卡命中。
+- 覆盖：river 115→**127/129（98.4%）**，`strong_made/none/bet` 10/10、
+  `strong_made/none/raise` 2/2；全库 #108 后 1508→**1520/1548（98.2%）**。
+  剩余 28 点：翻前 25（4-bet/5-bet 与层级不明，故意）、转牌炸弹池 1（#109）、
+  河牌 TPTK 无人下注 2。
+- 测试：`tests/test_playbook_river_cards.py` 覆盖派生、三张卡的匹配/选档/渲染
+  与 category 缺失 fail open；零匹配 fixture 改成 TPTK 无人下注；
+  `tests/test_prompt_book_plan.py`、`tests/test_playbook_book_audit.py` 全绿。
+- 纯卡集 + 派生维，不改提示词文本；`PROMPT_VERSION` / advice version 不动。

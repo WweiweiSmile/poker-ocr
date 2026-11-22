@@ -50,8 +50,9 @@ def check(cond: bool, msg: str) -> None:
         FAILS.append(msg)
 
 
-def _multiway_snapshot(*, street: str = "flop", to_call: float = 0.0) -> HandSnapshot:
-    """3+ 人池（3 名对手）、hero 拿 KK 击中暗三：replay 里最常见的强成牌节点。"""
+def _multiway_snapshot(*, street: str = "flop", to_call: float = 0.0,
+                       hero_cards: tuple[str, str] = ("Kh", "Kd")) -> HandSnapshot:
+    """3+ 人池（3 名对手）；默认 hero 拿 KK 击中暗三，replay 里最常见的强成牌节点。"""
     board = {"flop": ("Ks", "7d", "2c"), "turn": ("Ks", "7d", "2c", "9h"),
              "river": ("Ks", "7d", "2c", "9h", "3s")}[street]
     opponents = tuple(
@@ -59,7 +60,7 @@ def _multiway_snapshot(*, street: str = "flop", to_call: float = 0.0) -> HandSna
         for i in range(3))
     return HandSnapshot(
         hand_id="book-wire", hand_index=0, street=street,
-        board=board, hero_cards=("Kh", "Kd"),
+        board=board, hero_cards=hero_cards,
         hero_position="BTN", hero_stack=100.0, hero_bet=0.0,
         hero_invested=4.0, to_call=to_call, second_bet=None,
         pot=10.0, pot_before_street=9.0, table_size=4,
@@ -81,9 +82,12 @@ def _multiway_snapshot(*, street: str = "flop", to_call: float = 0.0) -> HandSna
     )
 
 
-def _sit(*, street: str = "flop", to_call: float = 0.0):
-    return build_situation(_multiway_snapshot(street=street, to_call=to_call),
-                           table_dynamics="")
+def _sit(*, street: str = "flop", to_call: float = 0.0,
+         hero_cards: tuple[str, str] = ("Kh", "Kd")):
+    return build_situation(
+        _multiway_snapshot(street=street, to_call=to_call,
+                           hero_cards=hero_cards),
+        table_dynamics="")
 
 
 def _section(user: str) -> str:
@@ -131,10 +135,10 @@ def test_replay_decision_prompt_contains_readable_book_plan() -> None:
 def test_zero_match_says_no_book_spot_without_page_number() -> None:
     """② 零匹配：明说书中无此局面，不伪造页码。
 
-    河牌强成牌面对下注故意留空（两对 vs 三条以上在 Spot 里拆不开，
-    见设计稿 M8 残余），用真实生产路径验证零匹配，而不是塞空卡集。
+    河牌 TPTK 无人下注是已知缺口（书没有明确分支，见设计稿 M8 残余），
+    用真实生产路径验证零匹配，而不是塞空卡集。
     """
-    sit = _sit(street="river", to_call=5.0)
+    sit = _sit(street="river", to_call=0.0, hero_cards=("Ah", "Kd"))
     _, user = build_messages(sit)
     section = _section(user)
     check("书中无此局面" in section, f"零匹配没明说：{section}")

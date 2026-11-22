@@ -1,4 +1,4 @@
-"""河牌书卡（#84）：价值、诈唬、抓诈唬的匹配、选档与渲染。"""
+"""河牌书卡（#84/#106）：价值、诈唬、抓诈唬、强成牌细档的匹配、选档与渲染。"""
 
 import sys
 from pathlib import Path
@@ -20,7 +20,8 @@ from poker_ocr.playbook import (  # noqa: E402
 ROOT = Path(__file__).resolve().parents[1]
 RIVER = ROOT / "poker_ocr/playbook/cards/harrington_cash_river.json"
 
-# 本批新增的 9 张河牌卡：价值 1、诈唬 2、抓诈唬 2、摊牌过牌 3、弃牌 1。
+# 本批新增的 12 张河牌卡：价值 1、诈唬 2、抓诈唬 2、摊牌过牌 3、弃牌 1、
+# 强成牌细档 3（两对跟注 / 三条以上加注 / 三条以上面对加注再加注）。
 NEW_IDS = (
     "river.value.strong_made.bet",
     "river.bluff.air.bet",
@@ -31,6 +32,9 @@ NEW_IDS = (
     "river.check.middle_pair",
     "river.check.board_play",
     "river.check.top_pair_weak",
+    "river.two_pair.facing_bet",
+    "river.trips_plus.facing_bet",
+    "river.trips_plus.facing_raise",
 )
 
 
@@ -54,7 +58,7 @@ def _card(card_id):
 
 def test_river_cards_validate():
     cards = _cards()
-    assert len(cards) == 9
+    assert len(cards) == 12
     assert validate_cards(cards) == []
 
 
@@ -85,6 +89,15 @@ def test_each_river_card_resolves_to_itself():
      "river.check.board_play"),
     (Spot(street="river", players="3+", made_hand="top_pair_weak_kicker",
           facing="none"), "river.check.top_pair_weak"),
+    (Spot(street="river", players="3+", made_hand="strong_made",
+          made_hand_detail="two_pair", facing="bet"),
+     "river.two_pair.facing_bet"),
+    (Spot(street="river", players="3+", made_hand="strong_made",
+          made_hand_detail="trips_plus", facing="bet"),
+     "river.trips_plus.facing_bet"),
+    (Spot(street="river", players="3+", made_hand="strong_made",
+          made_hand_detail="trips_plus", facing="raise"),
+     "river.trips_plus.facing_raise"),
 ])
 def test_river_bucket_hits_its_card(spot, expected):
     got = resolve(_cards(), spot)
@@ -129,6 +142,12 @@ def _opt(kind, amount=None):
     ("river.check.middle_pair", [_opt("check"), _opt("bet", 6.7)], "check"),
     ("river.check.board_play", [_opt("check"), _opt("bet", 6.7)], "check"),
     ("river.check.top_pair_weak", [_opt("check"), _opt("bet", 6.7)], "check"),
+    ("river.two_pair.facing_bet",
+     [_opt("fold"), _opt("call", 5.0), _opt("raise", 20.0)], "call"),
+    ("river.trips_plus.facing_bet",
+     [_opt("fold"), _opt("call", 5.0), _opt("raise", 20.0)], "raise"),
+    ("river.trips_plus.facing_raise",
+     [_opt("fold"), _opt("call", 5.0), _opt("raise", 20.0)], "raise"),
 ])
 def test_river_card_lands_on_legal_option(card_id, options, expected_kind):
     match = choose_option(options, _card(card_id).plan, pot_bb=10.0, to_call_bb=5.0)
@@ -197,14 +216,52 @@ def test_river_bluff_catch_renders_call():
     assert "计划: 跟注（第 2 卷 p75 / p85，编译归纳）" in text
 
 
-def test_strong_made_facing_bet_is_deliberately_unmatched():
-    # two pair（书里中等，跟）与 set+（书里强，加注）在 Spot 里都归 strong_made，
-    # 一张卡无法同时忠实；宁可留空，也不写死会错一半的基线。
+def test_two_pair_facing_bet_renders_call():
+    # 两对在书里是中等牌力（p84），不能加注，也不能全弃（p85）。
+    text = render_book_plan_text(_river_sit(
+        hand_tier="强成牌", category=2,
+        snap=SimpleNamespace(preflop_shapes=("single-raise",), to_call=5.0,
+                             hero_position="BB"),
+    ))
+    assert "河牌 / 3+ 人 / 强成牌 / 面对下注" in text
+    assert "计划: 跟注（第 2 卷 p84 / p85，编译归纳）" in text
+    assert "书中无此局面" not in text
+
+
+def test_trips_plus_facing_bet_renders_raise():
+    text = render_book_plan_text(_river_sit(
+        hand_tier="强成牌", category=6,
+        snap=SimpleNamespace(preflop_shapes=("single-raise",), to_call=5.0,
+                             hero_position="BB"),
+    ))
+    assert "计划: 加注 1 池（第 2 卷 p85，编译归纳）" in text
+
+
+def test_trips_plus_facing_raise_renders_raise():
+    acts = (SimpleNamespace(action="bet"), SimpleNamespace(action="raise"))
+    text = render_book_plan_text(_river_sit(
+        hand_tier="强成牌", category=3,
+        snap=SimpleNamespace(preflop_shapes=("single-raise",), to_call=5.0,
+                             hero_position="BB",
+                             actions_of=lambda street: acts),
+    ))
+    assert "河牌 / 3+ 人 / 强成牌 / 面对加注" in text
+    assert "计划: 加注 1 池（第 2 卷 p85，编译归纳）" in text
+
+
+def test_strong_made_without_category_fails_open():
+    # category 缺失时派生不出细档：宁可无计划，也不猜两对/三条以上。
     text = render_book_plan_text(_river_sit(
         hand_tier="强成牌",
         snap=SimpleNamespace(preflop_shapes=("single-raise",), to_call=5.0,
                              hero_position="BB"),
     ))
+    assert "书中无此局面" in text
+
+
+def test_top_pair_no_bet_is_deliberately_unmatched():
+    # 剩下的已知缺口是 TPTK 无人下注（书无明确分支）；保持零匹配，宁缺毋滥。
+    text = render_book_plan_text(_river_sit(hand_tier="顶对强踢"))
     assert "书中无此局面" in text
 
 

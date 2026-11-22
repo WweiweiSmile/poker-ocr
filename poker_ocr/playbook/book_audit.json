@@ -2839,6 +2839,62 @@
       "quote": "稳妥的做法是弃牌。 弃牌吧。",
       "note": "被加注为编译延伸；p58-59 讲落后就弃。",
       "source": "《哈林顿在现金桌》第2卷 p58 p59（PDF p64 p65）"
+    },
+    {
+      "id": "river.two_pair.facing_bet",
+      "file": "poker_ocr/playbook/cards/harrington_cash_river.json",
+      "book": "harrington_cash",
+      "volume": 2,
+      "chapter": "ch7",
+      "pages": [
+        84,
+        85
+      ],
+      "pdf_pages": [
+        90,
+        91
+      ],
+      "confidence": "interpreted",
+      "verdict": "compiled",
+      "quote": "中等牌力，即牌力属于两对、超对，或顶对好踢脚这样的范围。",
+      "note": "p84 把两对列入中等牌力；p85 要求中等牌力跟注一部分；freq 1.0 为编译（书是混合）。",
+      "source": "《哈林顿在现金桌》第2卷 p84、p85（PDF p90、p91）"
+    },
+    {
+      "id": "river.trips_plus.facing_bet",
+      "file": "poker_ocr/playbook/cards/harrington_cash_river.json",
+      "book": "harrington_cash",
+      "volume": 2,
+      "chapter": "ch7",
+      "pages": [
+        85
+      ],
+      "pdf_pages": [
+        91
+      ],
+      "confidence": "interpreted",
+      "verdict": "compiled",
+      "quote": "如果你拿着强牌，你会选择加注。",
+      "note": "p85 明说强牌加注；1 池尺寸为编译，与转牌强成牌加注口径一致。",
+      "source": "《哈林顿在现金桌》第2卷 p85（PDF p91）"
+    },
+    {
+      "id": "river.trips_plus.facing_raise",
+      "file": "poker_ocr/playbook/cards/harrington_cash_river.json",
+      "book": "harrington_cash",
+      "volume": 2,
+      "chapter": "ch7",
+      "pages": [
+        85
+      ],
+      "pdf_pages": [
+        91
+      ],
+      "confidence": "interpreted",
+      "verdict": "compiled",
+      "quote": "如果你拿着强牌，你会选择加注。",
+      "note": "p85 只明说强牌面对下注加注；面对加注再加注是编译延伸，尺寸 1 池。",
+      "source": "《哈林顿在现金桌》第2卷 p85（PDF p91）"
     }
   ],
   "removed": [

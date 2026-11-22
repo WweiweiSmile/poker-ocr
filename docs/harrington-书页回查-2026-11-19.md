@@ -1,6 +1,6 @@
 # 哈林顿在现金桌：书页逐条回查（#85）
 
-日期：2026-11-19　范围：`poker_ocr/playbook/cards/` 下全部 live 书卡（130 张）+ 移出 1 张。
+日期：2026-11-19（#106 增补于 2026-11-22）　范围：`poker_ocr/playbook/cards/` 下全部 live 书卡（157 张）+ 移出 1 张。
 
 ## 结论
 
@@ -8,7 +8,7 @@
 | --- | --- | --- |
 | ok | 63 | 页码、转述、confidence 均与原文一致 |
 | fixed | 56 | 本轮修过页码/转述/confidence |
-| compiled | 11 | 方向有原文依据，频率/尺寸为编译值 |
+| compiled | 38 | 方向有原文依据，频率/尺寸为编译值 |
 | removed | 1 | 无法核实，已移出 live |
 
 机器可查台账：[`poker_ocr/playbook/book_audit.json`](../poker_ocr/playbook/book_audit.json)，按卡 id 直接检索；每张卡带卷、印刷页、PDF 页、原文短句与结论。
@@ -77,6 +77,12 @@
 - `river.check.board_play`（p74）：why 改为「只能分池或输」的保守一支。
 - `river.fold.board_play.facing_bet`（p78）：why 改为「只能分池或输」的保守一支。
 - `river.value.strong_made.bet`（p71、p82）：p71 明说「认为可能最好就下注」，升为 explicit；尺寸按 p82。
+
+## 2026-11-22 增补（#106）
+
+- `river.two_pair.facing_bet`（p84、p85）：p84 把两对列入中等牌力，p85 要求中等牌力跟注一部分；freq 1.0 为编译（书是混合）。
+- `river.trips_plus.facing_bet`（p85）：p85 明说强牌加注；1 池尺寸为编译，与转牌强成牌加注口径一致。
+- `river.trips_plus.facing_raise`（p85）：p85 只明说强牌面对下注加注；面对加注再加注是编译延伸。
 
 ## 移出 live
 
@@ -221,4 +227,7 @@
 | `river.check.middle_pair` | 2 / 74、75 | 80、81 | interpreted | ok | 当你的牌有一点价值时，你希望以最小的代价熬到亮牌。 | 页码、转述与 confidence 一致。 |
 | `river.check.top_pair_weak` | 2 / 74 | 80 | interpreted | ok | 当你的牌有一点价值时，你希望以最小的代价熬到亮牌。 | 页码、转述与 confidence 一致。 |
 | `river.fold.board_play.facing_bet` | 2 / 78 | 84 | interpreted | fixed | 如果到了河牌，你的牌仍没有任何价值……如果别人下注，你就弃牌。 | why 改为「只能分池或输」的保守一支。 |
+| `river.trips_plus.facing_bet` | 2 / 85 | 91 | interpreted | compiled | 如果你拿着强牌，你会选择加注。 | p85 明说强牌加注；1 池尺寸为编译，与转牌卡一致。 |
+| `river.trips_plus.facing_raise` | 2 / 85 | 91 | interpreted | compiled | 如果你拿着强牌，你会选择加注。 | p85 只明说强牌面对下注加注；面对加注再加注是编译延伸，尺寸 1 池。 |
+| `river.two_pair.facing_bet` | 2 / 84、85 | 90、91 | interpreted | compiled | 中等牌力，即牌力属于两对、超对，或顶对好踢脚这样的范围。 | p84 把两对列入中等牌力；p85 要求中等牌力跟注一部分；freq 1.0 为编译。 |
 | `river.value.strong_made.bet` | 2 / 71、82 | 77、88 | explicit | fixed | 你只要认为可能已拿着最好的牌，就应该考虑下注；越接近坚果下注越大（p82）。 | p71 明说「认为可能最好就下注」，升为 explicit；尺寸按 p82。 |

@@ -257,6 +257,97 @@
       "confidence": "interpreted",
       "priority": 100,
       "offset_policy": "size_only"
+    },
+    {
+      "id": "river.two_pair.facing_bet",
+      "book": "harrington_cash",
+      "volume": 2,
+      "chapter": "ch7",
+      "pages": [
+        84,
+        85
+      ],
+      "pdf_pages": [
+        90,
+        91
+      ],
+      "street": "river",
+      "spot": {
+        "street": "river",
+        "made_hand": "strong_made",
+        "made_hand_detail": "two_pair",
+        "facing": "bet"
+      },
+      "plan": {
+        "action": "call",
+        "freq": 1.0
+      },
+      "why": "河牌中等牌力明确包含两对（p84），没有强到加注；书要求中等牌力必须跟注一部分（p85）。缺少对手故事与下注尺度维度，取跟注基线，不弃牌。",
+      "confidence": "interpreted",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "river.trips_plus.facing_bet",
+      "book": "harrington_cash",
+      "volume": 2,
+      "chapter": "ch7",
+      "pages": [
+        85
+      ],
+      "pdf_pages": [
+        91
+      ],
+      "street": "river",
+      "spot": {
+        "street": "river",
+        "made_hand": "strong_made",
+        "made_hand_detail": "trips_plus",
+        "facing": "bet"
+      },
+      "plan": {
+        "action": "raise",
+        "size": {
+          "kind": "pct_pot",
+          "value": 1.0
+        },
+        "freq": 1.0
+      },
+      "why": "河牌三条及以上属于强牌，面对下注应加注（p85）；1 池为编译尺寸，与转牌强成牌加注口径一致。",
+      "confidence": "interpreted",
+      "priority": 100,
+      "offset_policy": "size_only"
+    },
+    {
+      "id": "river.trips_plus.facing_raise",
+      "book": "harrington_cash",
+      "volume": 2,
+      "chapter": "ch7",
+      "pages": [
+        85
+      ],
+      "pdf_pages": [
+        91
+      ],
+      "street": "river",
+      "spot": {
+        "street": "river",
+        "made_hand": "strong_made",
+        "made_hand_detail": "trips_plus",
+        "facing": "raise"
+      },
+      "plan": {
+        "action": "raise",
+        "size": {
+          "kind": "pct_pot",
+          "value": 1.0
+        },
+        "freq": 1.0
+      },
+      "why": "强牌面对加注继续加注（p85 强牌加注的编译延伸）；河牌三条以上不弃牌。",
+      "confidence": "interpreted",
+      "priority": 100,
+      "offset_policy": "size_only"
     }
   ]
 }

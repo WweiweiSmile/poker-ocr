@@ -246,3 +246,18 @@ def test_players_bucket_is_headsup_or_multiway(opponents, players):
     # #101：书 Ch5 的多路池对 3 人池与 4+ 同线，只分「单挑 / 多人」
     spot = Spot.from_situation(_facing_sit(["bet"], opponents=opponents))
     assert spot.players == players
+
+
+def test_made_hand_detail_requires_strong_made():
+    # 细档只在 strong_made 上派生；挂到超对会是一张永不匹配的死卡。
+    bad = _card("bad-detail", made_hand="overpair",
+                made_hand_detail="two_pair")
+    errors = validate_cards([bad])
+    assert any("made_hand_detail" in error for error in errors), errors
+
+
+def test_made_hand_detail_must_be_known_value():
+    bad = _card("bad-detail-value", made_hand="strong_made",
+                made_hand_detail="three_pair")
+    errors = validate_cards([bad])
+    assert any("made_hand_detail" in error for error in errors), errors

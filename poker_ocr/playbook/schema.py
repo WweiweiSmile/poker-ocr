@@ -37,6 +37,10 @@ MADE_HANDS = (
     "strong_made", "overpair", "top_pair_top_kicker", "top_pair_weak_kicker",
     "middle_or_bottom_pair", "board_play", "draw", "air", "unknown",
 )
+# 强成牌内部的细档（#106）：书在河牌把「两对」和「三条以上」分成中等/强两档，
+# 面对下注时一个跟注控池、一个加注收价值。只在 playbook 层派生，不拆
+# `hand_tier`——后者是策略表/弃牌率/buckets 共用的粗档，拆它会改到书卡之外。
+MADE_HAND_DETAILS = ("two_pair", "trips_plus")
 DRAWS = ("none", "flush", "oesd", "gutshot", "combo", "other", "unknown")
 BOARDS = ("dry", "flush", "straight", "flush_straight", "paired", "unknown")
 SPRS = ("lt3", "3to6", "gt6", "unknown")
@@ -126,6 +130,25 @@ def _norm_made_hand(value: Any) -> str:
         "弱听": "draw",
         "空气": "air",
     }, MADE_HANDS)
+
+
+def _made_hand_detail(made_hand: str | None, category: Any) -> str | None:
+    """强成牌 -> two_pair / trips_plus；其它牌力或算不出 category 返回 None。
+
+    `category` 是 `Read.category` 的 evaluate 档位（2=两对，3=三条，4=顺，
+    5=同花，6=葫芦…）。只认强成牌：两对以下与 board_play 不派生细档。
+    """
+    if made_hand != "strong_made":
+        return None
+    try:
+        value = int(category)
+    except (TypeError, ValueError):
+        return None
+    if value == 2:
+        return "two_pair"
+    if value >= 3:
+        return "trips_plus"
+    return None
 
 
 def _norm_draw(sit: Any) -> str:
@@ -227,6 +250,8 @@ class Spot:
     hero_position: str | None = None
     in_position: bool | None = None
     made_hand: str | None = None
+    # 强成牌的细档（#106）：two_pair / trips_plus；其它牌力一律 None。
+    made_hand_detail: str | None = None
     draw: str | None = None
     board: str | None = None
     spr: str | None = None
@@ -322,6 +347,7 @@ class Spot:
         hand_suited = (preflop_suited(hero_cards)
                        if street == "preflop" else None)
         raises = _preflop_raises(snap) if street == "preflop" else ()
+        made_hand = _norm_made_hand(getattr(sit, "hand_tier", None))
         return cls(
             street=street or "unknown",
             preflop_node=preflop_node,
@@ -329,7 +355,9 @@ class Spot:
             players=_bucket_players(getattr(sit, "opponents_in_hand", None)),
             hero_position=_norm(getattr(snap, "hero_position", None)),
             in_position=getattr(sit, "in_position", None),
-            made_hand=_norm_made_hand(getattr(sit, "hand_tier", None)),
+            made_hand=made_hand,
+            made_hand_detail=_made_hand_detail(
+                made_hand, getattr(sit, "category", None)),
             draw=_norm_draw(sit),
             board=_norm_board(getattr(sit, "texture", None)),
             spr=spr_bucket,
@@ -487,6 +515,19 @@ def validate_cards(cards: Iterable[Card]) -> list[str]:
             errors.append(f"{card.id}: why 为空")
         if card.priority < 0:
             errors.append(f"{card.id}: priority 必须 >=0")
+        if card.spot.made_hand_detail is not None:
+            if card.spot.street == "preflop":
+                errors.append(
+                    f"{card.id}: made_hand_detail 只对翻后有意义（street="
+                    f"{card.spot.street!r}）")
+            if card.spot.made_hand != "strong_made":
+                errors.append(
+                    f"{card.id}: made_hand_detail 只在 made_hand=strong_made "
+                    f"时派生（当前 made_hand={card.spot.made_hand!r}）")
+            if card.spot.made_hand_detail not in MADE_HAND_DETAILS:
+                errors.append(
+                    f"{card.id}: made_hand_detail 非法 "
+                    f"{card.spot.made_hand_detail!r}")
         if card.spot.hand_class is not None:
             if card.spot.street != "preflop":
                 errors.append(
