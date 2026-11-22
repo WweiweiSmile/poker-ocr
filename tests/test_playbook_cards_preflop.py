@@ -150,6 +150,13 @@ def test_rfi_cards_hit_positions_and_suits():
         assert got.card.id == expected, (kwargs, got.card.id)
 
 
+def test_prompt_renders_primary_and_mix_frequencies():
+    """#107：70/30 的混合卡必须同时印出主行动与副分支的频率。"""
+    text = "\n".join(render_book_plan_zh(_sit(cards=("Jh", "Jd"), position="UTG")))
+    assert "计划: 加注 3BB（频率 70%，" in text
+    assert "混合: 跟注 1BB（频率 30%）" in text
+
+
 def test_medium_and_low_pair_follow_book_mix():
     """书 p110：前位 JJ-99 70% 加注，88-66 30% 加注。"""
     cards = load_cards(CARDS)

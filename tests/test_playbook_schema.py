@@ -168,7 +168,30 @@ def test_frequency_sum_over_one_is_error():
         mix=(Plan(action="bet", freq=0.4),), why="测试",
     )
     errors = validate_cards([card])
-    assert any("freq 合计" in e for e in errors)
+    assert any("freq 合计" in e and "应为 1" in e for e in errors)
+
+
+def test_frequency_sum_under_one_is_error():
+    """#107：合计必须为 1；缺掉的那份就是模型看不见的主行动频率。"""
+    card = Card(
+        id="under", book="harrington_cash", volume=1, chapter="ch4",
+        pages=(190,), street="flop",
+        spot=Spot(street="flop"), plan=Plan(action="check", freq=0.6),
+        mix=(Plan(action="bet", freq=0.3),), why="测试",
+    )
+    errors = validate_cards([card])
+    assert any("freq 合计" in e and "应为 1" in e for e in errors), errors
+
+
+def test_frequency_sum_within_tolerance_is_ok():
+    """浮点四舍五入（0.7004 + 0.3）不算错，容差 0.001。"""
+    card = Card(
+        id="near", book="harrington_cash", volume=1, chapter="ch4",
+        pages=(190,), street="flop",
+        spot=Spot(street="flop"), plan=Plan(action="check", freq=0.7004),
+        mix=(Plan(action="bet", freq=0.3),), why="测试",
+    )
+    assert validate_cards([card]) == []
 
 if __name__ == "__main__":
     import pytest

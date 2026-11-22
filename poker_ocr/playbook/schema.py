@@ -459,7 +459,11 @@ class Resolution:
 
 
 def validate_cards(cards: Iterable[Card]) -> list[str]:
-    """编译期静态校验；返回错误列表，空列表 = 通过。"""
+    """编译期静态校验；返回错误列表，空列表 = 通过。
+
+    混合频率：plan 是主行动、mix 是其余分支，两者 freq 合计必须为 1
+    （容差 0.001）——主行动的频率缺了，渲染层就只能把它读成 100%。
+    """
     errors: list[str] = []
     seen: dict[str, Card] = {}
     for card in cards:
@@ -530,8 +534,8 @@ def validate_cards(cards: Iterable[Card]) -> list[str]:
                 if size.kind == "bb" and size.value <= 0:
                     errors.append(f"{card.id}: bb 必须 >0")
         total = sum(p.freq for p in plans)
-        if total > 1.001:
-            errors.append(f"{card.id}: freq 合计 {total:.3f} 超过 1")
+        if abs(total - 1.0) > 0.001:
+            errors.append(f"{card.id}: freq 合计 {total:.3f}，应为 1")
 
     ordered = list(seen.values())
     for i, a in enumerate(ordered):

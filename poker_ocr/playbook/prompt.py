@@ -122,6 +122,22 @@ def _source_zh(card: Card) -> str:
     return f"{volume}{pages}，{confidence}"
 
 
+def _plan_meta(card: Card) -> str:
+    """计划行括号里的内容：混合策略先给主行动频率，再接来源页。
+
+    `plan` 是主行动、`mix` 是其余分支（schema.Card.mix）；只印 mix 的频率
+    会让模型把主行动读成 100%（#107）。
+    """
+    source = _source_zh(card)
+    if not card.mix and card.plan.freq == 1.0:
+        return source
+    return f"频率 {card.plan.freq:.0%}，{source}"
+
+
+def _mix_line(mix: Plan) -> str:
+    return f"混合: {_plan_line(mix)}（频率 {mix.freq:.0%}）"
+
+
 def _spot_line(spot: Spot) -> str:
     parts = [
         STREET_ZH.get(spot.street, spot.street),
@@ -173,6 +189,22 @@ def _cap(lines: list[str]) -> list[str]:
     return result
 
 
+def _card_lines(card: Card, spot: Spot) -> list[str]:
+    """单张书卡的「书中计划」段；渲染与验收测试共用同一入口。"""
+    lines = [
+        BOOK_PLAN_HEADER,
+        f"局面: {_spot_line(spot)}",
+        f"计划: {_plan_line(card.plan)}（{_plan_meta(card)}）",
+    ]
+    if card.why:
+        lines.append(f"理由: {card.why}")
+    for street, future in card.plan.future.items():
+        lines.append(f"后续/{STREET_ZH.get(street, street)}: {future}")
+    for mix in card.mix:
+        lines.append(_mix_line(mix))
+    return _cap(lines)
+
+
 def render_book_plan_zh(sit) -> list[str]:
     """渲染「书中计划」段；零匹配返回一行说明，不返回空列表。
 
@@ -186,21 +218,7 @@ def render_book_plan_zh(sit) -> list[str]:
             f"局面: {_spot_line(spot)}",
             "书中无此局面：不套用任何书页，按事实与可选动作保守处理。",
         ])
-
-    lines = [
-        BOOK_PLAN_HEADER,
-        f"局面: {_spot_line(spot)}",
-        f"计划: {_plan_line(card.plan)}（{_source_zh(card)}）",
-    ]
-    if card.why:
-        lines.append(f"理由: {card.why}")
-    for street, future in card.plan.future.items():
-        lines.append(f"后续/{STREET_ZH.get(street, street)}: {future}")
-    for mix in card.mix:
-        lines.append(
-            f"混合: {_plan_line(mix)}，频率 {mix.freq:.0%}"
-        )
-    return _cap(lines)
+    return _card_lines(card, spot)
 
 
 def render_book_plan_text(sit) -> str:

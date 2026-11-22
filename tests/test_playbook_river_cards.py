@@ -183,8 +183,8 @@ def test_river_bluff_renders_bet_with_check_mix():
     # 书里标准是过牌；诈唬只在特定条件下，卡里用 50% 混合表达，不落成无条件下注。
     text = render_book_plan_text(_river_sit(hand_tier="空气"))
     assert "河牌 / 3+ 人 / 空气 / 无人下注" in text
-    assert "计划: 下注 0.67 池（第 2 卷 p78 / p82，编译归纳）" in text
-    assert "混合: 过牌，频率 50%" in text
+    assert "计划: 下注 0.67 池（频率 50%，第 2 卷 p78 / p82，编译归纳）" in text
+    assert "混合: 过牌（频率 50%）" in text
 
 
 def test_river_bluff_catch_renders_call():

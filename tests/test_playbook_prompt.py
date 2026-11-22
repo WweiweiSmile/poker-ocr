@@ -45,6 +45,25 @@ def test_text_is_short_enough_for_prompt_budget():
     text = render_book_plan_text(_sit())
     assert len(text) <= 800
 
+
+def test_every_mixed_card_renders_both_primary_and_mix_frequencies():
+    """#107：26 张混合频率卡，主行动与每个副分支的频率都要落进提示词。
+
+    走 `_card_lines(card, card.spot)`：渲染器与验收测试共用同一入口，
+    不必给每张卡另造一个 Situation。
+    """
+    from poker_ocr.playbook.prompt import _all_cards, _card_lines, _plan_line
+
+    mixed = [card for card in _all_cards() if card.mix]
+    assert len(mixed) == 26
+    for card in mixed:
+        text = "\n".join(_card_lines(card, card.spot))
+        primary = f"计划: {_plan_line(card.plan)}（频率 {card.plan.freq:.0%}，"
+        assert primary in text, card.id
+        for branch in card.mix:
+            line = f"混合: {_plan_line(branch)}（频率 {branch.freq:.0%}）"
+            assert line in text, card.id
+
 if __name__ == "__main__":
     import pytest
     raise SystemExit(pytest.main([__file__, "-q"]))
