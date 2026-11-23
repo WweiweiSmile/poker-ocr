@@ -17,6 +17,7 @@ from __future__ import annotations
 from ..refs import collecting, section
 from ..system import build_system
 from .action_line import render_action_line_zh
+from .bomb import render_bomb_guard_zh
 from .book import render_book_plan_zh
 from .explosive import render_explosive_pot_zh
 from .geometry import render_geometry_zh, render_side_pot_zh
@@ -70,8 +71,17 @@ def render_facts_zh(sit) -> str:
 
     # ── 书中计划（Harrington 场景卡）：基线 ──
     # 解析失败时整段不出现（fail open），零匹配仍由渲染器写「书中无此局面」。
+    # 炸弹池守则生效时书计划整段让位（返回 []），由下方守则段占这个位置。
     with section("book_plan") as sec:
         sec.extend(render_book_plan_zh(sit))
+    if sec.lines:
+        lines.append("")
+        lines.extend(sec.lines)
+
+    # ── 炸弹池守则（#114）：没有翻前下注轮的固定打法 ──
+    # 只在横幅确认且翻前无动作时出现；普通局面为 []，不多出空行。
+    with section("bomb_guard") as sec:
+        sec.extend(render_bomb_guard_zh(sit))
     if sec.lines:
         lines.append("")
         lines.extend(sec.lines)

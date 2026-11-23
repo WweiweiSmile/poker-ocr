@@ -3271,7 +3271,11 @@ def test_explosive_pot_facts_follow_spr() -> None:
 
 
 def test_explosive_pot_has_no_special_hard_rule() -> None:
-    """炸弹池不再有「一条街/不能跟注」硬规则，只保留结构/权益事实。"""
+    """炸弹池不再有「一条街/不能跟注」硬规则，只保留结构/权益事实。
+
+    #114 起政策变了：横幅确认且翻前无动作时改给固定「炸弹池守则」，
+    不再写「按正常翻后规则打」；原有用例守的负向断言保留。
+    """
     from poker_ocr.hand_track import ActionRecord, StreetRecord
 
     turn = StreetRecord("turn", 45.0, (
@@ -3291,7 +3295,9 @@ def test_explosive_pot_has_no_special_hard_rule() -> None:
     text = render_facts_zh(sit)
     check("炸弹池节奏" not in text, f"不该再写一条街节奏：\n{text}")
     check("不能跟注" not in text, f"不该再写不能跟注：\n{text}")
-    check("按正常翻后规则" in text, f"应写按正常规则：\n{text}")
+    check("## 炸弹池守则" in text, f"炸弹池应给固定守则：\n{text}")
+    check("按正常翻后规则" not in text,
+          f"守则生效时不该再说按正常规则打：\n{text}")
 
     # 还没投过钱的街不能出现这条硬规则（否则会把正常下注也吓住）
     fresh = build_situation(make_point(
@@ -3311,6 +3317,9 @@ def test_effective_stack_not_hero_stack_drives_depth() -> None:
 
     这是买入加深后最容易犯的错：拿自己的 300BB 当深度，去打一个
     实际上只有 100BB 的底池。
+
+    注意这个 fixture 没有横幅标记：`explosive_pot` 是按人均前注**算**出来的，
+    #114 的守则只认 `bomb_pot` 标记，所以这里仍按正常翻后规则、不出守则。
     """
     from poker_ocr.hand_track import OpponentSnapshot
 
@@ -3326,6 +3335,8 @@ def test_effective_stack_not_hero_stack_drives_depth() -> None:
     text = render_facts_zh(sit)
     check("按正常翻后规则" in text,
           f"对手只有 100BB 时也按正常规则，不再写浅码分支：\n{text}")
+    check("## 炸弹池守则" not in text,
+          f"没有横幅标记不该触发守则（#114 只认 bomb_pot）：\n{text}")
 
 
 def test_unknown_opponent_stack_suppresses_effective_and_spr() -> None:
@@ -3605,8 +3616,12 @@ def test_count_limpers_ignores_calls_of_a_raise() -> None:
           f"只有 HJ/CO 是溜入：{count_limpers(point)}")
 
 
-def test_bomb_pot_shallow_spr_plays_normal_not_auto_stackoff() -> None:
-    """9 人炸弹池 SPR 1.3：按正常翻后规则打，不能自动把顶对当套池价值牌。"""
+def test_bomb_pot_shallow_spr_uses_guard_not_auto_stackoff() -> None:
+    """9 人炸弹池 SPR 1.3：按「炸弹池守则」打，不能自动把顶对当套池价值牌。
+
+    #114 取代了旧的「按正常翻后规则打」口径：书卡层与正常规则文案一起让位，
+    改由守则段给固定打法；原有用例守的「不自动打光」断言保留。
+    """
     from poker_ocr.hand_track import OpponentSnapshot
 
     point = make_point(
@@ -3625,8 +3640,11 @@ def test_bomb_pot_shallow_spr_plays_normal_not_auto_stackoff() -> None:
           f"炸弹池不能写成无人入池：\n{text}")
     check("底池类型：无人入池" not in text,
           f"炸弹池不能写成无人入池：\n{text}")
-    check("按正常翻后规则" in text,
-          f"炸弹池应按正常翻后规则：\n{text}")
+    check("## 炸弹池守则" in text, f"炸弹池应给固定守则：\n{text}")
+    check("## 书中计划" not in text and "书中无此局面" not in text,
+          f"炸弹池不该再套书卡层：\n{text}")
+    check("按正常翻后规则" not in text,
+          f"守则生效时不该再说按正常规则打：\n{text}")
     check("套池价值牌" not in text,
           f"不能再把顶对自动说成套池价值牌：\n{text}")
     check("默认跟注打光" not in text,
@@ -3879,8 +3897,10 @@ def test_bomb_pot_does_not_say_you_can_stack_off() -> None:
     check("可以打光" not in text, f"不能再写可以打光：\n{text}")
     check("一条街" not in text and "被下注即弃" not in text,
           f"炸弹池不再有特殊一条街硬规则：\n{text}")
-    check("按正常翻后规则" in text,
-          f"炸弹池应按正常翻后规则：\n{text}")
+    check("炸弹池守则" in text,
+          f"守则生效时应指向守则段：\n{text}")
+    check("按正常翻后规则" not in text,
+          f"守则生效时不该再说按正常规则打：\n{text}")
 
 
 def test_system_contract_has_valid_json_examples_and_mappings() -> None:
@@ -4089,6 +4109,7 @@ def test_all_in_hand_opponents_get_reads() -> None:
 
 
 def test_bomb_pot_facts_have_no_special_hard_rule() -> None:
+    """炸弹池只留结构/权益事实，打法由 #114 的守则段给。"""
     from poker_ocr.hand_track import OpponentSnapshot
 
     point = make_point(
@@ -4096,7 +4117,9 @@ def test_bomb_pot_facts_have_no_special_hard_rule() -> None:
         pot=40.0, pot_before_street=40.0, bomb_pot=True, hero_stack=50.0,
         opponents=(OpponentSnapshot("bb", "BB", "BB", 50.0, 0.0, False),))
     text = render_facts_zh(build_situation(point))
-    check("按正常翻后规则" in text, f"炸弹池应按正常规则：\n{text}")
+    check("## 炸弹池守则" in text, f"炸弹池应给固定守则：\n{text}")
+    check("按正常翻后规则" not in text,
+          f"守则生效时不该再说按正常规则打：\n{text}")
     check("一条街" not in text and "被下注即弃" not in text,
           f"炸弹池不该再有特殊硬规则：\n{text}")
     check("炸弹池结构" in text and "炸弹池权益" in text,

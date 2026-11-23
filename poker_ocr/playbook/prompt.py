@@ -11,7 +11,8 @@
     理由: 多人局第二类强牌直接下注约 2/3 池
     后续: 转牌继续下注约 2/3 池，河牌按牌力收价值
 
-零匹配时只写「书中无此局面」，不伪造页码。
+零匹配时只写「书中无此局面」，不伪造页码。炸弹池守则生效时（#114）整层
+让位返回空列表：炸弹池没有翻前，书上也没有这种局面，连匹配都不做。
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 
+from .bomb import bomb_guard_applies
 from .schema import Card, Plan, Spot, load_cards, resolve
 
 CARDS_DIR = Path(__file__).resolve().parent / "cards"
@@ -210,7 +212,13 @@ def render_book_plan_zh(sit) -> list[str]:
 
     返回一行说明而不是 []，是为了让模型知道「书里没有这个局面」，而不是
     把零匹配误读成「书说可以随便打」。
+
+    炸弹池守则生效时是唯一的例外：整层让位返回 []，连匹配都不做——炸弹池
+    没有翻前、书里也没有这种局面，说「书中无此局面」等于什么都没说，还会
+    把「没有书页」误读成「随便打」。
     """
+    if bomb_guard_applies(sit):
+        return []
     spot, card = resolve_for_situation(sit)
     if card is None:
         return _cap([

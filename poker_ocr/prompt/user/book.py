@@ -4,7 +4,8 @@
 「书计划确实进了 prompt」；下一票 #81 再做原子切换。
 
 书层解析失败时 fail open —— 整段不出现，绝不阻塞 OCR 主循环，也不伪造
-书页。零匹配不走异常，由 `render_book_plan_zh` 明确写「书中无此局面」。
+书页。零匹配不走异常，由 `render_book_plan_zh` 明确写「书中无此局面」；
+炸弹池守则生效时（#114）书层整体让位，本段返回 []，由守则段占位。
 """
 
 from __future__ import annotations

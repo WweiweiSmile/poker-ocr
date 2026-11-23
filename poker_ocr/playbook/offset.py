@@ -27,6 +27,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
+from .bomb import bomb_guard_applies
 from .schema import Card, Plan, Spot
 
 OFFSETS_PATH = Path(__file__).resolve().parent / "offsets.json"
@@ -486,7 +487,13 @@ def apply_offsets(card: Card | None, sit,
 
 
 def offsets_for_situation(sit) -> tuple[OffsetDelta, ...]:
-    """决策链路入口：解析书卡 -> 应用偏移；任何异常 fail open。"""
+    """决策链路入口：解析书卡 -> 应用偏移；任何异常 fail open。
+
+    炸弹池守则生效时整层让位：不解析书卡、不产生偏移。书卡本身都不该
+    出现在提示词里，偏移（书 -> 本桌）自然也没有立足点。
+    """
+    if bomb_guard_applies(sit):
+        return ()
     try:
         from .prompt import resolve_for_situation
         _, card = resolve_for_situation(sit)
