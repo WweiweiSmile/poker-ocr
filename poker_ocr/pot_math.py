@@ -176,6 +176,39 @@ def _after_hero(snap: HandSnapshot, street: str | None = None) -> list[str]:
     return [p for p in order[idx + 1:] if p in live]
 
 
+def seats_behind(snap: HandSnapshot, street: str | None = None) -> int | None:
+    """身后还有几个没弃牌的对手（按本街真实行动顺序，不含自己）。
+
+    #113「有效位置」按这个数分档（≥7 早 / 5–6 中 / ≤4 晚）。翻前盲注还没
+    说话，算在身后；翻后盲注先行动，不算。与 `_after_hero()` 的区别：后者
+    数的是「还能主动行动、且还没跟到最高注」的人（跟一注就不再算），口径
+    随下注状态抖动；这里只问**位置在不在我后面**，同一手牌翻前翻后、对手
+    跟不跟注都不改变这个数。
+
+    只看还在局里的对手（弃牌的不算）。全下的人不能主动行动，但仍在局、
+    仍占着身后的位置，所以照样计入 —— 本票的档位是「身后有几个对手」，
+    不是「还有几个人能加注」。
+
+    fail open：位置表缺（桌型未知）、英雄位置不在表里、任何一个没弃牌的
+    对手位置读不出来时返回 None。宁可没有这条事实（退回座位静态档），
+    也不拿一个可能漏人的数去放宽档位。
+    """
+    order = _action_order(snap, street)
+    hero = snap.hero_position
+    if order is None or hero not in order:
+        return None
+    behind = set(order[order.index(hero) + 1:])
+    count = 0
+    for opponent in snap.opponents:
+        if opponent.folded:
+            continue
+        if opponent.position not in order:
+            return None
+        if opponent.position in behind:
+            count += 1
+    return count
+
+
 def _street_bet(snap: HandSnapshot, opponent) -> float:
     """对手本街已下注总额；下注槽读不到时从行动线兜底，仍未知按 0。"""
     bet = opponent.bet

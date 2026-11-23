@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 from ...hand_track import PREFLOP
+from ...playbook.prompt import POSITION_ZH
 from ...pot_math import (
     _action_order, _big_blind_option_pending, _can_act, _street_bet,
     behind_opponents, hero_first_to_act,
@@ -59,9 +60,29 @@ def render_position_zh(sit) -> list[str]:
     if sit.in_position is None and snap.street != PREFLOP:
         position.append("位置未知（座位未读出）：不要假设有/无位置，"
                         "按人数和行动线保守处理")
+    # #113 有效位置：座位名 + 按身后人数放宽后的档位。只并进这一行，
+    # 不新开段；档位按当前街算，和上面的「翻后位置」是两个口径（前者是
+    # 行动顺序，后者是书里的宽窄分区），所以分开写。
+    effective = _effective_position_zh(sit)
+    if effective:
+        position.insert(0, effective)
     if position:
         return ["｜".join(position)]
     return []
+
+
+def _effective_position_zh(sit) -> str:
+    """「有效位置：中位（UTG，身后 6 人）」；算不出/座位未知时省略。"""
+    bucket = getattr(sit, "effective_position_bucket", None)
+    seat = getattr(sit.snap, "hero_position", None)
+    if not bucket or not seat:
+        return ""
+    label = POSITION_ZH.get(bucket, bucket)
+    behind = getattr(sit, "seats_behind", None)
+    if bucket == "blind" or behind is None:
+        # 盲注不参与人数映射；身后人数读不出时只报静态档。
+        return f"有效位置：{label}（{seat}）"
+    return f"有效位置：{label}（{seat}，身后 {behind} 人）"
 
 
 def _allin_behind_zh(snap) -> str:

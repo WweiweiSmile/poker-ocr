@@ -24,10 +24,11 @@ from .hand_track import PREFLOP, HandSnapshot, preflop_aggressive
 from .options import (
     LOOSE_OPEN_BONUS, _abnormal_options, build_options, options_mode,
 )
+from .playbook.hand_class import effective_position_bucket as _effective_bucket
 from .pot_math import (
     _no_opponent_anomaly, _playable_depth, _unknown_stack_opponents,
     behind_opponents, count_limpers, hero_in_position, is_explosive_pot,
-    players_left_to_act, pot_per_player, pot_type, spr,
+    players_left_to_act, pot_per_player, pot_type, seats_behind, spr,
 )
 from .preflop_ranges import limp_whitelist, range_verdict
 from .table_dynamics import (
@@ -126,6 +127,12 @@ class Situation:
     spr: float | None = None
     in_position: bool | None = None
     players_left_to_act: int | None = None
+    # 有效位置（#113）：本街真实行动顺序里身后的在局对手数，以及「座位静态档」
+    # 与「人数档」取更晚之后的档位。None = 位置表缺/英雄或对手位置没读出
+    # （fail open，调用方退回座位名）。书卡匹配与提示词位置事实都读这两个字段，
+    # 座位名本身、盲注定义都不变。
+    seats_behind: int | None = None
+    effective_position_bucket: str | None = None
     # 上一街自己的决定（同手）。空 = 本手第一个决策点，或跨手重放。
     previous: "Advice | None" = None
     # 手牌 vs 对手范围（实时牌面范围 + 精确 behind + MC equity）。
@@ -472,6 +479,8 @@ def build_situation(snap: HandSnapshot,
             snap, table_dynamics, loose_flag, passive_flag, reads)
     else:
         preflop_text = None
+    # #113 有效位置：身后人数只看「位置排在我后面、没弃牌」，与下注状态无关。
+    behind = seats_behind(snap)
     sit = Situation(
         snap=snap,
         options=(_abnormal_options(snap) if degraded == "abnormal"
@@ -516,6 +525,9 @@ def build_situation(snap: HandSnapshot,
         spr=spr(snap),
         in_position=hero_in_position(snap),
         players_left_to_act=players_left_to_act(snap),
+        seats_behind=behind,
+        effective_position_bucket=_effective_bucket(
+            snap.hero_position, behind),
         previous=previous,
         abnormal_no_opponents=anomaly,
     )

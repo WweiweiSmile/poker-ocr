@@ -165,9 +165,48 @@ def position_bucket(position) -> str | None:
     return _POSITION_BUCKET.get(str(position).strip().upper())
 
 
+# ── 有效位置（#113）：身后人数分档 ──
+# 阈值是**规则数字**（不是策略数字）：牌桌规则/牌书共识的「身后还有几个
+# 对手」分宽窄，依据见 issue #113。它住在规则模块里，不进 `poker_ocr/tables/`。
+# 校准依据：9-max 满员翻前 UTG/UTG+1 身后 8/7 人 → 早位（≥7）；身后 5–6 人
+# 是中位（LJ 5 人、9-max 满员翻前 UTG+2 6 人）；≤4 人放开到后位。
+# 已知偏离：同一条规则下 9-max 满员翻前的 UTG+2（6）会从早位落到中位、
+# HJ（4）会从中位落到后位。这是**接受**的放宽（人数只放宽，不收紧）。
+SEATS_BEHIND_EARLY = 7
+SEATS_BEHIND_MIDDLE = 5
+
+# 档位的「晚」序：靠后的 index 更晚。blind 不参与比较（盲注恒为盲注档）。
+_BUCKET_LATER = ("early", "middle", "late")
+
+
+def effective_position_bucket(position, behind: int | None) -> str | None:
+    """座位静态档与「身后人数档」取**更晚**的那个（#113）。
+
+    `behind` 来自 `pot_math.seats_behind()`（本街真实行动顺序里、不含自己、
+    只数没弃牌的对手）。人数只用来放宽：中位座位身后再多人也不会退回早位，
+    晚位座位身后没人也不会变回中位。SB/BB 恒为 blind，不参与人数映射。
+
+    `behind is None`（位置表缺/有人位置没读出）或座位名认不出时退回静态档
+    / None —— 与 fail open 口径一致：算不出人数就当这条事实不存在。
+    """
+    static = position_bucket(position)
+    if static is None or static == "blind" or behind is None:
+        return static
+    if behind >= SEATS_BEHIND_EARLY:
+        by_count = "early"
+    elif behind >= SEATS_BEHIND_MIDDLE:
+        by_count = "middle"
+    else:
+        by_count = "late"
+    return max(static, by_count, key=_BUCKET_LATER.index)
+
+
 __all__ = [
     "POSITION_BUCKETS",
     "PREFLOP_HAND_CLASSES",
+    "SEATS_BEHIND_EARLY",
+    "SEATS_BEHIND_MIDDLE",
+    "effective_position_bucket",
     "position_bucket",
     "preflop_hand_class",
     "preflop_suited",

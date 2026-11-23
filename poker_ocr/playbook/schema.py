@@ -365,8 +365,12 @@ class Spot:
             commitment=commitment,
             opponent="unknown",
             hand_class=hand_class,
-            position_bucket=position_bucket(
-                getattr(snap, "hero_position", None)),
+            # #113 有效位置：座位静态档与身后人数档取更晚（由 situation 算好，
+            # 这里只读）。拿不到有效档就退回座位名 —— 旧快照/离线调用方不会少卡。
+            position_bucket=(
+                getattr(sit, "effective_position_bucket", None)
+                or position_bucket(getattr(snap, "hero_position", None))
+            ),
             hand_suited=hand_suited,
             facing_level=_facing_level(raises) if street == "preflop" else None,
             hero_role=_hero_role(raises) if street == "preflop" else None,

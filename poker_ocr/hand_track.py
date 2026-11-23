@@ -2764,6 +2764,11 @@ class LiveHandTracker:
             warnings.append(
                 f"本手 ante 按桌配置假设为 {state.ante_assumed_bb:g} BB，"
                 "未从画面读到（若牌桌没有 ante，请改用无前注的 profile）")
+        # #113 少于 7 人的桌：位置分档（身后人数）是按满员校准的，第一轮
+        # 未校准。按**桌型人数**判断，不看这一刻还能行动的对手数 —— 后者随
+        # 弃牌抖动，告警会一手亮一手灭。table_seats=0 表示没读到桌型，不猜。
+        if 0 < (state.table_seats or 0) < 7:
+            warnings.append("少于 7 人，第一轮未校准，建议离桌")
 
         # 决策点身份 = 这一手、这一街到目前的**动作序列**（+ 自己的底牌）。
         # 底池/最高下注不进 key：它们是 OCR 读数，盲注补齐、筹码动画会让它们
