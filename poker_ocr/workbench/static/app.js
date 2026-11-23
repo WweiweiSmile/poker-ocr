@@ -2127,6 +2127,8 @@ function adviceHtml(a) {
     pick('prompt_tokens') != null ? `${pick('prompt_tokens')}+${pick('completion_tokens') ?? '?'} tok` : '',
     a.action_index != null ? `第 ${a.action_index} 个动作后` : '',
   ].filter(Boolean);
+  // 事实边界（ante 假设 / 随机补位 / 降采样 / 未校准…）：空列表时这里是空串，卡片逐字不变。
+  const bounds = AdviceBounds.warningsHtml(facts.warnings, esc);
   return `<div class="advice-card kind-${kind}">
     <div class="advice-headline">
       <div>
@@ -2147,7 +2149,7 @@ function adviceHtml(a) {
     ${a.plan ? `<div class="advice-plan"><b>下一街</b> ${esc(a.plan)}</div>` : ''}
     ${chips.length ? `<div class="read-chips">${chips.map((c) => `<span class="read-chip">${esc(c)}</span>`).join('')}</div>` : ''}
     ${reads.length ? `<div class="read-chips">${reads.map((r) => `<span class="read-chip">${esc(r.display_name || r.key || r.seat_id || '?')} ${esc(String(r.archetype).toUpperCase())}${r.confidence != null ? ` ${fmtNum(r.confidence)}` : ''}</span>`).join('')}</div>` : ''}
-    ${meta.length ? `<div class="advice-meta">${meta.map((m) => esc(m)).join(' · ')}</div>` : ''}
+    ${meta.length ? `<div class="advice-meta">${meta.map((m) => esc(m)).join(' · ')}</div>` : ''}${bounds}
     ${a.click ? `<div class="alert ${['clicked', 'dry_run'].includes(a.click.status) ? 'info' : 'warn'}">自动点击：${esc(a.click.status || '?')}${a.click.reason ? ` · ${esc(a.click.reason)}` : ''}</div>` : ''}
   </div>`;
 }
