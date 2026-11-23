@@ -357,6 +357,38 @@ def test_explosive_wording_only_points_to_guard_when_it_applies() -> None:
           f"守则生效时不该再说按正常规则打：{bomb}")
 
 
+def test_bomb_guard_warning_is_auditable() -> None:
+    """#110 §6：守则生效这件事本身要能复盘审计，不是只出现在提示词里。
+
+    守则生效 → `sit.warnings` / `facts["warnings"]`（建议卡「数据边界」）/
+    数据质量段三处都有；横幅串手（翻前有真实动作）与普通局面都不加。
+    """
+    from poker_ocr.advice import _facts_snapshot, render_facts_zh
+
+    sit = _sit(bomb_pot=True, preflop_actions=())
+    hits = [w for w in sit.warnings if "炸弹池守则生效" in w]
+    check(len(hits) == 1,
+          f"炸弹池应有且仅有一条守则口径 warning：{sit.warnings}")
+    if hits:
+        for needle in ("书卡层整体让位", "沉没成本"):
+            check(needle in hits[0], f"warning 要写清影响（{needle}）：{hits[0]}")
+
+    facts = _facts_snapshot(sit)
+    check(any("炸弹池守则生效" in w for w in facts["warnings"]),
+          f'facts["warnings"] 要带这条（建议卡可审计）：{facts["warnings"]}')
+    user = render_facts_zh(sit)
+    quality = user.split("## 数据质量", 1)[-1]
+    check("炸弹池守则生效" in quality, f"数据质量段要带这条：{quality[:400]}")
+
+    # 横幅串到下一手（翻前读到真实动作）：按有行动处理，不加这条口径。
+    conflicted = _sit(bomb_pot=True)
+    check(not any("炸弹池守则生效" in w for w in conflicted.warnings),
+          f"翻前有动作时不该说守则生效：{conflicted.warnings}")
+    plain = _sit(bomb_pot=False)
+    check(not any("炸弹池守则生效" in w for w in plain.warnings),
+          f"普通局面不该有这条：{plain.warnings}")
+
+
 def main() -> int:
     tests = [value for name, value in sorted(globals().items())
              if name.startswith("test_") and callable(value)]

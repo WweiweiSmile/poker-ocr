@@ -24,7 +24,10 @@ from .hand_track import PREFLOP, HandSnapshot, preflop_aggressive
 from .options import (
     LOOSE_OPEN_BONUS, _abnormal_options, build_options, options_mode,
 )
-from .playbook.hand_class import effective_position_bucket as _effective_bucket
+from .playbook.hand_class import (
+    effective_position_bucket as _effective_bucket, position_bucket,
+)
+from .playbook.prompt import POSITION_ZH
 from .pot_math import (
     _no_opponent_anomaly, _playable_depth, _unknown_stack_opponents,
     behind_opponents, count_limpers, hero_in_position, is_explosive_pot,
@@ -481,6 +484,8 @@ def build_situation(snap: HandSnapshot,
         preflop_text = None
     # #113 有效位置：身后人数只看「位置排在我后面、没弃牌」，与下注状态无关。
     behind = seats_behind(snap)
+    effective_bucket = _effective_bucket(snap.hero_position, behind)
+    static_bucket = position_bucket(snap.hero_position)
     sit = Situation(
         snap=snap,
         options=(_abnormal_options(snap) if degraded == "abnormal"
@@ -526,11 +531,33 @@ def build_situation(snap: HandSnapshot,
         in_position=hero_in_position(snap),
         players_left_to_act=players_left_to_act(snap),
         seats_behind=behind,
-        effective_position_bucket=_effective_bucket(
-            snap.hero_position, behind),
+        effective_position_bucket=effective_bucket,
         previous=previous,
         abnormal_no_opponents=anomaly,
     )
+    # #110 §6：口径类事实也要能被复盘审计（facts.warnings → 数据质量段 → 建议卡）。
+    # 这两条都不改 option 列表，只改「这手建议按什么口径读」：炸弹池守则取代
+    # 书卡层、有效位置被身后人数放宽。判不出来就一条都不加（fail open）。
+    extra_warnings: list[str] = []
+    try:
+        from .playbook.bomb import bomb_guard_applies
+        if bomb_guard_applies(sit):
+            extra_warnings.append(
+                "炸弹池守则生效：本手没有翻前行动，书卡层整体让位"
+                "（只继续 set/两对/顺/同花/坚果同花听牌，超对只在干燥面小注，"
+                "其余过牌/弃牌，不诈唬；已投入的筹码按沉没成本处理）")
+    except Exception:  # noqa: BLE001
+        pass
+    if (effective_bucket and static_bucket
+            and effective_bucket != static_bucket
+            and effective_bucket != "blind"):
+        extra_warnings.append(
+            f"有效位置按身后人数放宽：{POSITION_ZH.get(static_bucket, static_bucket)}"
+            f"→{POSITION_ZH.get(effective_bucket, effective_bucket)}"
+            f"（{snap.hero_position}，身后 {behind} 人）")
+    if extra_warnings:
+        sit = replace(sit, warnings=list(dict.fromkeys(
+            [*sit.warnings, *extra_warnings])))
     # 手牌 vs 对手范围：答案在 ground truth 之后、board structure 之前。
     # 任何一步缺数据都 fail open，绝不影响主链路。
     try:

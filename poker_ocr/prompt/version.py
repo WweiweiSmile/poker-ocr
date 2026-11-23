@@ -234,5 +234,15 @@ from __future__ import annotations
 # 段（与 ante 假设、随机补位同级保底）与建议卡。seed 仍由目标样本数派生，所以
 # 降采样结果就是同一组抽样的前缀；不超预算时抽样次数/顺序与今天完全一致，
 # 三个 golden fixture 的 system 与 user 都不变，hash 不变。
-PROMPT_VERSION = "lean-zh-2026-11-23.16"
+# 2026-11-23.17：口径类事实补成可审计的 warning（#110 §6 收口核对）——规格要求
+# 六类新增 warning（ante_assumed / effective_position / fewer_than_7 /
+# random_opponents / equity_sample_reduced / bomb_guard）都进数据质量段与建议卡，
+# 但「有效位置被放宽」只印在位置事实行里、「炸弹池守则生效」只体现为书卡层消失，
+# 复盘时看不出这手建议是按什么口径给的。现在两条各写一行中文事实 warning：
+# 「有效位置按身后人数放宽：前位→中位（UTG+2，身后 6 人）」只在档位真的变了时
+# 出现（座位没放宽不加，普通局面逐字不变），「炸弹池守则生效：…书卡层整体让位…」
+# 只在守则真的生效时出现（横幅串手按有行动处理时不加）。两条都进 assumed 桶保底，
+# 4 行 cap 挤不掉。3-bet golden fixture（6-max flop UTG，身后 1 人 → 后位）因此
+# 多这一行，三个 hash 里只有它变。
+PROMPT_VERSION = "lean-zh-2026-11-23.17"
 PROMPT_LANGUAGE = "zh"

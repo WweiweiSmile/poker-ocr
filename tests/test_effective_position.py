@@ -42,6 +42,8 @@ from poker_ocr.profile import DEFAULT_PREFLOP_MIN_OPEN_BB  # noqa: E402
 from poker_ocr.prompt.user.quality import _summarize_gaps  # noqa: E402
 
 SHORT_TABLE_WARNING = "少于 7 人，第一轮未校准，建议离桌"
+# #110 §6：有效位置被身后人数放宽时要作为口径事实留下来（事实 → 提示词 → 卡）。
+EFFECTIVE_POSITION_WARNING = "有效位置按身后人数放宽"
 
 FAILS: list[str] = []
 
@@ -417,6 +419,54 @@ def test_short_table_warning_in_snapshot_facts_and_prompt():
     ])
     check(SHORT_TABLE_WARNING in summary,
           f"少于 7 人是硬缺口，必须活过 4 条 cap：{summary}")
+
+
+def test_effective_position_warning_in_facts_and_prompt():
+    """#110 §6：有效位置被放宽这件事本身要成为可审计的 warning。
+
+    座位没被放宽时不加这条（普通局面逐字不变），放宽时同时出现在
+    `sit.warnings` / `facts["warnings"]`（建议卡「数据边界」）与数据质量段。
+    """
+    sit = build_situation(
+        full_snapshot(table_size=9, hero="UTG+2", street="preflop"),
+        table_dynamics="")
+    hits = [w for w in sit.warnings if EFFECTIVE_POSITION_WARNING in w]
+    check(len(hits) == 1,
+          f"9-max UTG+2 应有且仅有一条有效位置口径 warning：{sit.warnings}")
+    if hits:
+        check("前位→中位" in hits[0] and "身后 6 人" in hits[0],
+              f"warning 要写清放宽方向与人数：{hits[0]}")
+
+    facts = _facts_snapshot(sit)
+    check(any(EFFECTIVE_POSITION_WARNING in w for w in facts["warnings"]),
+          f'facts["warnings"] 要带这条（建议卡可审计）：{facts["warnings"]}')
+
+    user = render_facts_zh(sit)
+    quality = user.split("## 数据质量", 1)[-1]
+    check(EFFECTIVE_POSITION_WARNING in quality,
+          f"数据质量段要带这条：{quality[:400]}")
+    check(EFFECTIVE_POSITION_WARNING in build_messages(sit)[1],
+          "发给模型的消息里也要有这条")
+
+    # 四条软缺口占满时也不能被 4 行 cap 挤掉：它改变的是书卡口径。
+    summary = _summarize_gaps([
+        "只建模前 2 名对手；另有 1 名未计入范围权益",
+        "部分座位翻前动作线缺失，范围按未开池先验估计",
+        "部分座位本街行动线缺失，范围按未行动处理（不是已过牌）",
+        "某座位范围未知",
+        hits[0] if hits else EFFECTIVE_POSITION_WARNING,
+    ])
+    check(any(EFFECTIVE_POSITION_WARNING in g for g in summary),
+          f"有效位置口径要活过 4 条 cap：{summary}")
+
+    # 没放宽的座位不出这条：普通局面不该平白多一行数据边界。
+    for size, hero, street in ((9, "UTG", "preflop"), (9, "BTN", "flop"),
+                               (9, "SB", "preflop")):
+        plain = build_situation(
+            full_snapshot(table_size=size, hero=hero, street=street),
+            table_dynamics="")
+        check(not any(EFFECTIVE_POSITION_WARNING in w for w in plain.warnings),
+              f"{size}-max {hero} {street} 没放宽，不该有这条：{plain.warnings}")
 
 
 def test_seven_or_more_players_has_no_short_table_warning():
