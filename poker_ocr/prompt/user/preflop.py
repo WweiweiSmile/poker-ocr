@@ -63,8 +63,12 @@ def render_preflop_zh(sit: Situation) -> list[str]:
         lines.append(f"前面溜入人数：{limpers}")
     raises = sorted({o.amount for o in sit.options
                      if o.kind in ("raise", "bet") and o.amount is not None})
+    # 下限是本桌规则（profile 的 preflop_min_open_bb，经快照带来）：0.5BB
+    # 前注桌 6.0，无前注桌 5.5。和 options 读同一份值，提示词不另留常量；
+    # 老快照没有这个字段时回落到缺省桌规则。
+    floor = getattr(snap, "preflop_min_open_bb", None) or PREFLOP_MIN_RAISE_BB
     if raises:
         lines.append(fact(
-            f"本桌翻前最低加注：{PREFLOP_MIN_RAISE_BB:g}BB（更小的会被客户端"
+            f"本桌翻前最低加注：{floor:g}BB（更小的会被客户端"
             "拒绝；实际金额以「可选动作」为准）", kind="derived"))
     return lines

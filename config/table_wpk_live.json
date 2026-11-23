@@ -14,6 +14,7 @@
     2182
   ],
   "default_ante": 0.5,
+  "preflop_min_open_bb": 6.0,
   "canvas": null,
   "table_center": [
     0.5,

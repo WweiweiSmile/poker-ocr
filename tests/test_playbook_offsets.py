@@ -200,6 +200,38 @@ def test_already_legal_book_size_is_not_a_fake_offset() -> None:
           "没有实际改动就不该有偏移行")
 
 
+def test_floor_is_applied_once_by_options_not_twice_by_the_offset() -> None:
+    """⑦ 下限只在 options 里落一次；偏移层只对齐到合法档，不再补一次下限。
+
+    UTG 在前注桌（下限 6.0）的合法开注是 6/7/8BB；书里 3BB 应被抬到最近的
+    合法档 6BB。若偏移层把下限再加一遍会得到 3+6=9BB —— 一个选不到的金额。
+    """
+    sit = build_situation(
+        replace(_snapshot(ante=0.5), hero_position="UTG",
+                preflop_min_open_bb=6.0),
+        table_dynamics="")
+    raise_amounts = {o.amount for o in sit.options if o.kind == "raise"}
+    check(raise_amounts == {6.0, 7.0, 8.0},
+          f"UTG 下限 6.0 的合法开注应 6/7/8BB：{raise_amounts}")
+
+    card = _open_card(3.0)
+    deltas = apply_offsets(card, sit)
+    check(len(deltas) == 1, f"应恰好一条尺寸偏移：{deltas}")
+    if not deltas:
+        return
+    check(deltas[0].final == "6BB",
+          f"3BB 应抬到最近的合法档 6BB：{deltas[0]}")
+    check(deltas[0].final != "9BB", "不能把下限再加一遍（3+6=9）")
+
+    again = apply_offsets(card, sit)
+    check([(d.final, d.baseline) for d in again]
+          == [(d.final, d.baseline) for d in deltas],
+          f"同一局面重复应用偏移必须幂等：{again}")
+    check(f"{float(deltas[0].final.rstrip('BB')):g}BB"
+          in {f"{amount:g}BB" for amount in raise_amounts},
+          "最终尺寸必须真的出现在 options 里")
+
+
 def test_size_between_options_lands_on_a_legal_option() -> None:
     """④ 落在区间内但选不到的尺寸（7.2BB）也要移到最近合法档。"""
     sit = _ante_sit(0.5)

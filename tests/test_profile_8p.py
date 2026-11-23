@@ -124,9 +124,27 @@ def test_side_seats_copied() -> None:
                   f"{sid}.{field} 应当与 9 人桌一致：8p={getattr(a, field)} vs 9p={getattr(b, field)}")
 
 
+def test_preflop_min_open_floor() -> None:
+    """开池下限是 profile 字段（#112）：无前注 8 人桌取缺省 5.5，越界报 2-20。"""
+    import dataclasses
+
+    from poker_ocr.profile import DEFAULT_PREFLOP_MIN_OPEN_BB
+
+    p = Profile.load(str(PROFILE))
+    check(p.default_ante is None,
+          f"8 人桌没有前注，不该兜底：{p.default_ante}")
+    check(DEFAULT_PREFLOP_MIN_OPEN_BB == 5.5,
+          f"缺省开池下限应是 5.5：{DEFAULT_PREFLOP_MIN_OPEN_BB}")
+    check(p.preflop_min_open_bb == DEFAULT_PREFLOP_MIN_OPEN_BB,
+          f"无前注桌应取缺省下限：{p.preflop_min_open_bb}")
+    problems = dataclasses.replace(p, preflop_min_open_bb=21.0).check()
+    check(any("preflop_min_open_bb" in q and "2-20" in q for q in problems),
+          f"越界下限应报 2-20：{problems}")
+
+
 def main() -> int:
     tests = [test_profile_shape, test_ring_geometry, test_top_seat_geometry,
-             test_side_seats_copied]
+             test_side_seats_copied, test_preflop_min_open_floor]
     for t in tests:
         before = len(FAILS)
         try:

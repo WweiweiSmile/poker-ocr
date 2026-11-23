@@ -58,6 +58,7 @@ from typing import Callable
 from .frame_state import FrameState, PlayerState
 from .hand_id import build_hand_identity
 from .parse import Blinds
+from .profile import DEFAULT_PREFLOP_MIN_OPEN_BB
 
 PREFLOP = "preflop"
 FLOP = "flop"
@@ -353,6 +354,9 @@ class HandSnapshot:
     # bet_unknown）的座位。这些座位不进 `to_call` 的取最大，所以 to_call 会
     # **偏小甚至变成 0**；非空即表示这一帧的 to_call 不可用。
     bets_unknown: tuple[str, ...] = ()
+    # 本桌翻前未开池的最低开池（BB）。来自 profile → FrameState，options 与
+    # 提示词都读这一份；老快照没有它时回落到缺省的桌规则 5.5。
+    preflop_min_open_bb: float = DEFAULT_PREFLOP_MIN_OPEN_BB
 
     @property
     def opponents_in_hand(self) -> int:
@@ -2753,6 +2757,13 @@ class LiveHandTracker:
             warnings.append(
                 f"opponent bet unreadable ({', '.join(bets_unknown)}); "
                 "to_call may be underestimated")
+        # 画面没读到前注、profile 兜底填上的：这是**假设**，不是读数。
+        # 中文告警原样进 prompt 数据质量段（quality._gap_zh 放行 CJK），
+        # 让模型/人知道这一个事实有条件（若牌桌无 ante，建议尺寸会偏大）。
+        if state.ante_assumed_bb:
+            warnings.append(
+                f"本手 ante 按桌配置假设为 {state.ante_assumed_bb:g} BB，"
+                "未从画面读到（若牌桌没有 ante，请改用无前注的 profile）")
 
         # 决策点身份 = 这一手、这一街到目前的**动作序列**（+ 自己的底牌）。
         # 底池/最高下注不进 key：它们是 OCR 读数，盲注补齐、筹码动画会让它们
@@ -2788,6 +2799,7 @@ class LiveHandTracker:
             bomb_pot=hand.bomb_pot,
             players_dealt=players_dealt,
             bets_unknown=bets_unknown,
+            preflop_min_open_bb=state.preflop_min_open_bb,
         )
 
     def _preflop_shapes(self, hand: _LiveHand, max_bet: float,

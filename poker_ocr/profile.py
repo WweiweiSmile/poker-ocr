@@ -19,6 +19,15 @@ HERE = Path(__file__).resolve().parent
 PROJECT_ROOT = HERE.parent
 DEFAULT_PROFILE = PROJECT_ROOT / "config" / "table_default.json"
 
+# 翻前未开池的最低开池尺寸（BB）：客户端会拒绝更小的加注，所以它是**桌规则**，
+# 不是策略数字，按桌配置（`preflop_min_open_bb`）。0.5BB 前注桌底池更大，
+# 各家把下限抬到 6.0；没有前注的桌保持 5.5。只作用于未开池的 open 档位
+# （见 options.build_preflop_options），最小加注/3-bet/全下另有合法下限。
+# `pot_math.PREFLOP_MIN_RAISE_BB` 是本值的兼容别名（缺省值）。
+DEFAULT_PREFLOP_MIN_OPEN_BB = 5.5
+# 允许区间：低于 2BB 等于没有下限（客户端不会拒绝），高于 20BB 不是真桌规则。
+PREFLOP_MIN_OPEN_RANGE = (2.0, 20.0)
+
 Slot = tuple[float, float, float, float]   # 归一化 x1,y1,x2,y2
 Size = tuple[int, int]                      # 宽, 高
 
@@ -83,6 +92,9 @@ class Profile:
     # 盲注横幅读丢前注时的兜底（BB）。这款 app 的 1/2 桌固定 0.5BB 前注；
     # None = 不兜底，按横幅原样。
     default_ante: float | None = None
+    # 本桌翻前未开池的最低开池（BB）。客户端会拒绝更小的加注 —— 这是桌规则，
+    # 按桌配置：0.5BB 前注桌 6.0，无前注桌 5.5。只作用于未开池的 open 档位。
+    preflop_min_open_bb: float = DEFAULT_PREFLOP_MIN_OPEN_BB
 
     # ── 查询 ──────────────────────────────────────────────
 
@@ -184,6 +196,11 @@ class Profile:
         走 `validate()` 保持原来的打印 + sys.exit 行为。
         """
         problems = []
+        lo, hi = PREFLOP_MIN_OPEN_RANGE
+        if not (lo <= self.preflop_min_open_bb <= hi):
+            problems.append(
+                f"preflop_min_open_bb 应在 {lo:g}-{hi:g}，"
+                f"实际 {self.preflop_min_open_bb:g}")
         ids = [s.seat_id for s in self.seats]
         if not (2 <= len(ids) <= 9):
             problems.append(f"座位数应在 2-9，实际 {len(ids)}")
@@ -267,6 +284,12 @@ class Profile:
             runtime=bool(raw.get("runtime", False)),
             default_ante=(float(raw["default_ante"])
                           if raw.get("default_ante") is not None else None),
+            # 缺省 = 老配置：按 5.5BB 桌规则。显式写 null 也按缺省处理
+            # （null 只对 default_ante 有「不兜底」的语义）。
+            preflop_min_open_bb=(
+                float(raw["preflop_min_open_bb"])
+                if raw.get("preflop_min_open_bb") is not None
+                else DEFAULT_PREFLOP_MIN_OPEN_BB),
         )
 
     @classmethod

@@ -67,6 +67,18 @@ def _round_bb(v: float) -> float:
     return round(v, 2)
 
 
+def _table_min_open_bb(snap: HandSnapshot) -> float:
+    """本桌翻前未开池的最低开池（BB）：读快照，不读模块常量。
+
+    下限是**桌规则**（客户端拒绝更小的加注），按桌配置在 profile 的
+    `preflop_min_open_bb`：0.5BB 前注桌 6.0，无前注桌 5.5。它跟着
+    profile → FrameState → 快照一路带到这里；老快照/测试构造的快照没有
+    这个字段时回落到 `pot_math.PREFLOP_MIN_RAISE_BB`（缺省桌规则）。
+    """
+    value = getattr(snap, "preflop_min_open_bb", None)
+    return float(value) if value else PREFLOP_MIN_RAISE_BB
+
+
 # all-in 只有在几何上说得通时才挂进选项：深码顶对局面挂一个 10 倍池的
 # 「全下」只会污染动作空间，模型还得自己判断它是不是正常尺度。阈值按
 # 跟注后底池和 SPR 双重判断；短码推弃（≤20BB）和已经套池（SPR≤3）不受限。
@@ -137,8 +149,8 @@ def _all_in_option(snap: HandSnapshot) -> Option | None:
 # 大盲在溜入池里再加注时，尺度要比开池更大（没有位置劣势补偿，直接收池）。
 # 这些是**无前注、底池 1.5BB** 时的原始尺度。实际开池还要乘上底池缩放
 # (底池/1.5)**OPEN_POT_EXPONENT（见 build_preflop_options），再被本桌
-# 5.5BB 最低开池（PREFLOP_MIN_RAISE_BB）抬一次下限。本桌 9 人 0.5BB 前注
-# → 底池 6BB → 缩放 2.0 倍 → 后位 7-8BB。
+# 最低开池（profile 的 preflop_min_open_bb，经快照带来）再抬一次下限。
+# 本桌 9 人 0.5BB 前注 + 下限 6.0 → 底池 6BB → 缩放 2.0 倍 → 后位 7-8BB。
 _OPEN_BASES: dict[str, tuple[float, ...]] = {
     "UTG": (2.5, 2.75, 3.0),
     "UTG+1": (2.5, 2.75, 3.0),
@@ -171,8 +183,8 @@ def _cap(target: float, hero_max: float | None, min_raise_to: float,
          min_note: str = "已抬到最小加注") -> tuple[float, str]:
     """把目标额修正到合法范围：低于最小加注抬上去，高于后手封顶为全下。
 
-    `min_note` 让翻前的牌桌下限（5.5BB）能和扑克本身的最小加注区分开：
-    模型看到「已抬到本桌最低加注 5.5BB」才知道不是程序算错了。
+    `min_note` 让翻前的牌桌下限（本桌最低开池）能和扑克本身的最小加注
+    区分开：模型看到「已抬到本桌最低加注 6BB」才知道不是程序算错了。
     """
     note = ""
     if target < min_raise_to:
@@ -201,9 +213,10 @@ def build_preflop_options(snap: HandSnapshot,
     second = snap.second_bet
     increment = max(max_bet - second if second is not None else max_bet, bb)
     legal_min_raise_to = max_bet + increment
-    # 本桌的 5.5BB 下限与扑克的最小加注取较严的那个：上家已经加注到 10BB 时，
-    # 合法的再加注到 20BB 比 5.5BB 更严，不能被 5.5BB 覆盖掉。
-    table_min_raise_to = bb * PREFLOP_MIN_RAISE_BB
+    # 本桌的下限（profile 决定：0.5BB 前注桌 6.0，无前注桌 5.5）与扑克的
+    # 最小加注取较严的那个：上家已经加注到 10BB 时，合法的再加注到 20BB
+    # 比桌下限更严，不能被桌下限覆盖掉。
+    table_min_raise_to = bb * _table_min_open_bb(snap)
     min_raise_to = max(legal_min_raise_to, table_min_raise_to)
     min_note = ("已抬到最小加注"
                 if legal_min_raise_to >= table_min_raise_to
@@ -292,7 +305,7 @@ def build_preflop_options(snap: HandSnapshot,
     # 开池尺度按**底池**缩放，不按盲注。
     #
     # 2.5-4BB 这套位置尺度成立的前提是「无前注、底池 1.5BB」。本桌 9 人
-    # 各交 0.5BB 前注，底池一到翻前就是 6BB —— 开 5.5BB 时大盲只需补 4.5
+    # 各交 0.5BB 前注，底池一到翻前就是 6BB —— 开下限尺寸时大盲只需补 4.5
     # 进 16，门槛 28%，比无前注局的 31% 还便宜。开池要对已经躺在底池里的
     # 死钱收费，所以尺度必须跟着底池走。
     #
@@ -308,7 +321,7 @@ def build_preflop_options(snap: HandSnapshot,
         target, note = _cap(target, hero_max, min_raise_to, min_note)
         rows.append((target, note, b))
 
-    # 5.5BB 下限会把 2.5/2.75/3.0 三个基础尺度一起抬成同一个金额。
+    # 本桌下限会把 2.5/2.75/3.0 三个基础尺度一起抬成同一个金额。
     # 三个 id、同一个金额不是选择，是噪声：改成下限、下限+1、下限+2 三个
     # 真正不同的尺度（仍然走 _cap，后手不足时会封顶/去重）。
     if len({target for target, _note, _b in rows}) <= 2:
@@ -318,7 +331,7 @@ def build_preflop_options(snap: HandSnapshot,
             target, note = _cap(floor + step, hero_max, min_raise_to, min_note)
             # floor 本身就在牌桌下限上：_cap 看到 target == min_raise_to 不会
             # 再补 note，但这一行是**按牌桌下限构造**的，不说明来源模型会以为
-            # 是程序把尺度算成了 5.5。补一句，和第一行的口径一致。
+            # 是程序把尺度算成了下限值。补一句，和第一行的口径一致。
             if not note and abs(target - table_min_raise_to) < 1e-9:
                 note = f"已抬到本桌最低加注 {table_min_raise_to:g}BB"
             rows.append((target, note, b))
@@ -343,10 +356,11 @@ def _raise_geometry(snap: HandSnapshot) -> tuple[float, float, float, float | No
     """加注金额的公共几何：需跟额、底池、当前最高下注、后手封顶、最小加注到。
 
     `build_options()` 和 `preset_targets()` 共用，避免两处对「最小加注 / 全下
-    封顶」的算法漂移。翻前还要叠加本桌的 5.5BB 下限（`PREFLOP_MIN_RAISE_BB`）：
-    这是**建议**必须落在这条线以上（低于它的开池会被牌桌拒绝）。
-    `preset_targets()` 只取几何、不用 `min_raise_to` —— 客户端档位按钮按底池
-    比例自己算，不会被这条下限抬价（见该函数的说明）。
+    封顶」的算法漂移。翻前还要叠加本桌的最低开池（profile 的
+    `preflop_min_open_bb`，经快照带来）：这是**建议**必须落在这条线以上
+    （低于它的开池会被牌桌拒绝）。`preset_targets()` 只取几何、不用
+    `min_raise_to` —— 客户端档位按钮按底池比例自己算，不会被这条下限抬价
+    （见该函数的说明）。
     """
     to_call = max(snap.to_call or 0.0, 0.0)
     pot = snap.pot or 0.0
@@ -358,7 +372,7 @@ def _raise_geometry(snap: HandSnapshot) -> tuple[float, float, float, float | No
     increment = max(max_bet - second if second is not None else max_bet, bb)
     min_raise_to = max_bet + increment
     if snap.street == PREFLOP:
-        min_raise_to = max(min_raise_to, bb * PREFLOP_MIN_RAISE_BB)
+        min_raise_to = max(min_raise_to, bb * _table_min_open_bb(snap))
     hero_max = (hero_bet + stack) if stack is not None else None
     return to_call, pot, max_bet, hero_max, min_raise_to
 

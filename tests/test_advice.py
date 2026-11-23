@@ -1385,6 +1385,39 @@ def test_preflop_min_raise_floor_is_five_half_bb() -> None:
           f"后手不足 5.5BB 应封顶为全下：{[(o.id, o.amount, o.note) for o in short_raises]}")
 
 
+def test_preflop_min_open_line_follows_snapshot_floor() -> None:
+    """本桌下限来自快照（profile → FrameState → 快照）：options 与提示词同源。
+
+    #112：0.5BB 前注的 9 人桌把下限设成 6.0，UTG 三档必须是 6/7/8BB；
+    改成 7.5 时 options 与提示词那行都跟着变 —— 不许再有第二处写死 5.5。
+    """
+    def spot(floor: float):
+        point = make_point(street="preflop", board=(), to_call=1.0, pot=6.0,
+                           hero_position="UTG", hero_cards=("Td", "Qd"),
+                           hero_bet=0.0, hero_stack=100.0,
+                           preflop_shapes=("unopened",), cbet_spot=False,
+                           preflop_min_open_bb=floor,
+                           blinds=Blinds(0.5, 1.0, 0.5, "1/2(1)"))
+        return point, build_situation(point, table_dynamics="")
+
+    for floor, tiers in ((6.0, [6.0, 7.0, 8.0]), (7.5, [7.5, 8.5, 9.5])):
+        snap, sit = spot(floor)
+        check(snap.preflop_min_open_bb == floor,
+              f"快照应带住下限 {floor:g}：{snap.preflop_min_open_bb}")
+        opens = [o.amount for o in sit.options if o.id.startswith("open-")]
+        check(opens == tiers,
+              f"下限 {floor:g} 的 UTG 开池三档应是 {tiers}：{opens}")
+        user = render_facts_zh(sit)
+        check(f"本桌翻前最低加注：{floor:g}BB" in user,
+              f"提示词下限行应跟随快照 {floor:g}BB")
+
+    # 无 ante 桌：老缺省 5.5 仍然是缺省（profile 没写就用它），UTG 从 5.5 起。
+    _, default_sit = spot(5.5)
+    opens = [o.amount for o in default_sit.options if o.id.startswith("open-")]
+    check(opens == [5.5, 6.5, 7.5],
+          f"缺省 5.5BB 下限的 UTG 三档应是 5.5/6.5/7.5：{opens}")
+
+
 def test_preflop_presets_follow_client_buttons_not_table_floor() -> None:
     """翻前档位按**客户端按钮**算，5.5BB 桌规只约束建议，不约束按钮金额。
 

@@ -43,7 +43,7 @@ from .parse import (
     parse_percent, sticky_name, waiting_badge,
 )
 from .positions import assign_positions
-from .profile import Profile
+from .profile import DEFAULT_PREFLOP_MIN_OPEN_BB, Profile
 from .roi_reader import RoiFrame
 
 # 状态里的动作枚举（与 call-back / api.py 的口径一致）
@@ -174,6 +174,13 @@ class FrameState:
     # 其余字段（别人的筹码/底池/动作）仍然可用。调用方据此**不给 AI 建议**：
     # to_call/水位依赖最大下注，静默少算一位会点错金额。
     bet_warnings: list[str] = dc_field(default_factory=list)
+    # 本桌翻前未开池的最低开池（BB），来自 profile。只作用于未开池的 open
+    # 档位；带进快照，options 与提示词都读这一份，绝不各留一个常量。
+    preflop_min_open_bb: float = DEFAULT_PREFLOP_MIN_OPEN_BB
+    # 本帧的 ante 是 profile 兜底出来的（画面没读到）时，记下被假设的值。
+    # None = 前注是画面读到的 / 本桌没有前注；上层据此记「ante 按配置假设」
+    # 的事实告警（不得把假设当成读数）。
+    ante_assumed_bb: float | None = None
 
     @property
     def ok(self) -> bool:
@@ -371,18 +378,27 @@ def _global_facts(ctx: BuildContext):
     # ── 全局 ──────────────────────────────────────────────
     blinds = parse_blinds(frame.text("blinds"))
     blinds_source = "frame"
+    ante_assumed: float | None = None
+    # 跨帧继承的盲注如果本来就是兜底出来的，假设也要跟着走（前注是牌桌属性，
+    # 上一帧没读到、这一帧横幅又被盖住时，不能把假设悄悄变成「读到了」）。
+    inherited_assumed = (ctx.prev_state.ante_assumed_bb
+                         if ctx.prev_state is not None else None)
     if blinds is None and prev_blinds is not None:
         blinds, blinds_source = prev_blinds, "carried"
+        ante_assumed = inherited_assumed
     elif blinds is not None and blinds.ante is None and prev_blinds is not None:
         # 括号里的前注被读丢（`1/2）`）→ 沿用上一帧的前注。前注是牌桌定义，
         # 只在升级时变；让它跟着 OCR 在 0 / 0.5 之间跳会制造假状态变化。
         blinds = Blinds(sb=blinds.sb, bb=blinds.bb, ante=prev_blinds.ante,
                         raw=blinds.raw)
+        ante_assumed = inherited_assumed
     if blinds is not None and blinds.ante is None and ante_fallback:
         # 横幅把括号里的前注读空（`1/2(）`）时，用 profile 的默认前注兜底。
         # 前注直接影响开池尺寸（有前注要放大）和底池计算，不能当 0。
+        # 但兜底值不是读数：记下是被假设的，交给上层当事实告警（#112）。
         blinds = Blinds(sb=blinds.sb, bb=blinds.bb,
                         ante=float(ante_fallback), raw=blinds.raw)
+        ante_assumed = float(ante_fallback)
 
     pot_a = parse_amount(frame.text("pot"))
     pbs_a = parse_amount(frame.text("pot_before_street"))
@@ -396,7 +412,8 @@ def _global_facts(ctx: BuildContext):
                     and pbs <= pot else None)
 
     dealer = frame.dealer.seat_id if (frame.dealer and frame.dealer.status == "found") else None
-    return blinds, blinds_source, pot, pbs, pot_idle, street_total, dealer
+    return (blinds, blinds_source, ante_assumed, pot, pbs, pot_idle,
+            street_total, dealer)
 
 
 def _build_players(ctx: BuildContext):
@@ -937,7 +954,7 @@ def _quality_gate(ctx: BuildContext, in_hand: list[PlayerState],
 def _build_state(ctx: BuildContext) -> FrameState:
     """编排：全局事实 → 座位 → 位置 → 质量闸 → FrameState。"""
     frame = ctx.frame
-    (blinds, blinds_source, pot, pbs, pot_idle, street_total,
+    (blinds, blinds_source, ante_assumed, pot, pbs, pot_idle, street_total,
      dealer) = _global_facts(ctx)
     players, name_warnings = _build_players(ctx)
     in_hand = [p for p in players if p.in_hand]
@@ -965,6 +982,8 @@ def _build_state(ctx: BuildContext) -> FrameState:
         errors=errors,
         name_warnings=name_warnings,
         bet_warnings=bet_warnings,
+        preflop_min_open_bb=float(ctx.profile.preflop_min_open_bb),
+        ante_assumed_bb=ante_assumed,
     )
 
 
@@ -985,7 +1004,8 @@ def signature(state: FrameState) -> tuple:
         （把底池值读到 pbs 槽），而底池/下注本身已经覆盖了真实变化。
       · 盲注的 `ante` —— 括号被读丢时靠继承，`None→0.5` 不该算状态变化；
         sb/bb 变了才是真的升级。
-      · `blinds_source` / `notes` —— 读数来源和备注不是状态。
+      · `blinds_source` / `notes` / `ante_assumed_bb` / `preflop_min_open_bb`
+        —— 读数来源、备注、以及从 profile 来的桌规则/兜底标记都不是桌面状态。
     """
     b = (state.blinds.sb, state.blinds.bb) if state.blinds else None
     return (

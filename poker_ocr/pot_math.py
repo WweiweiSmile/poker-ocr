@@ -14,15 +14,17 @@ from .hand_track import (
     FLOP, PREFLOP, ActionRecord, HandSnapshot, preflop_aggressive,
 )
 from .positions import POSITIONS_BY_TABLE_SIZE, BB, SB
+from .profile import DEFAULT_PREFLOP_MIN_OPEN_BB
 
 
 # ─────────────────────── 牌桌规则常量 ───────────────────────
 
-# 翻前桌上规则：任何加注/开池/再加注的「加注到」总额不得低于 5.5BB。
-# 牌桌客户端会拒绝更小的尺度，给出 2.5BB 的开池建议等于给一个点不出来的动作。
-# 位置尺度（2.5-4BB）低于这个下限时由 `_cap()` 抬到 5.5BB；真正的全下不受此限
-# （后手不足 5.5BB 时只能全下，这是合法动作）。改牌桌规则时只改这个常量。
-PREFLOP_MIN_RAISE_BB = 5.5
+# 翻前开池/加注的**缺省**最低「加注到」总额（BB）。牌桌客户端会拒绝更小的
+# 尺度，所以真正生效的值住在 profile 的 `preflop_min_open_bb`（0.5BB 前注桌
+# 是 6.0），快照带过来给 options / prompt 用。这个常量只作两件事：
+# 老快照的缺省值 + 兼容旧名字（`advice.PREFLOP_MIN_RAISE_BB` 仍在 re-export）。
+# 改牌桌规则请改 profile 字段，不要在这里加第二份数字。
+PREFLOP_MIN_RAISE_BB = DEFAULT_PREFLOP_MIN_OPEN_BB
 
 
 # ─────────────────────── 翻前人数 ───────────────────────
