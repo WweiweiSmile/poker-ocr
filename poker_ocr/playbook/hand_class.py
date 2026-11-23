@@ -169,11 +169,14 @@ def position_bucket(position) -> str | None:
 # 阈值是**规则数字**（不是策略数字）：牌桌规则/牌书共识的「身后还有几个
 # 对手」分宽窄，依据见 issue #113。它住在规则模块里，不进 `poker_ocr/tables/`。
 # 校准依据：9-max 满员翻前 UTG/UTG+1 身后 8/7 人 → 早位（≥7）；身后 5–6 人
-# 是中位（LJ 5 人、9-max 满员翻前 UTG+2 6 人）；≤4 人放开到后位。
-# 已知偏离：同一条规则下 9-max 满员翻前的 UTG+2（6）会从早位落到中位、
-# HJ（4）会从中位落到后位。这是**接受**的放宽（人数只放宽，不收紧）。
+# 是中位（LJ 5 人）；≤4 人放开到后位。
+# 9 人满员是**第一轮校准过的基准场景**（规格 #110 §2：9-max 行为不变）：
+# 7/5 这两个分界是对 9 人桌座位表标的，在满员桌上再按人数重算会把基准场景
+# 整体挪一档（翻后尤其狠——盲注先行动，满员桌没有任何非盲座位能到 7 人）。
+# 所以人数放宽只在**少于满员**的桌上生效；满员桌或桌型未知时退回座位静态档。
 SEATS_BEHIND_EARLY = 7
 SEATS_BEHIND_MIDDLE = 5
+FULL_RING_TABLE_SIZE = 9
 
 # 档位的「晚」序：靠后的 index 更晚。blind 不参与比较（盲注恒为盲注档）。
 _BUCKET_LATER = ("early", "middle", "late")
@@ -202,6 +205,7 @@ def effective_position_bucket(position, behind: int | None) -> str | None:
 
 
 __all__ = [
+    "FULL_RING_TABLE_SIZE",
     "POSITION_BUCKETS",
     "PREFLOP_HAND_CLASSES",
     "SEATS_BEHIND_EARLY",

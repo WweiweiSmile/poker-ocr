@@ -25,7 +25,8 @@ from .options import (
     LOOSE_OPEN_BONUS, _abnormal_options, build_options, options_mode,
 )
 from .playbook.hand_class import (
-    effective_position_bucket as _effective_bucket, position_bucket,
+    FULL_RING_TABLE_SIZE, effective_position_bucket as _effective_bucket,
+    position_bucket,
 )
 from .playbook.prompt import POSITION_ZH
 from .pot_math import (
@@ -483,9 +484,15 @@ def build_situation(snap: HandSnapshot,
     else:
         preflop_text = None
     # #113 有效位置：身后人数只看「位置排在我后面、没弃牌」，与下注状态无关。
+    # 满员（9 人）桌是第一轮校准过的基准场景，按规格 #110 §2 保持座位静态档；
+    # 人数放宽只在少于满员的桌上生效（桌型未知也退回静态档，fail open）。
     behind = seats_behind(snap)
-    effective_bucket = _effective_bucket(snap.hero_position, behind)
     static_bucket = position_bucket(snap.hero_position)
+    table_size = snap.table_size or 0
+    effective_bucket = (
+        static_bucket
+        if table_size <= 0 or table_size >= FULL_RING_TABLE_SIZE
+        else _effective_bucket(snap.hero_position, behind))
     sit = Situation(
         snap=snap,
         options=(_abnormal_options(snap) if degraded == "abnormal"

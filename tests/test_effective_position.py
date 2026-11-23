@@ -9,7 +9,8 @@
   2. `hand_class.effective_position_bucket()`：座位静态档与人数档取更晚，
      SB/BB 恒为盲注档，behind=None 时退回静态档；
   3. 7/8/9 人桌 × 全部座位 × 翻前/翻后 的档位表（与 issue #113 验收逐项对照）；
-  4. 有效档真的改变书卡匹配（9-max UTG+2 翻前从 early 卡换到 middle 卡）；
+     9 人满员是第一轮校准过的基准场景，按规格 #110 §2 保持座位静态档（不变）；
+  4. 有效档真的改变书卡匹配（8-max UTG+1 翻前从 early 卡换到 middle 卡）；
   5. 少于 7 人：硬告警同时进 facts["warnings"] 与提示词数据质量段；
   6. 提示词的位置事实带有效档，且不新增整段。
 """
@@ -264,10 +265,12 @@ def full_snapshot(*, table_size: int, hero: str, street: str = "preflop",
 
 
 # issue #113 验收表：7/8/9 人 × 全部座位 × 翻前/翻后。
+# 9 人是第一轮校准过的基准场景（规格 #110 §2：9-max 行为不变），人数放宽只在
+# <9 人桌生效，所以 9-max 每一行都等于座位静态档（翻前翻后相同）。
 EXPECTED_BUCKETS = {
     "preflop": {
-        9: {"UTG": "early", "UTG+1": "early", "UTG+2": "middle",
-            "LJ": "middle", "HJ": "late", "CO": "late", "BTN": "late",
+        9: {"UTG": "early", "UTG+1": "early", "UTG+2": "early",
+            "LJ": "middle", "HJ": "middle", "CO": "late", "BTN": "late",
             "SB": "blind", "BB": "blind"},
         8: {"UTG": "early", "UTG+1": "middle", "LJ": "middle",
             "HJ": "late", "CO": "late", "BTN": "late",
@@ -276,9 +279,9 @@ EXPECTED_BUCKETS = {
             "CO": "late", "BTN": "late", "SB": "blind", "BB": "blind"},
     },
     "flop": {
-        9: {"SB": "blind", "BB": "blind", "UTG": "middle",
-            "UTG+1": "middle", "UTG+2": "late", "LJ": "late",
-            "HJ": "late", "CO": "late", "BTN": "late"},
+        9: {"SB": "blind", "BB": "blind", "UTG": "early",
+            "UTG+1": "early", "UTG+2": "early", "LJ": "middle",
+            "HJ": "middle", "CO": "late", "BTN": "late"},
         8: {"SB": "blind", "BB": "blind", "UTG": "middle",
             "UTG+1": "late", "LJ": "late", "HJ": "late",
             "CO": "late", "BTN": "late"},
@@ -286,6 +289,20 @@ EXPECTED_BUCKETS = {
             "HJ": "late", "CO": "late", "BTN": "late"},
     },
 }
+
+
+def test_full_ring_keeps_static_buckets():
+    """9-max 满员：翻前翻后都必须与座位静态档逐位相同（规格 #110 §2）。"""
+    for street in ("preflop", "flop"):
+        for position in ("UTG", "UTG+1", "UTG+2", "LJ", "HJ", "CO", "BTN",
+                         "SB", "BB"):
+            sit = build_situation(
+                full_snapshot(table_size=9, hero=position, street=street),
+                table_dynamics="")
+            want = position_bucket(position)
+            check(sit.effective_position_bucket == want,
+                  f"9-max {street} {position} 应保持静态 {want}，"
+                  f"实际 {sit.effective_position_bucket}")
 
 
 def test_acceptance_table_preflop_and_postflop():
@@ -321,36 +338,55 @@ def test_postflop_counts_fewer_players_only_later():
                   f"{before.effective_position_bucket} → "
                   f"{after.effective_position_bucket}")
 
-    # 9-max 翻后 UTG+1：UTG+2 弃牌 → 身后 5 → 4，中位 → 后位。
+    # 8-max 翻后 UTG：UTG+1 弃牌 → 身后 5 → 4，中位 → 后位。
     bent = build_situation(
-        full_snapshot(table_size=9, hero="UTG+1", street="flop",
-                      folded=("UTG+2",)), table_dynamics="")
-    check(bent.seats_behind == 4, f"UTG+2 弃牌后身后应 4 人，实际 {bent.seats_behind}")
+        full_snapshot(table_size=8, hero="UTG", street="flop",
+                      folded=("UTG+1",)), table_dynamics="")
+    check(bent.seats_behind == 4, f"UTG+1 弃牌后身后应 4 人，实际 {bent.seats_behind}")
     check(bent.effective_position_bucket == "late",
           f"减员后应更晚（late），实际 {bent.effective_position_bucket}")
 
+    # 9-max 满员不套人数规则：同一次减员不移档。
+    full = build_situation(
+        full_snapshot(table_size=9, hero="UTG+1", street="flop"),
+        table_dynamics="")
+    folded = build_situation(
+        full_snapshot(table_size=9, hero="UTG+1", street="flop",
+                      folded=("UTG+2",)), table_dynamics="")
+    check(folded.effective_position_bucket == full.effective_position_bucket
+          == "early",
+          f"9-max 满员减员不该移档：{full.effective_position_bucket} → "
+          f"{folded.effective_position_bucket}")
+
 
 def test_effective_bucket_changes_book_card():
-    """有效档真的换了卡：9-max UTG+2 翻前 88，早位卡（跟）→ 中位卡（加）。"""
-    utg = build_situation(full_snapshot(table_size=9, hero="UTG",
+    """有效档真的换了卡：8-max UTG+1 翻前 88，早位卡（跟）→ 中位卡（加）。"""
+    utg = build_situation(full_snapshot(table_size=8, hero="UTG",
                                         cards=("8h", "8d")), table_dynamics="")
-    utg2 = build_situation(full_snapshot(table_size=9, hero="UTG+2",
+    utg1 = build_situation(full_snapshot(table_size=8, hero="UTG+1",
                                          cards=("8h", "8d")), table_dynamics="")
     check(utg.effective_position_bucket == "early",
           f"UTG 有效档应 early，实际 {utg.effective_position_bucket}")
-    check(utg2.effective_position_bucket == "middle",
-          f"UTG+2 有效档应 middle，实际 {utg2.effective_position_bucket}")
+    check(utg1.effective_position_bucket == "middle",
+          f"UTG+1 有效档应 middle，实际 {utg1.effective_position_bucket}")
     _spot_u, card_u = resolve_for_situation(utg)
-    _spot_2, card_2 = resolve_for_situation(utg2)
+    _spot_2, card_2 = resolve_for_situation(utg1)
     check(card_u is not None and card_2 is not None, "两处都应命中卡片")
     check(card_u.id != card_2.id,
-          f"有效档应改变命中卡：UTG={card_u.id} UTG+2={card_2.id}")
+          f"有效档应改变命中卡：UTG={card_u.id} UTG+1={card_2.id}")
     check(card_u.id == "preflop.rfi.low_pair.early",
           f"UTG 应命中早位 88 卡，实际 {card_u.id}")
     check(card_2.id == "preflop.rfi.low_pair.middle",
-          f"UTG+2 应命中中位 88 卡，实际 {card_2.id}")
+          f"UTG+1 应命中中位 88 卡，实际 {card_2.id}")
     check(card_u.plan.action == "call" and card_2.plan.action == "raise",
           f"早位跟/中位加应换过来：{card_u.plan.action} → {card_2.plan.action}")
+
+    # 9-max 满员不换卡：UTG+2 仍是早位卡（规格 #110 §2 的行为不变）。
+    full = build_situation(full_snapshot(table_size=9, hero="UTG+2",
+                                         cards=("8h", "8d")), table_dynamics="")
+    _spot, card_full = resolve_for_situation(full)
+    check(card_full is not None and card_full.id == "preflop.rfi.low_pair.early",
+          f"9-max UTG+2 应仍命中早位卡，实际 {getattr(card_full, 'id', None)}")
 
 
 # ───────────────── 4. 少于 7 人：硬告警 ─────────────────
@@ -428,11 +464,11 @@ def test_effective_position_warning_in_facts_and_prompt():
     `sit.warnings` / `facts["warnings"]`（建议卡「数据边界」）与数据质量段。
     """
     sit = build_situation(
-        full_snapshot(table_size=9, hero="UTG+2", street="preflop"),
+        full_snapshot(table_size=8, hero="UTG+1", street="preflop"),
         table_dynamics="")
     hits = [w for w in sit.warnings if EFFECTIVE_POSITION_WARNING in w]
     check(len(hits) == 1,
-          f"9-max UTG+2 应有且仅有一条有效位置口径 warning：{sit.warnings}")
+          f"8-max UTG+1 应有且仅有一条有效位置口径 warning：{sit.warnings}")
     if hits:
         check("前位→中位" in hits[0] and "身后 6 人" in hits[0],
               f"warning 要写清放宽方向与人数：{hits[0]}")
@@ -460,8 +496,10 @@ def test_effective_position_warning_in_facts_and_prompt():
           f"有效位置口径要活过 4 条 cap：{summary}")
 
     # 没放宽的座位不出这条：普通局面不该平白多一行数据边界。
-    for size, hero, street in ((9, "UTG", "preflop"), (9, "BTN", "flop"),
-                               (9, "SB", "preflop")):
+    # 9-max 满员一律静态档，所以一条都不该有。
+    for size, hero, street in ((9, "UTG", "preflop"), (9, "UTG+2", "preflop"),
+                               (9, "BTN", "flop"), (9, "SB", "preflop"),
+                               (8, "UTG", "preflop"), (8, "BTN", "flop")):
         plain = build_situation(
             full_snapshot(table_size=size, hero=hero, street=street),
             table_dynamics="")
@@ -501,21 +539,26 @@ def prompt_for(*, table_size: int, hero: str, street: str = "preflop"):
 
 
 def test_prompt_position_line_carries_effective_bucket():
-    """9-max UTG+2 翻前：位置事实要写「有效位置：中位」，不新增整段。"""
+    """位置事实要写「有效位置：X」，不新增整段；9-max 满员保持静态档。"""
     user = prompt_for(table_size=9, hero="UTG+2")
-    check("有效位置：中位" in user, f"该有有效位置中位：{user[:600]}")
+    check("有效位置：前位" in user, f"9-max 满员该保持前位：{user[:600]}")
     check("## 有效位置" not in user, "不许为有效位置新开一段")
     lines = [line for line in user.splitlines() if "有效位置：" in line]
     check(len(lines) == 1, f"有效位置只该占一行：{lines}")
     check(any("翻后位置" in line for line in lines),
           f"有效位置要与既有位置事实同行：{lines}")
 
-    # 同一手牌按当前街算：UTG 翻前早位、翻后中位。
+    # 9-max 翻前翻后都按座位名：UTG 两街都是前位。
     check("有效位置：前位" in prompt_for(table_size=9, hero="UTG"),
           "9-max UTG 翻前应前位（书里的 early）")
-    check("有效位置：中位" in prompt_for(table_size=9, hero="UTG", street="flop"),
-          "9-max UTG 翻后应中位（当前街口径）")
-    # 7-max UTG 翻前（身后 6）放宽到中位。
+    check("有效位置：前位" in prompt_for(table_size=9, hero="UTG", street="flop"),
+          "9-max UTG 翻后仍是前位（满员不套人数规则）")
+    # <9 人桌按身后人数放宽：8-max UTG+1 翻前（身后 6）→ 中位，
+    # 8-max UTG 翻后（身后 5）→ 中位；7-max UTG 翻前（身后 6）→ 中位。
+    check("有效位置：中位" in prompt_for(table_size=8, hero="UTG+1"),
+          "8-max UTG+1 翻前应中位")
+    check("有效位置：中位" in prompt_for(table_size=8, hero="UTG", street="flop"),
+          "8-max UTG 翻后应中位")
     check("有效位置：中位" in prompt_for(table_size=7, hero="UTG"),
           "7-max UTG 翻前应中位")
 
