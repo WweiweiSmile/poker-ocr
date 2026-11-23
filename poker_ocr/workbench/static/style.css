@@ -362,6 +362,12 @@ legend { color: var(--muted); font-size: 12px; padding: 0 6px; }
   border-radius: 6px; padding: 6px 9px; }
 .advice-plan b { color: var(--text); margin-right: 6px; }
 .advice-meta { color: var(--faint); font-size: 11.5px; font-family: var(--mono); }
+.advice-bounds { border-left: 2px solid var(--line); padding-left: 10px;
+  display: flex; flex-direction: column; gap: 4px; }
+.advice-bounds-list { margin: 0; padding-left: 16px; color: var(--muted);
+  font-size: 12.5px; line-height: 1.5; }
+/* 一条 warning 一行；文案里的换行原样保留，渲染成同一条目内的多行。 */
+.advice-bounds-list li { white-space: pre-wrap; }
 .alert { padding: 6px 9px; border-radius: 7px; font-size: 12.5px; line-height: 1.45;
   background: var(--bg-soft); border: 1px solid var(--line); }
 .alert.warn { border-color: rgba(245, 184, 61, .35); color: #f5cd84; }

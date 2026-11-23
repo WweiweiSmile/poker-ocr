@@ -132,6 +132,10 @@ SUITES = ["test_positions.py", "test_env.py", "test_profile_8p.py", "test_coach.
           "test_playbook_river_cards.py",
           # 票 #85（书页逐条回查台账：live 卡页码/来源/原文）新增套件
           "test_playbook_book_audit.py",
+          # 票 #111（建议卡「数据边界」段：逐行渲染事实 warning）新增套件
+          "test_advice_bounds.py",
+          # 票 #116（盲评 CLI：分层抽样 / 盲卡片 / 幂等续评）新增套件
+          "test_blind_review.py",
           # 票 #81（推倒旧提示词，切到事实+书计划+options 契约）：旧规则
           # 台账渲染器删除，test_prompt_rules 随之下线；新增契约验收在
           # replay-console/tests/test_prompt_golden.py 与本文件的历史套件里。
