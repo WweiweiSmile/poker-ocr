@@ -221,5 +221,11 @@ from __future__ import annotations
 # 已投的 5BB 是沉没成本。守则自带 400 字预算（先丢尾行再单行截断），不占书计划
 # 的 800。横幅与翻前动作冲突时按有行动处理，走原路径。三个 golden fixture 都是
 # 普通 flop 局面，system 与 user 都不变，hash 不变；只有版本号变。
-PROMPT_VERSION = "lean-zh-2026-11-23.14"
+# 2026-11-23.15：权益收进全部在局对手，随机补位可见（#115，父设计 §4）——
+# 范围层不再截断到前 4 家：5–9 个在局对手全部进同一次联合抽样（整组冲突重抽），
+# 有范围证据的展开逐家范围、没证据的按均匀随机牌补位，补位人数写一条中文事实
+# warning「N 个对手按随机牌处理」，进数据质量段（与 ante 假设同级保底，4 行 cap
+# 挤不掉）与建议卡。≤4 家的 equity/behind_any 逐位不变（seed 不含 warnings）。
+# 三个 golden fixture 都 ≤4 家且无补位，system 与 user 都不变，hash 不变。
+PROMPT_VERSION = "lean-zh-2026-11-23.15"
 PROMPT_LANGUAGE = "zh"

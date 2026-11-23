@@ -142,6 +142,8 @@ SUITES = ["test_positions.py", "test_env.py", "test_profile_8p.py", "test_coach.
           "test_effective_position.py",
           # 票 #114（炸弹池书卡层让位，改渲染固定守则）新增套件
           "test_bomb_guard.py",
+          # 票 #115（权益收进全部在局对手 + 随机补位 warning）新增套件
+          "test_equity_all_opponents.py",
           # 票 #81（推倒旧提示词，切到事实+书计划+options 契约）：旧规则
           # 台账渲染器删除，test_prompt_rules 随之下线；新增契约验收在
           # replay-console/tests/test_prompt_golden.py 与本文件的历史套件里。
