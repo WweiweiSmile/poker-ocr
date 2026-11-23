@@ -2352,7 +2352,7 @@ def test_draw_facts_are_chinese_and_not_vetoed() -> None:
 
 
 def test_multiway_facts_show_actual_and_modeled_players() -> None:
-    """8 人池写实际 8 人 / 建模 4 家 / 随机牌 3 家 / 公平份额 12.5%。"""
+    """8 人池写实际 8 人 / 建模 7 家 / 公平份额 12.5%（在局对手全部建模，#115）。"""
     from poker_ocr.hand_track import OpponentSnapshot
 
     positions = ("SB", "BB", "UTG", "UTG+1", "LJ", "HJ", "CO")
@@ -2364,19 +2364,20 @@ def test_multiway_facts_show_actual_and_modeled_players() -> None:
         hero_position="BTN", opponents=opponents, table_size=8,
         players_dealt=8, pot=40.0, pot_before_street=40.0, bomb_pot=True,
         preflop_shapes=("unopened",), hero_is_pfr=False))
-    check(sit.hand_ranges is not None, "8 人 bomb pot 应能建模前 4 家范围")
-    check(sit.hand_ranges.random_opponents == 3,
-          f"7 名对手只建模 4 家，其余 3 家应按随机牌：{sit.hand_ranges.random_opponents}")
+    check(sit.hand_ranges is not None, "8 人 bomb pot 应建模全部在局对手")
+    check(sit.hand_ranges.random_opponents == 0,
+          f"7 名对手都有 bomb 池范围，不应再有随机补位：{sit.hand_ranges.random_opponents}")
     text = render_facts_zh(sit)
-    check("多人池：实际 8 人 / 范围建模 4 名对手 / 随机牌 3 家 / 公平份额 12.5%" in text,
+    check("多人池：实际 8 人 / 范围建模 7 名对手 / 公平份额 12.5%" in text,
           f"多人池口径不对：\n{text}")
     check("爆炸底池：是" in text, f"应标爆炸底池：\n{text}")
-    check("只建模前 4 名对手" in text, f"数据缺口应说明建模上限：\n{text}")
+    check("只建模前 4 名对手" not in text,
+          f"截断已删除，不应再写建模上限：\n{text}")
     check("5-way avg" not in text, "不该再出现建模人数平均份额")
-    # 炸弹池权益的公平份额也必须按实际人数，且分子要包含随机牌。
+    # 炸弹池权益的公平份额也必须按实际人数。
     check("实际 8 人" in text and "公平份额 12.5%" in text,
           f"炸弹池权益应按实际人数算公平份额：\n{text}")
-    check("随机牌 3 家" in text, f"炸弹池权益应标随机牌：\n{text}")
+    check("随机牌 3 家" not in text, f"全额建模时不应再标随机牌：\n{text}")
     check("这不是「中等牌」" not in text,
           f"炸弹池不能再用公平份额倍数把牌直接推成价值牌：\n{text}")
     check("建模 5 人公平份额" not in text,

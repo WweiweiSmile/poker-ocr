@@ -503,10 +503,8 @@ def resolve(snap: HandSnapshot) -> Field:
     active = [o for o in snap.opponents if not o.folded]
     if not active:
         return Field((), ("no opponents in hand",))
-    if len(active) > 4:
-        warnings.append(f"{len(active)} opponents in hand: only the first 4 are "
-                        "modeled (render/perf cap)")
-        active = active[:4]
+    # 不截断：多人池里每家未弃牌对手都进权益的联合计算（#115）。性能预算与
+    # 降采样由 #117 负责，这里先保证口径完整。
 
     pre = snap.actions_of(PREFLOP)
     raises = _raises(pre)

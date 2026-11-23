@@ -182,7 +182,8 @@ def test_unread_badge_keeps_prior_range() -> None:
           f"{len(dropped.combo_weights)}")
 
 
-def test_folded_and_opponent_cap() -> None:
+def test_folded_and_all_live_opponents() -> None:
+    """弃牌过滤保留，但不再截断到前 4 家：所有未弃牌对手都进 specs（#115）。"""
     field = resolve(snap(
         hero_pos="BTN",
         opponents=(opp("a", "BB", folded=True), opp("b", "CO"),
@@ -191,8 +192,10 @@ def test_folded_and_opponent_cap() -> None:
         preflop=(act("hero", "BTN", "raise", 6.0, hero=True),)))
     seats = [s.seat_id for s in field.specs]
     check("a" not in seats, "已弃牌对手不应出现")
-    check(len(field.specs) == 4, f"5+ 对手应只算前 4 个，实际 {len(field.specs)}")
-    check(any("only the first 4" in w for w in field.warnings), "应标注截断")
+    check(seats == ["b", "c", "d", "e", "f"],
+          f"所有未弃牌对手都应建模，实际 {seats}")
+    check(not any("only the first" in w for w in field.warnings),
+          f"不应再有 4 家截断告警：{field.warnings}")
 
 
 def main() -> int:
@@ -203,7 +206,7 @@ def main() -> int:
         test_modes_from_current_street,
         test_all_in_mode,
         test_missing_and_contradictory_data_fail_open,
-        test_folded_and_opponent_cap,
+        test_folded_and_all_live_opponents,
     ]
     for t in tests:
         before = len(FAILS)

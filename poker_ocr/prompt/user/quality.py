@@ -84,7 +84,11 @@ def _summarize_gaps(gaps: list[str], *, has_range_equity: bool = False) -> list[
     hard = [g for g in rest if _is_hard_gap(g)]
     # 「ante 是按桌配置假设的」改变的是**尺寸口径**（牌桌真没前注时建议会
     # 偏大），不是可信度；不能被后面几条软缺口用 4 行 cap 挤掉（#112）。
-    assumed = [g for g in rest if "ante 按桌配置假设" in g]
+    # 「N 个对手按随机牌处理」同理改变的是**权益口径**（没范围的对手按均匀
+    # 随机牌进联合抽样，多人池权益偏乐观）；8 家局面上方 range-unknown 与
+    # 本街行动线缺口会把 4 行占满，所以和 ante 同级保底（#115）。
+    assumed = [g for g in rest
+               if "ante 按桌配置假设" in g or "按随机牌处理" in g]
     unacted = [g for g in rest if "本街行动线缺失" in g]
     out.extend(hard)
     out.extend(assumed)

@@ -340,7 +340,8 @@ def _monte_carlo(hero_cards, board, ranges_list, samples: int,
     """返回 (behind_any, tie_any, equity, valid_samples, failed_groups)。
 
     `random_opponents` 是未建模对手数：它们不在 `ranges_list` 里，但按均匀
-    随机牌参与每一轮抽样，避免多人池里只对前 4 家算权益而高估胜率。
+    随机牌参与每一轮抽样 —— 所有在局对手（有范围的与随机的）在同一组里
+    联合抽牌，任一家冲突就整组重抽，不退化成分家近似再拼接。
     """
     dead = set(hero_cards) | set(board)
     samplers = [_sampler(rng, dead) for rng in ranges_list]
@@ -436,7 +437,7 @@ def compute(hero, board, opponents: Sequence[Any], *, samples: int | None = None
     `(seat, position, Range, mode)`；也兼容带 `.range`/`.seat_id` 的对象。
 
     `random_opponents`：未建模对手数。它们不展开逐家范围，但按均匀随机牌
-    参与 MC，保证多人池 equity/behind_any 不会只算前 4 家而虚高。
+    和其余对手一起进同一次 MC（#115）；补位人数会写成一条中文事实 warning。
     """
     try:
         hero_cards = _as_cards(hero)
@@ -496,6 +497,12 @@ def compute(hero, board, opponents: Sequence[Any], *, samples: int | None = None
         return None
 
     all_warnings = list(dict.fromkeys([*warnings, *skipped]))
+    # 补位人数是口径事实，必须让提示词/记录/建议卡都看见（#115）：这些对手
+    # 没范围证据，只按均匀随机牌进同一次 MC，权益仍然偏乐观。
+    if random_opponents > 0:
+        fill = f"{random_opponents} 个对手按随机牌处理"
+        if fill not in all_warnings:
+            all_warnings.insert(0, fill)
     ids = [e.range_id for e in edges]
     if len(set(ids)) < len(ids):
         all_warnings.append("two or more opponents use the same range: their "
@@ -763,9 +770,9 @@ def _lookup(sit: Any) -> HandVsRanges | None:
             if trail and n_events > widest_events:
                 widest, widest_events = trail.get("params") or {}, n_events
     active = [o for o in snap.opponents if not o.folded]
-    # 建模上限是 4 家（field_ranges.resolve 的渲染/性能 cap）。其余在局对手
-    # 不展开范围，但必须按随机牌纳入 MC，否则 8 人池的 equity 只对 4 家算，
-    # 会被当成全桌权益使用。
+    # 全部在局对手都进权益（#115）：有证据的展开逐家范围，没证据的按均匀
+    # 随机牌补位，两者在同一组里联合抽样。补位人数要如实记下来，否则多人池
+    # 的 equity 会被当成「每家都有范围」的全桌权益使用。
     random_opponents = max(len(active) - len(entries), 0)
     if not entries:
         # 一家可确认范围都没有时，不生成范围权益块；保留 gt 的随机牌下界，
