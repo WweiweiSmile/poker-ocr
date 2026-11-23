@@ -200,5 +200,11 @@ from __future__ import annotations
 # 统一成「混合: 过牌（频率 50%）」；validate_cards 同时要求 plan+mix 合计为 1
 # （容差 0.001），缺主行动频率的卡在编译期就报错（数据层 #85 已补齐 26 张卡，
 # 这里只补渲染与校验）。system 未改；三个 golden fixture 都不含混合卡，hash 不变。
-PROMPT_VERSION = "lean-zh-2026-11-22.11"
+# 2026-11-23.12：翻前开池下限改按桌配置（#112，父设计 §1）——「本桌翻前最低
+# 加注」不再印全局常量 5.5，改读快照里的 profile 值 `preflop_min_open_bb`
+# （0.5BB 前注桌 6.0 → 显示 6BB，无前注桌 5.5），与 options 用的是同一份；
+# 新增「本手 ante 按桌配置假设为 X BB，未从画面读到」数据质量行（只在横幅读丢
+# 前注、由 profile 兜底时出现）。三个 golden fixture 都是翻后、无 ante 假设，
+# system 与 user 都不变，hash 不变；只有版本号变。
+PROMPT_VERSION = "lean-zh-2026-11-23.12"
 PROMPT_LANGUAGE = "zh"

@@ -41,6 +41,7 @@ from poker_ocr.profile import (  # noqa: E402
     DEFAULT_PREFLOP_MIN_OPEN_BB, PREFLOP_MIN_OPEN_RANGE, Profile,
 )
 from poker_ocr.roi_reader import RoiFrame, RoiRead, SeatRoi  # noqa: E402
+from poker_ocr.prompt.user.quality import _summarize_gaps  # noqa: E402
 
 ANTE_PROFILE = ROOT / "config" / "table_wpk_live.json"
 NOANTE_PROFILE = ROOT / "config" / "table_wpk_live_noante.json"
@@ -351,6 +352,29 @@ def test_read_ante_does_not_produce_warning() -> None:
     sit = build_situation(point, table_dynamics="")
     check(not [w for w in _facts_snapshot(sit)["warnings"] if ANTE_WARNING in w],
           "读到前注时 facts 里不该有假设告警")
+
+
+def test_ante_assumed_survives_the_four_line_cap() -> None:
+    """数据质量段最多 4 条，但 ante 假设不能被别的软缺口挤掉。
+
+    spec #110 §1 要求这条假设一路到提示词数据质量段；`_summarize_gaps` 的
+    cap 是 4，若排在软缺口末尾，多来几条范围告警它就不见了。所以它排在
+    硬缺口之后、软缺口之前。
+    """
+    soft = ["只建模前 2 名对手；另有 1 名未计入范围权益",
+            "部分座位翻前动作线缺失，范围按未开池先验估计",
+            "部分座位本街行动线缺失，范围按未行动处理（不是已过牌）",
+            "某座位范围未知",
+            "街前底池未读全，范围 SPR 为近似值"]
+    assumed = "本手 ante 按桌配置假设为 0.5 BB，未从画面读到"
+    summary = _summarize_gaps([*soft, assumed])
+    check(len(summary) <= 4, f"最多 4 条，实际 {len(summary)}：{summary}")
+    check(any("ante 按桌配置假设" in gap for gap in summary),
+          f"ante 假设必须活过 cap：{summary}")
+    # 硬缺口仍然排在它前面（动作空间被砍才是第一位）。
+    hard_first = _summarize_gaps(["底牌未读出，无法评估牌力", assumed])
+    check(hard_first and hard_first[0].startswith("底牌未读出"),
+          f"硬缺口要排在 ante 假设之前：{hard_first}")
 
 
 # ─────────────────────────── 4. 提示词取快照 ───────────────────────────
