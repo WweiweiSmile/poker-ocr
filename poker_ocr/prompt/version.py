@@ -227,5 +227,12 @@ from __future__ import annotations
 # warning「N 个对手按随机牌处理」，进数据质量段（与 ante 假设同级保底，4 行 cap
 # 挤不掉）与建议卡。≤4 家的 equity/behind_any 逐位不变（seed 不含 warnings）。
 # 三个 golden fixture 都 ≤4 家且无补位，system 与 user 都不变，hash 不变。
-PROMPT_VERSION = "lean-zh-2026-11-23.15"
+# 2026-11-23.16：9 人权益加 2 秒预算，降采样可见（#117，父设计 §5）——权益
+# 联合抽样加了墙钟预算（env HAND_VS_RANGES_BUDGET_MS，默认 2000ms，≤0 不限），
+# 到点只停止抽样、**对手数一个不减**；降采样发生时写一条中文事实 warning
+# 「权益按 N/M 次抽样计算（超出 Kms 预算，已降采样；对手数不变）」，进数据质量
+# 段（与 ante 假设、随机补位同级保底）与建议卡。seed 仍由目标样本数派生，所以
+# 降采样结果就是同一组抽样的前缀；不超预算时抽样次数/顺序与今天完全一致，
+# 三个 golden fixture 的 system 与 user 都不变，hash 不变。
+PROMPT_VERSION = "lean-zh-2026-11-23.16"
 PROMPT_LANGUAGE = "zh"
