@@ -125,8 +125,9 @@ def joint_at_least(hero, board, n: int, *, samples: int = DEFAULT_SAMPLES,
         return 0.0
     deck = [_uniform_range() for _ in range(int(n))]
     # `_monte_carlo` 内部是 `list(h) + board`，board 必须是 list。
-    behind, _tie, _eq, valid, failed = hand_vs_ranges._monte_carlo(
-        list(hero), list(board), deck, int(samples), int(seed))
+    behind, _tie, _eq, valid, failed, _attempted = (
+        hand_vs_ranges._monte_carlo(
+            list(hero), list(board), deck, int(samples), int(seed)))
     if valid <= 0:
         raise RuntimeError(f"抽样全部失败（failed={failed}）")
     return float(behind)

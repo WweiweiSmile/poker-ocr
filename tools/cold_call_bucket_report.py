@@ -319,7 +319,7 @@ def measure(points: list[Point], samples: int, seeds: int) -> None:
             got = {}
             for arm in ("base", "bucket"):
                 built_list, random_opponents = arms[arm]
-                behind, _tie, equity, valid, _failed = (
+                behind, _tie, equity, valid, _failed, _attempted = (
                     hand_vs_ranges._monte_carlo(
                         list(hero_cards), list(board_cards), built_list,
                         int(samples), int(seed), int(random_opponents)))

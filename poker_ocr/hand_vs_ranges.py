@@ -26,6 +26,7 @@ import math
 import os
 import random
 import threading
+import time
 import zlib
 from collections import Counter
 from dataclasses import dataclass, field, replace
@@ -299,6 +300,20 @@ def _samples_for(n: int) -> int:
     return samples
 
 
+def _budget_ms() -> int:
+    """MC 时间预算（毫秒）；`<= 0` 表示不限时。
+
+    默认 2000 = 第一轮门槛「9 人局面 p90 ≤ 2 秒」（#117）。超预算时只降
+    抽样次数，**对手数一个不减** —— 拿少算对手换速度等于偷偷改口径。
+    """
+    raw = os.environ.get("HAND_VS_RANGES_BUDGET_MS", "").strip()
+    try:
+        budget = int(raw) if raw else 2000
+    except ValueError:
+        budget = 2000
+    return budget if budget > 0 else 0
+
+
 def _seed(hero: str, board: str, entries, samples: int,
           seed_key: str | None, random_opponents: int = 0) -> int:
     text = "|".join([
@@ -335,24 +350,30 @@ def _draw(combos: list, cumulative: list, rnd: random.Random):
 
 
 def _monte_carlo(hero_cards, board, ranges_list, samples: int,
-                 seed: int, random_opponents: int = 0
-                 ) -> tuple[float, float, float, int, int]:
-    """返回 (behind_any, tie_any, equity, valid_samples, failed_groups)。
+                 seed: int, random_opponents: int = 0,
+                 budget_ms: int = 0
+                 ) -> tuple[float, float, float, int, int, int]:
+    """返回 (behind_any, tie_any, equity, valid_samples, failed_groups,
+    attempted_groups)。
 
     `random_opponents` 是未建模对手数：它们不在 `ranges_list` 里，但按均匀
     随机牌参与每一轮抽样 —— 所有在局对手（有范围的与随机的）在同一组里
     联合抽牌，任一家冲突就整组重抽，不退化成分家近似再拼接。
+
+    `budget_ms > 0` 时按块查墙钟：到点就停止抽样，返回实际尝试次数。抽样
+    计数与 RNG 顺序都不改（seed 仍由目标 `samples` 派生），所以降采样结果
+    就是同一组抽样的前缀；不超预算时行为逐位同今天（#117）。
     """
     dead = set(hero_cards) | set(board)
     samplers = [_sampler(rng, dead) for rng in ranges_list]
     if any(s is None for s in samplers):
-        return 0.0, 0.0, 0.0, 0, samples
+        return 0.0, 0.0, 0.0, 0, samples, 0
     if random_opponents > 0:
         uniform = _sampler(ranges.uniform_range("RANDOM_FILL",
                                                 note="unmodeled opponent: random cards"),
                            dead)
         if uniform is None:
-            return 0.0, 0.0, 0.0, 0, samples
+            return 0.0, 0.0, 0.0, 0, samples, 0
         # 每个未建模对手独立抽两手牌；共享同一份 combo 列表即可，抽样时
         # 会按 used 去重，所以不会和已建模对手/彼此撞牌。
         samplers.extend([uniform] * int(random_opponents))
@@ -362,8 +383,15 @@ def _monte_carlo(hero_cards, board, ranges_list, samples: int,
     need = max(5 - len(board), 0)
 
     behind_any = tie_any = equity = 0.0
-    valid = failed = 0
+    valid = failed = attempted = 0
+    started = time.perf_counter()
     for _ in range(samples):
+        # 每 128 个样本查一次预算。检查本身不动 RNG，所以不超预算时循环
+        # 次数与抽样顺序和未加预算前完全一致。
+        if (budget_ms and attempted and attempted % 128 == 0
+                and (time.perf_counter() - started) * 1000.0 >= budget_ms):
+            break
+        attempted += 1
         used = set(dead)
         hands = []
         ok = True
@@ -401,8 +429,9 @@ def _monte_carlo(hero_cards, board, ranges_list, samples: int,
             equity += 1.0 / (winners + 1)
 
     if valid <= 0:
-        return 0.0, 0.0, 0.0, 0, failed
-    return (behind_any / valid, tie_any / valid, equity / valid, valid, failed)
+        return 0.0, 0.0, 0.0, 0, failed, attempted
+    return (behind_any / valid, tie_any / valid, equity / valid, valid, failed,
+            attempted)
 
 
 # ─────────────────────────── 主入口 ───────────────────────────
@@ -414,10 +443,11 @@ _CACHE_LOCK = threading.Lock()
 
 def _cache_key(hero: str, board: str, edges, sampled_ranges, samples: int,
                seed_key: str | None, context: str, source: str,
-               warnings: Iterable[str], random_opponents: int = 0) -> tuple:
+               warnings: Iterable[str], random_opponents: int = 0,
+               budget_ms: int = 0) -> tuple:
     return (
         hero, board, samples, seed_key or "", context, source, tuple(warnings),
-        int(random_opponents),
+        int(random_opponents), int(budget_ms),
         tuple(
             (o.seat_id, o.position, o.range_id, o.mode, o.bucket,
              round(o.width_pct, 3), round(o.behind, 6), round(o.tie, 6),
@@ -462,6 +492,8 @@ def compute(hero, board, opponents: Sequence[Any], *, samples: int | None = None
 
     hero_text = "".join(f"{ranges.RANK_CHARS[r]}{s}" for r, s in hero_cards)
     board_text = "".join(f"{ranges.RANK_CHARS[r]}{s}" for r, s in board_cards)
+    # 预算进缓存键：同一局面在不同预算下是不同口径（降采样与否）。
+    budget_ms = _budget_ms()
 
     edges: list[OpponentEdge] = []
     sampled_ranges: list[ranges.Range] = []
@@ -480,7 +512,8 @@ def compute(hero, board, opponents: Sequence[Any], *, samples: int | None = None
         return None
 
     key = _cache_key(hero_text, board_text, edges, sampled_ranges, samples,
-                     seed_key, context, source, warnings, random_opponents)
+                     seed_key, context, source, warnings, random_opponents,
+                     budget_ms)
     with _CACHE_LOCK:
         if key in _CACHE:
             hit = _CACHE[key]
@@ -490,9 +523,9 @@ def compute(hero, board, opponents: Sequence[Any], *, samples: int | None = None
 
     seed = _seed(hero_text, board_text, edges, samples, seed_key,
                  random_opponents)
-    behind_any, tie_any, equity, valid, failed = _monte_carlo(
+    behind_any, tie_any, equity, valid, failed, attempted = _monte_carlo(
         hero_cards, board_cards, sampled_ranges, samples, seed,
-        random_opponents)
+        random_opponents, budget_ms)
     if valid <= 0:
         return None
 
@@ -507,8 +540,15 @@ def compute(hero, board, opponents: Sequence[Any], *, samples: int | None = None
     if len(set(ids)) < len(ids):
         all_warnings.append("two or more opponents use the same range: their "
                             "hands are sampled as independent draws")
-    if failed > samples * 0.10:
-        all_warnings.append(f"{failed}/{samples} Monte Carlo groups rejected on "
+    # 降采样是口径事实（这次权益比标称样本数更粗），必须进 prompt/记录/
+    # 建议卡；对手数一个没减，warning 里要写清楚（#117）。
+    downsampled = attempted < samples
+    if downsampled:
+        all_warnings.append(
+            f"权益按 {attempted}/{samples} 次抽样计算"
+            f"（超出 {budget_ms}ms 预算，已降采样；对手数不变）")
+    if failed > attempted * 0.10:
+        all_warnings.append(f"{failed}/{attempted} Monte Carlo groups rejected on "
                             "card conflicts; results are approximate")
     ci = math.sqrt(max(equity * (1.0 - equity), 0.0) / max(valid, 1))
     result = HandVsRanges(
@@ -529,10 +569,12 @@ def compute(hero, board, opponents: Sequence[Any], *, samples: int | None = None
         samples_requested=samples,
         n_failed=failed,
     )
-    with _CACHE_LOCK:
-        if len(_CACHE) >= _CACHE_MAX:
-            _CACHE.clear()
-        _CACHE[key] = result
+    # 降采样结果不写缓存：一次慢机器上的抽样次数不能长期污染后续运行。
+    if not downsampled:
+        with _CACHE_LOCK:
+            if len(_CACHE) >= _CACHE_MAX:
+                _CACHE.clear()
+            _CACHE[key] = result
     return result
 
 
