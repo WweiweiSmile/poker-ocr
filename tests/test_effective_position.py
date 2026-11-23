@@ -208,6 +208,30 @@ def test_effective_bucket_fails_open_to_static():
     check(effective_position_bucket("", 7) is None, "空座位名 → None")
 
 
+def test_snapshot_unreadable_opponent_falls_back_to_static():
+    """端到端 fail open：任一在局对手位置读不出 → 静态档 + 静态卡，不崩。"""
+    base = full_snapshot(table_size=9, hero="UTG+2", cards=("8h", "8d"))
+    opponents = tuple(
+        replace(o, position=None) if o.position == "HJ" else o
+        for o in base.opponents)
+    sit = build_situation(
+        replace(base, opponents=opponents), table_dynamics="")
+    check(sit.seats_behind is None,
+          f"对手位置未知时身后人数应为 None，实际 {sit.seats_behind}")
+    check(sit.effective_position_bucket == "early",
+          f"应退回座位静态档 early，实际 {sit.effective_position_bucket}")
+    spot, card = resolve_for_situation(sit)
+    check(spot.position_bucket == "early",
+          f"书卡档应退回 early，实际 {spot.position_bucket}")
+    check(card is not None and card.id == "preflop.rfi.low_pair.early",
+          f"应按早位卡出建议，实际 {getattr(card, 'id', None)}")
+    user = render_facts_zh(sit)
+    line = next((ln for ln in user.splitlines() if "有效位置" in ln), "")
+    effective = line.split("｜")[0] if line else ""
+    check(effective == "有效位置：前位（UTG+2）",
+          f"位置事实只报静态档、不编身后人数：{line}")
+
+
 # ───────────────── 3. 快照 → Situation → 书卡 ─────────────────
 
 def full_snapshot(*, table_size: int, hero: str, street: str = "preflop",
