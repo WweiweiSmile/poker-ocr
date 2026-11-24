@@ -419,7 +419,9 @@ def build_situation(snap: HandSnapshot,
             f"{len(unknown_stacks)} 名对手筹码未读出，有效筹码/SPR 未计算")
     if snap.pot is None or snap.pot <= 0 or snap.hero_stack is None:
         warnings.append("底池/后手未读全，已隐藏下注选项，只保留过牌/跟注/弃牌")
-    n_opp = sum(1 for o in snap.opponents if not o.folded)
+    # 在局对手数只认快照自己的口径（#121）：别在这里再数一遍 folded，
+    # 否则弃牌判定一改，两处就会各说各话。
+    n_opp = snap.opponents_in_hand
     anomaly = _no_opponent_anomaly(snap)
     # 翻后只剩 Hero、底池却很大：状态帧把对手全标成弃牌（0c2e 的
     # 22:07:59 帧）。这种事实会自相矛盾（「本手在局 1 人」却有人全下），

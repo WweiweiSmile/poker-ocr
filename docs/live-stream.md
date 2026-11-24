@@ -946,7 +946,7 @@ nv -m poker_ocr.live --no-fold
 {"type":"state","seq":412,"epoch":1,"ts":"2026-10-19T21:30:31.321+08:00",
  "queue_ms":11.2,"proc_ms":561.4,
  "index":1,"t":36.73,"frame":"live_e1_000667_0036.73s",
- "table_seats":9,"players_in_hand":9,
+ "table_seats":9,"players_in_hand":9,"players_not_folded":9,
  "blinds":{"sb":0.5,"bb":1.0,"ante":0.5,"raw":"1/2（1）521222","source":"frame"},
  "dealer":"midL","hero_seat_id":"hero","hero_turn":false,
  "pot":45.0,"pot_before_street":45.0,"street_bet_total":0.0,
@@ -968,7 +968,8 @@ nv -m poker_ocr.live --no-fold
 | `index` / `t` | 第几条记录 / 会话内秒数 |
 | `frame` | 触发本记录的帧 ID |
 | `table_seats` | 桌型座位数 |
-| `players_in_hand` | 本手参与人数（含已弃牌、本手中途离桌），不是仍在行动的人数 |
+| `players_in_hand` | 本手参与人数（含已弃牌、本手中途离场），不是仍在行动的人数。**换手判定依赖它的跳变**（`IN_HAND_JUMP`），口径不许改成「不含弃牌」 |
+| `players_not_folded` | 还没弃牌的人数（含 hero），是 `players_in_hand` 的子集：`players[].fold` 为 `true` 或 `status` 为 `folded`（中途离桌也算弃牌）的不算，本手没发到牌的人（中途入座，`in_hand=false`）也不算，`fold` 未知的**算在局**。看板「N 人在局」读它；发牌人数仍看 `players_in_hand` |
 | `blinds` | `sb/bb/ante` 单位为 BB；`source=frame` 或 `carried` |
 | `dealer` | 庄位 `seat_id`；读不到时该帧会被丢弃 |
 | `hero_turn` | `true/false/null`（null = 有东西盖住，不硬判） |

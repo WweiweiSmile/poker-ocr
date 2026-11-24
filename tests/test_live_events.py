@@ -50,6 +50,7 @@ class StubStream:
                            players_in_hand=3, players=[])
         record = {"index": self.records, "t": t, "frame": frame_id,
                   "table_seats": 9, "players_in_hand": 3,
+                  "players_not_folded": 3,
                   "pot": 10.0, "hero_seat_id": "hero",
                   "players": [{"seat_id": "hero", "name": "me",
                                "stack": 100.0, "position": "BTN"}]}
@@ -83,6 +84,9 @@ def test_frame_events_for_record_and_discard() -> None:
     check(payload["kind"] == "record", f"kind 错：{payload}")
     check(payload.get("state", {}).get("pot") == 10.0,
           f"有效帧应带 state：{payload}")
+    # 面板「N 人在局」读这个键（#121）：它必须原样出现在 frame 事件的 state 里。
+    check(payload.get("state", {}).get("players_not_folded") == 3,
+          f"state 应透传 players_not_folded：{payload.get('state')}")
     check(payload["state_index"] == 1, f"应带 state_index：{payload}")
     check(payload["cards"]["reliable"] is False,
           "没有 profile 时读牌应标不可用")

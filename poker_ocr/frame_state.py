@@ -192,11 +192,30 @@ class FrameState:
                 return p
         raise KeyError(seat_id)
 
+    @property
+    def players_not_folded(self) -> int:
+        """还没弃牌的人数（含 hero）——面板「N 人在局」用的就是它。
+
+        和 players_in_hand 分工明确、不许互相替代：
+
+          · players_in_hand = **本手发牌人数**，含已弃牌与中途离场。换手判定
+            （hand_track 的 IN_HAND_JUMP）靠它跳变，改成「不含弃牌」会让每一次
+            弃牌都像换手，制造假记录。
+          · players_not_folded = 此刻**仍在局**的人数。弃牌（fold is True）与
+            中途离座（status == "folded"，离桌的人会被补成弃牌）都不算；
+            fold is None（未知）**算在局**——弃牌检测是三态 best-effort，未知
+            只能当没看见，不能拿负证据扣人。本手没发到牌的人（in_hand=False，
+            中途入座）也不算：它压根不在这手里。
+        """
+        return sum(1 for p in self.players
+                   if p.in_hand and p.fold is not True and p.status != "folded")
+
     def to_debug(self) -> dict:
         return {
             "frame_id": self.frame_id,
             "table_seats": self.table_seats,
             "players_in_hand": self.players_in_hand,
+            "players_not_folded": self.players_not_folded,
             "blinds": ({**self.blinds.to_debug(), "source": self.blinds_source}
                        if self.blinds else None),
             "dealer": self.dealer,

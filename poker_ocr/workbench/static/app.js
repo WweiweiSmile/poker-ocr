@@ -2596,7 +2596,8 @@ function tableSignature(st, frame) {
   if (!st) return 'null';
   const hero = st.hero || {};
   return JSON.stringify([
-    st.pot, st.street_bet_total, st.dealer, st.hero_turn, st.players_in_hand,
+    st.pot, st.street_bet_total, st.dealer, st.hero_turn,
+    st.players_in_hand, st.players_not_folded, /* 在局人数（不含弃牌，#121）变了也要重画 */
     hero.stack, hero.bet, hero.name, hero.position,
     (st.hero_cards || []).join(','), (st.board || []).join(','),
     st.cards_reliable, (st.cards_warnings || []).length,
@@ -2706,7 +2707,7 @@ function renderTablePanel() {
 
   const street = (frame && frame.hand && frame.hand.street) || tblStreetFromBoard((st.board || []).length);
   const streetEl = document.getElementById('hand-street');
-  if (streetEl) streetEl.textContent = `${tblStreet(street)} · ${st.players_in_hand ?? '—'} 人在局`;
+  if (streetEl) streetEl.textContent = TableMeta.inHandLine(tblStreet(street), st);
   const handIdEl = document.getElementById('hand-id');
   if (handIdEl) handIdEl.textContent = (frame && (frame.hand_id || (frame.hand && frame.hand.hand_id))) || '—';
 

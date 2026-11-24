@@ -47,13 +47,14 @@ def facts_snapshot(sit: Any) -> dict[str, Any]:
     if getattr(snap, "bomb_pot", False) or getattr(sit, "pot_per_player", None) is not None:
         _put(out, "explosive_pot", bool(getattr(sit, "explosive_pot", False)))
 
-    # 在局人数含 hero：`opponents_in_hand` 不含 hero，规则里写区间（gte:3）
-    # 的人数是「桌上还有几个人没弃牌」，所以要 +1。
-    opponents = getattr(snap, "opponents", ()) or ()
-    if opponents:
-        alive = sum(1 for o in opponents if not getattr(o, "folded", False))
-        if alive:
-            _put(out, "players_in_hand", alive + 1)
+    # 在局人数含 hero，直接读快照的口径（#121）：facts 不再自己数 opponents
+    # 再 +1——同一件事两处算，迟早一处漏了弃牌。谓词名仍是 players_in_hand
+    # （规则台账按它取值），语义是「还没弃牌的人数」。
+    # 只有 hero 一个人（没有对手 / 对手全弃）时不出这个事实：与旧实现一致，
+    # 也避免 eq:2 / gte:3 这类区间规则命中一个本该缺席的键。
+    players = getattr(snap, "players_not_folded", None)
+    if players is not None and players > 1:
+        _put(out, "players_in_hand", players)
 
     # 这两个谓词按设计 §5 只描述**翻前**：翻后的「前面还有几个人加注」是另一个
     # 概念（本街加注数），不能拿翻前序列冒充。

@@ -23,7 +23,8 @@ sys.path.insert(0, str(ROOT))
 
 from poker_ocr.dealer import DealerResult  # noqa: E402
 from poker_ocr.frame_state import (  # noqa: E402
-    action_signature, build_state, is_bomb_banner, signature,
+    FrameState, PlayerState, action_signature, build_state, is_bomb_banner,
+    signature,
 )
 from poker_ocr.parse import Blinds, NameTracker  # noqa: E402
 from poker_ocr.profile import Profile  # noqa: E402
@@ -328,6 +329,39 @@ def test_fold_needs_icon_gone_and_text() -> None:
 
     check(s.player("lowL").fold is None,
           "没给图标/文字的座位应保持未知")
+
+
+def test_players_not_folded_excludes_folds_and_left() -> None:
+    """「N 人在局」= 还没弃牌的人数（含 hero），与发牌人数分开口径（#121）。
+
+    players_in_hand 是本手发牌人数，含已弃牌与中途离场；换手判定靠它跳变，
+    改了它每次弃牌都像换手。面板人数另用一个计数，六家弃牌时显示 3 人在局。
+    """
+    rows = {k: dict(v) for k, v in BASE.items()}
+    folded = ["lowL", "midL", "upL", "topL", "topR", "upR"]
+    s = build_state(make_frame(rows), PROFILE,
+                    card_icons={seat: False for seat in folded},
+                    avatar_reads={seat: ("弃牌", 0.9) for seat in folded})
+    check(s.players_in_hand == 9,
+          f"发牌人数不该受弃牌影响，实际 {s.players_in_hand}")
+    check(s.players_not_folded == 3,
+          f"六家弃牌后应剩 hero + 2 = 3 人在局，实际 {s.players_not_folded}")
+    check(s.to_debug()["players_not_folded"] == 3,
+          "快照必须带上不含弃牌的计数，否则前端拿不到")
+
+    # 三态：未知（fold=None）算在局，中途离座（fold=True + status=folded）不算。
+    unknown = PlayerState(seat_id="u", in_hand=True, status="playing")
+    kept = PlayerState(seat_id="k", in_hand=True, status="playing", fold=False)
+    left = PlayerState(seat_id="g", in_hand=True, status="folded",
+                       fold=True, left=True)
+    waiting = PlayerState(seat_id="w", in_hand=False, status="sitting_out")
+    st = FrameState(frame_id="t", table_seats=5, players_in_hand=4,
+                    players=[unknown, kept, left, waiting])
+    check(unknown.fold is None, "新构造的座位弃牌状态应是未知")
+    check(st.players_not_folded == 2,
+          f"未知算在局、离座/等待不算，应剩 2 人，实际 {st.players_not_folded}")
+    check(st.players_in_hand == 4,
+          f"players_in_hand 是构造时给定的发牌人数，不应被重算：{st.players_in_hand}")
 
 
 def test_raw_fold_reads_are_kept_for_diagnosis() -> None:
@@ -1153,6 +1187,7 @@ def main() -> int:
         test_waiting_badge_yields_to_in_hand_evidence,
         test_empty_seat_is_not_in_hand,
         test_fold_needs_icon_gone_and_text,
+        test_players_not_folded_excludes_folds_and_left,
         test_raw_fold_reads_are_kept_for_diagnosis,
         test_missing_icon_alone_does_not_fold_a_bettor,
         test_card_icon_overrides_fold_text,

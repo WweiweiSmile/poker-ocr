@@ -341,6 +341,29 @@ def test_facts_snapshot_flop() -> None:
     check("raises_before" not in facts, "raises_before 只描述翻前")
 
 
+def test_facts_players_in_hand_reads_snapshot_count() -> None:
+    """在局人数直接读快照口径（#121），facts 不再自己数 opponents 再 +1。
+
+    同一件事只在一个地方算：快照说几个人没弃牌，facts 就是几个人。
+    players_dealt 仍是「发过牌的人数」（含已弃牌），两者不可互换。
+    """
+    snap = flop_snap()
+    facts = r.facts_snapshot(build_situation(snap))
+    eq(facts.get("players_in_hand"), snap.players_not_folded,
+       "facts 的人数应与 HandSnapshot.players_not_folded 一致")
+    eq(snap.players_not_folded, 3, "两个未弃牌对手 + hero")
+    eq(snap.players_dealt, 6, "players_dealt 仍是发过牌的人数，不被在局人数代替")
+
+    # 对手全弃（只剩 hero）：与旧实现一致，不写这个事实，区间规则不会误命中。
+    all_folded = replace(snap, opponents=tuple(
+        replace(o, folded=True) for o in snap.opponents))
+    eq(all_folded.players_not_folded, 1, "对手全弃只剩 hero")
+    folded_facts = r.facts_snapshot(build_situation(all_folded))
+    check("players_in_hand" not in folded_facts,
+          "只剩 hero 时不该写在局人数："
+          f"{folded_facts.get('players_in_hand')!r}")
+
+
 def test_facts_snapshot_preflop() -> None:
     facts = r.facts_snapshot(build_situation(preflop_snap()))
     eq(facts.get("street"), "preflop", "street")

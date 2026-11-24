@@ -216,6 +216,9 @@ def test_exit_mid_hand_keeps_name_position_and_marks_fold() -> None:
               f"离桌后不该要求筹码/下注：{mid.to_debug()}")
         check(state.players_in_hand == 9,
               f"这一手仍是 9 人局（离桌按弃牌），实际 {state.players_in_hand}")
+        # 面板人数不含弃牌：离桌按弃牌算，所以「在局」只剩 8（#121）。
+        check(state.players_not_folded == 8,
+              f"离桌的人不算在局，应剩 8 人，实际 {state.players_not_folded}")
         check(not state.errors, f"确认离桌后不该再丢帧：{state.errors}")
         check({p.seat_id: p.position for p in state.players} == base_pos,
               "有人退出不能让其他人的位置整体挪位："

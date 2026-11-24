@@ -363,6 +363,18 @@ class HandSnapshot:
     def opponents_in_hand(self) -> int:
         return sum(1 for o in self.opponents if not o.folded)
 
+    @property
+    def players_not_folded(self) -> int:
+        """还没弃牌的人数（含 hero），与 FrameState.players_not_folded 同口径。
+
+        规则层问「现在几个人在局」要用它；`players_dealt` 是本手**发过牌**
+        的人数（含已弃牌），两者不可互相替代。
+
+        hero 按在局算（+1）：快照产出建议的前提就是 hero 还能行动；hero 已经
+        弃牌的那些快照只给复盘看牌用，不会拿去问「几个人在局」。
+        """
+        return 1 + self.opponents_in_hand
+
     def all_actions(self) -> list[ActionRecord]:
         return [a for s in self.streets for a in s.actions]
 
