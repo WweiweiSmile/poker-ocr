@@ -30,7 +30,7 @@ sys.path.insert(0, str(ROOT))
 import poker_ocr.cards as cards_mod  # noqa: E402
 from poker_ocr.cards import (  # noqa: E402
     RANKS, _classify_suit, _suit_from_shape, recognize_cards,
-    recognize_cards_of_file,
+    recognize_cards_of_file, recognize_region,
 )
 from poker_ocr.profile import Profile  # noqa: E402
 
@@ -46,6 +46,7 @@ CARD_DIR = ROOT / "images" / "card"
 PROFILE_PATH = ROOT / "config" / "table_wpk_1080x2400.json"
 DEFAULT_PROFILE_PATH = ROOT / "config" / "table_default.json"
 SHOW_PROFILE_PATH = ROOT / "config" / "table_wpk_live.json"
+MAC_PROFILE_PATH = ROOT / "config" / "table_wpk_mac.json"
 
 # key -> (公共牌, hero 手牌)，均按画面从左到右。
 # key 取文件名里的序号；redA.jpg 单独命名。
@@ -196,6 +197,86 @@ def test_preflop_has_no_false_positive() -> None:
               f"{key} 翻前不应识别出公共牌，得到 {result.board_codes}")
 
 
+# 票 #119 的真实转牌帧（mac 版式 1472x1676）：转牌入场后公共牌整排收紧，
+# 相邻两张几乎贴在一起（缝 0–2px），5x5 闭运算把右两张连成一块宽轮廓。
+# 文件名带 incident 时间戳，原始 10 帧在 logs/incidents/<时间戳>_board__本帧_2_张…/。
+NARROW_TURN_SAMPLES: dict[str, list[str]] = {
+    "turn_narrow_194732_09.jpg": ["2s", "3h", "Kd", "Ah"],
+    "turn_narrow_194904_09.jpg": ["7h", "5c", "Ac", "Qh"],
+    # 这一帧的缝有好几列宽，切点落在缝里 → 右半边带上缝会被读成 4c（0.37）；
+    # 裁回白牌面之后才是真正的 9c。
+    "turn_narrow_201522_09.jpg": ["Qh", "10d", "Jc", "9c"],
+}
+
+
+def test_narrow_turn_board_splits_glued_pair() -> None:
+    """转牌后公共牌整排收紧：粘连的两张要沿缝切开，四张逐张读对。
+
+    票 #119：粘连块的宽高比过不了单张牌几何门，整块被丢 → 这一帧只读出 2 张；
+    2 不是合法张数 → 实时链沿用上一帧 → 牌面停在翻牌。这两帧是本次排查里的
+    **真实帧**（不是合成图）：不切分只检出 2 块，打开切分后四张逐张正确。
+    """
+    profile = Profile.load(MAC_PROFILE_PATH)
+    board_slot = profile.global_slots.get("board")
+    check(board_slot is not None, "table_wpk_mac 缺 board 槽位")
+    if board_slot is None:
+        return
+
+    for name, expected in NARROW_TURN_SAMPLES.items():
+        img = cv2.imread(str(CARD_DIR / name))
+        check(img is not None, f"{name}: 读不了 {name}（真实帧样本不进库）")
+        if img is None:
+            continue
+
+        result = recognize_cards(img, profile)
+        check(result.board_codes == expected,
+              f"{name} 公共牌：得到 {result.board_codes}，期望 {expected}")
+
+        # 前提断言：这张帧必须「真的需要切分」。否则几何层哪天把粘连块也
+        # 直接收下，这条用例会悄悄退化成「本来就读对」，不再守着切分。
+        h, w = img.shape[:2]
+        unsplit = recognize_region(img, profile.slot_to_px(board_slot, (w, h)),
+                                   name="board", slot=board_slot)
+        check(len(unsplit.codes) == 2,
+              f"{name} 关掉切分应只剩 2 张（粘连块过不了几何门），"
+              f"实际 {unsplit.codes}")
+
+
+# 票 #119 的 AC4 反例帧（真实帧）：公共牌区左上是 175x155 的白色弹窗/水印，
+# 宽高比 1.13 正好落在「两连」区间；只验「缝里白像素少」的话会被拦腰劈成
+# 两张假牌、读出 3 张（3 是合法张数，张数闸拦不住）。
+WIDE_BLOCK_SAMPLE = "board_wide_block_181407_01.jpg"
+
+
+def test_wide_white_block_is_not_split_into_fake_cards() -> None:
+    """白但不满高的大块不能当两张粘连的牌切开，切分失败要留在「沿用上一帧」。
+
+    票 #119 AC4：这张真实帧修好前读 1 张（7s），开切分后若劈开就变 3 张
+    （['3s','10s','7s'] 之类，全是低置信度）——3 张合法，张数闸不拦，错牌
+    会直接顶掉翻牌。加上「缝两侧都是通高白块」的门之后必须放弃切分。
+    """
+    profile = Profile.load(MAC_PROFILE_PATH)
+    board_slot = profile.global_slots.get("board")
+    check(board_slot is not None, "table_wpk_mac 缺 board 槽位")
+    img = cv2.imread(str(CARD_DIR / WIDE_BLOCK_SAMPLE))
+    check(img is not None, f"{WIDE_BLOCK_SAMPLE}: 读不了（真实帧样本不进库）")
+    if board_slot is None or img is None:
+        return
+
+    result = recognize_cards(img, profile)
+    check(result.board_codes == ["7s"],
+          f"{WIDE_BLOCK_SAMPLE} 公共牌：得到 {result.board_codes}，期望 ['7s']"
+          "（1 张不是合法张数 → 沿用上一帧；绝不能变成 3 张假牌）")
+
+    # 公共牌的紧排模式（只认真缝）也必须放弃这块白块：切了就会多出两张假牌。
+    h, w = img.shape[:2]
+    tight = recognize_region(img, profile.slot_to_px(board_slot, (w, h)),
+                             name="board", slot=board_slot,
+                             pair_split="seam")
+    check(tight.codes == ["7s"],
+          f"{WIDE_BLOCK_SAMPLE} 紧排模式只剩右边那张真牌，实际 {tight.codes}")
+
+
 def test_shown_cards_from_show_card_sample() -> None:
     """摊牌亮牌样张：midL 的 A♣Q♥ 紧贴在一起，要切开并归到该座。"""
     profile = Profile.load(SHOW_PROFILE_PATH)
@@ -263,7 +344,7 @@ def test_card_back_is_classified_explicitly() -> None:
         seat = next(s for s in profile.seats if s.seat_id == seat_id)
         px = profile.slot_to_px(seat.action_slot, (w, h))
         raw = recognize_region(img, px, name=seat_id, slot=seat.action_slot,
-                               max_cards=2, split_pairs=True)
+                               max_cards=2, pair_split="midpoint")
         check(len(raw.cards) == 2, f"{seat_id} 原始读数应有 2 块牌：{raw.codes}")
         check(any(c.evidence.get("card_back") for c in raw.cards),
               f"{seat_id} 应显式识别出牌背："
@@ -390,6 +471,8 @@ def main() -> int:
         test_live_profile_declares_card_slots,
         test_default_profile_falls_back_to_wpk_slots,
         test_preflop_has_no_false_positive,
+        test_narrow_turn_board_splits_glued_pair,
+        test_wide_white_block_is_not_split_into_fake_cards,
     ]
     for t in tests:
         before = len(FAILS)

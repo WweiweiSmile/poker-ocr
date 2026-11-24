@@ -37,7 +37,7 @@ from dataclasses import dataclass, field as dc_field
 from functools import lru_cache
 from pathlib import Path
 import time
-from typing import Any
+from typing import Any, Literal
 
 import cv2
 import numpy as np
@@ -73,10 +73,17 @@ _CARD_MAX_SAT = 60
 _CARD_MIN_AREA_FRAC = 0.04     # 占 ROI 面积的下限；D 庄位圆片远小于它
 _CARD_HEIGHT_FRAC = 0.60       # 牌高至少占 ROI 高度的 60%
 _CARD_ASPECT = (0.50, 0.95)
-# 摊牌时两张亮出的手牌常常紧贴在一起，白色牌面会被闭运算连成一个轮廓，
-# 宽高比约等于单张的 2 倍（实测 AQ 样张 199x144 ≈ 1.38）。这个区间用来
-# 识别「两张牌粘在一起」，再沿中间的缝切开。
+# 两张牌粘成一个轮廓：摊牌亮牌区（常常紧贴/互相压住）和整排收紧后的公共牌
+# （票 #119，转牌/河牌入场后相邻两张贴在一起，实测缝隙 0px）都会被闭运算连上，
+# 宽高比约等于单张的 2 倍（实测 AQ 样张 199x144 ≈ 1.38、公共牌 156x111 ≈ 1.41）。
+# 这个区间用来识别「两张牌粘在一起」，再切开；切法见 _detect_card_rects。
 _CARD_PAIR_ASPECT = (1.05, 1.90)
+# 切两连牌时找缝的参数：在轮廓中间 ±15% 宽度内找缝，缝里白像素少于带内中位数
+# 的一半才算；缝两侧必须各是通高白牌面（实测填充 0.69–0.83 个牌高），否则白
+# 弹窗/水印这类大块会被劈成两张假牌。
+_CARD_SEAM_BAND_FRAC = 0.15
+_CARD_SEAM_FILL_RATIO = 0.50
+_CARD_SPLIT_MIN_FILL = 0.60
 _MAX_CARDS = 5
 
 # 花色符号区（占牌面的比例）：下半部中间，避开左上角的点数。
@@ -270,22 +277,32 @@ class CardsResult:
 
 # ─────────────────────────── 牌面切分 ───────────────────────────
 
+PairSplit = Literal["none", "midpoint", "seam"]
+
+
 def _detect_card_rects(roi: np.ndarray, *,
-                       split_pairs: bool = False) -> list[tuple[int, int, int, int]]:
+                       pair_split: PairSplit = "none"
+                       ) -> list[tuple[int, int, int, int]]:
     """在 ROI 里找出牌面矩形，按从左到右排序。
 
     牌面是白/灰低饱和，毛毡是绿色高饱和 —— 这个差异很稳。只取外轮廓
     （RETR_EXTERNAL），再用「面积 + 宽高比 + 高度」三道几何门过滤，
     不做颜色以外的内容判断。
 
-    `split_pairs=True` 时，把「两张牌粘成一个宽轮廓」的情况沿中间的缝切开。
-    摊牌亮牌区（座位 action_slot）里两张牌往往只隔几个像素，5x5 闭运算会把
-    它们连成一块；公共牌/hero 牌的间距更大，保持默认 False 不受影响。
+    `pair_split` 把「两张牌粘成一个宽轮廓」的情况切成两半（票 #119）：
+
+      · `"midpoint"`：摊牌亮牌区。两张牌常常互相压住，中间没有缝，找不到缝
+        就按几何中点切；
+      · `"seam"`：公共牌紧排。必须找到通高的真缝才切（缝两侧都该是整列白牌
+        面）；白弹窗/水印这类宽白块宁可不切 —— 整块按几何门丢掉，交给
+        「本帧 N 张 → 沿用上一帧」；
+      · `"none"`：不切（hero 手牌两张之间留得更宽，实测不需要）。
     """
     hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
     mask = ((hsv[..., 2] >= _CARD_MIN_VALUE) & (hsv[..., 1] <= _CARD_MAX_SAT))
     mask = mask.astype(np.uint8) * 255
-    # 闭运算填掉牌面里的字/花色造成的小洞；5x5 不会把相邻牌之间的缝（约 8px）连上
+    # 闭运算填掉牌面里的字/花色造成的小洞；间距 5px 的相邻牌还能分开（5 张
+    # 排布实测就是 5px），贴在一起时会被连上 —— 公共牌收紧后就是这样。
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
 
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -303,30 +320,106 @@ def _detect_card_rects(roi: np.ndarray, *,
         if _CARD_ASPECT[0] < aspect < _CARD_ASPECT[1]:
             rects.append((x, y, w, h))
             continue
-        if not (split_pairs and _CARD_PAIR_ASPECT[0] <= aspect <= _CARD_PAIR_ASPECT[1]):
+        if pair_split == "none":
+            continue
+        if not _CARD_PAIR_ASPECT[0] <= aspect <= _CARD_PAIR_ASPECT[1]:
             continue
 
-        # 在轮廓中间 ±15% 宽度范围内找白色像素最少的一列，就是两张牌之间的缝；
-        # 找不到明显低谷时退回几何中点。
-        sub = (mask[y:y + h, x:x + w] > 0)
-        cols = sub.sum(axis=0)
-        mid = w // 2
-        lo = max(1, mid - int(w * 0.15))
-        hi = min(w - 1, mid + int(w * 0.15))
-        split = mid
-        if hi > lo:
-            k = lo + int(np.argmin(cols[lo:hi]))
-            if cols[k] < 0.5 * max(1, cols[mid]):
-                split = k
-        for rx, rw in ((x, split), (x + split, w - split)):
-            if rw <= 0:
+        split = (_pair_split_seam(mask, x, y, w, h) if pair_split == "seam"
+                 else _pair_split_overlap(mask, x, y, w, h))
+        if split is None:
+            continue
+        halves = ((x, split), (x + split, w - split))
+        if pair_split == "seam":
+            # 公共牌并排、互不遮挡：两半先各自裁回白牌面，再要求都成单张形状。
+            # 只收过门的那一半会凭空多出一张牌，「多一张」可能正好落在合法张数
+            # 上，比整块丢掉更危险（张数闸拦不住）。摊牌区后一张压住前一张，
+            # 半边天然不满宽，保留老口径逐半收，低置信度那半交给置信度门筛。
+            trimmed = tuple(_trim_to_white_face(mask, rx, y, rw, h)
+                            for rx, rw in halves)
+            if any(not _CARD_ASPECT[0] < rw / max(1, h) < _CARD_ASPECT[1]
+                   for _, _, rw, _ in trimmed):
                 continue
-            half_aspect = rw / max(1, h)
-            if _CARD_ASPECT[0] < half_aspect < _CARD_ASPECT[1]:
-                rects.append((rx, y, rw, h))
+            rects.extend(trimmed)
+        else:
+            rects.extend((rx, y, rw, h) for rx, rw in halves)
 
     rects.sort(key=lambda r: r[0])
     return rects[:_MAX_CARDS]
+
+
+def _seam_band(mask: np.ndarray, x: int, y: int, w: int, h: int
+               ) -> tuple[np.ndarray, int, int] | None:
+    """合并轮廓中间 ±15% 宽度内的「每列白像素数」与窗口边界 (cols, lo, hi)。
+
+    窗口是闭区间 [lo, hi]；合并块本身不够宽、窗口退化时返回 None。
+    """
+    cols = (mask[y:y + h, x:x + w] > 0).sum(axis=0)
+    mid = w // 2
+    lo = max(1, mid - int(w * _CARD_SEAM_BAND_FRAC))
+    hi = min(w - 1, mid + int(w * _CARD_SEAM_BAND_FRAC))
+    if hi <= lo:
+        return None
+    return cols, lo, hi
+
+
+def _pair_split_overlap(mask: np.ndarray, x: int, y: int, w: int, h: int) -> int:
+    """摊牌亮牌区的切点：两张牌常常互相压住，中间没有缝，按几何中点切。
+
+    轮廓中间有暗缝时优先用缝（列下标）；没有就用 `w // 2`，永不返回 None。
+    这里**不校验**两半是否通高：亮牌区后一张会压住前一张，切出来的半边天然
+    不满高；低置信度那一半由 `recognize_shown_cards` 的置信度门筛掉。
+    """
+    band = _seam_band(mask, x, y, w, h)
+    if band is None:
+        return w // 2
+    cols, lo, hi = band
+    window = cols[lo:hi + 1]
+    k = lo + int(np.argmin(window))
+    if cols[k] < _CARD_SEAM_FILL_RATIO * max(1, cols[w // 2]):
+        return k
+    return w // 2
+
+
+def _pair_split_seam(mask: np.ndarray, x: int, y: int, w: int, h: int) -> int | None:
+    """公共牌紧排的切点：只认真正的缝，找不到返回 None（整块丢掉）。
+
+    参照物是「带内大部分列」的中位数，不是 `cols[mid]`：合并块的正中往往就是
+    缝本身，拿它当参照比值恒等于 1，会把任何宽白块（滑窗/横幅/弹窗）都劈开
+    （票 #119 的 181407 帧就是反例）。缝里还可能残留几个白像素（描边/抗锯齿），
+    所以低于带内中位数一半才算；缝两侧还必须是通高白牌面（白弹窗不满高）。
+    """
+    band = _seam_band(mask, x, y, w, h)
+    if band is None:
+        return None
+    cols, lo, hi = band
+    window = cols[lo:hi + 1]
+    k = lo + int(np.argmin(window))
+    if cols[k] >= _CARD_SEAM_FILL_RATIO * max(1.0, float(np.median(window))):
+        return None
+    if any(float(np.median(part)) < _CARD_SPLIT_MIN_FILL * h
+           for part in (cols[:k], cols[k + 1:])):
+        return None
+    return k
+
+
+def _trim_to_white_face(mask: np.ndarray, x: int, y: int, w: int, h: int
+                        ) -> tuple[int, int, int, int]:
+    """把切出来的半边裁到它自己的白牌面上（只裁列）。
+
+    两张牌贴在一起时，缝可能有好几列宽，切点落在缝里就总有一半会带上缝本身。
+    那几列几乎不是白牌面，却会让点数/花色窗口整体推偏 —— 票 #119 的 3c/4c
+    低分读错（置信度 0.37–0.42，实际是 9c/7c）就是这么来的；裁掉通高白像素
+    不足的列之后读数回到 0.9 以上。裁得太狠（剩下不到 60% 宽）就不裁。
+    """
+    cols = (mask[y:y + h, x:x + w] > 0).sum(axis=0)
+    keep = np.flatnonzero(cols >= _CARD_SPLIT_MIN_FILL * h)
+    if len(keep) == 0:
+        return x, y, w, h
+    c0, c1 = int(keep[0]), int(keep[-1]) + 1
+    if c1 - c0 < w * 0.6:
+        return x, y, w, h
+    return x + c0, y, c1 - c0, h
 
 
 def _canonical_card(roi: np.ndarray, rect: tuple[int, int, int, int]) -> np.ndarray:
@@ -841,10 +934,11 @@ def _read_card(roi: np.ndarray, rect: tuple[int, int, int, int],
 def recognize_region(img: np.ndarray, rect: tuple[int, int, int, int], *,
                      name: str = "cards", slot: Slot = (0.0, 0.0, 1.0, 1.0),
                      max_cards: int = _MAX_CARDS,
-                     split_pairs: bool = False) -> CardSlotRead:
+                     pair_split: PairSplit = "none") -> CardSlotRead:
     """识别图像中一个**像素矩形**里的牌。rect 是原图坐标 (x1,y1,x2,y2)。
 
-    `split_pairs=True` 用于摊牌亮牌区：两张牌紧贴时会粘成一个轮廓，需要切开。
+    `pair_split` 用于牌面紧贴的场景（摊牌亮牌区用 `"midpoint"`、整排收紧后的
+    公共牌用 `"seam"`）：两张牌会粘成一个轮廓，需要切开，见 `_detect_card_rects`。
     """
     h, w = img.shape[:2]
     x1, y1, x2, y2 = rect
@@ -858,7 +952,7 @@ def recognize_region(img: np.ndarray, rect: tuple[int, int, int, int], *,
         read.warnings.append(f"{name}: 牌区为空")
         return read
 
-    rects = _detect_card_rects(roi, split_pairs=split_pairs)[:max_cards]
+    rects = _detect_card_rects(roi, pair_split=pair_split)[:max_cards]
     for r in rects:
         card, warnings = _read_card(roi, r, (x1, y1), name)
         read.cards.append(card)
@@ -907,7 +1001,7 @@ def recognize_shown_cards(img: np.ndarray, profile: Profile | None, *,
         px = profile.slot_to_px(seat.action_slot, (w, h))
         read = recognize_region(
             img, px, name=f"show:{seat.seat_id}", slot=seat.action_slot,
-            max_cards=2, split_pairs=True)
+            max_cards=2, pair_split="midpoint")
         # 只秀一张时，另一张是带 POKER 字样的牌背；它会检出低分数的假点数
         # （样张 lowR：K♦ + 牌背被读成 8h，rank_score 0.64）。逐张过滤，
         # 保留 1 张高置信度的真牌，而不是因为第二张是牌背把整座丢掉。
@@ -1681,7 +1775,12 @@ def recognize_cards(img: np.ndarray, profile: Profile | None = None, *,
         else:
             px = (int(slot[0] * w), int(slot[1] * h),
                   int(slot[2] * w), int(slot[3] * h))
-        reads[key] = recognize_region(img, px, name=key, slot=slot)
+        # 公共牌整排会在转牌/河牌入场后收紧，相邻两张粘成一块宽轮廓；不切就整块
+        # 过不了单张牌几何门（票 #119）。hero 手牌间距更大，实测不需要切。
+        is_board = key == "board"
+        reads[key] = recognize_region(
+            img, px, name=key, slot=slot,
+            pair_split="seam" if is_board else "none")
 
     if source == "default":
         warnings.append(
