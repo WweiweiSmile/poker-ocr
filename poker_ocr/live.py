@@ -64,7 +64,8 @@ import numpy as np
 from . import range_trace
 from .advice import (AISettings, AdviceRunner, PROMPT_LANGUAGE, PROMPT_VERSION,
                      build_situation, call_amount)
-from .cards import (DEFAULT_CARD_SLOTS, DEFAULT_DOUBT_WINDOW, CardsResult,
+from .cards import (DEFAULT_CARD_SLOTS, DEFAULT_DOUBT_WINDOW,
+                    DEFAULT_SWAP_WINDOW, CardsResult,
                     StableCards, recognize_cards, recognize_shown_cards)
 from .action_buttons import find_action_buttons
 from .bet_slider import (BetSliderController, SliderSettings, WindowCapture,
@@ -948,7 +949,11 @@ def _incident_category(reason: str) -> str:
     归成 board:back、hero_cards:count 这类类别后才能把整段异常合成一份。
     """
     slot, _, detail = reason.partition(":")
-    if "回退" in detail:
+    if "换牌" in detail or "前缀" in detail:
+        # 公共牌被动画顶掉（#120）：和「张数回退」是同族但值得单独成类，
+        # 否则会被 count 桶吞掉。
+        kind = "swap"
+    elif "回退" in detail:
         kind = "regress"
     elif "牌背" in detail:
         kind = "back"
@@ -1235,6 +1240,7 @@ class LiveProcessor:
                  error_dir: Path | None = None,
                  card_confirm_frames: int = 2,
                  card_doubt_window: float = DEFAULT_DOUBT_WINDOW,
+                 card_swap_window: float = DEFAULT_SWAP_WINDOW,
                  clock=time.monotonic, log=_log,
                  control: LiveControl | None = None,
                  preview: PreviewStore | None = None,
@@ -1366,7 +1372,8 @@ class LiveProcessor:
         # profile 为 None（单测桩）时不启用，_read_cards 直接返回桩结果。
         self.card_state = (StableCards(
             confirm_frames=card_confirm_frames,
-            doubt_window=card_doubt_window)
+            doubt_window=card_doubt_window,
+            swap_window=card_swap_window)
             if profile is not None else None)
         # 牌区 ROI 去重：board/hero 像素没变时复用上一次的识别结果，只重读亮牌。
         self._card_roi_sig: tuple | None = None
@@ -3563,6 +3570,11 @@ def build_parser() -> argparse.ArgumentParser:
                     help="牌面读数带疑点（低置信度/遮挡等）又和 last-good 不同时，"
                          "开多少秒的疑惑帧仲裁窗口做多帧投票（默认 0.5；"
                          "0 = 关闭，退回 2 帧确认 + 10 帧弱读数兜底）")
+    ap.add_argument("--card-swap-window", type=float,
+                    default=DEFAULT_SWAP_WINDOW,
+                    help="公共牌前缀被顶掉（同张数换牌/张数变大但前几张变了）的"
+                         "挑战者要连续多少秒才允许按正常确认翻案（默认 2，"
+                         "远长于 200–500ms 发牌动画；0 = 关闭翻案，永久拒收）")
     ap.add_argument("--incident-dir", type=Path, default=DEFAULT_INCIDENT_DIR,
                     help="牌面回退/张数异常/牌背时，把最近几帧存到这里做回归样本"
                          f"（默认 {DEFAULT_INCIDENT_DIR}）")
@@ -3751,6 +3763,8 @@ def _validate_args(ap: argparse.ArgumentParser, args) -> None:
         ap.error("--card-confirm-frames 至少为 1")
     if args.card_doubt_window < 0:
         ap.error("--card-doubt-window 不能为负（0 = 关闭仲裁）")
+    if args.card_swap_window < 0:
+        ap.error("--card-swap-window 不能为负（0 = 关闭翻案）")
     if args.incident_frames < 1:
         ap.error("--incident-frames 至少为 1")
     if args.incident_max < 0:
@@ -4466,6 +4480,7 @@ def _build_runtime(ap: argparse.ArgumentParser, args, env_load) -> _Runtime:
         error_dir=args.out.parent / "errors",
         card_confirm_frames=args.card_confirm_frames,
         card_doubt_window=args.card_doubt_window,
+        card_swap_window=args.card_swap_window,
         control=control, preview=preview,
         events=(publish if (event_log is not None or web is not None)
                 else None))

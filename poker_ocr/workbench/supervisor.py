@@ -42,6 +42,7 @@ ADVANCED_VALUE_FLAGS: dict[str, str] = {
     "dealer_carry": "--dealer-carry",
     "card_confirm_frames": "--card-confirm-frames",
     "card_doubt_window": "--card-doubt-window",
+    "card_swap_window": "--card-swap-window",
     "max_frame_age": "--max-frame-age",
     "roi_threads": "--roi-threads",
     "max_vanish": "--max-vanish",

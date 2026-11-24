@@ -167,18 +167,47 @@ def test_card_back_challenger_never_wins() -> None:
 
 
 def test_clean_frames_end_the_window_early() -> None:
-    """窗口内连续两帧完全干净且一致：提前采用，不等满窗口。"""
+    """窗口内连续两帧完全干净且一致：提前采用，不等满窗口。
+
+    挑战者必须是**前缀不变、末尾追加**的（3→4）；换掉已发牌内容的挑战者
+    拿不到这条快路径，见 `test_same_count_swap_gets_no_two_frame_shortcut`。
+    """
     s = established()
-    clean_alt = [card("Kd"), card("7c"), card("2s")]
-    s.update(frame(ALT), now=0.2)            # 带疑点开窗
-    out = s.update(frame(clean_alt), now=0.3)
+    weak_turn = [card("Ad"), card("7c"), card("2s"),
+                 card("9h", confidence=0.60)]
+    clean_turn = [card("Ad"), card("7c"), card("2s"), card("9h")]
+    s.update(frame(weak_turn), now=0.2)      # 带疑点开窗
+    out = s.update(frame(clean_turn), now=0.3)
     check(out.board_codes == FLOP, f"一帧干净还不够：{out.board_codes}")
-    out = s.update(frame(clean_alt), now=0.4)
-    check(out.board_codes == codes(clean_alt),
+    out = s.update(frame(clean_turn), now=0.4)
+    check(out.board_codes == codes(clean_turn),
           f"连续两帧干净应提前采用：{out.board_codes}")
     check(out.reliable is True, f"提前采用后应可靠：{out.warnings}")
     check(any("连续 2 帧干净" in w for w in out.warnings),
           f"应写提前采用 warning：{out.warnings}")
+
+
+def test_same_count_swap_gets_no_two_frame_shortcut() -> None:
+    """公共牌换掉已发牌内容：疑惑帧窗口的「两帧干净」快路径不适用。
+
+    转牌滑入动画里连续两三帧干净读出的「张数合法但内容错」组合（#120），
+    正是两帧确认会扶正的东西；窗口内的干净帧只算采样，等窗口到期投票。
+    """
+    s = established()
+    swap = [card("Ad"), card("7c"), card("9h")]
+    s.update(frame(ALT), now=0.2)            # 带疑点开窗
+    out = s.update(frame(swap), now=0.3)
+    check(out.board_codes == FLOP, f"一帧干净还不够：{out.board_codes}")
+    out = s.update(frame(swap), now=0.4)
+    check(out.board_codes == FLOP,
+          f"换掉已发牌内容不能靠两帧干净采用：{out.board_codes}")
+    check(out.reliable is False, f"应标不可靠：{out.warnings}")
+    check(any("等窗口投票" in w for w in out.warnings),
+          f"应说明走窗口投票：{out.warnings}")
+    # 窗口到期后按逐帧投票定案（票数够才采用），不是两帧干净就翻。
+    out = s.update(frame(swap), now=1.0)
+    check(any("疑惑帧仲裁" in w for w in out.warnings),
+          f"窗口到期应进投票：{out.warnings}")
 
 
 def test_current_flagged_frame_is_unreliable() -> None:
@@ -234,6 +263,7 @@ def main() -> int:
         test_low_confidence_rank_does_not_win_by_votes,
         test_card_back_challenger_never_wins,
         test_clean_frames_end_the_window_early,
+        test_same_count_swap_gets_no_two_frame_shortcut,
         test_current_flagged_frame_is_unreliable,
         test_invalid_count_frame_is_unreliable,
         test_pending_clean_change_keeps_reliable,

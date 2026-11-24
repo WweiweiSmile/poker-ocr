@@ -148,6 +148,13 @@ _DOUBT_WIN_SHARE = 0.6
 # A♠ 被裂纹动画读成 Ks（rank_score 0.506、margin 0.07），4/4 票把
 # 错误读数扶正。候选必须达到稳定闸的点数门槛，或分数略低但 margin 足够。
 _DOUBT_MIN_RANK_MARGIN = 0.15
+# 公共牌「前缀不一致」的挑战者（同张数换牌，或张数变大但前几张被顶掉）要连续
+# 超过这么久才允许按正常 `confirm_frames` 帧确认改用：发牌/翻牌动画约
+# 200–500ms，2s 留足余量，
+# 不会把动画中帧扶正（实测一场里被这样换掉 18 次）。但也不能永久拒收 ——
+# last-good 本身可能才是误读，一直拒收会让 reliable 永远为 False，点击/建议
+# 整手停摆。0 = 关闭，退回「前缀不一致一律拒收」。
+DEFAULT_SWAP_WINDOW = 2.0
 
 # 牌背分类：POKER 牌背的白色边框仍会被检出成牌面矩形，但内部是大面积高饱和
 # 图案（实测 S 中位数≈150、高饱和像素占 82%–85%，V 中位数≈170）；真牌是白底，
@@ -973,6 +980,16 @@ def _reading_issues(read: CardSlotRead) -> list[str]:
     return issues
 
 
+def _prefix_kept(codes: tuple[str, ...],
+                 last: tuple[str, ...]) -> bool:
+    """公共牌不变量：新读数以 last-good 的每一张为前缀，只许末尾追加。
+
+    转牌滑入动画会把翻牌第 3 张盖住，读成「张数合法但内容错」的组合；同张数
+    换牌和张数变大但前几张被顶掉，都违反了这条。
+    """
+    return codes[:len(last)] == last
+
+
 @dataclass
 class _StableSlot:
     """一块牌区（board / hero_cards）的跨帧状态。"""
@@ -1001,6 +1018,12 @@ class _StableSlot:
         dc_field(default_factory=list)
     # 仲裁没有多数：继续输出 last-good，但标为不可靠，等下一帧恢复或再开窗。
     unresolved: bool = False
+    # 公共牌「前缀不一致」的挑战者（同张数换牌 / 张数变大但前缀被顶掉）。连续
+    # 同一个挑战者超过 swap_window 才允许按正常 `confirm_frames` 帧确认改用，
+    # 避免把动画中帧扶正。
+    swap_codes: tuple[str, ...] = ()
+    swap_streak: int = 0
+    swap_started: float = 0.0
 
 
 class StableCards:
@@ -1013,6 +1036,18 @@ class StableCards:
 
       · **公共牌只前进**：合法张数是 0/3/4/5；4→3、5→4 这类回退一律不采用，
         只记异常并继续用 last-good。0 是新一手信号，也要连续 2 帧确认。
+      · **公共牌只许「前缀不变 + 末尾追加」**：张数不变却换了内容（转牌滑入动画
+        把翻牌第 3 张盖住，读成「张数合法但内容错」的组合），或张数变大但前几张
+        被顶掉，都不是新街追加 —— 先拒收并标不可靠。这类**干净**读数不进投票也
+        不开疑惑帧窗口：光靠帧数一致转正，两帧就能把被顶掉的组合扶正（实测一场
+        里这样换掉 18 次）。给一个 `swap_window` 秒的窗口兜底（默认 2s，远长于
+        200–500ms 发牌动画）：同一个挑战者连续超过窗口才判为 last-good 误读、
+        按正常 `confirm_frames`（默认 2）帧确认改用，避免一张错牌把 reliable
+        与点击锁死整手。
+        0 = 关闭，前缀不一致的干净读数永久拒收。带疑点（牌背/遮挡/低置信度）
+        的挑战者仍走下面的疑惑帧仲裁：那有独立证据，不是只靠帧数。窗口里也
+        只有「前缀不变、末尾追加」的挑战者能走两帧干净提前采用；换掉已发牌
+        内容的挑战者要等窗口到期按票数定案。
       · **hero 只接受 0/2 张**：1 张只走主动亮牌路径（`recognize_shown_cards`），
         不写进 hero_cards。
       · **新读数连续 `confirm_frames` 帧一致才替换 last-good**；期间继续输出
@@ -1050,7 +1085,8 @@ class StableCards:
     def __init__(self, confirm_frames: int = 2,
                  vote_frames: int = VOTE_FRAMES,
                  weak_accept_frames: int = _WEAK_ACCEPT_FRAMES,
-                 doubt_window: float = DEFAULT_DOUBT_WINDOW) -> None:
+                 doubt_window: float = DEFAULT_DOUBT_WINDOW,
+                 swap_window: float = DEFAULT_SWAP_WINDOW) -> None:
         self.confirm_frames = max(1, int(confirm_frames))
         # 0 = 关闭投票，只认连续 confirm_frames 帧一致
         self.vote_frames = max(0, int(vote_frames))
@@ -1058,6 +1094,8 @@ class StableCards:
         self.weak_accept_frames = max(0, int(weak_accept_frames))
         # 0 = 关闭疑惑帧仲裁，退回原来的 2 帧确认 + 弱读数兜底
         self.doubt_window = max(0.0, float(doubt_window))
+        # 0 = 前缀不一致的读数永久拒收（不给「last-good 才是误读」的翻案窗口）
+        self.swap_window = max(0.0, float(swap_window))
         self.last_anomalies: list[str] = []
         self.reliable = True
         self._reset_tracks()
@@ -1123,6 +1161,9 @@ class StableCards:
         # 直接忽略本帧 board 读数，保留 last-good。
         duplicate = set(result.board.codes) & set(result.hero_codes)
         if duplicate:
+            # 这一帧 board 读数整帧忽略、没进 _update_slot，必须先打断挑战者
+            # 连续计时，否则隔几秒复发一次也会凑出「连续 2s」。
+            self._reset_swap(self._board)
             warnings.append(
                 "board: 与 hero 手牌重复（"
                 + "/".join(sorted(duplicate)) + "），忽略本帧牌面读数")
@@ -1180,6 +1221,11 @@ class StableCards:
         """返回 (对外读数, 是否确认归零, 是否确认换了 2 张 hero, 本帧是否可疑)。"""
         codes = tuple(raw.codes)
         n = len(codes)
+        # 挑战者必须是**连续**帧：中间插进任何别的读数（回到 last-good、非法
+        # 张数、疑惑帧）就重新计时，否则隔几秒复发一次的累计「2s」会让动画
+        # 误读凭空翻案。整帧被忽略的读数（board∩hero 重复）见 `update()`。
+        if codes != track.swap_codes:
+            self._reset_swap(track)
 
         # 疑惑帧窗口打开期间，所有合法读数都进窗口。干净帧是强证据：
         # 连续两帧干净一致就提前采用 / 提前解除，不必等满整个窗口。
@@ -1258,15 +1304,44 @@ class StableCards:
                 track.weak_codes, track.weak_n = (), 0
             return self._current(track, raw), False, False, True
 
-        # 公共牌回退：4→3、5→4 一律不接受，哪怕连续多帧。0 是新一手信号，
-        # 走下面的 2 帧确认；否则 4 张短暂读成 3 张会把一手牌劈成两半。
+        def note_stale(reason: str) -> None:
+            """本帧读数不能采用：记异常 + warning，对外继续沿用上一帧。"""
+            msg = f"{name}: {reason}"
+            anomalies.append(msg)
+            warnings.append(f"{msg}；沿用上一帧")
+
+        # 公共牌只许「前缀不变 + 末尾追加」（`_prefix_kept`）。0 是新一手信号，
+        # 走下面的 2 帧确认；其余违反前缀的读数都不是新街追加，不能靠连续
+        # 帧数转正，否则转牌滑入动画盖住第 3 张的 2~3 帧就够扶正一个错组合
+        # （实测一场被这样换掉 18 次）。
         if board and track.established and track.read is not None:
-            last_n = len(track.read.cards)
-            if n < last_n and n != 0:
-                msg = f"{name}: 张数 {last_n}→{n} 回退，不采用"
-                anomalies.append(msg)
-                warnings.append(f"{msg}；沿用上一帧")
-                return track.read, False, False, True
+            last_codes = tuple(track.read.codes)
+            last_n = len(last_codes)
+            if n != 0 and not _prefix_kept(codes, last_codes):
+                if n < last_n:
+                    # 4→3、5→4 回退：扛得住多帧，否则 4 张短暂读成 3 张会把
+                    # 一手牌劈成两半。
+                    note_stale(f"张数 {last_n}→{n} 回退，不采用")
+                    return track.read, False, False, True
+                why = (f"同张数换牌（{n} 张内容不一致）" if n == last_n
+                       else f"前缀被顶掉（{last_n}→{n} 张）")
+                if codes == track.swap_codes:
+                    track.swap_streak += 1
+                else:
+                    track.swap_codes, track.swap_streak = codes, 1
+                    track.swap_started = now
+                # 兜底：last-good 本身也可能是误读的那个，永久拒收会让 reliable
+                # 恒为 False、点击与建议整手停摆。同一个挑战者连续超过
+                # swap_window 才判为 last-good 误读，交给下面正常的
+                # `confirm_frames` 帧确认。
+                if not (self.swap_window > 0
+                        and track.swap_streak >= self.confirm_frames
+                        and now - track.swap_started >= self.swap_window):
+                    note_stale(f"{why}，不采用")
+                    return track.read, False, False, True
+                warnings.append(
+                    f"{name}: {why} 连续 {now - track.swap_started:g}s"
+                    f"（{track.swap_streak} 帧），判为 last-good 误读，重新确认")
 
         if track.read is not None and codes == tuple(track.read.codes):
             track.pending = None
@@ -1367,6 +1442,12 @@ class StableCards:
         track.doubt_started = 0.0
         track.doubt_samples = []
 
+    @staticmethod
+    def _reset_swap(track: _StableSlot) -> None:
+        """打断「同一个前缀不一致挑战者」的连续计时。"""
+        track.swap_codes, track.swap_streak = (), 0
+        track.swap_started = 0.0
+
     def _update_doubt(self, raw: CardSlotRead, track: _StableSlot, name: str,
                       warnings: list[str], *, board: bool,
                       now: float) -> tuple[CardSlotRead, bool, bool, bool]:
@@ -1378,6 +1459,10 @@ class StableCards:
 
         last = tuple(track.read.codes) if track.read is not None else ()
         recent = track.doubt_samples[-2:]
+        # 两帧干净一致时能不能提前定案：换了公共牌已发牌内容的挑战者不行
+        # （转牌滑入动画里连续两三帧干净读出「张数合法但内容错」的组合正是
+        # #120 要拦的），只能等窗口到期投票，并由上面的 swap_window 兜底。
+        blocked = False
         if (len(recent) == 2
                 and recent[0][0] == recent[1][0]
                 and recent[0][2] and recent[1][2]):
@@ -1388,16 +1473,20 @@ class StableCards:
                 track.unresolved = False
                 warnings.append(f"{name}: 疑惑帧已消失，继续沿用上一帧")
                 return track.read, False, False, False
-            warnings.append(
-                f"{name}: 疑惑帧仲裁采用 {'/'.join(recent[-1][0])}"
-                "（连续 2 帧干净）")
-            return self._accept_doubt(track, recent[-1][3], board=board)
+            if board and last and not _prefix_kept(recent[-1][0], last):
+                blocked = True
+            else:
+                warnings.append(
+                    f"{name}: 疑惑帧仲裁采用 {'/'.join(recent[-1][0])}"
+                    "（连续 2 帧干净）")
+                return self._accept_doubt(track, recent[-1][3], board=board)
 
         elapsed = now - track.doubt_started
         if elapsed < self.doubt_window:
             warnings.append(
                 f"{name}: 疑惑帧仲裁中 {elapsed:.2f}s"
-                f"/{self.doubt_window:g}s（{len(track.doubt_samples)} 帧）")
+                f"/{self.doubt_window:g}s（{len(track.doubt_samples)} 帧）"
+                + ("，公共牌前缀被顶掉，等窗口投票" if blocked else ""))
             return self._current(track, raw), False, False, True
 
         return self._decide_doubt(track, name, warnings, board=board)
@@ -1634,6 +1723,7 @@ __all__ = [
     "CardsResult",
     "DEFAULT_CARD_SLOTS",
     "DEFAULT_DOUBT_WINDOW",
+    "DEFAULT_SWAP_WINDOW",
     "RANKS",
     "SUIT_NAMES",
     "StableCards",

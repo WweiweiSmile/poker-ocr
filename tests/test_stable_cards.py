@@ -3,6 +3,8 @@
 
 不读图片、不跑 OCR：手工拼 CardsResult。重点覆盖实测异常案例：
   · 翻牌动画把 4 张读成 3 张，不能把一手牌劈成两半；
+  · 转牌滑入把翻牌第 3 张顶掉（同张数换牌 / 张数变大但前缀被顶掉），
+    不能靠连续帧数转正，但持续超过 swap_window 要能翻案（fail open）；
   · hero 只读到 1 张（另一张是牌背）不能写进 hero_cards；
   · 新读数要连续 2 帧一致才替换 last-good；
   · 牌背/遮挡/低置信度即使连续两帧一致也不能采用。
@@ -180,6 +182,114 @@ def test_single_frame_flip_does_not_replace_last_good() -> None:
     check(out.board_codes == codes(flop), "回到原读数应继续沿用")
 
 
+def test_same_count_board_swap_is_rejected() -> None:
+    """转牌滑入把翻牌第 3 张顶掉：同张数换牌连续多帧也不替换 last-good。"""
+    s = StableCards()
+    flop = [card("Ad"), card("7c"), card("2s")]
+    for _ in range(2):
+        s.update(frame(flop, []))
+    check(s._board.read is not None
+          and codes(s._board.read.cards) == ["Ad", "7c", "2s"],
+          "前提不成立：flop 应已稳定")
+
+    # 2s 被转牌 9h 顶掉：张数仍是 3，但内容变了（同张数换牌）
+    swapped = [card("Ad"), card("7c"), card("9h")]
+    for i in range(4):
+        out = s.update(frame(swapped, []), now=0.05 * (i + 1))
+        check(out.board_codes == ["Ad", "7c", "2s"],
+              f"同张数换牌第 {i + 1} 帧也不该替换：{out.board_codes}")
+        check(out.reliable is False,
+              f"同张数换牌应标不可靠：{out.warnings}")
+        check(any("同张数换牌" in w for w in out.warnings),
+              f"应写同张数换牌 warning：{out.warnings}")
+        check(any("同张数换牌" in a for a in s.last_anomalies),
+              f"应进 last_anomalies：{s.last_anomalies}")
+
+    # 正常追加（3→4）：第 1 帧先等确认，第 2 帧采用
+    turn = flop + [card("9h")]
+    out = s.update(frame(turn, []), now=0.3)
+    check(out.board_codes == ["Ad", "7c", "2s"],
+          f"4 张追加第 1 帧先等确认：{out.board_codes}")
+    out = s.update(frame(turn, []), now=0.4)
+    check(out.board_codes == ["Ad", "7c", "2s", "9h"],
+          f"4 张正常追加应采用：{out.board_codes}")
+    check(out.reliable, f"正常追加后应恢复可靠：{out.warnings}")
+
+
+def test_broken_prefix_growth_is_rejected() -> None:
+    """张数变大但前缀被顶掉（转牌盖住翻牌第 3 张、又读成 4 张）也不采用。
+
+    这不是新街追加：3→4 时前 3 张必须原样保留。拒收后正确读数要能恢复，
+    不能把 last-good 锁死（否则 reliable 恒 False、点击整手停摆）。
+    """
+    s = StableCards()
+    flop = [card("Ad"), card("7c"), card("2s")]
+    for _ in range(2):
+        s.update(frame(flop, []), now=0.0)
+
+    # 2s 被转牌 9h 顶掉，且张数读成 4
+    broken = [card("Ad"), card("7c"), card("9h"), card("9h")]
+    for i in range(3):
+        out = s.update(frame(broken, []), now=0.1 * (i + 1))
+        check(out.board_codes == ["Ad", "7c", "2s"],
+              f"前缀被顶掉的 {i + 1} 帧不该采用：{out.board_codes}")
+        check(out.reliable is False,
+              f"前缀被顶掉应标不可靠：{out.warnings}")
+        check(any("前缀被顶掉" in w for w in out.warnings),
+              f"应写前缀被顶掉 warning：{out.warnings}")
+
+    # 正确的 3→4 追加：第 1 帧等确认，第 2 帧采用（说明没有锁死）
+    turn = flop + [card("9h")]
+    out = s.update(frame(turn, []), now=0.5)
+    check(out.board_codes == ["Ad", "7c", "2s"],
+          f"正确追加第 1 帧先等确认：{out.board_codes}")
+    out = s.update(frame(turn, []), now=0.6)
+    check(out.board_codes == ["Ad", "7c", "2s", "9h"],
+          f"正确追加应恢复采用：{out.board_codes}")
+    check(out.reliable, f"恢复后应可靠：{out.warnings}")
+
+
+def test_sustained_swap_wins_after_window() -> None:
+    """last-good 才是误读时：同一挑战者持续超过 swap_window 要能翻案。
+
+    永久拒收会把 reliable 钉在 False、点击与建议整手停摆（fail open）。
+    """
+    s = StableCards(swap_window=0.4)
+    flop = [card("Ad"), card("7c"), card("2s")]
+    for _ in range(2):
+        s.update(frame(flop, []), now=0.0)
+
+    swapped = [card("Ad"), card("7c"), card("9h")]
+    out = s.update(frame(swapped, []), now=0.2)
+    check(out.board_codes == ["Ad", "7c", "2s"] and out.reliable is False,
+          f"窗口内仍应拒收：{out.board_codes} reliable={out.reliable}")
+    out = s.update(frame(swapped, []), now=0.4)
+    check(out.board_codes == ["Ad", "7c", "2s"],
+          f"窗口未满应继续拒收：{out.board_codes}")
+    # 窗口满且挑战者连续 → 落到正常 2 帧确认，不能一步到位
+    out = s.update(frame(swapped, []), now=0.9)
+    check(out.board_codes == ["Ad", "7c", "2s"],
+          f"翻案也要走 2 帧确认：{out.board_codes}")
+    out = s.update(frame(swapped, []), now=1.0)
+    check(out.board_codes == ["Ad", "7c", "9h"],
+          f"持续超过窗口应改用挑战者：{out.board_codes}")
+    check(out.reliable, f"翻案后应可靠：{out.warnings}")
+
+
+def test_zero_swap_window_never_adopts() -> None:
+    """swap_window=0 = 关闭兜底：前缀不一致的读数永久拒收。"""
+    s = StableCards(swap_window=0)
+    flop = [card("Ad"), card("7c"), card("2s")]
+    for _ in range(2):
+        s.update(frame(flop, []), now=0.0)
+    swapped = [card("Ad"), card("7c"), card("9h")]
+    for i in range(8):
+        out = s.update(frame(swapped, []), now=1.0 + i)
+        check(out.board_codes == ["Ad", "7c", "2s"],
+              f"关闭兜底后不该采用挑战者：{out.board_codes}")
+        check(out.reliable is False, f"应一直标不可靠：{out.warnings}")
+
+
 def test_card_back_is_never_accepted() -> None:
     """牌背读数即使连续两帧一致也不能替换 last-good。"""
     s = StableCards()
@@ -321,6 +431,10 @@ def main() -> int:
         test_board_zero_resets_after_confirmation,
         test_hero_one_card_is_never_accepted,
         test_single_frame_flip_does_not_replace_last_good,
+        test_same_count_board_swap_is_rejected,
+        test_broken_prefix_growth_is_rejected,
+        test_sustained_swap_wins_after_window,
+        test_zero_swap_window_never_adopts,
         test_card_back_is_never_accepted,
         test_low_confidence_first_read_is_unreliable,
         test_hero_change_resets_board,

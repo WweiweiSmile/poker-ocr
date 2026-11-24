@@ -46,6 +46,7 @@ ADVANCED_BOOL_KEYS = {
 ADVANCED_KEYS = {
     "stable_frames", "stable_seconds", "stable_reset_on_discard",
     "dealer_carry", "card_confirm_frames", "card_doubt_window",
+    "card_swap_window",
     "max_frame_age", "roi_threads", "no_dedup", "no_fold", "crop", "rotate",
     "max_vanish", "name_confirm", "incident_frames", "incident_max",
     "min_advice_confidence", "cross_check", "ai_timeout", "ai_confirm",
