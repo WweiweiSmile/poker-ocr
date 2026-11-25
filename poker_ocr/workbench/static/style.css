@@ -510,6 +510,13 @@ legend { color: var(--muted); font-size: 12px; padding: 0 6px; }
 .run-left .seat.is-empty { opacity: 0.34; border-style: dashed; }
 .run-left .seat.is-folded { opacity: 0.5; }
 .run-left .seat.is-left { opacity: 0.42; }
+/* 弃牌状态没读到（#123）：不是弃牌、也不许看起来还在局，用虚线框 + 「未知」徽章。 */
+.run-left .seat.is-unknown { opacity: 0.78; border-style: dashed; }
+.run-left .seat-unknown {
+  display: inline-block; margin-top: 4px; margin-left: 4px; padding: 1px 6px;
+  border-radius: 4px; font-size: 10px; color: var(--muted);
+  border: 1px dashed rgba(231, 241, 236, 0.32); background: rgba(231, 241, 236, 0.04);
+}
 .run-left .seat.is-turn { border-color: rgba(111, 211, 163, 0.75); box-shadow: 0 0 0 1px rgba(111, 211, 163, 0.35), 0 8px 20px rgba(0, 0, 0, 0.35); }
 .run-left .seat.act-bet, .run-left .seat.act-raise, .run-left .seat.act-all_in { border-color: rgba(231, 198, 109, 0.45); }
 .run-left .seat.act-call, .run-left .seat.act-check { border-color: rgba(125, 184, 232, 0.42); }

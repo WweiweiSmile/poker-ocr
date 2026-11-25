@@ -2544,10 +2544,12 @@ function renderSeats() {
     if (String(seat.seat_id) === String(heroId)) continue;
     const player = findSeatPlayer(seat.seat_id);
     const node = el('div', 'seat');
-    if (!player) node.classList.add('is-empty');
-    if (player && (player.fold === true || player.status === 'folded')) node.classList.add('is-folded');
+    /* 弃牌三态走纯函数（#123）：fold 没读到的座位画成「未知」，不再冒充在局。 */
+    const foldState = TableMeta.seatFold(player);
+    if (foldState === 'empty') node.classList.add('is-empty');
+    if (foldState === 'folded') node.classList.add('is-folded');
+    if (foldState === 'unknown') node.classList.add('is-unknown');
     if (player && player.left) node.classList.add('is-left');
-    if (player && ['away', 'sitting_out', 'buying_in'].includes(player.status)) node.classList.add('is-empty');
     if (st.hero_turn === true && player && player.seat_id === st.hero_seat_id) node.classList.add('is-turn');
 
     const top = el('div', 'seat-top');
@@ -2567,6 +2569,11 @@ function renderSeats() {
         const cls = String(action).replace(/[^a-z_]/gi, '');
         node.classList.add(`act-${cls}`);
         node.append(el('span', `seat-action action-${cls}`, actionText));
+      }
+      if (foldState === 'unknown') {
+        const chip = el('span', 'seat-unknown', '未知');
+        chip.title = '弃牌状态没读到：手牌图标与头像文字都没认出来，不当作仍在局';
+        node.append(chip);
       }
       const shown = (st.shows || []).find((x) => String(x.seat_id) === String(seat.seat_id));
       if (shown && Array.isArray(shown.cards) && shown.cards.length) {
@@ -2598,6 +2605,7 @@ function tableSignature(st, frame) {
   return JSON.stringify([
     st.pot, st.street_bet_total, st.dealer, st.hero_turn,
     st.players_in_hand, st.players_not_folded, /* 在局人数（不含弃牌，#121）变了也要重画 */
+    st.players_in_play, st.players_fold_unknown, /* 在局/未知分开画（#123） */
     hero.stack, hero.bet, hero.name, hero.position,
     (st.hero_cards || []).join(','), (st.board || []).join(','),
     st.cards_reliable, (st.cards_warnings || []).length,

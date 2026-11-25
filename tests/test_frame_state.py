@@ -364,6 +364,66 @@ def test_players_not_folded_excludes_folds_and_left() -> None:
           f"players_in_hand 是构造时给定的发牌人数，不应被重算：{st.players_in_hand}")
 
 
+def test_fold_unknown_is_counted_separately() -> None:
+    """弃牌没读到的座位单独计数，不冒充在局，也不被负证据补成弃牌（#123）。
+
+    弃牌要「图标消失 + 头像弃牌」两条同时成立，头像是 best-effort OCR，所以
+    「未知」是常态。未知既不能画成在局，也不能因为「没看到他行动」就判弃牌：
+
+      · players_not_folded（#121）口径**不变**——未知仍算在局，规则链路读它；
+      · 展示层改用两个新计数：players_in_play（确定在局）+ players_fold_unknown
+        （弃牌状态没读到），两者相加恰好等于 players_not_folded。
+    """
+    # 九人桌，三家弃牌（图标消失 + 头像弃牌），其余五家图标没读到 = 未知。
+    rows = {k: dict(v) for k, v in BASE.items()}
+    folded = ["lowL", "midL", "upL"]
+    s = build_state(make_frame(rows), PROFILE,
+                    card_icons={seat: False for seat in folded},
+                    avatar_reads={seat: ("弃牌", 0.9) for seat in folded})
+    check(s.players_in_hand == 9, f"发牌人数不受弃牌影响，实际 {s.players_in_hand}")
+    # 9 人里 3 家弃牌、lowR 全下（all_in 把 fold 定成 False）、hero 与其余 4 家
+    # 图标没读到 → 确定在局 2（hero + 全下），未知 4。
+    check(s.players_fold_unknown == 4,
+          f"没读到图标的 4 家应算未知，实际 {s.players_fold_unknown}")
+    check(s.players_in_play == 2,
+          f"确定在局的是 hero + 全下的 lowR，实际 {s.players_in_play}")
+    check(s.players_in_play + s.players_fold_unknown == s.players_not_folded,
+          f"两个新计数必须刚好拆开旧口径：{s.players_in_play}+"
+          f"{s.players_fold_unknown} != {s.players_not_folded}")
+
+    unknown_seat = s.player("midR")
+    check(unknown_seat.fold is None,
+          f"没读到图标也没有弃牌文案 = 未知，实际 {unknown_seat.to_debug()}")
+    check(unknown_seat.fold is not True, "没看到他行动不等于他弃牌了")
+    check(s.player("lowR").all_in and s.player("lowR").fold is False,
+          "全下是明确的在局证据，不能被算成未知")
+
+    debug = s.to_debug()
+    check(debug.get("players_fold_unknown") == 4,
+          f"快照必须带上未知计数，否则前端画不出「未知」：{debug.get('players_fold_unknown')}")
+    check(debug.get("players_in_play") == 2,
+          f"快照必须带上确定在局计数：{debug.get('players_in_play')}")
+
+    # hero 的头像从不挂手牌图标，fold=None 是**结构性**的，不是「未知」；
+    # 它弃牌只能靠头像文案判（frame_state 的 hero 分支），否则会被永远算成未知。
+    hero = PlayerState(seat_id="h", in_hand=True, status="playing")
+    kept = PlayerState(seat_id="k", in_hand=True, status="playing", fold=False)
+    unknown = PlayerState(seat_id="u", in_hand=True, status="playing")
+    folded_p = PlayerState(seat_id="f", in_hand=True, status="playing", fold=True)
+    left = PlayerState(seat_id="g", in_hand=True, status="folded", fold=True,
+                       left=True)
+    waiting = PlayerState(seat_id="w", in_hand=False, status="sitting_out")
+    st = FrameState(frame_id="t", table_seats=6, players_in_hand=5,
+                    hero_seat_id="h",
+                    players=[hero, kept, unknown, folded_p, left, waiting])
+    check(st.players_in_play == 2,
+          f"hero（无图标可读）与确定在局的 k 都应算在局，实际 {st.players_in_play}")
+    check(st.players_fold_unknown == 1,
+          f"只有没读到图标的对手算未知，实际 {st.players_fold_unknown}")
+    check(st.players_not_folded == 3,
+          f"旧口径不变：未知仍算在局（rules 链路读它），实际 {st.players_not_folded}")
+
+
 def test_raw_fold_reads_are_kept_for_diagnosis() -> None:
     """`fold` 是合并结论；原始图标/文案读数要留下来给证据快照用。
 
@@ -1188,6 +1248,7 @@ def main() -> int:
         test_empty_seat_is_not_in_hand,
         test_fold_needs_icon_gone_and_text,
         test_players_not_folded_excludes_folds_and_left,
+        test_fold_unknown_is_counted_separately,
         test_raw_fold_reads_are_kept_for_diagnosis,
         test_missing_icon_alone_does_not_fold_a_bettor,
         test_card_icon_overrides_fold_text,

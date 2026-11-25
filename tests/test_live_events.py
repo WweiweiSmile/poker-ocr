@@ -51,6 +51,7 @@ class StubStream:
         record = {"index": self.records, "t": t, "frame": frame_id,
                   "table_seats": 9, "players_in_hand": 3,
                   "players_not_folded": 3,
+                  "players_in_play": 2, "players_fold_unknown": 1,
                   "pot": 10.0, "hero_seat_id": "hero",
                   "players": [{"seat_id": "hero", "name": "me",
                                "stack": 100.0, "position": "BTN"}]}
@@ -87,6 +88,11 @@ def test_frame_events_for_record_and_discard() -> None:
     # 面板「N 人在局」读这个键（#121）：它必须原样出现在 frame 事件的 state 里。
     check(payload.get("state", {}).get("players_not_folded") == 3,
           f"state 应透传 players_not_folded：{payload.get('state')}")
+    # 展示口径（#123）：确定在局与「弃牌状态未知」分开走，面板各读各的，不混算。
+    check(payload.get("state", {}).get("players_in_play") == 2,
+          f"state 应透传 players_in_play：{payload.get('state')}")
+    check(payload.get("state", {}).get("players_fold_unknown") == 1,
+          f"state 应透传 players_fold_unknown：{payload.get('state')}")
     check(payload["state_index"] == 1, f"应带 state_index：{payload}")
     check(payload["cards"]["reliable"] is False,
           "没有 profile 时读牌应标不可用")

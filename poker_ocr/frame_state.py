@@ -102,7 +102,9 @@ class PlayerState:
     def seat_state(self) -> str:
         """三态玩家状态：``in_hand`` / ``waiting`` / ``folded``；``empty`` = 空座。
 
-        业务语义的唯一口径（`status` 继续保留给 JSONL/旧消费者）：
+        业务语义（三态）的唯一口径，`status` 继续保留给 JSONL/旧消费者。看板展示
+        在这三态之外把 `fold` 未知拆成「未知」（#123，见 players_fold_unknown），
+        那是展示层的第四种态，不改这里的规则语义：
 
           · **在局**是默认值：只要这一手有他（名单锁定的座位），没有明确的
             弃牌/等待证据就一直在局；
@@ -194,14 +196,15 @@ class FrameState:
 
     @property
     def players_not_folded(self) -> int:
-        """还没弃牌的人数（含 hero）——面板「N 人在局」用的就是它。
+        """还没弃牌的人数（含 hero）——**规则口径**，facts 层与手牌追踪读它。
 
         和 players_in_hand 分工明确、不许互相替代：
 
           · players_in_hand = **本手发牌人数**，含已弃牌与中途离场。换手判定
             （hand_track 的 IN_HAND_JUMP）靠它跳变，改成「不含弃牌」会让每一次
             弃牌都像换手，制造假记录。
-          · players_not_folded = 此刻**仍在局**的人数。弃牌（fold is True）与
+          · players_not_folded = 此刻**仍在局**的人数（未知算在局）。看板不直接读它，
+            读 players_in_play（#123，扣掉未知）；弃牌（fold is True）与
             中途离座（status == "folded"，离桌的人会被补成弃牌）都不算；
             fold is None（未知）**算在局**——弃牌检测是三态 best-effort，未知
             只能当没看见，不能拿负证据扣人。本手没发到牌的人（in_hand=False，
@@ -210,12 +213,54 @@ class FrameState:
         return sum(1 for p in self.players
                    if p.in_hand and p.fold is not True and p.status != "folded")
 
+    @property
+    def players_fold_unknown(self) -> int:
+        """弃牌状态**没读到**的座位数（不含 hero）——展示层把它画成「未知」（#123）。
+
+        弃牌要「手牌图标消失 + 头像文案弃牌」两条同时成立，头像是 best-effort
+        OCR（实测同一帧 5 个弃牌玩家会漏掉 2 个），所以这里经常非 0。它**只影响
+        展示**，不参与任何判定：
+
+          · players_not_folded（#121）口径不变，fold 未知**仍算在局**，规则链路
+            （facts / HandSnapshot）读的是那个数；
+          · 本计数只回答「面板上有几个座位要画成未知」；
+          · 不许拿「没看到他行动」这种负证据把这些座位补成弃牌——未知就是未知。
+
+        hero 不算：hero 的头像**从不挂手牌图标**（见 build_state 的 hero 分支），
+        它的 fold is None 是结构性事实而不是「没读到」；hero 弃牌只由头像文案判，
+        否则 hero 会被永远算成未知。
+        """
+        return sum(1 for p in self.players
+                   if p.in_hand and p.fold is None
+                   and p.seat_id != self.hero_seat_id
+                   and p.status != "folded")
+
+    @property
+    def players_in_play(self) -> int:
+        """**确定**还在局的人数（含 hero）——面板「N 人在局」读它（#123）。
+
+        与 players_not_folded 的分工（两者只差一个「未知」）：
+
+          · players_not_folded = 规则口径：未知**算在局**（不敢拿负证据扣人），
+            facts 层与手牌追踪读它；
+          · players_in_play = 展示口径：只数有明确在局证据的人，
+            = players_not_folded − players_fold_unknown；
+          · 两边相加恰好还原旧口径，不会漏人数。
+
+        hero 的 fold is None 算在局（头像没有图标槽，见 players_fold_unknown）。
+        """
+        return self.players_not_folded - self.players_fold_unknown
+
     def to_debug(self) -> dict:
         return {
             "frame_id": self.frame_id,
             "table_seats": self.table_seats,
             "players_in_hand": self.players_in_hand,
             "players_not_folded": self.players_not_folded,
+            # 展示层用这两个把「在局」和「弃牌未知」分开画（#123）；
+            # 规则链路只读 players_not_folded，别拿它们替代（见属性文档）。
+            "players_in_play": self.players_in_play,
+            "players_fold_unknown": self.players_fold_unknown,
             "blinds": ({**self.blinds.to_debug(), "source": self.blinds_source}
                        if self.blinds else None),
             "dealer": self.dealer,

@@ -219,6 +219,11 @@ def test_exit_mid_hand_keeps_name_position_and_marks_fold() -> None:
         # 面板人数不含弃牌：离桌按弃牌算，所以「在局」只剩 8（#121）。
         check(state.players_not_folded == 8,
               f"离桌的人不算在局，应剩 8 人，实际 {state.players_not_folded}")
+        # 展示口径（#123）：未知座位不计进在局，但也不凭空消失，两者相加还原旧口径。
+        check(state.players_in_play + state.players_fold_unknown
+              == state.players_not_folded,
+              "确定在局 + 弃牌未知 应等于 players_not_folded："
+              f"{state.players_in_play} + {state.players_fold_unknown}")
         check(not state.errors, f"确认离桌后不该再丢帧：{state.errors}")
         check({p.seat_id: p.position for p in state.players} == base_pos,
               "有人退出不能让其他人的位置整体挪位："

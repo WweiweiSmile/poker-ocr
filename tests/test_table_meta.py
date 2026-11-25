@@ -3,12 +3,13 @@
 
     nv tests/test_table_meta.py
 
-口径来自 #121：
+口径来自 #121 + #123：
 
-  · 优先读 `players_not_folded`（还没弃牌的人数，含 hero）；
-  · 只有缺这个键的老记录才回落到 `players_in_hand`——旧口径显示，绝不覆盖新键；
-  · 两个都缺 ⇒ 「—」，与改动前的 `st.players_in_hand ?? '—'` 一致；
-  · `players_in_hand` 本身不动：换手判定（hand_track 的 IN_HAND_JUMP）靠它跳变。
+  · 优先读 `players_in_play`（确定在局，含 hero），未知座位另报 `players_fold_unknown`；
+  · 老记录回落到 #121 的 `players_not_folded`（未知算在局），再回落到 `players_in_hand`；
+  · 未知数是后缀「（N 未知）」，绝不加进人数；两个都缺 ⇒ 「—」；
+  · `players_in_hand` 本身不动：换手判定（hand_track 的 IN_HAND_JUMP）靠它跳变；
+  · 座位弃牌三态 `seatFold()`：fold 是 null ⇒ 未知，不拿动作徽章补，更不拿负证据补。
 
 前端没有构建链、也没有浏览器测试，所以渲染逻辑做成无 DOM 依赖的纯 JS 模块，
 由 node 直接断言；`app.js` 只负责把街道名与 state 传进去，并把人数字段纳入变化指纹。
@@ -63,6 +64,8 @@ def main() -> int:
           "app.js 必须把街道名与 state 交给 TableMeta.inHandLine")
     check("st.players_in_hand ?? '—'" not in app,
           "app.js 不应再自己拼 players_in_hand 的人数文案")
+    check("TableMeta.seatFold(player)" in app,
+          "app.js 座位弃牌三态必须走纯函数 TableMeta.seatFold")
 
     return report()
 
@@ -73,7 +76,7 @@ def report() -> int:
         for item in FAILS:
             print(f"  · {item}")
         return 1
-    print("✓ 牌桌面板「N 人在局」：优先新键/回落旧键/缺省「—」/0 有效/接线 全通过")
+    print("✓ 牌桌面板「N 人在局」：确定在局/未知分开/回落旧键/缺省「—」/座位三态/接线 全通过")
     return 0
 
 
