@@ -75,15 +75,17 @@ class PlayerState:
     equity: float | None = None
     # playing / folded / buying_in / away / uncertain（暂离，见 left_uncertain）
     status: str = "away"
-    # 本手中途离桌。离桌必然已经弃牌，所以本手剩余时间仍保留在 players 里：
-    # 名字/位置沿用离桌前的，fold=True、status=folded，但不参与行动线。
+    # 本手中途离桌。离桌是**观测事实**（人走了），不等于他弃牌：动作由本街
+    # 水位在街末唯一决定（#125）。本手剩余时间仍保留在 players 里，名字/
+    # 位置沿用离桌前的，fold=True、status=folded（只说明「不在池里」，不是
+    # 动作证据），行动线由 hand_track 补。
     # 下一手重新识别这个座位（可能已经换人）。
     left: bool = False
     # 本手中途**暂离**：连续若干帧名字/筹码/手牌图标都没有任何读数（#124）。
-    # 和 left 的区别是证据强度：left 由头像「+」占位确认，必然已弃牌，本手
-    # 剩余时间按 folded 走；暂离只是「读不到」，人可能还在（弹窗遮挡、网络
-    # 卡顿、客户端重连），所以不再算在局、看板置灰，但**不补 fold、不写进
-    # 行动线**，任一槽位恢复读数就撤销。离桌动作按注额分流是 #125 的事。
+    # 和 left 的区别是证据强度：left 由头像「+」占位确认，人确实走了；暂离
+    # 只是「读不到」，人可能还在（弹窗遮挡、网络卡顿、客户端重连），所以
+    # 不再算在局、看板置灰，而且**一条动作都不补、不写进行动线**（负证据），
+    # 任一槽位恢复读数就撤销。离桌的动作分流见 #125。
     left_uncertain: bool = False
     notes: list[str] = dc_field(default_factory=list)
     # ── 名字诊断（落库用，不影响判定）──
@@ -118,7 +120,7 @@ class PlayerState:
           · **等待入局**只由头像文案（等待审核 / 等待中 / 正在带入）触发；
           · **弃牌**只由「头像出现弃牌 + 手牌图标消失」两条同时满足触发；
           · **暂离**（#124）是第四态：名单里的人连续若干帧没有任何读数，
-            不再算在局、看板置灰，读数恢复即撤销；它不是弃牌，也不补 fold；
+            不再算在局、看板置灰，读数恢复即撤销；它不是弃牌，也不补动作；
           · **空座**不是玩家状态（虚线「+」占位 / 牌桌没坐满）。
         """
         if self.status == "away" and not self.in_hand:
@@ -219,7 +221,8 @@ class FrameState:
             弃牌都像换手，制造假记录。
           · players_not_folded = 此刻**仍在局**的人数（未知算在局）。看板不直接读它，
             读 players_in_play（#123，扣掉未知）；弃牌（fold is True）、
-            中途离座（status == "folded"，离桌的人会被补成弃牌）与**暂离**
+            中途离座（status == "folded"；离桌的人按本街水位在街末补弃牌或
+            过牌，#125）与**暂离**
             （left_uncertain，连续读不到，#124）都不算；
             fold is None（未知）**算在局**——弃牌检测是三态 best-effort，未知
             只能当没看见，不能拿负证据扣人。本手没发到牌的人（in_hand=False，
@@ -413,7 +416,8 @@ def build_state(frame: RoiFrame, profile: Profile,
     座位，语义是「暂离」而非离桌。锁定后：
 
       · 离桌座位仍然保留在 players 里，沿用锁定时名字/位置，`left=True`、
-        `fold=True`、`status=folded`，本手剩余时间按弃牌处理；
+        `fold=True`、`status=folded`（不算在局），他的动作由 hand_track 在
+        街末按本街水位分流补全（#125）；
       · 暂离座位同样保留在 players 里、沿用名字/位置，`left_uncertain=True`、
         `fold=None`、`status=uncertain`：不再算在局，但不补弃牌，读数恢复
         即撤销（#124）；
@@ -824,7 +828,7 @@ def _build_players(ctx: BuildContext):
             notes.append(f"头像 {avatar_text.strip()!r} → {label}，本手不参与")
 
         # ── 一手牌内的座位身份锁 ─────────────────────────────
-        # 离桌的人肯定已经弃牌：本手剩余时间继续保留在 players 里，沿用锁定
+        # 离桌的人不再参与行动：本手剩余时间继续保留在 players 里，沿用锁定
         # 时的名字/位置，按 folded 处理，不再要求筹码/下注（人都不在了，
         # 这两块读不到是正常的，不能因此整帧丢弃）。
         left_here = sid in left
@@ -842,7 +846,7 @@ def _build_players(ctx: BuildContext):
             action = None
             notes = [n for n in notes
                      if not n.startswith(("chip:", "bet:", "equity:"))]
-            notes.append("本手中途离桌，按弃牌处理")
+            notes.append("本手中途离桌，动作由本街水位在街末决定")
         absent_here = sid in absent and not left_here
         if absent_here:
             # 暂离（#124）：连续若干帧名字/筹码/手牌图标都没有任何读数。
@@ -922,7 +926,7 @@ def _assign_positions(ctx: BuildContext, in_hand: list[PlayerState],
     # 有座位身份锁时按**锁定的 roster** 排，而不是当前还在场的人：9 人桌
     # 中途退了一个，若按 8 人重新编号，空位后面的人会整体往前挪一位
     # （hero 的 UTG+2→LJ），行动顺序/AI 上下文全错。roster 里离桌的人仍占
-    # 位置，只是按弃牌处理。
+    # 位置，只是不再参与行动（动作在街末按水位补全）。
     position_seats = ([s.seat_id for s in frame.seats if s.seat_id in roster]
                       if roster else [p.seat_id for p in in_hand])
     pos = assign_positions(position_seats, dealer,

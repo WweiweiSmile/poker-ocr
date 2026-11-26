@@ -88,6 +88,7 @@ SUITES = ["test_positions.py", "test_env.py", "test_profile_8p.py", "test_coach.
           "test_hand_track_folded_bet.py",
           "test_action_source.py",
           "test_avatar_fold.py",
+          "test_left_actions.py",
           "test_blinds.py",
           "test_pending_streets.py",
           "test_order_unknown.py",

@@ -76,10 +76,11 @@ ACTION_TYPES = ("check", "call", "bet", "raise", "fold")
 
 AGGRESSIVE = ("bet", "raise")
 
-# 行动的证据来源：名称区徽章 / 头像弃牌 / 注额差反推 / 街末账本补全。
+# 行动的证据来源：名称区徽章 / 头像弃牌 / 注额差反推 / 街末账本补全 /
+# 离桌分流（本手中途离桌，动作由本街水位在街末唯一决定，见 #125）。
 # `inferred` 只是「来源是推断」的派生标记，落库以 `source` 为准。
-ACTION_SOURCES = ("badge", "avatar_fold", "bet_delta", "ledger")
-INFERRED_SOURCES = ("bet_delta", "ledger")
+ACTION_SOURCES = ("badge", "avatar_fold", "bet_delta", "ledger", "left")
+INFERRED_SOURCES = ("bet_delta", "ledger", "left")
 
 
 def preflop_aggressive(actions) -> list[ActionRecord]:
@@ -256,8 +257,9 @@ class ActionRecord:
     is_hero: bool = False
     # 视频流漏抓、由街末底池对账补出来的记录。落库时单独标出来，复盘时可区分
     inferred: bool = False
-    # 由「本手中途离桌」补出的弃牌（内部标记，不落库）。弹窗/遮挡让状态层
-    # 误判离桌、随后手牌图标恢复时，只撤销这一类 fold，不碰真实弃牌。
+    # 由「本手中途离桌」补出的动作（弃牌或过牌；内部标记，不落库）。
+    # 弹窗/遮挡让状态层误判离桌、随后手牌图标恢复时，只撤销这一类动作，
+    # 不碰真实弃牌，也不碰别的座位。
     left: bool = False
     # 补出 inferred fold 时的证据快照（可选）。手末补全没有帧，留空。
     evidence: FoldEvidence | None = None
@@ -442,6 +444,13 @@ class _LiveHand:
     shows: dict[str, dict] = field(default_factory=dict)
     # 全下汇总：seat_id → {seat_id, name, position, amount, equity}
     all_ins: dict[str, dict] = field(default_factory=dict)
+    # 本手最后一帧看到的离桌 / 暂离座位（#125）。街末结算可能发生在**换手帧**
+    # 上，那一帧的 state 已经是下一手的了（状态层在换手时清空 hand_left /
+    # hand_absent），不在这里留底，最后一街又会退回「离桌 = 弃牌」。
+    left_seats: set[str] = field(default_factory=set)
+    absent_seats: set[str] = field(default_factory=set)
+    # 离桌座位最后一次作为「left」被看到时的证据快照，换手帧补动作用它。
+    left_evidence: dict[str, FoldEvidence] = field(default_factory=dict)
     # 这一手遇到过的牌面异常（稳定闸判断牌面不可靠时）。落库用于复盘：
     # 哪些建议/行动是在牌面异常期间记录的。
     cards_warnings: list[str] = field(default_factory=list)
@@ -736,9 +745,10 @@ class LiveHandTracker:
             # 这一帧自己的徽章当基准 —— 那会把真正的翻牌第一动作也吞掉。
             last_words: dict[str, str] = {}
             for a in hand.actions:
-                # 只看真观测到的徽章；街末补出来的 ledger 不是屏幕上残留的
-                # 徽章，不能拿来当旧徽章基准。
-                if a.street == hand.street and a.source != "ledger":
+                # 只看真观测到的徽章；街末/离桌补出来的记录（ledger、left）
+                # 不是屏幕上残留的徽章，不能拿来当旧徽章基准（bet_delta 反推
+                # 的动作仍按原口径参与，本票不动它）。
+                if a.street == hand.street and a.source not in ("ledger", "left"):
                     last_words[a.seat_id] = a.action
             self._stale_badges = {
                 p.seat_id: (street, p.action, 0.0)
@@ -757,8 +767,10 @@ class LiveHandTracker:
         elif board_len >= 3 and board_len >= len(hand.board):
             hand.board = board
 
-        # 弹窗/遮挡让状态层误判离桌、随后图标恢复时，先撤销之前补的离桌弃牌。
-        self._revoke_left_folds(state, hand)
+        # 弹窗/遮挡让状态层误判离桌、随后图标恢复时，先撤销之前替离桌补的
+        # 动作（弃牌或过牌）。牌面正在清空的换手确认帧不算恢复。
+        if not self._drop_frames:
+            self._revoke_left_folds(state, hand)
         # hero 自己的投入必须**先**认定（客户端不给 hero 画下注 pill，账单里
         # 这笔钱只能从「本街实际投入 − 其他座」反解）：
         #   · 动作记录要用它当金额 —— 否则 hero 的加注记成「加注 0BB」；
@@ -770,10 +782,8 @@ class LiveHandTracker:
         # 把它当成「没读全」，整条街不再给建议（见 `_LiveHand.hero_street_bet`）。
         self._note_hero_bet(hand, state)
         self._record_actions(state, hand)
-        # 中途离桌的人必然已经弃牌：状态层把他保留成 folded，这里立刻补一条
-        # inferred fold（名字/位置沿用离桌前），让 AI 在当前街的行动线里就能
-        # 看到「这家已经弃牌」。状态层误判恢复时由上一步精确撤销。
-        self._record_left_folds(state, hand)
+        # 离桌（left）不在这里补动作：离桌是事实，但他做了什么没有观测到，
+        # 只能是弃牌还是过牌由本街水位在街末唯一决定（见 _finalize_street ①）。
         # 头像弃牌：两帧确认后按第一次看到的时刻插进行动线（不是街末）。
         self._record_avatar_folds(state, hand)
         # 横幅之外的第二个判据：翻前无动作 + 人均正好是客户端前注水位
@@ -786,6 +796,17 @@ class LiveHandTracker:
                     hand.bomb_pot = True
             else:
                 self._bomb_streak = 0
+        # 离桌/暂离逐帧留底（#125）：换手帧结算上一手时 state 已经是下一手的
+        # 了，left / left_uncertain 都读不到，只能靠本手自己记的这份。离桌只增
+        # 不减（撤销时由 _revoke_left_folds 剔除）；牌面正在清空的换手确认帧
+        # 不算数，否则状态层刚清的 left 会把这份留底一起抹掉。
+        if not self._drop_frames:
+            hand.left_seats |= self._left_seats(state)
+            hand.left_evidence.update({
+                sid: ev for sid in hand.left_seats
+                if (ev := self._fold_evidence(sid, state)) is not None})
+            hand.absent_seats = {p.seat_id for p in state.players
+                                 if p.left_uncertain}
         # 记录完本帧动作后再更新在局集合：本帧的弃牌徽章已经落成 fold，
         # 街末补弃牌时不会重复补。
         hand.active = set(current_active)
@@ -1663,7 +1684,7 @@ class LiveHandTracker:
 
         动作记录的 `all_in` 是单帧判据（frame_state 一帧就能置真），而
         `hand.all_ins` 要 `ALL_IN_CONFIRM_FRAMES` 帧确认；只看后者会在结算帧
-        漏掉「刚被单帧判成全下」的人 —— 他随后被「离桌」补一条 fold，同一手
+        漏掉「刚被单帧判成全下」的人 —— 他随后被「离桌」补一条弃牌，同一手
         里既 all_in 又 fold。两套口径在这里合并成「推过就是推过」。
         """
         seats = set(hand.all_ins)
@@ -1675,14 +1696,14 @@ class LiveHandTracker:
 
         提交时**位置与证据取第一次看到的那一帧**：`_FoldPending.index` 是
         当时的 `hand.actions` 长度，插入后弃牌落在它前后的两个动作之间。
-        中途离桌（`left`）交给 `_record_left_folds` 的 ledger 记录；全下
-        的人不可能弃牌；已经有过 fold 记录的座位不重复提交。
+        中途离桌（`left`）的动作交给街末按水位分流；全下的人不可能弃牌；
+        已经有过 fold 记录的座位不重复提交。
         """
         folded = {a.seat_id for a in hand.actions if a.action == "fold"}
         all_in_seats = self._all_in_seats(hand)
         for p in state.players:
-            # 离桌/暂离的人都不按头像补弃牌：离桌交给 ledger，暂离只标事实，
-            # 具体动作要按注额分流（#125），不能凭「看不清」补一条 fold。
+            # 离桌/暂离的人都不按头像补弃牌：离桌的动作由街末水位分流（#125），
+            # 暂离只标事实、一条动作都不补，都不能凭「看不清」补一条 fold。
             if (p.left or p.left_uncertain or p.seat_id in folded
                     or p.seat_id in all_in_seats):
                 self._fold_pending.pop(p.seat_id, None)
@@ -1752,37 +1773,70 @@ class LiveHandTracker:
         for i, a in enumerate(hand.actions):
             hand.last_index[(a.street, a.seat_id)] = i
 
-    def _record_left_folds(self, state: FrameState, hand: _LiveHand) -> None:
-        """中途离桌 = 已经弃牌：补一条 inferred fold，保留名字/位置。
+    @staticmethod
+    def _left_seats(state: FrameState | None) -> set[str]:
+        """这一帧判定离桌的座位。离桌是观测事实，优先于「还在局」的推算。"""
+        return {p.seat_id for p in (state.players if state is not None else ())
+                if p.left}
 
-        只补一次：同座这手已经有 fold 记录（自己弃的或之前补过）就跳过。
-        全下的人不可能弃牌，也跳过。这条记录带 `left=True`，离桌误判恢复时
-        `_revoke_left_folds` 能精确撤销它。
+    def _append_left_action(self, hand: _LiveHand, street: str,
+                            p: _PendingSeat, level: float,
+                            state: FrameState | None, *,
+                            at_hand_end: bool) -> None:
+        """离桌座位补一条动作：欠钱 → 弃牌，不欠钱 → 过牌。
+
+        离桌是**观测事实**（头像换成「+」占位），但他做了什么没有观测到：
+        帧里没有对手的回合信号（只有 `hero_turn`），「轮到他」这一刻抓不到。
+        能观测到的是街末不变量 —— 一街结束时他的投入必须等于水位。水位高于
+        他已投入，剩下唯一的选择就是弃牌；相等，就只能是他已经跟注/过牌
+        （有记录）或者过牌。所以动作不是「离桌即弃牌」，而是由水位唯一决定。
+
+        补出的动作标 `order_unknown`、放在街末（#125）：不按座位号伪造顺序。
+        这条记录带 `left=True` + `source="left"`，误判离桌恢复时只撤销这一类。
+
+        hero、全下、投入未知的座位不补：证据不足或不可能弃牌。手末的翻前
+        不补过牌（所有人弃牌到 BB 时 BB 直接收池，不是过牌），与 ④ 同口径。
         """
-        folded = {a.seat_id for a in hand.actions if a.action == "fold"}
-        all_in_seats = self._all_in_seats(hand)
-        for p in state.players:
-            if not p.left or p.seat_id in folded:
-                continue
-            if p.seat_id == hand.hero_seat_id or p.seat_id in all_in_seats:
-                continue
-            hand.actions.append(ActionRecord.make(
-                source="ledger",
-                street=hand.street, seat_id=p.seat_id, name=p.name,
-                position=p.position, action="fold", is_hero=False,
-                left=True, evidence=self._fold_evidence(p.seat_id, state)))
-            hand.last_index[(hand.street, p.seat_id)] = len(hand.actions) - 1
+        if p.unknown or p.all_in or p.seat_id == hand.hero_seat_id:
+            return
+        name, position = self._seat_info(hand, p.seat_id, state)
+        # 换手帧结算上一手时，state 里已经找不到这个座位（人是走了才 left 的）：
+        # 证据退回本手最后一次看到他离桌时的快照。
+        seen = {q.seat_id for q in (state.players if state is not None else ())}
+        fold_evidence = (self._fold_evidence(p.seat_id, state)
+                         if p.seat_id in seen
+                         else hand.left_evidence.get(p.seat_id))
+        # `_pending_seats` 只给在局的人算 `owes`（不在局恒 0），离桌的人得按
+        # 自己已记录的投入重算一遍水位差额。
+        owes = round(level - p.invested, 2)
+        if owes > RECONCILE_TOLERANCE:
+            action, evidence = "fold", fold_evidence
+        else:
+            # 不欠钱：已经记录过动作的座位不再补 —— 那条就是他的动作。
+            if p.acted or (at_hand_end and street == PREFLOP):
+                return
+            action, evidence = "check", None
+        hand.actions.append(ActionRecord.make(
+            source="left", street=street, seat_id=p.seat_id, name=name,
+            position=position, action=action, is_hero=False, left=True,
+            order_unknown=True, evidence=evidence))
+        hand.last_index[(street, p.seat_id)] = len(hand.actions) - 1
 
     def _revoke_left_folds(self, state: FrameState, hand: _LiveHand) -> None:
-        """撤销误判离桌补出的 fold（手牌图标恢复 = 他一直在这一手）。
+        """撤销误判离桌补出的动作（手牌图标恢复 = 他一直在这一手）。
 
-        只删 `left=True` 的合成记录，真实弃牌/对账补出的 fold 不受影响。
+        只删 `left=True` 的合成记录（弃牌或过牌），真实弃牌/对账补出的
+        记录不受影响。撤销后这一街不再回溯补全：宁可缺一条，不伪造。
         删完重建 `last_index`，避免后续动作指到旧下标。
         """
-        if not any(a.left for a in hand.actions):
-            return
         revived = {p.seat_id for p in state.players if not p.left}
         if not revived:
+            return
+        # 恢复的座位不再算离桌：后续街末结算不会替他补动作，也不会拿旧证据。
+        hand.left_seats -= revived
+        for sid in revived:
+            hand.left_evidence.pop(sid, None)
+        if not any(a.left for a in hand.actions):
             return
         before = hand.actions
         kept = [a for a in before
@@ -2076,7 +2130,7 @@ class LiveHandTracker:
         remaining = [p for p in state.players
                      if p.in_hand and p.fold is not True
                      and p.status != "folded" and not p.all_in
-                     and p.seat_id not in unknown]
+                     and not p.left and p.seat_id not in unknown]
         if not remaining:
             return
 
@@ -2395,13 +2449,17 @@ class LiveHandTracker:
                          current_active: set[str] | None,
                          *, state: FrameState | None = None,
                          at_hand_end: bool = False) -> None:
-        """街末/手末补全：漏读的弃牌 + 已经轮过且没动作的过牌。
+        """街末/手末补全：漏读的弃牌 + 离桌动作分流 + 已经轮过且没动作的过牌。
 
         视频流里弃牌徽章经常整条街都抓不到；但「街开始时在局、街末已经不在局」
         是可靠的结构证据。过牌更保守：只有这一街**没有任何 bet/raise、也没有
         弃牌**时才补 —— 有人下注时没记录到动作的人更可能是跟注（金额对账会先
         处理）；而「无人下注却有弃牌」本身就是矛盾证据，说明下注整条丢了，
         这时补 check 会造出一个不存在的「全场过牌」回合。
+
+        离桌（left）要再分一层：「人走了」只说明他不再行动，不说明他弃牌还是
+        过牌。本街水位高于他的投入 → 他欠钱 → 只能是弃牌；不欠钱 → 只能是
+        过牌。这不是猜测，是街末不变量（#125）。
         """
         if street in hand.finalized_streets:
             return
@@ -2425,17 +2483,33 @@ class LiveHandTracker:
         acts = hand.street_actions(street)
         recorded_folds = {a.seat_id for a in acts if a.action == "fold"}
         # 暂离（#124）的座位这一帧什么读数都没有：他不在 current 里，但那是
-        # 「看不见」不是「弃牌」。这里补一条 fold 就等于在事实层替他决策了，
-        # 而离桌后的动作要按注额分流（有注弃牌 / 无注过牌，见 #125）。
+        # 「看不见」不是「弃牌」，一条动作都不补（负证据）。
+        # 离桌（left）是观测事实，但他做了什么没观测到 —— 动作按本街水位分流，
+        # 见 ① 与 _append_left_action（#125）。
         absent = {p.seat_id for p in (state.players if state is not None else ())
-                  if p.left_uncertain}
+                  if p.left_uncertain} | hand.absent_seats
+        # 换手帧上 state 已经是下一手的，left/left_uncertain 都读不到：
+        # 并上本手逐帧留底的集合，否则最后一街又退回「离桌 = 弃牌」。
+        left = self._left_seats(state) | hand.left_seats
 
-        # ① 弃牌：街初在局、街末不在局、又没有 fold 记录的座位。
-        #    按待行动集合的位置顺序补，不再按 seat_id 字典序。
+        # ① 街初在局、街末不在局、又没有 fold 记录的座位：按待行动集合的位置
+        #    顺序补，不按 seat_id 字典序。
+        #    · 离桌：水位高于他已投入 → 弃牌；否则 → 过牌（见 _append_left_action）
+        #    · 暂离：一条都不补（上面的 absent）
+        #    · 其余：只有「人没了」这一条结构证据，补弃牌
+        level = hand.level.get(street, 0.0)
         for p in self._pending_seats(hand, street, current, state):
-            if p.in_hand or p.seat_id not in start:
+            if p.seat_id not in start:
                 continue
             if p.seat_id in recorded_folds or p.seat_id in absent:
+                continue
+            if p.seat_id in left:
+                # 离桌以 left 为准：即便状态层还把他算在局里，人已经走了，
+                # 动作由本街水位唯一决定（#125）。
+                self._append_left_action(hand, street, p, level, state,
+                                         at_hand_end=at_hand_end)
+                continue
+            if p.in_hand:
                 continue
             name, position = self._seat_info(hand, p.seat_id, state)
             hand.actions.append(ActionRecord.make(
@@ -2461,7 +2535,7 @@ class LiveHandTracker:
         # ③ 未配平：还欠动作或投入未知的座位只进诊断，不补成别的动作，
         #    也不补过牌 —— 街末补全只在「在局的人都能对上水位」时成立。
         unmatched = [p for p in pending
-                     if p.in_hand and not p.all_in
+                     if p.in_hand and not p.all_in and p.seat_id not in left
                      and (p.unknown or p.owes > 1e-9)]
         if unmatched:
             detail = "，".join(
@@ -2488,7 +2562,8 @@ class LiveHandTracker:
         if (not unmatched and not aggressive
                 and not (at_hand_end and street == PREFLOP)):
             for p in pending:
-                if not p.in_hand or p.all_in or p.acted or p.unknown:
+                if (not p.in_hand or p.all_in or p.acted or p.unknown
+                        or p.seat_id in left):
                     continue
                 name, position = self._seat_info(hand, p.seat_id, state)
                 hand.actions.append(ActionRecord.make(
@@ -2511,9 +2586,10 @@ class LiveHandTracker:
         if street in hand.level_unknown:
             return
         pending = self._pending_seats(hand, street, current, state)
+        left = self._left_seats(state) | hand.left_seats
         owed = [p for p in pending
                 if p.in_hand and not p.all_in and not p.unknown
-                and p.owes > 1e-9]
+                and p.seat_id not in left and p.owes > 1e-9]
         if not owed:
             return
         account = self._street_account(hand, street, hand.pot)

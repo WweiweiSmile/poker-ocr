@@ -3,7 +3,7 @@
 
 为什么需要它：
   `hand_track` 现在给每条行动记 `source`（badge / avatar_fold / bet_delta /
-  ledger）和 `order_unknown`。行动线改完是否达标，不能只看单测 —— 要拿真实
+  ledger / left）和 `order_unknown`。行动线改完是否达标，不能只看单测 —— 要拿真实
   日志整手回放，按来源拆分推断动作，并检查盲注位有没有把强制投入写成行动。
 
 用法：
@@ -32,12 +32,20 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from poker_ocr.frame_state import FrameState, PlayerState  # noqa: E402
-from poker_ocr.hand_track import BOMB_ANTE_BB, LiveHandTracker  # noqa: E402
+from poker_ocr.hand_track import (  # noqa: E402
+    ACTION_SOURCES,
+    BOMB_ANTE_BB,
+    INFERRED_SOURCES,
+    LiveHandTracker,
+)
 from poker_ocr.parse import Blinds  # noqa: E402
 
 DEFAULT_LOG = ROOT / "logs" / "live.mac.jsonl"
-SOURCES = ("badge", "avatar_fold", "bet_delta", "ledger")
-INFERRED_SOURCES = ("bet_delta", "ledger")
+# 证据源枚举只从 hand_track 取：本地再抄一份就会和实现漂移。
+SOURCES = ACTION_SOURCES
+# 街末「人已不在局」补出的弃牌：观测到的是「人没了」，不是漏抓，验收时单列。
+# 离桌分流补出的动作（source=left）是另一类，单独记 fold_left，不混进这一列。
+EXIT_SOURCES = ("ledger",)
 
 
 def player_from_dict(d: dict) -> PlayerState:
@@ -161,6 +169,7 @@ def summarize(hands: list[dict]) -> dict:
     folds = 0
     fold_inferred = 0
     fold_exit = 0
+    fold_left = 0
     order_unknown = 0
     for hand in hands:
         for street in hand.get("streets") or []:
@@ -174,8 +183,11 @@ def summarize(hands: list[dict]) -> dict:
                 if a.get("action") == "fold":
                     folds += 1
                     # 街末「人已不在局」的弃牌按口径算观测，不算漏抓；
-                    # 这类记录目前仍是 source=ledger，所以单列统计。
-                    if source == "ledger":
+                    # 这类记录是 source=ledger（人没了）或 left（离桌分流），
+                    # 所以单列统计。
+                    if source == "left":
+                        fold_left += 1
+                    elif source in EXIT_SOURCES:
                         fold_exit += 1
                     elif a.get("inferred") or source in INFERRED_SOURCES:
                         fold_inferred += 1
@@ -196,6 +208,7 @@ def summarize(hands: list[dict]) -> dict:
         "folds": folds,
         "fold_inferred": fold_inferred,
         "fold_exit": fold_exit,
+        "fold_left": fold_left,
         "order_unknown": order_unknown,
         "blind_misrecords": blind,
     }
@@ -215,7 +228,8 @@ def hand_rows(hands: list[dict]) -> list[dict]:
             "actions": len(acts),
             "inferred": inferred,
             "fold_inferred": sum(1 for a in folds
-                                 if a.get("source") != "ledger"
+                                 if a.get("source") not in EXIT_SOURCES
+                                 and a.get("source") != "left"
                                  and (a.get("inferred")
                                       or a.get("source") in INFERRED_SOURCES)),
             "blind": sum(1 for m in blind_misrecords([hand])),
@@ -234,7 +248,8 @@ def print_report(summary: dict, rows: list[dict], *, show_hands: bool) -> None:
         f"{s}={summary['sources'].get(s, 0)}"
         f"（推断 {summary['inferred_by_source'].get(s, 0)}）" for s in SOURCES))
     print(f"弃牌：{summary['folds']}（漏抓 {summary['fold_inferred']}，"
-          f"街末不在局 {summary['fold_exit']}）")
+          f"街末不在局 {summary['fold_exit']}，"
+          f"离桌分流 {summary['fold_left']}）")
     print(f"顺序未知：{summary['order_unknown']}")
     blind = summary["blind_misrecords"]
     print(f"盲注误记：{len(blind)}")

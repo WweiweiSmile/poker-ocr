@@ -61,7 +61,9 @@
   /* 座位弃牌三态 + 暂离。player: JSONL/SSE 里的对手对象（可能没有 fold 键 = 老记录）。 */
   function seatFold(player) {
     if (!player) return "empty";
-    if (player.left) return "folded"; /* 离桌必然已经弃牌 */
+    /* 离桌：人走了、不再算在局，所以置灰画成弃牌；他到底弃牌还是过牌由
+       街末水位决定（#125），看板这里只表达「不在池里」。 */
+    if (player.left) return "folded";
     /* 暂离（#124）：连续几帧什么都没读到。不是弃牌，但也不能画成还在局。 */
     if (player.left_uncertain || player.status === "uncertain") return "uncertain";
     if (player.fold === true || player.status === "folded") return "folded";

@@ -160,7 +160,7 @@ function appSource() {
   assert.strictEqual(TableMeta.seatFold({ status: "folded" }), "folded");
   assert.strictEqual(
     TableMeta.seatFold({ left: true, fold: false, status: "playing" }), "folded",
-    "离桌必然已弃牌",
+    "离桌座位不在池里（动作由街末水位决定，#125），画成弃牌只是置灰",
   );
   assert.strictEqual(
     TableMeta.seatFold({ left_uncertain: true, fold: null, status: "uncertain" }),
