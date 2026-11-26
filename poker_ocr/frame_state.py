@@ -73,11 +73,18 @@ class PlayerState:
     all_in: bool = False
     # 全下后筹码位置可能显示实时胜率（如 `30%`）。不是百分数时为 None。
     equity: float | None = None
-    status: str = "away"             # playing / folded / buying_in / away
+    # playing / folded / buying_in / away / uncertain（暂离，见 left_uncertain）
+    status: str = "away"
     # 本手中途离桌。离桌必然已经弃牌，所以本手剩余时间仍保留在 players 里：
     # 名字/位置沿用离桌前的，fold=True、status=folded，但不参与行动线。
     # 下一手重新识别这个座位（可能已经换人）。
     left: bool = False
+    # 本手中途**暂离**：连续若干帧名字/筹码/手牌图标都没有任何读数（#124）。
+    # 和 left 的区别是证据强度：left 由头像「+」占位确认，必然已弃牌，本手
+    # 剩余时间按 folded 走；暂离只是「读不到」，人可能还在（弹窗遮挡、网络
+    # 卡顿、客户端重连），所以不再算在局、看板置灰，但**不补 fold、不写进
+    # 行动线**，任一槽位恢复读数就撤销。离桌动作按注额分流是 #125 的事。
+    left_uncertain: bool = False
     notes: list[str] = dc_field(default_factory=list)
     # ── 名字诊断（落库用，不影响判定）──
     # 本帧名字槽的**原始读数**和它的 rec 分数。用户反馈里最常见的追问就是
@@ -110,12 +117,18 @@ class PlayerState:
             弃牌/等待证据就一直在局；
           · **等待入局**只由头像文案（等待审核 / 等待中 / 正在带入）触发；
           · **弃牌**只由「头像出现弃牌 + 手牌图标消失」两条同时满足触发；
+          · **暂离**（#124）是第四态：名单里的人连续若干帧没有任何读数，
+            不再算在局、看板置灰，读数恢复即撤销；它不是弃牌，也不补 fold；
           · **空座**不是玩家状态（虚线「+」占位 / 牌桌没坐满）。
         """
         if self.status == "away" and not self.in_hand:
             return "empty"
         if self.status in ("buying_in", "sitting_out"):
             return "waiting"
+        # 暂离是「在座但这一手不再算在局」：既不是弃牌（没有弃牌证据），
+        # 也不是空座（人还在名单里），单独一态供看板置灰。
+        if self.left_uncertain or self.status == "uncertain":
+            return "uncertain"
         if self.fold is True or self.status == "folded":
             return "folded"
         return "in_hand"
@@ -142,6 +155,7 @@ class PlayerState:
             **({"name_tracked": self.name_tracked}
                if self.name_tracked and self.name_tracked != self.name else {}),
             **({"left": True} if self.left else {}),
+            **({"left_uncertain": True} if self.left_uncertain else {}),
             **({"notes": self.notes} if self.notes else {}),
         }
 
@@ -204,14 +218,16 @@ class FrameState:
             （hand_track 的 IN_HAND_JUMP）靠它跳变，改成「不含弃牌」会让每一次
             弃牌都像换手，制造假记录。
           · players_not_folded = 此刻**仍在局**的人数（未知算在局）。看板不直接读它，
-            读 players_in_play（#123，扣掉未知）；弃牌（fold is True）与
-            中途离座（status == "folded"，离桌的人会被补成弃牌）都不算；
+            读 players_in_play（#123，扣掉未知）；弃牌（fold is True）、
+            中途离座（status == "folded"，离桌的人会被补成弃牌）与**暂离**
+            （left_uncertain，连续读不到，#124）都不算；
             fold is None（未知）**算在局**——弃牌检测是三态 best-effort，未知
             只能当没看见，不能拿负证据扣人。本手没发到牌的人（in_hand=False，
             中途入座）也不算：它压根不在这手里。
         """
         return sum(1 for p in self.players
-                   if p.in_hand and p.fold is not True and p.status != "folded")
+                   if p.in_hand and p.fold is not True
+                   and p.status != "folded" and not p.left_uncertain)
 
     @property
     def players_fold_unknown(self) -> int:
@@ -233,7 +249,7 @@ class FrameState:
         return sum(1 for p in self.players
                    if p.in_hand and p.fold is None
                    and p.seat_id != self.hero_seat_id
-                   and p.status != "folded")
+                   and p.status != "folded" and not p.left_uncertain)
 
     @property
     def players_in_play(self) -> int:
@@ -372,6 +388,7 @@ def build_state(frame: RoiFrame, profile: Profile,
                 ante_fallback: float | None = None,
                 hand_roster: dict[str, tuple[str | None, str | None]] | None = None,
                 left_seats: set[str] | None = None,
+                absent_seats: set[str] | None = None,
                 prev_state: "FrameState | None" = None) -> FrameState:
     """一帧 RoiFrame → FrameState（含解析错误清单）。
 
@@ -389,12 +406,17 @@ def build_state(frame: RoiFrame, profile: Profile,
     `prev_fold` 是上一份被接受状态里各座位的弃牌判定：亮牌的人弃没弃，
     只能沿用之前动作得出的结论（亮牌本身不代表没弃牌）。
 
-    `hand_roster` / `left_seats` 是**一手牌内的座位身份锁**（实时链路用）：
-    `hand_roster` = {seat_id: (名字, 位置)}，在这一手开始时由 StateStream 锁定；
-    `left_seats` 是其中已经确认中途离桌的座位。锁定后：
+    `hand_roster` / `left_seats` / `absent_seats` 是**一手牌内的座位身份锁**
+    （实时链路用）：`hand_roster` = {seat_id: (名字, 位置)}，在这一手开始时由
+    StateStream 锁定；`left_seats` 是其中已经确认中途离桌的座位；
+    `absent_seats` 是连续若干帧**没有任何读数**（名字/筹码/手牌图标全空）的
+    座位，语义是「暂离」而非离桌。锁定后：
 
       · 离桌座位仍然保留在 players 里，沿用锁定时名字/位置，`left=True`、
         `fold=True`、`status=folded`，本手剩余时间按弃牌处理；
+      · 暂离座位同样保留在 players 里、沿用名字/位置，`left_uncertain=True`、
+        `fold=None`、`status=uncertain`：不再算在局，但不补弃牌，读数恢复
+        即撤销（#124）；
       · 本手开始后才坐下的人（不在 roster 里）本手不参与、不算人数，
         名字也不在这手输出，等下一手重新识别；
       · 位置按**锁定的 roster** 而非当前在场人数排。否则一个非庄位玩家退出，
@@ -411,7 +433,7 @@ def build_state(frame: RoiFrame, profile: Profile,
         card_icons=card_icons, shown_seats=shown_seats,
         prev_fold=prev_fold, ante_fallback=ante_fallback,
         hand_roster=hand_roster, left_seats=left_seats,
-        prev_state=prev_state))
+        absent_seats=absent_seats, prev_state=prev_state))
 
 
 @dataclass(frozen=True)
@@ -432,6 +454,7 @@ class BuildContext:
     ante_fallback: float | None
     hand_roster: dict[str, tuple[str | None, str | None]] | None
     left_seats: set[str] | None
+    absent_seats: set[str] | None
     prev_state: FrameState | None
 
 def _global_facts(ctx: BuildContext):
@@ -490,6 +513,7 @@ def _build_players(ctx: BuildContext):
     shown_seats = ctx.shown_seats
     hand_roster = ctx.hand_roster
     left_seats = ctx.left_seats
+    absent_seats = ctx.absent_seats
     prev_fold = ctx.prev_fold
     name_tracker = ctx.name_tracker
     lenient_chips = ctx.lenient_chips
@@ -502,6 +526,7 @@ def _build_players(ctx: BuildContext):
     # 一手牌内的座位身份锁（见 docstring）。空 dict = 未启用，走旧逻辑。
     roster = dict(hand_roster or {})
     left = set(left_seats or ())
+    absent = set(absent_seats or ())
     # 整帧都判断不了（4x4 单测桩、整桌摊牌亮牌）时当作「没有这项信息」；
     # 只要有一座位给出了明确结果（有/没有图标），就按座位各自判断。
     icons = dict(card_icons or {})
@@ -818,6 +843,26 @@ def _build_players(ctx: BuildContext):
             notes = [n for n in notes
                      if not n.startswith(("chip:", "bet:", "equity:"))]
             notes.append("本手中途离桌，按弃牌处理")
+        absent_here = sid in absent and not left_here
+        if absent_here:
+            # 暂离（#124）：连续若干帧名字/筹码/手牌图标都没有任何读数。
+            # 人可能还在（遮挡/卡顿/重连），所以**不补弃牌**，只把他移出
+            # 「在局」计数、让看板置灰；名字/位置沿用锁定时快照，读数一恢复
+            # StateStream 就撤销（不误伤弹窗遮挡与网络抖动）。
+            roster_name, _ = roster.get(sid, (None, None))
+            name = roster_name or name
+            in_hand = True
+            fold = None
+            all_in = False
+            equity = None
+            status = "uncertain"
+            stack = None
+            bet = None
+            bet_unknown = False
+            action = None
+            notes = [n for n in notes
+                     if not n.startswith(("chip:", "bet:", "equity:"))]
+            notes.append("本手连续读不到，按暂离处理（读数恢复即撤销）")
         elif roster and sid in roster:
             # 名字暂时被遮住时用锁定值兜底；读到新值（OCR 纠正）仍然优先。
             roster_name, _ = roster[sid]
@@ -844,13 +889,14 @@ def _build_players(ctx: BuildContext):
             seat_id=sid, name=name, stack=stack, bet=bet, action=action,
             fold=fold, in_hand=in_hand, all_in=all_in, equity=equity,
             bet_unknown=bet_unknown,
-            status=status, left=left_here, notes=notes,
+            status=status, left=left_here, left_uncertain=absent_here,
+            notes=notes,
             # 诊断字段：原始读数 / rec 分数 / tracker 的结论。名字被动作徽章
             # 盖住时 name_raw 是徽章文字，不写出来免得误导。
             name_raw=(name_text or None) if action is None else None,
             name_score=name_score if (action is None and name_text) else 0.0,
-            # 离桌座位的 tracker 结论属于**下一手**的占用者，不能写进这一手
-            name_tracked=None if left_here else tracked,
+            # 离桌/暂离座位的 tracker 结论属于**下一手**的占用者，不能写进这一手
+            name_tracked=None if (left_here or absent_here) else tracked,
             # 弃牌判据的原始读数：`fold` 合并了图标与文案，这里原样留证。
             fold_icon=icon,
             fold_text=((avatar_text or "").strip() or None
@@ -960,7 +1006,9 @@ def _quality_gate(ctx: BuildContext, in_hand: list[PlayerState],
 
     for p in in_hand:
         # 离桌的人筹码/下注位已经不存在，读不到是正常的：不能因此整帧丢弃。
-        if p.left:
+        # 暂离（#124）同理：判据本身就是「这三块都没有读数」，拿它报错会
+        # 让每一帧暂离都变成丢帧，反而把整个状态流打断。
+        if p.left or p.left_uncertain:
             continue
         # **摊牌**的座位：头像被亮出的两张牌盖住、筹码胶囊显示 `0`（没有 BB
         # 单位 → None）、All-in 徽章也被牌盖住 —— 这时读不到筹码/下注是画面
@@ -1056,7 +1104,7 @@ def signature(state: FrameState) -> tuple:
 
     用户定的触发口径是「筹码 / 下注等没有变化就不记录」，所以指纹只收**牌局事实**：
     盲注、庄位、底池、在场人数、爆炸底池横幅、每座的
-    {位置, 名字, 后手, 下注, 在场, 全下, 是否中途离桌}。
+    {位置, 名字, 后手, 下注, 在场, 全下, 是否中途离桌, 是否暂离}。
 
     刻意**不含**（它们仍写进输出，只是不触发记录）：
 
@@ -1080,7 +1128,8 @@ def signature(state: FrameState) -> tuple:
         state.bomb_pot,
         tuple(
             (p.seat_id, p.position, p.name, _r(p.stack), _r(p.bet), p.in_hand,
-             p.all_in, p.left, _r(p.equity) if p.equity is not None else None)
+             p.all_in, p.left, p.left_uncertain,
+             _r(p.equity) if p.equity is not None else None)
             for p in state.players
         ),
     )

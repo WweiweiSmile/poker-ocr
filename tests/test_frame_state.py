@@ -1109,6 +1109,34 @@ def test_roster_left_seat_keeps_position_and_folds() -> None:
           f"离桌不该再要求筹码/下注：{s.errors}")
 
 
+def test_roster_absent_seat_is_uncertain_not_folded() -> None:
+    """连续读不到（absent_seats）：第四态「暂离」，不算在局，但不补弃牌。"""
+    rows = {k: dict(v) for k, v in BASE.items()}
+    rows["lowR"] = {}
+    roster = {sid: ("x", "y") for sid in BASE}
+    s = build_state(make_frame(rows), PROFILE, hand_roster=roster,
+                    absent_seats={"lowR"})
+    lowr = s.player("lowR")
+    check(lowr.left_uncertain and not lowr.left and lowr.fold is not True,
+          f"暂离不能当成离桌/弃牌：{lowr.to_debug()}")
+    check(lowr.in_hand and lowr.status == "uncertain"
+          and lowr.seat_state == "uncertain",
+          f"暂离是第四态：{lowr.to_debug()}")
+    check(lowr.position is not None, "暂离后位置仍要保留")
+    check(lowr.to_debug().get("left_uncertain") is True,
+          f"to_debug 要输出暂离标记：{lowr.to_debug()}")
+    check(not any(e.startswith(("stack:lowR", "bet:lowR")) for e in s.errors),
+          f"暂离不该再要求筹码/下注：{s.errors}")
+    check(s.ok, f"暂离不该丢整帧：{s.errors}")
+    check(s.players_in_hand == 9, f"发牌人数不变：{s.players_in_hand}")
+    check(s.players_not_folded == 8, f"暂离不算在局：{s.players_not_folded}")
+    check(s.players_not_folded == s.players_in_play + s.players_fold_unknown,
+          "在局人数恒等式要保持")
+    # 指纹要带上暂离：否则状态变化不会被记录/展示
+    plain = build_state(make_frame(), PROFILE, hand_roster=roster)
+    check(signature(s) != signature(plain), "暂离要进变化指纹")
+
+
 # ───────────── 下注 pill 旁的筹码图标（2026-11-12 实盘） ─────────────
 
 def test_bet_with_chip_icon_tail_is_cleaned_not_dropped() -> None:
@@ -1242,6 +1270,7 @@ def main() -> int:
         test_roster_zero_idle_is_not_waiting,
         test_roster_waiting_badge_is_waiting,
         test_roster_left_seat_keeps_position_and_folds,
+        test_roster_absent_seat_is_uncertain_not_folded,
         test_waiting_badge_keeps_player_out_of_hand,
         test_waiting_badge_variants,
         test_waiting_badge_yields_to_in_hand_evidence,

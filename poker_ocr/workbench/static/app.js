@@ -2525,6 +2525,7 @@ function seatActionText(player) {
   let action = player.all_in ? 'all_in' : player.action;
   if (!action && (player.fold || player.status === 'folded')) action = 'fold';
   if (player.left) return '离桌';
+  if (player.left_uncertain) return '暂离';
   if (!action) return '';
   const amount = Number(player.bet);
   const withAmount = ['call', 'bet', 'raise', 'all_in'].includes(action)
@@ -2550,6 +2551,8 @@ function renderSeats() {
     if (foldState === 'folded') node.classList.add('is-folded');
     if (foldState === 'unknown') node.classList.add('is-unknown');
     if (player && player.left) node.classList.add('is-left');
+    /* 暂离（#124）：看不清他，置灰 + 虚线，和「离桌」区分开。 */
+    if (player && player.left_uncertain) node.classList.add('is-uncertain');
     if (st.hero_turn === true && player && player.seat_id === st.hero_seat_id) node.classList.add('is-turn');
 
     const top = el('div', 'seat-top');
@@ -2565,7 +2568,9 @@ function renderSeats() {
       node.append(info);
       const actionText = seatActionText(player);
       if (actionText) {
-        const action = player.left ? 'fold' : (player.all_in ? 'all_in' : (player.action || 'fold'));
+        const action = player.left ? 'fold'
+          : (player.left_uncertain ? 'away'
+            : (player.all_in ? 'all_in' : (player.action || 'fold')));
         const cls = String(action).replace(/[^a-z_]/gi, '');
         node.classList.add(`act-${cls}`);
         node.append(el('span', `seat-action action-${cls}`, actionText));
@@ -2609,7 +2614,7 @@ function tableSignature(st, frame) {
     hero.stack, hero.bet, hero.name, hero.position,
     (st.hero_cards || []).join(','), (st.board || []).join(','),
     st.cards_reliable, (st.cards_warnings || []).length,
-    (st.opponents || []).map((p) => [p.seat_id, p.stack, p.bet, p.action, p.fold, p.all_in, p.left, p.name, p.position, p.status].join('|')).join(';'),
+    (st.opponents || []).map((p) => [p.seat_id, p.stack, p.bet, p.action, p.fold, p.all_in, p.left, p.left_uncertain, p.name, p.position, p.status].join('|')).join(';'),
     (st.shows || []).map((s) => `${s.seat_id}:${(s.cards || []).join(',')}`).join(';'),
     st.blinds ? [st.blinds.sb, st.blinds.bb, st.blinds.ante, st.blinds.source].join('/') : '',
     frame ? [frame.seq, frame.kind, (frame.errors || []).length, frame.hand_id].join('/') : '',

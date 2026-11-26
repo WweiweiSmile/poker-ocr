@@ -288,10 +288,12 @@ def test_new_player_mid_hand_kept_out_until_next_hand() -> None:
 
 
 def test_occluded_player_is_not_marked_left() -> None:
-    """整座被弹窗盖住（三块槽位全空、没有「+」占位）**不算离桌**。
+    """短时间被弹窗盖住（三块槽位全空、没有「+」占位）**不算离桌**。
 
-    名单锁定的座位默认在局；这一帧读不到只说明遮挡，质量闸按 stack/bet
-    缺失丢帧，状态和位置都不变。这样弹窗/动画不会把人误判成弃牌。
+    名单锁定的座位默认在局；读不到的帧数还没到 ABSENT_CONFIRM_FRAMES 时
+    保持旧行为：质量闸按 stack/bet 缺失丢帧，状态和位置都不变。这样弹窗/
+    动画不会把人误判成弃牌。连续读不到更久才走 #124 的暂离（见
+    test_absent_seat_confirmed_after_confirm_frames）。
     """
     with stub_env():
         s = new_stream(max_vanish=2, detect_fold=True)
@@ -317,6 +319,74 @@ def test_occluded_player_is_not_marked_left() -> None:
         mid = out.state.player("midL")
         check(mid.in_hand and not mid.left and mid.position == "HJ",
               f"遮挡结束后应恢复：{mid.to_debug()}")
+
+
+def test_absent_seat_confirmed_after_confirm_frames() -> None:
+    """连续读不到 N 帧 → 暂离（#124）：不再算在局，但不判弃牌。"""
+    with stub_env():
+        s = new_stream(max_vanish=2, detect_fold=True, absent_frames=6)
+        sig = (("As", "Kd"), ())
+        feed(s, make_frame(), extra_signature=sig)
+
+        rows = {k: dict(v) for k, v in BASE.items()}
+        rows["midL"] = {"name": "", "chip": "", "bet": ""}
+        occluded = make_frame(rows)
+        outs = [feed(s, occluded, t=0.5 * (i + 1), extra_signature=sig)
+                for i in range(6)]
+        for out in outs[:-1]:
+            check(out.kind == "discard" and "stack:midL" in out.errors,
+                  f"确认前应保持旧行为（丢帧）：{out.kind} / {out.errors}")
+        last = outs[-1]
+        check(last.kind in ("no_change", "record"),
+              f"确认暂离的帧不该再丢：{last.kind} / {last.errors}")
+        mid = last.state.player("midL")
+        check(mid.left_uncertain and not mid.left,
+              f"应判暂离而不是离桌：{mid.to_debug()}")
+        check(mid.in_hand and mid.fold is not True and mid.status == "uncertain",
+              f"暂离不补弃牌、仍算发过牌：{mid.to_debug()}")
+        check(mid.name == "伯克利丁真" and mid.position == "HJ",
+              f"名字/位置要在本手内保留：{mid.name!r}/{mid.position!r}")
+        check(mid.stack is None, f"暂离后不再要求筹码：{mid.stack!r}")
+        check(last.state.players_in_hand == 9,
+              f"发牌人数不变：{last.state.players_in_hand}")
+        check(last.state.players_not_folded == 8,
+              f"暂离不算在局：{last.state.players_not_folded}")
+        check(last.state.players_not_folded
+              == last.state.players_in_play + last.state.players_fold_unknown,
+              "在局人数恒等式不该被暂离打破")
+        check(s.summary()["hand_absent"] == ["midL"],
+              f"暂离集合应记下他：{s.summary()}")
+        check(not s.summary()["hand_left"], "暂离不能写进离桌集合")
+
+        # 读数回来（他还坐在那儿，只是刚才被盖住）→ 撤销暂离
+        out = feed(s, make_frame(), t=5.0, extra_signature=sig)
+        mid = out.state.player("midL")
+        check(not mid.left_uncertain and mid.in_hand,
+              f"读数恢复应撤销暂离：{mid.to_debug()}")
+        check(out.state.players_not_folded == 9,
+              f"撤销后应重新算在局：{out.state.players_not_folded}")
+        check(not s.summary()["hand_absent"],
+              f"暂离集合应清空：{s.summary()}")
+
+
+def test_whole_table_occlusion_never_marks_absent() -> None:
+    """整片读不到（弹窗盖住整桌 / 底池都没了）不能判任何座位暂离。"""
+    with stub_env():
+        s = new_stream(max_vanish=2, detect_fold=True, absent_frames=3)
+        sig = (("As", "Kd"), ())
+        feed(s, make_frame(), extra_signature=sig)
+
+        blank = {k: {"name": "", "chip": "", "bet": ""} for k in BASE}
+        covered = make_frame(blank, pot="")
+        outs = [feed(s, covered, t=0.5 * (i + 1), extra_signature=sig)
+                for i in range(8)]
+        for out in outs:
+            check(out.kind == "discard", f"全遮挡帧应丢弃：{out.kind}")
+        check(not s.summary()["hand_absent"],
+              f"整片遮挡不该确认暂离：{s.summary()['hand_absent']}")
+        out = feed(s, make_frame(), t=6.0, extra_signature=sig)
+        check(out.state.players_not_folded == 9,
+              f"遮挡结束后人数应完好：{out.state.players_not_folded}")
 
 
 def test_plus_placeholder_marks_left_and_icon_return_revives() -> None:
@@ -975,6 +1045,8 @@ def main() -> int:
         test_exit_mid_hand_keeps_name_position_and_marks_fold,
         test_new_player_mid_hand_kept_out_until_next_hand,
         test_occluded_player_is_not_marked_left,
+        test_absent_seat_confirmed_after_confirm_frames,
+        test_whole_table_occlusion_never_marks_absent,
         test_plus_placeholder_marks_left_and_icon_return_revives,
         test_lineup_change_between_hands_does_not_discard,
         test_dead_button_dealer_left_keeps_recording,

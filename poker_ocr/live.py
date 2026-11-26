@@ -96,7 +96,7 @@ from .preflop_ranges import always_fold, hand_key
 from .profile import Profile
 from .roi_dedup import pixel_mad
 from .roi_reader import hero_turn_method, measure_fold_button
-from .state_stream import DEFAULT_ROI_THREADS, StateStream
+from .state_stream import ABSENT_CONFIRM_FRAMES, DEFAULT_ROI_THREADS, StateStream
 from .opponent_profile import (DEFAULT_PROFILE_PATH as DEFAULT_OPPONENT_DB,
                                ProfileStore, format_read_line,
                                load_profile_store, pool_key_from_blinds)
@@ -933,7 +933,7 @@ def _state_line(t: float, body: dict, tail: str = "") -> str:
         f"{p.get('seat_id')}:{p.get('name') or '-'}={p.get('stack')}"
         f"{'/' + str(p.get('bet')) if p.get('bet') else ''}"
         f"{'(' + p.get('action') + ')' if p.get('action') else ''}"
-        f"{'/离桌' if p.get('left') else ''}"
+        f"{'/离桌' if p.get('left') else ('/暂离' if p.get('left_uncertain') else '')}"
         for p in (body.get("opponents") or [])
     ) or "-"
     return (f"  [{t:7.2f}s] ✅ 记录 #{body.get('index')}  "
@@ -3587,7 +3587,11 @@ def build_parser() -> argparse.ArgumentParser:
                          f"{DEFAULT_INCIDENT_MAX}；0 = 不限制）")
     ap.add_argument("--max-vanish", type=int, default=3,
                     help="在场玩家整座空白连续几帧才认定离开（默认 3；"
-                         "认定后本手保留名字/位置并按弃牌处理）")
+                         "只服务没锁名单的离线链路——live 锁名单后离桌只认"
+                         "头像「+」占位连续 2 帧，连续读不到 6 帧判暂离，见 #124）")
+    ap.add_argument("--absent-frames", type=int, default=ABSENT_CONFIRM_FRAMES,
+                    help="锁定名单后连续几帧没有任何读数判暂离（默认 "
+                         f"{ABSENT_CONFIRM_FRAMES}；读数恢复即撤销，不补弃牌）")
     ap.add_argument("--name-confirm", type=int, default=3,
                     help="名字连续确认几帧才换（默认 3）")
     ap.add_argument("--dealer-carry", type=int, default=4,
@@ -3771,6 +3775,8 @@ def _validate_args(ap: argparse.ArgumentParser, args) -> None:
         ap.error("--incident-max 不能为负（0 = 不限制）")
     if args.max_vanish < 0:
         ap.error("--max-vanish 不能为负")
+    if args.absent_frames < 1:
+        ap.error("--absent-frames 至少为 1")
     if args.name_confirm < 1:
         ap.error("--name-confirm 至少为 1")
     if args.dealer_carry < 0:
@@ -4117,6 +4123,7 @@ def _build_runtime(ap: argparse.ArgumentParser, args, env_load) -> _Runtime:
             stable_seconds=args.stable_seconds,
             stable_reset_on_discard=args.stable_reset_on_discard,
             max_vanish=args.max_vanish,
+            absent_frames=args.absent_frames,
             name_confirm=args.name_confirm,
             initial_blinds=initial_blinds,
             lenient_chips=args.lenient_chips,

@@ -162,7 +162,15 @@ function appSource() {
     TableMeta.seatFold({ left: true, fold: false, status: "playing" }), "folded",
     "离桌必然已弃牌",
   );
-  assert.strictEqual(TableMeta.seatFold({ status: "away" }), "empty", "空座/暂离不是玩家状态");
+  assert.strictEqual(
+    TableMeta.seatFold({ left_uncertain: true, fold: null, status: "uncertain" }),
+    "uncertain", "暂离（#124）不是弃牌，也不是在局",
+  );
+  assert.strictEqual(
+    TableMeta.seatFold({ status: "uncertain" }), "uncertain",
+    "只有 status 也要认得暂离",
+  );
+  assert.strictEqual(TableMeta.seatFold({ status: "away" }), "empty", "空座不是玩家状态");
   assert.strictEqual(TableMeta.seatFold({ status: "sitting_out" }), "empty");
   assert.strictEqual(TableMeta.seatFold({ status: "buying_in" }), "empty");
   assert.strictEqual(TableMeta.seatFold({ in_hand: false, fold: null, status: "playing" }), "empty",

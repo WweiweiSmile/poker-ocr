@@ -46,6 +46,7 @@ ADVANCED_VALUE_FLAGS: dict[str, str] = {
     "max_frame_age": "--max-frame-age",
     "roi_threads": "--roi-threads",
     "max_vanish": "--max-vanish",
+    "absent_frames": "--absent-frames",
     "name_confirm": "--name-confirm",
     "incident_frames": "--incident-frames",
     "incident_max": "--incident-max",

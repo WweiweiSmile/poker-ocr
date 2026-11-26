@@ -58,12 +58,14 @@
     return label ? label + " \u00b7 " + text : text;
   }
 
-  /* 座位弃牌三态。player: JSONL/SSE 里的对手对象（可能没有 fold 键 = 老记录）。 */
+  /* 座位弃牌三态 + 暂离。player: JSONL/SSE 里的对手对象（可能没有 fold 键 = 老记录）。 */
   function seatFold(player) {
     if (!player) return "empty";
     if (player.left) return "folded"; /* 离桌必然已经弃牌 */
+    /* 暂离（#124）：连续几帧什么都没读到。不是弃牌，但也不能画成还在局。 */
+    if (player.left_uncertain || player.status === "uncertain") return "uncertain";
     if (player.fold === true || player.status === "folded") return "folded";
-    if (player.in_hand === false) return "empty"; /* 本手没发到牌（中途入座/暂离） */
+    if (player.in_hand === false) return "empty"; /* 本手没发到牌（中途入座） */
     if (player.status === "away" || player.status === "sitting_out"
         || player.status === "buying_in") return "empty";
     if (player.fold === false) return "playing";

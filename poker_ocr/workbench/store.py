@@ -48,7 +48,7 @@ ADVANCED_KEYS = {
     "dealer_carry", "card_confirm_frames", "card_doubt_window",
     "card_swap_window",
     "max_frame_age", "roi_threads", "no_dedup", "no_fold", "crop", "rotate",
-    "max_vanish", "name_confirm", "incident_frames", "incident_max",
+    "max_vanish", "absent_frames", "name_confirm", "incident_frames", "incident_max",
     "min_advice_confidence", "cross_check", "ai_timeout", "ai_confirm",
     "record_without_hero", "lenient_chips",
 }

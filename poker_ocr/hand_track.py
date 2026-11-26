@@ -314,6 +314,8 @@ class OpponentSnapshot:
     position: str | None
     stack: float | None
     bet: float | None
+    # 不在池里：确定弃牌，或暂离（#124 的 left_uncertain）。不是「确定弃牌
+    # 动作」的同义词——统计弃牌仍看 ActionRecord。
     folded: bool
 
 
@@ -1679,7 +1681,9 @@ class LiveHandTracker:
         folded = {a.seat_id for a in hand.actions if a.action == "fold"}
         all_in_seats = self._all_in_seats(hand)
         for p in state.players:
-            if (p.left or p.seat_id in folded
+            # 离桌/暂离的人都不按头像补弃牌：离桌交给 ledger，暂离只标事实，
+            # 具体动作要按注额分流（#125），不能凭「看不清」补一条 fold。
+            if (p.left or p.left_uncertain or p.seat_id in folded
                     or p.seat_id in all_in_seats):
                 self._fold_pending.pop(p.seat_id, None)
                 continue
@@ -1731,7 +1735,8 @@ class LiveHandTracker:
                             if p.seat_id == seat_id), None)
                       if state is not None else None)
             if (player is not None and player.fold is True
-                    and not player.left and seat_id not in all_in_seats
+                    and not player.left and not player.left_uncertain
+                    and seat_id not in all_in_seats
                     and state is not None
                     and state.frame_id != pending.frame_id):
                 pending.count += 1
@@ -2269,10 +2274,11 @@ class LiveHandTracker:
         """这一帧仍在局（已发牌、未弃牌、未离桌）的座位。
 
         弃牌后 `in_hand` 仍然是 True（status=folded），所以不能只看 in_hand。
-        空座/带入中/暂离的人 `status` 不是 playing，会被排除。
+        空座/带入中的人 `status` 不是 playing；暂离（#124）即使还没弃牌也
+        不再算在局 —— 他这一帧根本没读数。
         """
         return {p.seat_id for p in state.players
-                if p.in_hand and p.fold is not True
+                if p.in_hand and p.fold is not True and not p.left_uncertain
                 and p.status not in ("folded", "buying_in", "away",
                                      "sitting_out")}
 
@@ -2418,13 +2424,18 @@ class LiveHandTracker:
         self._settle_pending_folds(hand, street, state)
         acts = hand.street_actions(street)
         recorded_folds = {a.seat_id for a in acts if a.action == "fold"}
+        # 暂离（#124）的座位这一帧什么读数都没有：他不在 current 里，但那是
+        # 「看不见」不是「弃牌」。这里补一条 fold 就等于在事实层替他决策了，
+        # 而离桌后的动作要按注额分流（有注弃牌 / 无注过牌，见 #125）。
+        absent = {p.seat_id for p in (state.players if state is not None else ())
+                  if p.left_uncertain}
 
         # ① 弃牌：街初在局、街末不在局、又没有 fold 记录的座位。
         #    按待行动集合的位置顺序补，不再按 seat_id 字典序。
         for p in self._pending_seats(hand, street, current, state):
             if p.in_hand or p.seat_id not in start:
                 continue
-            if p.seat_id in recorded_folds:
+            if p.seat_id in recorded_folds or p.seat_id in absent:
                 continue
             name, position = self._seat_info(hand, p.seat_id, state)
             hand.actions.append(ActionRecord.make(
@@ -2738,7 +2749,12 @@ class LiveHandTracker:
                 position=(hand.start_stacks.get(p.seat_id) or {}).get(
                     "position") or p.position,
                 stack=p.stack, bet=p.bet,
-                folded=(p.fold is True or p.status == "folded"))
+                # 这里的 folded 是「不在池里」：确定弃牌，或暂离（#124）
+                # ——人已经不在桌上，底池/身后人数都不该再算他。但**没有**
+                # 替他写弃牌动作（动作按注额分流见 #125），所以统计口径要
+                # 看动作记录，不能拿这个字段反推「他弃牌了」。
+                folded=(p.fold is True
+                        or p.status in ("folded", "uncertain")))
             for p in state.players
             if p.seat_id != hero_seat and (p.in_hand or p.status == "folded")
         )

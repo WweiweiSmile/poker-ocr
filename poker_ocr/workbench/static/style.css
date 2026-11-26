@@ -510,6 +510,10 @@ legend { color: var(--muted); font-size: 12px; padding: 0 6px; }
 .run-left .seat.is-empty { opacity: 0.34; border-style: dashed; }
 .run-left .seat.is-folded { opacity: 0.5; }
 .run-left .seat.is-left { opacity: 0.42; }
+/* 暂离（#124）：连续读不到，不是弃牌也不是离桌 —— 置灰 + 虚线。 */
+.run-left .seat.is-uncertain { opacity: 0.42; border-style: dashed; }
+.run-left .seat.act-away { border-color: rgba(231, 241, 236, 0.22); }
+.run-left .seat.act-away .seat-action { color: var(--muted); }
 /* 弃牌状态没读到（#123）：不是弃牌、也不许看起来还在局，用虚线框 + 「未知」徽章。 */
 .run-left .seat.is-unknown { opacity: 0.78; border-style: dashed; }
 .run-left .seat-unknown {
